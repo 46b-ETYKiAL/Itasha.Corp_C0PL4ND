@@ -61,32 +61,25 @@ fn full_config_round_trips_through_toml() {
 }
 
 #[test]
-fn startup_panel_injects_into_a_fresh_session_grid() {
-    // Mirrors the app's spawn_tab path: gather info, render the panel, and
-    // advance it into the session's terminal grid (display-only, no PTY write).
+fn startup_panel_is_plain_text_for_overlay() {
+    // The startup panel is drawn as an app-rendered overlay (the renderer
+    // colours it), NOT injected into the PTY grid — on Windows ConPTY repaints
+    // the screen on shell start and would wipe a grid-injected panel. So the
+    // panel must be PLAIN text (no ANSI escapes) carrying the logo + stats.
     let info = c0pl4nd_core::fetch::SystemInfo::gather(Some("Integration GPU"));
     let panel = c0pl4nd_core::fetch::render_panel(&info);
 
-    #[cfg(windows)]
-    let session = Session::spawn_program("cmd.exe", &["/C", "rem"], 24, 80).expect("spawn session");
-    #[cfg(not(windows))]
-    let session =
-        Session::spawn_program("/bin/sh", &["-c", "true"], 24, 80).expect("spawn session");
-
-    {
-        let term = session.terminal();
-        let mut term = term.lock().expect("lock terminal");
-        term.advance(panel.as_bytes());
-    }
-
-    let text = session.snapshot_text();
     assert!(
-        text.contains("the operator's shell"),
-        "startup panel logo not visible in grid; got:\n{text}"
+        panel.contains("the operator's shell"),
+        "panel missing logo; got:\n{panel}"
     );
     assert!(
-        text.contains("Integration GPU"),
-        "startup panel GPU stat not visible in grid; got:\n{text}"
+        panel.contains("Integration GPU"),
+        "panel missing gpu stat; got:\n{panel}"
+    );
+    assert!(
+        !panel.contains('\x1b'),
+        "panel must be plain text (renderer colours the overlay); got:\n{panel}"
     );
 }
 

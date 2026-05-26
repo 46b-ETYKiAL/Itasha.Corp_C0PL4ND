@@ -19,16 +19,25 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{ResizeDirection, Window, WindowId};
 
 const LINE_HEIGHT: f32 = 20.0;
 const CELL_W: f32 = 9.0;
 /// Height of the custom (frameless) title bar, in physical pixels.
 const TITLEBAR_H: f32 = 30.0;
-/// Width of each title-bar button hit zone, in physical pixels.
-const BUTTON_W: f32 = 46.0;
-/// Total width of the 3-button cluster.
-const BUTTONS_W: f32 = BUTTON_W * 3.0;
+/// Each title-bar button occupies this many monospace cells. The button glyphs
+/// are rendered in the chrome text buffer (CELL_W per cell), so the hit zones
+/// are derived from the SAME geometry — keeping the visuals and click targets
+/// aligned at any window width.
+const BUTTON_CELLS: f32 = 3.0;
+/// Total cells for the 3-button (min / max / close) cluster.
+const BUTTONS_CELLS: f32 = BUTTON_CELLS * 3.0;
+/// Gap in pixels between the close button and the window's right edge.
+const BTN_RIGHT_MARGIN: f32 = 8.0;
+/// Thickness in pixels of the invisible window-edge resize band (frameless).
+const RESIZE_BORDER: f64 = 6.0;
+/// Left inset (px) of the chrome text buffer; used for column<->pixel mapping.
+const CHROME_LEFT: f32 = 6.0;
 
 /// Public entrypoint: open the windowed terminal.
 pub fn run_gui(config: &Config) -> Result<()> {
@@ -63,6 +72,7 @@ struct Gpu {
     grid_buffer: Buffer,
     chrome_buffer: Buffer,
     palette_buffer: Buffer,
+    splash_buffer: Buffer,
     image_renderer: crate::image_render::ImageRenderer,
     gpu_name: String,
 }
@@ -84,6 +94,9 @@ struct App {
     palette_mode: bool,
     palette_query: String,
     palette_idx: usize,
+    /// neofetch-style startup splash (logo + system info), drawn as an overlay
+    /// over the first tab until the first keypress. `None` once dismissed.
+    splash: Option<String>,
 }
 
 /// Actions available from the command palette.
@@ -137,6 +150,7 @@ impl App {
             palette_mode: false,
             palette_query: String::new(),
             palette_idx: 0,
+            splash: None,
         }
     }
 
@@ -430,21 +444,20 @@ impl App {
 
     fn spawn_tab(&mut self) {
         let (cols, rows) = self.grid_dims();
+        let first = self.tabs.is_empty();
         match Session::spawn_shell(self.config.shell.as_deref(), rows, cols) {
             Ok(s) => {
-                // neofetch-style splash: render the logo + local system info
-                // straight into the new session's grid (display-only — never
-                // written to the PTY input). Gated by config.
-                if self.config.startup_panel {
-                    let gpu = self.gpu.as_ref().map(|g| g.gpu_name.as_str());
-                    let info = c0pl4nd_core::fetch::SystemInfo::gather(gpu);
-                    let panel = c0pl4nd_core::fetch::render_panel(&info);
-                    if let Ok(mut term) = s.terminal().lock() {
-                        term.advance(panel.as_bytes());
-                    }
-                }
                 self.tabs.push(Tab::single(s));
                 self.active = self.tabs.len() - 1;
+                // On the very first tab, arm the neofetch-style startup splash.
+                // It is drawn as an app overlay (NOT injected into the PTY grid,
+                // which Windows ConPTY clears on shell start) and dismissed on
+                // the first keypress.
+                if first && self.config.startup_panel && self.splash.is_none() {
+                    let gpu = self.gpu.as_ref().map(|g| g.gpu_name.as_str());
+                    let info = c0pl4nd_core::fetch::SystemInfo::gather(gpu);
+                    self.splash = Some(c0pl4nd_core::fetch::render_panel(&info));
+                }
             }
             Err(e) => tracing::error!("failed to spawn tab: {e}"),
         }
@@ -568,14 +581,53 @@ impl App {
         if y > TITLEBAR_H as f64 {
             return TitlebarHit::None;
         }
-        let buttons_left = width - BUTTONS_W as f64;
+        let buttons_left = Self::buttons_left_px(width as f32) as f64;
         if x < buttons_left {
             return TitlebarHit::Drag;
         }
-        match ((x - buttons_left) / BUTTON_W as f64) as i32 {
+        match ((x - buttons_left) / (BUTTON_CELLS as f64 * CELL_W as f64)) as i32 {
             0 => TitlebarHit::Minimize,
             1 => TitlebarHit::Maximize,
             _ => TitlebarHit::Close,
+        }
+    }
+
+    /// X pixel where the title-bar button cluster begins, for a given width.
+    /// Shared by `hit_titlebar` and the chrome renderer so the rendered glyphs
+    /// and the click zones use identical geometry.
+    fn buttons_left_px(width: f32) -> f32 {
+        width - BUTTONS_CELLS * CELL_W - BTN_RIGHT_MARGIN
+    }
+
+    /// Classify a point against the window's resize edges. A frameless window
+    /// has no OS resize border, so we hit-test a thin band ourselves and ask
+    /// winit to drive the native resize.
+    fn hit_resize_edge(&self, x: f64, y: f64) -> Option<ResizeDirection> {
+        let (w, h) = self
+            .gpu
+            .as_ref()
+            .map(|g| {
+                (
+                    g.surface_config.width as f64,
+                    g.surface_config.height as f64,
+                )
+            })
+            .unwrap_or((0.0, 0.0));
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let b = RESIZE_BORDER;
+        let (left, right, top, bottom) = (x <= b, x >= w - b, y <= b, y >= h - b);
+        match (top, bottom, left, right) {
+            (true, _, true, _) => Some(ResizeDirection::NorthWest),
+            (true, _, _, true) => Some(ResizeDirection::NorthEast),
+            (_, true, true, _) => Some(ResizeDirection::SouthWest),
+            (_, true, _, true) => Some(ResizeDirection::SouthEast),
+            (true, ..) => Some(ResizeDirection::North),
+            (_, true, ..) => Some(ResizeDirection::South),
+            (_, _, true, _) => Some(ResizeDirection::West),
+            (_, _, _, true) => Some(ResizeDirection::East),
+            _ => None,
         }
     }
 }
@@ -593,6 +645,7 @@ impl ApplicationHandler for App {
         let attrs = Window::default_attributes()
             .with_title(c0pl4nd_core::PRODUCT_NAME)
             .with_decorations(false)
+            .with_resizable(true)
             .with_inner_size(winit::dpi::LogicalSize::new(width as f64, height as f64));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
@@ -625,6 +678,13 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                // Frameless edge/corner resize takes priority over the titlebar.
+                if let Some(dir) = self.hit_resize_edge(self.cursor.0, self.cursor.1) {
+                    if let Some(gpu) = &self.gpu {
+                        let _ = gpu.window.drag_resize_window(dir);
+                    }
+                    return;
+                }
                 let hit = self.hit_titlebar(self.cursor.0, self.cursor.1);
                 if let Some(gpu) = &self.gpu {
                     match hit {
@@ -688,6 +748,8 @@ impl ApplicationHandler for App {
                 self.modifiers = m.state();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                // Any keypress dismisses the startup splash overlay.
+                self.splash = None;
                 // Overlay modes capture keystrokes instead of the PTY.
                 if self.palette_mode {
                     self.handle_palette_key(&event.logical_key, event_loop);
@@ -799,6 +861,7 @@ impl App {
         };
 
         let image_quads = self.collect_image_quads();
+        let splash_text = self.splash.clone();
 
         let Some(gpu) = &mut self.gpu else { return };
         let width = gpu.surface_config.width as f32;
@@ -820,10 +883,11 @@ impl App {
         gpu.grid_buffer
             .shape_until_scroll(&mut gpu.font_system, false);
 
-        // Custom chrome: wordmark (accent) on the left, buttons on the right.
-        let buttons_left = width - BUTTONS_W;
-        let pad_cols = ((buttons_left - 12.0) / CELL_W).max(0.0) as usize;
-        let mut chrome = if self.search_mode {
+        // Custom chrome: wordmark (accent) on the left, buttons flush right.
+        // The button cluster begins at the SAME pixel `hit_titlebar` uses.
+        let buttons_left = Self::buttons_left_px(width);
+        let pad_cols = (((buttons_left - CHROME_LEFT) / CELL_W).round()).max(0.0) as usize;
+        let title = if self.search_mode {
             let n = self.search_matches.len();
             let cur = if n == 0 { 0 } else { self.search_idx + 1 };
             format!(
@@ -840,15 +904,18 @@ impl App {
         } else {
             format!(" {} ", c0pl4nd_core::PRODUCT_NAME)
         };
-        while (chrome.chars().count() as f32) < pad_cols as f32 {
+        // Pad/truncate the title to the button column so each 3-cell button
+        // glyph lands exactly on its BUTTON_CELLS-wide hit zone.
+        let mut chrome: String = title.chars().take(pad_cols).collect();
+        while chrome.chars().count() < pad_cols {
             chrome.push(' ');
         }
-        // Minimize, maximize, close glyphs, spaced to the button zones.
+        // Each button is exactly 3 monospace cells: space, glyph, space.
         let chrome_spans = [
             (chrome, accent),
-            ("  \u{2014}  ".to_string(), fg),       // minimize  —
-            (" \u{25a1}  ".to_string(), fg),        // maximize  □
-            (" \u{2715} ".to_string(), signal_red), // close  ✕
+            (" \u{2014} ".to_string(), fg),         // minimize  —
+            (" \u{25a1} ".to_string(), fg),         // maximize  □
+            (" \u{2715} ".to_string(), signal_red), // close     ✕
         ];
         gpu.chrome_buffer.set_rich_text(
             &mut gpu.font_system,
@@ -874,6 +941,23 @@ impl App {
                 None,
             );
             gpu.palette_buffer
+                .shape_until_scroll(&mut gpu.font_system, false);
+        }
+
+        if let Some(st) = &splash_text {
+            gpu.splash_buffer.set_size(
+                &mut gpu.font_system,
+                Some(gpu.surface_config.width as f32),
+                Some(gpu.surface_config.height as f32),
+            );
+            gpu.splash_buffer.set_text(
+                &mut gpu.font_system,
+                st,
+                &Attrs::new().family(Family::Monospace).color(accent),
+                Shaping::Advanced,
+                None,
+            );
+            gpu.splash_buffer
                 .shape_until_scroll(&mut gpu.font_system, false);
         }
 
@@ -931,6 +1015,24 @@ impl App {
                 custom_glyphs: &[],
             },
         ];
+        if splash_text.is_some() {
+            // neofetch-style startup splash, drawn over the grid until the
+            // first keypress dismisses it.
+            areas.push(TextArea {
+                buffer: &gpu.splash_buffer,
+                left: 12.0,
+                top: TITLEBAR_H + 10.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: TITLEBAR_H as i32,
+                    right: w,
+                    bottom: h,
+                },
+                default_color: accent,
+                custom_glyphs: &[],
+            });
+        }
         if palette_text.is_some() {
             // Centered command-palette overlay.
             areas.push(TextArea {
@@ -1067,6 +1169,12 @@ impl Gpu {
             Some(size.width as f32),
             Some(size.height as f32),
         );
+        let mut splash_buffer = Buffer::new(&mut font_system, metrics);
+        splash_buffer.set_size(
+            &mut font_system,
+            Some(size.width as f32),
+            Some(size.height as f32),
+        );
         let image_renderer = crate::image_render::ImageRenderer::new(&device, format);
         let gpu_name = adapter.get_info().name;
 
@@ -1084,6 +1192,7 @@ impl Gpu {
             grid_buffer,
             chrome_buffer,
             palette_buffer,
+            splash_buffer,
             image_renderer,
             gpu_name,
         })

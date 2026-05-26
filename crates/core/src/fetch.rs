@@ -104,17 +104,15 @@ pub const LOGO: &str = r#"   ___ ___ ___ _    _ _  _ ___
   >_ the operator's shell
      into the wired"#;
 
-/// Render the fetch panel as ANSI-coloured text: logo (accent) on the left,
-/// stats (label dim, value bright) on the right. `accent_idx`/`label_idx` are
-/// ANSI palette indices so the active theme colours it.
+/// Render the fetch panel as PLAIN text: the logo on the left, `label : value`
+/// stats on the right, one line each.
+///
+/// Plain (no ANSI) by design. C0PL4ND draws this as an app-rendered startup
+/// overlay and applies the theme colours itself, because on Windows the shell's
+/// ConPTY repaint clears anything written into the terminal grid before the
+/// shell starts. `core` stays UI-agnostic: this owns layout, the renderer owns
+/// colour.
 pub fn render_panel(info: &SystemInfo) -> String {
-    // SGR helpers using the 16-colour palette so the theme styles it.
-    const ACCENT: &str = "\x1b[96m"; // bright cyan -> SIGNAL TEAL in itasha-void
-    const LABEL: &str = "\x1b[95m"; // bright magenta -> NEON PINK
-    const VALUE: &str = "\x1b[97m"; // bright white -> GHOST PAPER
-    const DIM: &str = "\x1b[90m";
-    const RST: &str = "\x1b[0m";
-
     let rows = [
         ("os", &info.os),
         ("kernel", &info.kernel),
@@ -136,28 +134,18 @@ pub fn render_panel(info: &SystemInfo) -> String {
     let n = logo_lines.len().max(rows.len());
 
     let mut out = String::new();
-    out.push_str("\r\n");
     for i in 0..n {
         let logo = logo_lines.get(i).copied().unwrap_or("");
-        out.push_str(ACCENT);
         out.push_str(logo);
-        out.push_str(RST);
-        // pad logo column to align stats
+        // Pad the logo column so the stats line up in a second column.
         for _ in logo.chars().count()..(logo_w + 4) {
             out.push(' ');
         }
         if let Some((label, value)) = rows.get(i) {
-            out.push_str(LABEL);
-            out.push_str(&format!("{label:>7}"));
-            out.push_str(DIM);
-            out.push_str(" : ");
-            out.push_str(VALUE);
-            out.push_str(value);
-            out.push_str(RST);
+            out.push_str(&format!("{label:>7} : {value}"));
         }
-        out.push_str("\r\n");
+        out.push('\n');
     }
-    out.push_str("\r\n");
     out
 }
 
@@ -184,7 +172,9 @@ mod tests {
         assert!(p.contains("the operator's shell"));
         assert!(p.contains("os"));
         assert!(p.contains("Windows 11 Pro"));
-        assert!(p.contains("\x1b[")); // is ANSI-coloured
+        // Plain text by design: the renderer colours the overlay, so the panel
+        // itself must carry NO ANSI escapes (they'd render as literal glyphs).
+        assert!(!p.contains('\x1b'), "panel must be plain text, no ANSI");
     }
 
     #[test]

@@ -1,3 +1,9 @@
+// Release GUI builds use the Windows subsystem so launching the terminal does
+// NOT spawn a separate console window alongside it. Debug builds keep the
+// console subsystem so `--demo` / `--version` / `--screenshot` print during
+// development and tests.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 //! C0PL4ND terminal — application entrypoint.
 //!
 //! Run modes:
