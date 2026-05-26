@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="C0PL4ND README banner">
+  <title>C0PL4ND — README hero banner</title>
+  <desc>README hero banner: wordmark and tagline beside a faux terminal window showing a colored prompt, over void black with scanlines.</desc>
+  <defs>
+    <pattern id="bn-scan" width="4" height="4" patternUnits="userSpaceOnUse">
+      <rect width="4" height="4" fill="#08060d"/>
+      <rect width="4" height="1" fill="#f0eef5" opacity="0.04"/>
+    </pattern>
+    <radialGradient id="bn-glow" cx="22%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#00e5ff" stop-opacity="0.07"/>
+      <stop offset="100%" stop-color="#00e5ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- void black bg -->
+  <rect width="1280" height="320" fill="#08060d"/>
+  <rect width="1280" height="320" fill="url(#bn-glow)"/>
+  <rect width="1280" height="320" fill="url(#bn-scan)"/>
+
+  <!-- corner ticks -->
+  <g stroke="#a020ff" stroke-width="2" opacity="0.5">
+    <line x1="40" y1="40" x2="76" y2="40"/>
+    <line x1="40" y1="40" x2="40" y2="76"/>
+    <line x1="1240" y1="280" x2="1204" y2="280"/>
+    <line x1="1240" y1="280" x2="1240" y2="244"/>
+  </g>
+
+  <!-- LEFT: wordmark + tagline -->
+  <g font-family="'Courier New','DejaVu Sans Mono',monospace">
+    <text x="72" y="110" font-size="24" letter-spacing="4" fill="#00ffb3">&gt; 端末 // terminal</text>
+    <g font-size="92" font-weight="700" letter-spacing="4">
+      <text x="74" y="200" fill="#e020ff" opacity="0.85">C0PL4ND</text>
+      <text x="72" y="197" fill="#00e5ff">C0PL4ND</text>
+    </g>
+    <text x="74" y="248" font-size="26" letter-spacing="2" fill="#f0eef5">the operator's shell into the wired</text>
+  </g>
+
+  <!-- RIGHT: faux terminal window -->
+  <g>
+    <rect x="744" y="60" width="472" height="200" rx="12" fill="#08060d" stroke="#a020ff" stroke-width="2"/>
+    <!-- title bar -->
+    <rect x="744" y="60" width="472" height="34" rx="12" fill="#08060d"/>
+    <rect x="744" y="80" width="472" height="14" fill="#08060d"/>
+    <line x1="744" y1="94" x2="1216" y2="94" stroke="#a020ff" stroke-width="1.5" opacity="0.6"/>
+    <circle cx="768" cy="77" r="6" fill="#ff0040"/>
+    <circle cx="790" cy="77" r="6" fill="#00ffb3"/>
+    <circle cx="812" cy="77" r="6" fill="#00e5ff"/>
+    <text x="1196" y="82" text-anchor="end" font-family="'Courier New',monospace" font-size="15" fill="#f0eef5" opacity="0.6">配線</text>
+
+    <!-- terminal body lines -->
+    <g font-family="'Courier New',monospace" font-size="19">
+      <text x="768" y="130"><tspan fill="#00ffb3">operator@wired</tspan><tspan fill="#f0eef5">:</tspan><tspan fill="#a020ff">~</tspan><tspan fill="#f0eef5">$ </tspan><tspan fill="#00e5ff">c0pl4nd --connect</tspan></text>
+      <text x="768" y="160"><tspan fill="#e020ff">[link]</tspan><tspan fill="#f0eef5"> resolving the wired ...</tspan></text>
+      <text x="768" y="190"><tspan fill="#00e5ff">[ ok ]</tspan><tspan fill="#f0eef5"> gpu surface online</tspan></text>
+      <text x="768" y="220"><tspan fill="#00ffb3">operator@wired</tspan><tspan fill="#f0eef5">:</tspan><tspan fill="#a020ff">~</tspan><tspan fill="#f0eef5">$ </tspan></text>
+    </g>
+    <!-- blinking cursor -->
+    <rect x="836" y="206" width="13" height="20" fill="#00ffb3">
+      <animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.5;0.5;1" dur="1.1s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+</svg>
