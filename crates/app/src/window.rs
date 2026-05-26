@@ -675,30 +675,28 @@ impl ApplicationHandler for App {
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
             }
-            WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed {
-                    // Overlay modes capture keystrokes instead of the PTY.
-                    if self.palette_mode {
-                        self.handle_palette_key(&event.logical_key, event_loop);
-                        return;
-                    }
-                    if self.search_mode {
-                        self.handle_search_key(&event.logical_key);
-                        return;
-                    }
-                    // Tab control combos (Ctrl+Shift+… ; on macOS Cmd+Shift+…).
-                    let mod_combo = (self.modifiers.control_key() || self.modifiers.super_key())
-                        && self.modifiers.shift_key();
-                    if mod_combo && self.handle_tab_combo(&event.logical_key, event_loop) {
-                        return;
-                    }
-                    if let Some(bytes) = key_to_bytes(&event.logical_key, &event.text) {
-                        if let Some(s) = self.active_session_mut() {
-                            if let Ok(mut term) = s.terminal().lock() {
-                                term.scroll_to_bottom();
-                            }
-                            let _ = s.write_input(&bytes);
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                // Overlay modes capture keystrokes instead of the PTY.
+                if self.palette_mode {
+                    self.handle_palette_key(&event.logical_key, event_loop);
+                    return;
+                }
+                if self.search_mode {
+                    self.handle_search_key(&event.logical_key);
+                    return;
+                }
+                // Tab control combos (Ctrl+Shift+… ; on macOS Cmd+Shift+…).
+                let mod_combo = (self.modifiers.control_key() || self.modifiers.super_key())
+                    && self.modifiers.shift_key();
+                if mod_combo && self.handle_tab_combo(&event.logical_key, event_loop) {
+                    return;
+                }
+                if let Some(bytes) = key_to_bytes(&event.logical_key, &event.text) {
+                    if let Some(s) = self.active_session_mut() {
+                        if let Ok(mut term) = s.terminal().lock() {
+                            term.scroll_to_bottom();
                         }
+                        let _ = s.write_input(&bytes);
                     }
                 }
             }

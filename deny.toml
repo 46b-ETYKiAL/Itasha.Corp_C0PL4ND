@@ -5,7 +5,9 @@
 version = 2
 # Fail on any security advisory in the dependency tree.
 yanked = "deny"
-ignore = []
+# RUSTSEC-2017-0008: `serial` unmaintained (informational, not a vulnerability);
+# transitive via portable-pty Windows serial handling, no upstream fix.
+ignore = ["RUSTSEC-2017-0008"]
 
 [licenses]
 version = 2

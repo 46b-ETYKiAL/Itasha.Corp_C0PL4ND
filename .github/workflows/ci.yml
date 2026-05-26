@@ -107,6 +107,10 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           working-directory: .
+          # RUSTSEC-2017-0008: `serial` is unmaintained (informational, NOT a
+          # vulnerability). It is a transitive dep of portable-pty's Windows
+          # serial handling; no fix exists upstream. Tracked, not a security risk.
+          ignore: RUSTSEC-2017-0008
 
       - name: cargo-deny (licenses, bans, sources)
         uses: EmbarkStudios/cargo-deny-action@v2
