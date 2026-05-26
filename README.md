@@ -140,4 +140,6 @@ at your option. Unless you explicitly state otherwise, any contribution intentio
 
 ---
 
-<p align="center"><sub>An Itasha.Corp product.</sub></p>
+<p align="center">
+  <img src=".github/assets/footer.svg" alt="C0PL4ND" width="100%" />
+</p>
