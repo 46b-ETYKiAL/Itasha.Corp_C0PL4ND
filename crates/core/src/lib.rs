@@ -7,6 +7,7 @@
 //! later without re-architecting the engine.
 
 pub mod config;
+pub mod fetch;
 pub mod fuzzy;
 pub mod grid;
 pub mod image;

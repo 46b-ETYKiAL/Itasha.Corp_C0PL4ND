@@ -64,6 +64,7 @@ struct Gpu {
     chrome_buffer: Buffer,
     palette_buffer: Buffer,
     image_renderer: crate::image_render::ImageRenderer,
+    gpu_name: String,
 }
 
 struct App {
@@ -431,6 +432,17 @@ impl App {
         let (cols, rows) = self.grid_dims();
         match Session::spawn_shell(self.config.shell.as_deref(), rows, cols) {
             Ok(s) => {
+                // neofetch-style splash: render the logo + local system info
+                // straight into the new session's grid (display-only — never
+                // written to the PTY input). Gated by config.
+                if self.config.startup_panel {
+                    let gpu = self.gpu.as_ref().map(|g| g.gpu_name.as_str());
+                    let info = c0pl4nd_core::fetch::SystemInfo::gather(gpu);
+                    let panel = c0pl4nd_core::fetch::render_panel(&info);
+                    if let Ok(mut term) = s.terminal().lock() {
+                        term.advance(panel.as_bytes());
+                    }
+                }
                 self.tabs.push(Tab::single(s));
                 self.active = self.tabs.len() - 1;
             }
@@ -1056,6 +1068,7 @@ impl Gpu {
             Some(size.height as f32),
         );
         let image_renderer = crate::image_render::ImageRenderer::new(&device, format);
+        let gpu_name = adapter.get_info().name;
 
         Ok(Gpu {
             window,
@@ -1072,6 +1085,7 @@ impl Gpu {
             chrome_buffer,
             palette_buffer,
             image_renderer,
+            gpu_name,
         })
     }
 

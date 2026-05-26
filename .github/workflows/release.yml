@@ -165,16 +165,45 @@ jobs:
         with:
           path: artifacts
 
+      - name: Install Rust toolchain (MSI)
+        if: matrix.kind == 'msi'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary (MSI)
+        if: matrix.kind == 'msi'
+        shell: pwsh
+        working-directory: .
+        run: cargo build --release --bin c0pl4nd
+
+      - name: Determine version (MSI)
+        if: matrix.kind == 'msi'
+        id: msiver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            raw="${{ github.event.inputs.tag }}"
+          else
+            raw="${GITHUB_REF_NAME}"
+          fi
+          echo "version=${raw#v}" >> "$GITHUB_OUTPUT"
+
       - name: Build Windows MSI
         if: matrix.kind == 'msi'
         shell: pwsh
         working-directory: .
         run: |
-          # cargo-wix consumes packaging/windows/wix/main.wxs. The maintainer
-          # must have the WiX Toolset available; cargo-wix vendors v3 on demand.
-          cargo install cargo-wix --locked
-          cargo wix --no-build --nocapture --output "dist/c0pl4nd.msi" || `
-            Write-Host "MSI build skeleton invoked; wire your release binary path before GA."
+          # Build a real, signed-on-install MSI with WiX Toolset v6 (dotnet tool).
+          dotnet tool install --global wix --version 6.*
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          wix extension add -g WixToolset.UI.wixext
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $ver = "${{ steps.msiver.outputs.version }}"
+          wix build packaging/windows/c0pl4nd.wxs `
+            -ext WixToolset.UI.wixext `
+            -arch x64 `
+            -d Version=$ver `
+            -o "dist/c0pl4nd-$ver-x86_64.msi"
+          Get-ChildItem dist/*.msi
 
       - name: Build macOS DMG
         if: matrix.kind == 'dmg'

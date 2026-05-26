@@ -1,64 +1,90 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Standalone WiX MSI definition for C0PL4ND (alternative to wix/main.wxs).
-
-  This variant is for maintainers who drive WiX directly rather than via
-  cargo-wix. Build with the WiX Toolset v3 candle/light pipeline:
-
-    candle.exe packaging\windows\c0pl4nd.wxs -o c0pl4nd.wixobj
-    light.exe  c0pl4nd.wixobj -ext WixUIExtension -o c0pl4nd.msi
-
-  Replace the UpgradeCode GUID once and keep it stable across all releases.
+  C0PL4ND Windows installer. WiX Toolset v6 (dotnet "wix" CLI).
+  The release.yml "msi" job builds this; see that workflow for the exact
+  invocation (it installs the wix global tool, adds the WixToolset.UI.wixext
+  extension, builds the release binary, then runs "wix build" from the repo
+  root). Source paths below are relative to the working directory (repo root).
+  The UpgradeCode GUID is STABLE: never regenerate it, or upgrades will break.
 -->
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product
-    Id="*"
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package
     Name="C0PL4ND"
-    UpgradeCode="11111111-1111-1111-1111-111111111111"
     Manufacturer="Itasha.Corp"
+    Version="$(var.Version)"
+    UpgradeCode="ADBB978D-ED4E-4EE3-A04F-22293BB12275"
     Language="1033"
-    Version="0.1.0">
+    Codepage="1252"
+    Scope="perMachine">
 
-    <Package
-      InstallerVersion="450"
-      Compressed="yes"
-      InstallScope="perMachine"
-      Description="C0PL4ND terminal emulator"
-      Manufacturer="Itasha.Corp" />
+    <SummaryInformation
+      Keywords="terminal,emulator,gpu,rust"
+      Description="C0PL4ND — the operator's shell into the wired" />
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of C0PL4ND is already installed." />
+    <MajorUpgrade
+      AllowSameVersionUpgrades="yes"
+      DowngradeErrorMessage="A newer version of C0PL4ND is already installed. Setup will now exit." />
+
     <MediaTemplate EmbedCab="yes" />
 
-    <Directory Id="TARGETDIR" Name="SourceDir">
-      <Directory Id="ProgramFiles64Folder">
-        <Directory Id="INSTALLFOLDER" Name="C0PL4ND" />
+    <!-- Install under Program Files\C0PL4ND and add it to the machine PATH. -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="C0PL4ND">
+        <Component Id="MainExecutable" Guid="*">
+          <File
+            Id="c0pl4ndExe"
+            Name="c0pl4nd.exe"
+            Source="target\release\c0pl4nd.exe"
+            KeyPath="yes" />
+          <Environment
+            Id="UpdatePath"
+            Name="PATH"
+            Value="[INSTALLFOLDER]"
+            Permanent="no"
+            Part="last"
+            Action="set"
+            System="yes" />
+        </Component>
       </Directory>
-    </Directory>
+    </StandardDirectory>
 
-    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
-      <Component Id="MainExe" Guid="*">
-        <File
-          Id="c0pl4ndExe"
-          Name="c0pl4nd.exe"
-          Source="target\release\c0pl4nd.exe"
-          KeyPath="yes" />
-        <Environment
-          Id="PathEnv"
-          Name="PATH"
-          Value="[INSTALLFOLDER]"
-          Permanent="no"
-          Part="last"
-          Action="set"
-          System="yes" />
-      </Component>
-    </ComponentGroup>
+    <!-- Start Menu shortcut. -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="C0PL4ND">
+        <Component Id="ApplicationShortcut" Guid="*">
+          <Shortcut
+            Id="ApplicationStartMenuShortcut"
+            Name="C0PL4ND"
+            Description="C0PL4ND terminal emulator"
+            Target="[INSTALLFOLDER]c0pl4nd.exe"
+            WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder Id="CleanUpShortCut" Directory="ApplicationProgramsFolder" On="uninstall" />
+          <RegistryValue
+            Root="HKCU"
+            Key="Software\Itasha.Corp\C0PL4ND"
+            Name="installed"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
 
     <Feature Id="Main" Title="C0PL4ND" Level="1">
-      <ComponentGroupRef Id="ProductComponents" />
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="ApplicationShortcut" />
     </Feature>
 
+    <!-- Add/Remove Programs metadata + branded icon. -->
+    <Icon Id="ProductIcon" SourceFile="packaging\windows\c0pl4nd.ico" />
+    <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
     <Property Id="ARPHELPLINK" Value="https://github.com/itasha-corp/c0pl4nd" />
-    <UIRef Id="WixUI_InstallDir" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/itasha-corp/c0pl4nd" />
+
+    <!-- Install-dir UI with the MIT OR Apache-2.0 license shown to the user. -->
+    <WixVariable Id="WixUILicenseRtf" Value="packaging\windows\License.rtf" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
-  </Product>
+    <ui:WixUI Id="WixUI_InstallDir" />
+  </Package>
 </Wix>

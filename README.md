@@ -47,6 +47,7 @@ Most modern terminals make you choose. The fastest ones skip Windows or ship wit
 - **Inline images** — Kitty graphics protocol plus Sixel fallback for previewing images right in the terminal.
 - **Search** — fast in-buffer search across scrollback.
 - **Command palette** — discover and run actions without memorizing keybindings.
+- **Startup panel** — a neofetch-style splash on launch: a brand ASCII logo beside live local stats (OS, kernel, host, uptime, shell, CPU, memory, GPU). Reads only local facts — never the network. Toggle with `startup_panel` in config.
 - **Retro-future default theme** — the *Retro-Future Anime OS* aesthetic ships as the default: **VOID BLACK + SIGNAL TEAL + NEON PINK**, with an optional CRT/scanline effect (off by default).
 - **Readable TOML config** — simple key-value configuration with live reload; sensible defaults mean most users never touch it.
 
@@ -69,9 +70,18 @@ teal/pink band — rendered via the GPU textured-quad image pipeline).
 
 ### Windows
 
+**Installer (recommended)** — download `c0pl4nd-<version>-x86_64.msi` from the
+[Releases](../../releases) page and run it. The MSI installs C0PL4ND under
+*Program Files*, adds it to your `PATH`, and creates a Start Menu entry.
+
+Or via [winget](https://learn.microsoft.com/windows/package-manager/):
+
 ```powershell
 winget install Itasha.C0PL4ND
 ```
+
+Or grab the portable `.zip` from [Releases](../../releases) and run
+`c0pl4nd.exe` directly — no install required.
 
 ### macOS
 

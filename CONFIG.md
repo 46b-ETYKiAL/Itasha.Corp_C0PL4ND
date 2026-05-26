@@ -32,6 +32,7 @@ Changes are applied **live the moment you save** — no restart required. If you
 | `[session]` | Close-confirmation and session safety |
 | `[effects]` | The optional CRT/scanline effect (off by default) |
 | `[keybindings]` | Keyboard shortcut overrides |
+| `startup_panel` | The neofetch-style launch splash (on by default) |
 
 ---
 
@@ -112,6 +113,14 @@ crt = false        # master toggle for the CRT/scanline effect
 scanline = 0.0     # 0.0 (none) .. 1.0 (strong) — scanline intensity, applies when crt = true
 ```
 
+## Startup panel
+
+On launch, C0PL4ND shows a neofetch-style splash: a brand ASCII logo beside your local system stats (OS, kernel, host, uptime, shell, terminal, CPU, memory, GPU). It reads only local facts and never touches the network. On by default.
+
+```toml
+startup_panel = true   # set false to launch straight to a clean prompt
+```
+
 ## Keybindings
 
 C0PL4ND ships with sensible default keybindings (open the **command palette** to discover available actions and their current shortcuts). You can override any binding here. Bindings are simple `key = action` entries; defaults you don't override stay active.
@@ -148,6 +157,8 @@ A complete configuration with every section populated at its default value. Copy
 #
 # Every setting here is shown at its default value.
 # Delete any line to fall back to the default — C0PL4ND works fine with an empty file.
+
+startup_panel = true          # neofetch-style splash on launch
 
 [font]
 family = "JetBrains Mono"

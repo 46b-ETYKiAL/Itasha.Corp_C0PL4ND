@@ -178,6 +178,8 @@ pub struct Config {
     pub effects: EffectsConfig,
     pub keybindings: Keybindings,
     pub update: UpdateConfig,
+    /// Show the neofetch-style startup panel (logo + system info) on launch.
+    pub startup_panel: bool,
     /// Override shell program; `None` = use the platform default shell.
     pub shell: Option<String>,
 }
@@ -194,6 +196,7 @@ impl Default for Config {
             effects: EffectsConfig::default(),
             keybindings: Keybindings::default(),
             update: UpdateConfig::default(),
+            startup_panel: true,
             shell: None,
         }
     }
