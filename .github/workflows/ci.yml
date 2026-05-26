@@ -42,7 +42,7 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "apps/c0pl4nd -> target"
+          workspaces: ". -> target"
 
       - name: Install Linux GUI/display build dependencies
         if: runner.os == 'Linux'
@@ -53,11 +53,11 @@ jobs:
             libxkbcommon-dev libwayland-dev libfontconfig1-dev
 
       - name: cargo build
-        working-directory: apps/c0pl4nd
+        working-directory: .
         run: cargo build --workspace --verbose
 
       - name: cargo test
-        working-directory: apps/c0pl4nd
+        working-directory: .
         run: cargo test --workspace --verbose
 
   lint:
@@ -75,7 +75,7 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "apps/c0pl4nd -> target"
+          workspaces: ". -> target"
 
       - name: Install Linux GUI/display build dependencies
         run: |
@@ -85,11 +85,11 @@ jobs:
             libxkbcommon-dev libwayland-dev libfontconfig1-dev
 
       - name: cargo fmt --check
-        working-directory: apps/c0pl4nd
+        working-directory: .
         run: cargo fmt --all --check
 
       - name: cargo clippy
-        working-directory: apps/c0pl4nd
+        working-directory: .
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   security:
@@ -106,12 +106,12 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: apps/c0pl4nd
+          working-directory: .
 
       - name: cargo-deny (licenses, bans, sources)
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          manifest-path: apps/c0pl4nd/Cargo.toml
+          manifest-path: ./Cargo.toml
           command: check licenses bans sources
 
   # Aggregating gate. This job always runs and explicitly inspects the result

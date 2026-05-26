@@ -1,62 +1,96 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="C0PL4ND README banner">
-  <title>C0PL4ND — README hero banner</title>
-  <desc>README hero banner: wordmark and tagline beside a faux terminal window showing a colored prompt, over void black with scanlines.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" width="1280" height="360" font-family="'Monaspace Neon','JetBrains Mono','Courier New',monospace" role="img" aria-label="C0PL4ND — the operator's shell into the wired">
   <defs>
-    <pattern id="bn-scan" width="4" height="4" patternUnits="userSpaceOnUse">
-      <rect width="4" height="4" fill="#08060d"/>
-      <rect width="4" height="1" fill="#f0eef5" opacity="0.04"/>
-    </pattern>
-    <radialGradient id="bn-glow" cx="22%" cy="50%" r="55%">
-      <stop offset="0%" stop-color="#00e5ff" stop-opacity="0.07"/>
-      <stop offset="100%" stop-color="#00e5ff" stop-opacity="0"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#08060d"/>
+      <stop offset="0.55" stop-color="#0d0a18"/>
+      <stop offset="1" stop-color="#08060d"/>
+    </linearGradient>
+    <radialGradient id="vig" cx="0.5" cy="0.42" r="0.75">
+      <stop offset="0" stop-color="#1a1230" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#08060d" stop-opacity="0"/>
     </radialGradient>
+    <linearGradient id="trail" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff0040"/>
+      <stop offset="1" stop-color="#e020ff"/>
+    </linearGradient>
+    <pattern id="scan" width="3" height="3" patternUnits="userSpaceOnUse">
+      <rect width="3" height="1" fill="#000000" opacity="0.18"/>
+    </pattern>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#a020ff" stroke-opacity="0.07" stroke-width="1"/>
+    </pattern>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
   </defs>
 
-  <!-- void black bg -->
-  <rect width="1280" height="320" fill="#08060d"/>
-  <rect width="1280" height="320" fill="url(#bn-glow)"/>
-  <rect width="1280" height="320" fill="url(#bn-scan)"/>
+  <rect width="1280" height="360" fill="url(#bg)"/>
+  <rect width="1280" height="360" fill="url(#grid)"/>
+  <rect width="1280" height="360" fill="url(#vig)"/>
 
-  <!-- corner ticks -->
-  <g stroke="#a020ff" stroke-width="2" opacity="0.5">
-    <line x1="40" y1="40" x2="76" y2="40"/>
-    <line x1="40" y1="40" x2="40" y2="76"/>
-    <line x1="1240" y1="280" x2="1204" y2="280"/>
-    <line x1="1240" y1="280" x2="1240" y2="244"/>
+  <g fill="#2a2833">
+    <rect x="40" y="276" width="34" height="84"/><rect x="84" y="300" width="22" height="60"/>
+    <rect x="116" y="262" width="40" height="98"/><rect x="166" y="290" width="26" height="70"/>
+    <rect x="958" y="288" width="30" height="72"/><rect x="998" y="266" width="38" height="94"/>
+    <rect x="1046" y="298" width="22" height="62"/><rect x="1078" y="274" width="36" height="86"/>
+    <rect x="1124" y="294" width="26" height="66"/><rect x="1160" y="258" width="40" height="102"/>
+  </g>
+  <g fill="#00e5ff" opacity="0.7">
+    <rect x="126" y="276" width="4" height="4"/><rect x="138" y="286" width="4" height="4"/>
+    <rect x="1008" y="282" width="4" height="4"/><rect x="1090" y="292" width="4" height="4"/>
+    <rect x="1170" y="272" width="4" height="4"/><rect x="1182" y="300" width="4" height="4"/>
   </g>
 
-  <!-- LEFT: wordmark + tagline -->
-  <g font-family="'Courier New','DejaVu Sans Mono',monospace">
-    <text x="72" y="110" font-size="24" letter-spacing="4" fill="#00ffb3">&gt; 端末 // terminal</text>
-    <g font-size="92" font-weight="700" letter-spacing="4">
-      <text x="74" y="200" fill="#e020ff" opacity="0.85">C0PL4ND</text>
-      <text x="72" y="197" fill="#00e5ff">C0PL4ND</text>
-    </g>
-    <text x="74" y="248" font-size="26" letter-spacing="2" fill="#f0eef5">the operator's shell into the wired</text>
+  <g stroke="#5a5869" stroke-width="1.5" fill="none" opacity="0.85">
+    <path d="M0 70 Q 320 110 640 74 T 1280 80"/>
+    <path d="M0 92 Q 320 132 640 96 T 1280 102"/>
+    <path d="M160 40 V 150 M1090 40 V 150"/>
+  </g>
+  <g fill="#ff0040" filter="url(#glow)">
+    <circle cx="160" cy="72" r="3"/><circle cx="640" cy="75" r="3"/><circle cx="1090" cy="83" r="3"/>
+  </g>
+  <text x="172" y="60" fill="#5a5869" font-size="11" letter-spacing="2">THE WIRED</text>
+
+  <g fill="#00ffb3" opacity="0.16" font-size="13" letter-spacing="1">
+    <text x="1216" y="150">0x7F</text><text x="1216" y="168">A0 1F</text>
+    <text x="1216" y="186">E2 9B</text><text x="1216" y="204">CC 04</text>
+    <text x="1216" y="222">7A FF</text><text x="1216" y="240">10 3E</text>
   </g>
 
-  <!-- RIGHT: faux terminal window -->
-  <g>
-    <rect x="744" y="60" width="472" height="200" rx="12" fill="#08060d" stroke="#a020ff" stroke-width="2"/>
-    <!-- title bar -->
-    <rect x="744" y="60" width="472" height="34" rx="12" fill="#08060d"/>
-    <rect x="744" y="80" width="472" height="14" fill="#08060d"/>
-    <line x1="744" y1="94" x2="1216" y2="94" stroke="#a020ff" stroke-width="1.5" opacity="0.6"/>
-    <circle cx="768" cy="77" r="6" fill="#ff0040"/>
-    <circle cx="790" cy="77" r="6" fill="#00ffb3"/>
-    <circle cx="812" cy="77" r="6" fill="#00e5ff"/>
-    <text x="1196" y="82" text-anchor="end" font-family="'Courier New',monospace" font-size="15" fill="#f0eef5" opacity="0.6">配線</text>
+  <path d="M40 250 C 360 250 360 196 720 196" stroke="url(#trail)" stroke-width="3" fill="none" opacity="0.85" filter="url(#glow)"/>
+  <circle cx="720" cy="196" r="5" fill="#ff0040" filter="url(#glow)"/>
 
-    <!-- terminal body lines -->
-    <g font-family="'Courier New',monospace" font-size="19">
-      <text x="768" y="130"><tspan fill="#00ffb3">operator@wired</tspan><tspan fill="#f0eef5">:</tspan><tspan fill="#a020ff">~</tspan><tspan fill="#f0eef5">$ </tspan><tspan fill="#00e5ff">c0pl4nd --connect</tspan></text>
-      <text x="768" y="160"><tspan fill="#e020ff">[link]</tspan><tspan fill="#f0eef5"> resolving the wired ...</tspan></text>
-      <text x="768" y="190"><tspan fill="#00e5ff">[ ok ]</tspan><tspan fill="#f0eef5"> gpu surface online</tspan></text>
-      <text x="768" y="220"><tspan fill="#00ffb3">operator@wired</tspan><tspan fill="#f0eef5">:</tspan><tspan fill="#a020ff">~</tspan><tspan fill="#f0eef5">$ </tspan></text>
-    </g>
-    <!-- blinking cursor -->
-    <rect x="836" y="206" width="13" height="20" fill="#00ffb3">
-      <animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.5;0.5;1" dur="1.1s" repeatCount="indefinite"/>
+  <text x="44" y="40" fill="#00e5ff" font-size="15" letter-spacing="3">[ C0PL4ND://WIR3D ]</text>
+
+  <g font-size="92" font-weight="700" letter-spacing="6">
+    <text x="50" y="190" fill="#e020ff" opacity="0.55">C0PL4ND</text>
+    <text x="44" y="186" fill="#00e5ff" filter="url(#glow)">C0PL4ND</text>
+  </g>
+
+  <g transform="translate(640,150)" opacity="0.9">
+    <rect x="0" y="10" width="26" height="20" rx="3" fill="none" stroke="#00ffb3" stroke-width="2"/>
+    <path d="M5 10 V5 a8 8 0 0 1 16 0 V10" fill="none" stroke="#00ffb3" stroke-width="2"/>
+    <rect x="11" y="17" width="4" height="7" fill="#00ffb3"/>
+  </g>
+  <g fill="#5a5869"><rect x="690" y="158" width="70" height="12" rx="2"/><rect x="770" y="158" width="40" height="12" rx="2"/></g>
+
+  <g font-size="22" letter-spacing="1">
+    <text x="50" y="240" fill="#00e5ff">&gt;</text>
+    <text x="74" y="240" fill="#f0eef5">the operator's shell into the wired</text>
+    <rect x="486" y="222" width="12" height="22" fill="#00e5ff">
+      <animate attributeName="opacity" values="1;1;0;0" dur="1.1s" repeatCount="indefinite"/>
     </rect>
   </g>
+  <text x="50" y="276" fill="#a020ff" font-size="14" letter-spacing="3" opacity="0.85">PRESENT DAY &#183; PRESENT TIME &#183; GPU &#183; LOCAL-FIRST &#183; NO TELEMETRY</text>
+
+  <text x="1120" y="120" fill="#a020ff" font-size="46" opacity="0.22" font-family="'Noto Sans JP',sans-serif">端末</text>
+
+  <g stroke="#00e5ff" stroke-width="2" opacity="0.6">
+    <path d="M24 24 H44 M24 24 V44" fill="none"/><path d="M1256 24 H1236 M1256 24 V44" fill="none"/>
+    <path d="M24 336 H44 M24 336 V316" fill="none"/><path d="M1256 336 H1236 M1256 336 V316" fill="none"/>
+  </g>
+
+  <rect width="1280" height="360" fill="url(#scan)"/>
+  <rect x="2" y="2" width="1276" height="356" fill="none" stroke="#2a2833" stroke-width="2"/>
 </svg>

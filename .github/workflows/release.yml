@@ -60,7 +60,7 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "apps/c0pl4nd -> target"
+          workspaces: ". -> target"
           key: ${{ matrix.target }}
 
       - name: Install Linux GUI/display build dependencies
@@ -77,12 +77,12 @@ jobs:
 
       - name: Build release binary (native)
         if: matrix.cross != true
-        working-directory: apps/c0pl4nd
+        working-directory: .
         run: cargo build --release --target ${{ matrix.target }} --bin ${{ env.BIN_NAME }}
 
       - name: Build release binary (cross)
         if: matrix.cross == true
-        working-directory: apps/c0pl4nd
+        working-directory: .
         run: cross build --release --target ${{ matrix.target }} --bin ${{ env.BIN_NAME }}
 
       - name: Determine version
@@ -98,7 +98,7 @@ jobs:
       - name: Package (Unix)
         if: runner.os != 'Windows'
         shell: bash
-        working-directory: apps/c0pl4nd
+        working-directory: .
         run: |
           set -euo pipefail
           tag="${{ steps.version.outputs.tag }}"
@@ -106,8 +106,8 @@ jobs:
           stage="${BIN_NAME}-${tag}-${target}"
           mkdir -p "dist/${stage}"
           cp "target/${target}/release/${BIN_NAME}" "dist/${stage}/"
-          cp ../../LICENSE-MIT "dist/${stage}/" 2>/dev/null || true
-          cp ../../LICENSE-APACHE "dist/${stage}/" 2>/dev/null || true
+          cp LICENSE-MIT "dist/${stage}/" 2>/dev/null || true
+          cp LICENSE-APACHE "dist/${stage}/" 2>/dev/null || true
           cp README.md "dist/${stage}/" 2>/dev/null || true
           ( cd dist && tar -czf "${stage}.tar.gz" "${stage}" )
           ( cd dist && shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256" )
@@ -115,15 +115,15 @@ jobs:
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        working-directory: apps/c0pl4nd
+        working-directory: .
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
           $target = "${{ matrix.target }}"
           $stage = "$env:BIN_NAME-$tag-$target"
           New-Item -ItemType Directory -Force -Path "dist/$stage" | Out-Null
           Copy-Item "target/$target/release/$env:BIN_NAME.exe" "dist/$stage/"
-          if (Test-Path "../../LICENSE-MIT") { Copy-Item "../../LICENSE-MIT" "dist/$stage/" }
-          if (Test-Path "../../LICENSE-APACHE") { Copy-Item "../../LICENSE-APACHE" "dist/$stage/" }
+          if (Test-Path "LICENSE-MIT") { Copy-Item "LICENSE-MIT" "dist/$stage/" }
+          if (Test-Path "LICENSE-APACHE") { Copy-Item "LICENSE-APACHE" "dist/$stage/" }
           if (Test-Path "README.md") { Copy-Item "README.md" "dist/$stage/" }
           Compress-Archive -Path "dist/$stage/*" -DestinationPath "dist/$stage.zip" -Force
           $hash = (Get-FileHash "dist/$stage.zip" -Algorithm SHA256).Hash.ToLower()
@@ -134,9 +134,9 @@ jobs:
         with:
           name: ${{ env.BIN_NAME }}-${{ matrix.target }}
           path: |
-            apps/c0pl4nd/dist/*.tar.gz
-            apps/c0pl4nd/dist/*.zip
-            apps/c0pl4nd/dist/*.sha256
+            ./dist/*.tar.gz
+            ./dist/*.zip
+            ./dist/*.sha256
           if-no-files-found: error
 
   # ----------------------------------------------------------------------------
@@ -168,7 +168,7 @@ jobs:
       - name: Build Windows MSI
         if: matrix.kind == 'msi'
         shell: pwsh
-        working-directory: apps/c0pl4nd
+        working-directory: .
         run: |
           # cargo-wix consumes packaging/windows/wix/main.wxs. The maintainer
           # must have the WiX Toolset available; cargo-wix vendors v3 on demand.
@@ -179,7 +179,7 @@ jobs:
       - name: Build macOS DMG
         if: matrix.kind == 'dmg'
         shell: bash
-        working-directory: apps/c0pl4nd
+        working-directory: .
         run: |
           chmod +x packaging/macos/build-dmg.sh
           ./packaging/macos/build-dmg.sh || echo "DMG skeleton invoked; wire the .app path before GA."
@@ -187,7 +187,7 @@ jobs:
       - name: Build Linux AppImage + DEB
         if: matrix.kind == 'linux'
         shell: bash
-        working-directory: apps/c0pl4nd
+        working-directory: .
         run: |
           chmod +x packaging/linux/build-appimage.sh packaging/linux/build-deb.sh
           ./packaging/linux/build-appimage.sh || echo "AppImage skeleton invoked; install linuxdeploy before GA."
@@ -198,10 +198,10 @@ jobs:
         with:
           name: installer-${{ matrix.kind }}
           path: |
-            apps/c0pl4nd/dist/*.msi
-            apps/c0pl4nd/dist/*.dmg
-            apps/c0pl4nd/dist/*.AppImage
-            apps/c0pl4nd/dist/*.deb
+            ./dist/*.msi
+            ./dist/*.dmg
+            ./dist/*.AppImage
+            ./dist/*.deb
           if-no-files-found: warn
 
   # ----------------------------------------------------------------------------
