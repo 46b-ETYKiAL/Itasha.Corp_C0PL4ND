@@ -70,7 +70,8 @@ fn startup_panel_injects_into_a_fresh_session_grid() {
     #[cfg(windows)]
     let session = Session::spawn_program("cmd.exe", &["/C", "rem"], 24, 80).expect("spawn session");
     #[cfg(not(windows))]
-    let session = Session::spawn_program("/bin/sh", &["-c", "true"], 24, 80).expect("spawn session");
+    let session =
+        Session::spawn_program("/bin/sh", &["-c", "true"], 24, 80).expect("spawn session");
 
     {
         let term = session.terminal();

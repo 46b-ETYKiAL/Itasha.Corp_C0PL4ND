@@ -26,6 +26,9 @@ allow = [
     "CC0-1.0",
     "BSL-1.0",
     "OpenSSL",
+    # Community Data License Agreement — Permissive 2.0; permissive, entered the
+    # tree transitively via the sysinfo dependency. Compatible with MIT/Apache.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 

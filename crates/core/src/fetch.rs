@@ -128,7 +128,11 @@ pub fn render_panel(info: &SystemInfo) -> String {
     ];
 
     let logo_lines: Vec<&str> = LOGO.lines().collect();
-    let logo_w = logo_lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let logo_w = logo_lines
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0);
     let n = logo_lines.len().max(rows.len());
 
     let mut out = String::new();
