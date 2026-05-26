@@ -5,3 +5,6 @@ Thumbs.db
 .env
 *.pem
 *.key
+
+# agent-system runtime artifacts (never publish)
+.s4f3-data/
