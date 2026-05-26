@@ -1,96 +1,113 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" width="1280" height="360" font-family="'Monaspace Neon','JetBrains Mono','Courier New',monospace" role="img" aria-label="C0PL4ND — the operator's shell into the wired">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 548" width="1280" height="548">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#08060d"/>
-      <stop offset="0.55" stop-color="#0d0a18"/>
-      <stop offset="1" stop-color="#08060d"/>
-    </linearGradient>
-    <radialGradient id="vig" cx="0.5" cy="0.42" r="0.75">
-      <stop offset="0" stop-color="#1a1230" stop-opacity="0.55"/>
-      <stop offset="1" stop-color="#08060d" stop-opacity="0"/>
+    <pattern id="scanlines" patternUnits="userSpaceOnUse" width="4" height="4">
+      <line x1="0" y1="0" x2="4" y2="0" stroke="#fff" stroke-width="0.5" opacity="0.15"/>
+    </pattern>
+    <radialGradient id="vignette" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="transparent"/>
+      <stop offset="100%" stop-color="rgba(0,0,0,0.4)"/>
     </radialGradient>
-    <linearGradient id="trail" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#ff0040"/>
-      <stop offset="1" stop-color="#e020ff"/>
-    </linearGradient>
-    <pattern id="scan" width="3" height="3" patternUnits="userSpaceOnUse">
-      <rect width="3" height="1" fill="#000000" opacity="0.18"/>
-    </pattern>
-    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-      <path d="M40 0H0V40" fill="none" stroke="#a020ff" stroke-opacity="0.07" stroke-width="1"/>
-    </pattern>
-    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
-      <feGaussianBlur stdDeviation="3" result="b"/>
-      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    <filter id="phosphor"><feGaussianBlur stdDeviation="0.8"/></filter>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
+  <style>
+    @keyframes sweep { 0% { transform: translateY(0); } 100% { transform: translateY(500px); } }
+    @keyframes flicker { 0%,96%,100% { opacity: 1; } 97% { opacity: 0.97; } 98% { opacity: 0.99; } }
+    @keyframes signalBroadcast { 0% { opacity: 0.8; stroke-dashoffset: 20; } 100% { opacity: 0.2; stroke-dashoffset: 0; } }
+    @keyframes endpointBlink { 0%,100% { opacity: 0.9; } 50% { opacity: 0.3; } }
+    @keyframes bootReveal { 0% { opacity: 0; } 100% { opacity: 0.9; } }
+    @keyframes heartbeat { 0%,100% { r: 3; opacity: 0.5; } 15% { r: 4; opacity: 0.9; } 30% { r: 3; opacity: 0.5; } 45% { r: 3.5; opacity: 0.8; } 60% { r: 3; opacity: 0.5; } }
+    @keyframes edgeGlow { 0% { stroke-dashoffset: 3500; } 100% { stroke-dashoffset: 0; } }
+    @keyframes phosphorBloom { 0%,100% { opacity: 0; } 50% { opacity: 0.015; } }
+    @keyframes curBlink { 0%,50% { opacity: 1; } 51%,100% { opacity: 0; } }
+    text { font-family: 'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',Consolas,monospace; }
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+  </style>
 
-  <rect width="1280" height="360" fill="url(#bg)"/>
-  <rect width="1280" height="360" fill="url(#grid)"/>
-  <rect width="1280" height="360" fill="url(#vig)"/>
+  <!-- Outer bezel -->
+  <rect x="0" y="0" width="1280" height="548" rx="18" ry="18" fill="#111118" stroke="#2a2833" stroke-width="2"/>
+  <!-- Inner bezel -->
+  <rect x="12" y="12" width="1256" height="524" rx="12" ry="12" fill="#18181f"/>
+  <!-- Screen -->
+  <rect x="24" y="24" width="1232" height="500" rx="6" ry="6" fill="#08060d"/>
+  <rect x="24" y="24" width="1232" height="500" rx="6" ry="6" fill="url(#scanlines)"/>
+  <rect x="24" y="24" width="1232" height="500" rx="6" ry="6" fill="url(#vignette)"/>
 
-  <g fill="#2a2833">
-    <rect x="40" y="276" width="34" height="84"/><rect x="84" y="300" width="22" height="60"/>
-    <rect x="116" y="262" width="40" height="98"/><rect x="166" y="290" width="26" height="70"/>
-    <rect x="958" y="288" width="30" height="72"/><rect x="998" y="266" width="38" height="94"/>
-    <rect x="1046" y="298" width="22" height="62"/><rect x="1078" y="274" width="36" height="86"/>
-    <rect x="1124" y="294" width="26" height="66"/><rect x="1160" y="258" width="40" height="102"/>
+  <!-- Edge glow + scanline sweep + phosphor bloom -->
+  <rect x="24" y="24" width="1232" height="500" rx="6" ry="6" fill="none" stroke="#00e5ff" stroke-width="1" opacity="0.06" stroke-dasharray="20,3480" style="animation: edgeGlow 12s linear infinite;"/>
+  <rect x="24" y="24" width="1232" height="2" fill="#00e5ff" opacity="0.03" style="animation: sweep 10s linear infinite;"/>
+  <rect x="24" y="24" width="1232" height="500" rx="6" ry="6" fill="white" opacity="0" style="animation: phosphorBloom 8s ease-in-out infinite;"/>
+
+  <g style="animation: flicker 6s infinite;">
+    <!-- House header + repo name -->
+    <text x="640" y="78" text-anchor="middle" fill="#5a5869" font-size="11" letter-spacing="6" filter="url(#phosphor)">I T A S H A . C O R P</text>
+    <text x="640" y="126" text-anchor="middle" fill="#00e5ff" font-size="40" font-weight="bold" letter-spacing="10" filter="url(#glow)">C 0 P L 4 N D</text>
+    <text x="640" y="152" text-anchor="middle" fill="#a020ff" font-size="12" letter-spacing="5" filter="url(#phosphor)">THE OPERATOR'S SHELL INTO THE WIRED</text>
+
+    <!-- Boot sequence (cybersecurity / early-internet terminal) -->
+    <g fill="#00e5ff" font-size="13" filter="url(#phosphor)" opacity="0.9">
+      <text x="60" y="210">c0pl4nd.init ──────────────────────</text>
+      <text x="60" y="240" style="animation: bootReveal 0.3s ease-out 0.2s both;">&gt; pty.spawn(shell)</text>
+      <text x="470" y="240" fill="#01fe36">[ OK ]</text>
+      <text x="60" y="268" style="animation: bootReveal 0.3s ease-out 0.5s both;">&gt; vt.parser.attach()</text>
+      <text x="470" y="268" fill="#01fe36">[ OK ]</text>
+      <text x="60" y="296" style="animation: bootReveal 0.3s ease-out 0.8s both;">&gt; gpu.surface.bind(wgpu)</text>
+      <text x="470" y="296" fill="#01fe36">[ OK ]</text>
+      <text x="60" y="324" style="animation: bootReveal 0.3s ease-out 1.1s both;">&gt; theme.load(itasha-void)</text>
+      <text x="470" y="324" fill="#01fe36">[ OK ]</text>
+      <text x="60" y="352" style="animation: bootReveal 0.3s ease-out 1.4s both;">&gt; wired.connect()</text>
+      <text x="470" y="352" fill="#01fe36">[ OK ]</text>
+      <text x="60" y="380">───────────────────────────────────</text>
+      <text x="60" y="420">operator@wired:~$</text>
+      <rect x="232" y="408" width="11" height="16" fill="#00e5ff" style="animation: curBlink 1.1s step-end infinite;"/>
+    </g>
+    <text x="60" y="458" fill="#5a5869" font-size="11" letter-spacing="2" filter="url(#phosphor)">present day &#183; present time</text>
+
+    <!-- Unique element: the Wired — power-line node tree (Lain) carrying the engine's links -->
+    <g transform="translate(840, 196)">
+      <line x1="60" y1="0" x2="60" y2="210" stroke="#00e5ff" stroke-width="2.5" filter="url(#glow)"/>
+      <circle cx="60" cy="0" r="4" fill="#00e5ff" opacity="0.9" filter="url(#glow)"/>
+      <!-- Akira-red signal arc off the top -->
+      <path d="M 68 -4 Q 86 -18 70 -34" fill="none" stroke="#ff0040" stroke-width="1.5" opacity="0.8" filter="url(#glow)"/>
+
+      <line x1="60" y1="40" x2="210" y2="40" stroke="#00e5ff" stroke-width="1.5" opacity="0.9" stroke-dasharray="6,3" style="animation: signalBroadcast 1.5s linear infinite;"/>
+      <circle cx="210" cy="40" r="5" fill="none" stroke="#00e5ff" stroke-width="1.5" style="animation: endpointBlink 2s ease-in-out infinite;"/>
+      <circle cx="210" cy="40" r="2" fill="#00e5ff" style="animation: endpointBlink 2s ease-in-out infinite;"/>
+      <text x="222" y="44" fill="#5a5869" font-size="9" opacity="0.8">PTY</text>
+
+      <line x1="60" y1="90" x2="190" y2="90" stroke="#e020ff" stroke-width="1.5" opacity="0.7" stroke-dasharray="6,3" style="animation: signalBroadcast 2s linear infinite;"/>
+      <circle cx="190" cy="90" r="5" fill="none" stroke="#e020ff" stroke-width="1.5" style="animation: endpointBlink 2s ease-in-out 0.4s infinite;"/>
+      <circle cx="190" cy="90" r="2" fill="#e020ff" style="animation: endpointBlink 2s ease-in-out 0.4s infinite;"/>
+      <text x="202" y="94" fill="#5a5869" font-size="9" opacity="0.8">VT</text>
+
+      <line x1="60" y1="140" x2="170" y2="140" stroke="#00ffb3" stroke-width="1.5" opacity="0.6" stroke-dasharray="6,3" style="animation: signalBroadcast 2.5s linear infinite;"/>
+      <circle cx="170" cy="140" r="5" fill="none" stroke="#00ffb3" stroke-width="1.5" style="animation: endpointBlink 2s ease-in-out 0.8s infinite;"/>
+      <circle cx="170" cy="140" r="2" fill="#00ffb3" style="animation: endpointBlink 2s ease-in-out 0.8s infinite;"/>
+      <text x="182" y="144" fill="#5a5869" font-size="9" opacity="0.8">GPU</text>
+
+      <text x="20" y="232" fill="#5a5869" font-size="8">MIT OR Apache-2.0</text>
+      <!-- kanji 配線 (wiring) -->
+      <text x="120" y="180" fill="#a020ff" font-size="34" opacity="0.18" font-family="'Noto Sans JP',sans-serif">配線</text>
+    </g>
   </g>
-  <g fill="#00e5ff" opacity="0.7">
-    <rect x="126" y="276" width="4" height="4"/><rect x="138" y="286" width="4" height="4"/>
-    <rect x="1008" y="282" width="4" height="4"/><rect x="1090" y="292" width="4" height="4"/>
-    <rect x="1170" y="272" width="4" height="4"/><rect x="1182" y="300" width="4" height="4"/>
-  </g>
 
-  <g stroke="#5a5869" stroke-width="1.5" fill="none" opacity="0.85">
-    <path d="M0 70 Q 320 110 640 74 T 1280 80"/>
-    <path d="M0 92 Q 320 132 640 96 T 1280 102"/>
-    <path d="M160 40 V 150 M1090 40 V 150"/>
-  </g>
-  <g fill="#ff0040" filter="url(#glow)">
-    <circle cx="160" cy="72" r="3"/><circle cx="640" cy="75" r="3"/><circle cx="1090" cy="83" r="3"/>
-  </g>
-  <text x="172" y="60" fill="#5a5869" font-size="11" letter-spacing="2">THE WIRED</text>
+  <!-- Corner brackets -->
+  <path d="M 40,40 L 40,70 M 40,40 L 70,40" stroke="#00e5ff" stroke-width="1.5" fill="none" opacity="0.1"/>
+  <path d="M 1240,40 L 1240,70 M 1240,40 L 1210,40" stroke="#00e5ff" stroke-width="1.5" fill="none" opacity="0.1"/>
+  <path d="M 40,510 L 40,480 M 40,510 L 70,510" stroke="#00e5ff" stroke-width="1.5" fill="none" opacity="0.1"/>
+  <path d="M 1240,510 L 1240,480 M 1240,510 L 1210,510" stroke="#00e5ff" stroke-width="1.5" fill="none" opacity="0.1"/>
 
-  <g fill="#00ffb3" opacity="0.16" font-size="13" letter-spacing="1">
-    <text x="1216" y="150">0x7F</text><text x="1216" y="168">A0 1F</text>
-    <text x="1216" y="186">E2 9B</text><text x="1216" y="204">CC 04</text>
-    <text x="1216" y="222">7A FF</text><text x="1216" y="240">10 3E</text>
-  </g>
+  <!-- Status dots -->
+  <circle cx="50" cy="505" r="3" fill="#01fe36" opacity="0.5" style="animation: heartbeat 2s ease-in-out infinite;"/>
+  <circle cx="62" cy="505" r="3" fill="#00e5ff" opacity="0.4"/>
+  <circle cx="74" cy="505" r="3" fill="#5a5869" opacity="0.3"/>
 
-  <path d="M40 250 C 360 250 360 196 720 196" stroke="url(#trail)" stroke-width="3" fill="none" opacity="0.85" filter="url(#glow)"/>
-  <circle cx="720" cy="196" r="5" fill="#ff0040" filter="url(#glow)"/>
-
-  <text x="44" y="40" fill="#00e5ff" font-size="15" letter-spacing="3">[ C0PL4ND://WIR3D ]</text>
-
-  <g font-size="92" font-weight="700" letter-spacing="6">
-    <text x="50" y="190" fill="#e020ff" opacity="0.55">C0PL4ND</text>
-    <text x="44" y="186" fill="#00e5ff" filter="url(#glow)">C0PL4ND</text>
-  </g>
-
-  <g transform="translate(640,150)" opacity="0.9">
-    <rect x="0" y="10" width="26" height="20" rx="3" fill="none" stroke="#00ffb3" stroke-width="2"/>
-    <path d="M5 10 V5 a8 8 0 0 1 16 0 V10" fill="none" stroke="#00ffb3" stroke-width="2"/>
-    <rect x="11" y="17" width="4" height="7" fill="#00ffb3"/>
-  </g>
-  <g fill="#5a5869"><rect x="690" y="158" width="70" height="12" rx="2"/><rect x="770" y="158" width="40" height="12" rx="2"/></g>
-
-  <g font-size="22" letter-spacing="1">
-    <text x="50" y="240" fill="#00e5ff">&gt;</text>
-    <text x="74" y="240" fill="#f0eef5">the operator's shell into the wired</text>
-    <rect x="486" y="222" width="12" height="22" fill="#00e5ff">
-      <animate attributeName="opacity" values="1;1;0;0" dur="1.1s" repeatCount="indefinite"/>
-    </rect>
-  </g>
-  <text x="50" y="276" fill="#a020ff" font-size="14" letter-spacing="3" opacity="0.85">PRESENT DAY &#183; PRESENT TIME &#183; GPU &#183; LOCAL-FIRST &#183; NO TELEMETRY</text>
-
-  <text x="1120" y="120" fill="#a020ff" font-size="46" opacity="0.22" font-family="'Noto Sans JP',sans-serif">端末</text>
-
-  <g stroke="#00e5ff" stroke-width="2" opacity="0.6">
-    <path d="M24 24 H44 M24 24 V44" fill="none"/><path d="M1256 24 H1236 M1256 24 V44" fill="none"/>
-    <path d="M24 336 H44 M24 336 V316" fill="none"/><path d="M1256 336 H1236 M1256 336 V316" fill="none"/>
-  </g>
-
-  <rect width="1280" height="360" fill="url(#scan)"/>
-  <rect x="2" y="2" width="1276" height="356" fill="none" stroke="#2a2833" stroke-width="2"/>
+  <!-- Bezel labels + power LED -->
+  <text x="40" y="542" font-size="9" fill="#4a4859" letter-spacing="2">ITASHA.CORP</text>
+  <text x="1200" y="542" text-anchor="end" font-size="9" fill="#4a4859">CRT-C0PL4ND</text>
+  <circle cx="1232" cy="534" r="6" fill="#01fe36" opacity="0.3"/>
+  <circle cx="1232" cy="534" r="4" fill="#01fe36" opacity="1.0"/>
 </svg>
