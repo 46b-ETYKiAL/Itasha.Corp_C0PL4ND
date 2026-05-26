@@ -1,0 +1,13 @@
+[package]
+name = "c0pl4nd-renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "C0PL4ND GPU renderer: glyph-atlas text rendering, damage tracking, render-on-input."
+
+[dependencies]
+c0pl4nd-core = { path = "../core" }
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

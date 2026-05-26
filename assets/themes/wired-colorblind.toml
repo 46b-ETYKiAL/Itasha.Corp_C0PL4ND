@@ -1,0 +1,44 @@
+# Wired Colorblind — deuteranopia/protanopia-safe variant.
+# Red/green confusion is the core risk for deuteranopia & protanopia, so the
+# traditional red and green ANSI slots are remapped onto a warm-vs-cool axis
+# that survives the loss of L/M-cone hue discrimination:
+#   * "red"  slot  -> WARM ORANGE  (#ff8c1a) — the safe warm anchor, never green-like
+#   * "green" slot -> COOL TEAL    (#00ddc4) — high luminance, reads cool not "green/red"
+#   * "yellow"     -> bright AMBER (#ffd24d) — highest-luminance accent, distinct from orange
+#   * "blue"       -> clear BLUE   (#3399ff)
+#   * "magenta"    -> VIOLET       (#b366ff) — distinct hue under both color deficiencies
+#   * "cyan"       -> light CYAN   (#66e0ff)
+# Accents are also separated by luminance (orange 8.6 / teal 11.6 / amber 14.0 /
+# blue 6.9 / violet 6.0 / cyan 13.1 on the void background) so they stay
+# distinguishable even when hue cues are unavailable.
+# WCAG contrast (foreground on background): 17.51:1 (AAA, far exceeds 7:1).
+name = "Wired Colorblind"
+author = "Itasha.Corp"
+
+# base UI colors
+background = "#08060d"
+foreground = "#f0eef5"
+cursor = "#ffd24d"
+cursor_text = "#08060d"
+selection_background = "#243a5a"
+selection_foreground = "#f0eef5"
+
+[normal]   # ANSI 0-7 — warm/cool axis, no red/green confusion pair
+black = "#3a3845"
+red = "#ff8c1a"
+green = "#00ddc4"
+yellow = "#ffd24d"
+blue = "#3399ff"
+magenta = "#b366ff"
+cyan = "#66e0ff"
+white = "#c8c4d4"
+
+[bright]   # ANSI 8-15 — lighter, same hue assignments, kept separable by luminance
+black = "#6a6878"
+red = "#ffb066"
+green = "#5cf0e0"
+yellow = "#ffe48a"
+blue = "#7ab8ff"
+magenta = "#cf99ff"
+cyan = "#99edff"
+white = "#f0eef5"

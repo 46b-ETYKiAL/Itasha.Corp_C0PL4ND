@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="C0PL4ND social preview card">
+  <title>C0PL4ND — the operator's shell into the wired</title>
+  <desc>Social preview card: void black background with a city grid and scanlines, the C0PL4ND wordmark, tagline, feature chips, and a kanji accent.</desc>
+  <defs>
+    <pattern id="sp-scan" width="4" height="4" patternUnits="userSpaceOnUse">
+      <rect width="4" height="4" fill="#08060d"/>
+      <rect width="4" height="1" fill="#f0eef5" opacity="0.035"/>
+    </pattern>
+    <radialGradient id="sp-glow" cx="32%" cy="42%" r="60%">
+      <stop offset="0%" stop-color="#00e5ff" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#00e5ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- void black bg -->
+  <rect width="1280" height="640" fill="#08060d"/>
+  <rect width="1280" height="640" fill="url(#sp-glow)"/>
+
+  <!-- city grid (perspective floor lines) -->
+  <g stroke="#a020ff" stroke-width="1" opacity="0.22">
+    <line x1="0" y1="470" x2="1280" y2="470"/>
+    <line x1="0" y1="510" x2="1280" y2="510"/>
+    <line x1="0" y1="560" x2="1280" y2="560"/>
+    <line x1="0" y1="620" x2="1280" y2="620"/>
+  </g>
+  <g stroke="#00e5ff" stroke-width="1" opacity="0.16">
+    <line x1="640" y1="440" x2="-260" y2="640"/>
+    <line x1="640" y1="440" x2="120" y2="640"/>
+    <line x1="640" y1="440" x2="420" y2="640"/>
+    <line x1="640" y1="440" x2="640" y2="640"/>
+    <line x1="640" y1="440" x2="860" y2="640"/>
+    <line x1="640" y1="440" x2="1160" y2="640"/>
+    <line x1="640" y1="440" x2="1540" y2="640"/>
+  </g>
+
+  <!-- scanlines on top -->
+  <rect width="1280" height="640" fill="url(#sp-scan)"/>
+
+  <!-- corner registration ticks -->
+  <g stroke="#00e5ff" stroke-width="2" opacity="0.6">
+    <line x1="48" y1="48" x2="92" y2="48"/>
+    <line x1="48" y1="48" x2="48" y2="92"/>
+    <line x1="1232" y1="592" x2="1188" y2="592"/>
+    <line x1="1232" y1="592" x2="1232" y2="548"/>
+  </g>
+
+  <!-- kanji accent: 端末 = terminal -->
+  <text x="1228" y="120" text-anchor="end" font-family="'Yu Gothic','Noto Sans CJK JP','MS Gothic',sans-serif" font-size="58" fill="#a020ff" opacity="0.55">端末</text>
+
+  <!-- prompt eyebrow -->
+  <text x="80" y="150" font-family="'Courier New',monospace" font-size="26" letter-spacing="4" fill="#00ffb3">&gt; ITASHA.CORP // RETRO-FUTURE OS</text>
+
+  <!-- wordmark with chromatic aberration -->
+  <g font-family="'Courier New','DejaVu Sans Mono',monospace" font-size="148" font-weight="700" letter-spacing="6">
+    <text x="84" y="320" fill="#e020ff" opacity="0.85">C0PL4ND</text>
+    <text x="80" y="316" fill="#00e5ff">C0PL4ND</text>
+  </g>
+
+  <!-- tagline -->
+  <text x="82" y="384" font-family="'Courier New',monospace" font-size="34" letter-spacing="2" fill="#f0eef5">the operator's shell into the wired</text>
+
+  <!-- feature chips -->
+  <g font-family="'Courier New',monospace" font-size="24" font-weight="700">
+    <g>
+      <rect x="80" y="420" width="180" height="44" rx="6" fill="none" stroke="#00e5ff" stroke-width="2"/>
+      <text x="170" y="449" text-anchor="middle" fill="#00e5ff">GPU-fast</text>
+    </g>
+    <g>
+      <rect x="276" y="420" width="206" height="44" rx="6" fill="none" stroke="#00ffb3" stroke-width="2"/>
+      <text x="379" y="449" text-anchor="middle" fill="#00ffb3">zero-config</text>
+    </g>
+    <g>
+      <rect x="498" y="420" width="206" height="44" rx="6" fill="none" stroke="#e020ff" stroke-width="2"/>
+      <text x="601" y="449" text-anchor="middle" fill="#e020ff">local-first</text>
+    </g>
+  </g>
+</svg>

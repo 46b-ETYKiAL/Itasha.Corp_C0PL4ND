@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Set C0PL4ND_HEADLESS=1 to skip tests that require a display/GPU.
+  # CI runners are headless, so display-dependent tests opt in to skipping
+  # via this flag. Tests should call `if std::env::var("C0PL4ND_HEADLESS").is_ok()`
+  # (or the `#[ignore]` + `--include-ignored` pattern) to honor it.
+  C0PL4ND_HEADLESS: "1"
+
+jobs:
+  test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/c0pl4nd -> target"
+
+      - name: Install Linux GUI/display build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libfontconfig1-dev
+
+      - name: cargo build
+        working-directory: apps/c0pl4nd
+        run: cargo build --workspace --verbose
+
+      - name: cargo test
+        working-directory: apps/c0pl4nd
+        run: cargo test --workspace --verbose
+
+  lint:
+    name: Format & Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/c0pl4nd -> target"
+
+      - name: Install Linux GUI/display build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libfontconfig1-dev
+
+      - name: cargo fmt --check
+        working-directory: apps/c0pl4nd
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        working-directory: apps/c0pl4nd
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  security:
+    name: Supply-chain Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo-audit (advisory scan)
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: apps/c0pl4nd
+
+      - name: cargo-deny (licenses, bans, sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: apps/c0pl4nd/Cargo.toml
+          command: check licenses bans sources
+
+  # Aggregating gate. This job always runs and explicitly inspects the result
+  # of every prior job so that a SKIPPED or CANCELLED job cannot be silently
+  # reported as a passing required check on the merge queue.
+  ci-gate:
+    name: CI Gate
+    runs-on: ubuntu-latest
+    needs: [test, lint, security]
+    if: always()
+    steps:
+      - name: Verify all required jobs succeeded
+        run: |
+          test_result="${{ needs.test.result }}"
+          lint_result="${{ needs.lint.result }}"
+          security_result="${{ needs.security.result }}"
+          echo "test     = ${test_result}"
+          echo "lint     = ${lint_result}"
+          echo "security = ${security_result}"
+          if [ "${test_result}" != "success" ] || [ "${lint_result}" != "success" ] || [ "${security_result}" != "success" ]; then
+            echo "::error::One or more required jobs did not succeed."
+            exit 1
+          fi
+          echo "All required jobs succeeded."

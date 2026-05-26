@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
+#
+# winget singleton manifest skeleton for C0PL4ND.
+#
+# To submit to the Windows Package Manager Community Repository
+# (microsoft/winget-pkgs), split this into the three multi-file manifests
+# (version / installer / locale) or keep singleton form for initial review.
+# The release workflow (.github/workflows/release.yml) fills the per-tag
+# values below from the built MSI: PackageVersion (release tag), InstallerUrl
+# (release asset URL), InstallerSha256 (sha256 of the MSI), and ProductCode
+# (the MSI ProductCode GUID). The zeroed sha256/GUID are rewritten per release.
+PackageIdentifier: Itasha.C0PL4ND
+PackageVersion: "0.1.0"
+PackageName: C0PL4ND
+Publisher: Itasha.Corp
+PublisherUrl: https://github.com/itasha-corp
+PublisherSupportUrl: https://github.com/itasha-corp/c0pl4nd/issues
+Author: Itasha.Corp
+PackageUrl: https://github.com/itasha-corp/c0pl4nd
+License: MIT OR Apache-2.0
+LicenseUrl: https://github.com/itasha-corp/c0pl4nd/blob/main/LICENSE-MIT
+Copyright: Copyright (c) Itasha.Corp
+ShortDescription: A fast, cross-platform terminal emulator.
+Description: |-
+  C0PL4ND is a cross-platform terminal emulator written in Rust. It runs on
+  Windows, Linux, and macOS and is distributed under the MIT OR Apache-2.0
+  license.
+Moniker: c0pl4nd
+Tags:
+  - terminal
+  - terminal-emulator
+  - console
+  - rust
+  - cli
+InstallerType: wix
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+UpgradeBehavior: install
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/itasha-corp/c0pl4nd/releases/download/v0.1.0/c0pl4nd-v0.1.0-x86_64-pc-windows-msvc.msi
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    ProductCode: "{00000000-0000-0000-0000-000000000000}"
+    Scope: machine
+ManifestType: singleton
+ManifestVersion: 1.6.0

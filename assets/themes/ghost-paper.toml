@@ -1,0 +1,35 @@
+# Ghost Paper — light theme.
+# Inverts the flagship: ghost-paper hull, void-black ink. Accents are the
+# brand signal colors darkened so each clears 4.5:1 on the light surface
+# (printed-circuit schematic on cold white paper).
+# WCAG contrast (foreground on background): 17.51:1 (AAA, far exceeds 7:1).
+name = "Ghost Paper"
+author = "Itasha.Corp"
+
+# base UI colors
+background = "#f0eef5"
+foreground = "#08060d"
+cursor = "#006d80"
+cursor_text = "#f0eef5"
+selection_background = "#c9bfe0"
+selection_foreground = "#08060d"
+
+[normal]   # ANSI 0-7 — darkened brand accents, each >= 4.5:1 on ghost paper
+black = "#08060d"
+red = "#b00030"
+green = "#00734d"
+yellow = "#8a5a00"
+blue = "#0040b0"
+magenta = "#9010c0"
+cyan = "#006d80"
+white = "#5a5869"
+
+[bright]   # ANSI 8-15 — slightly deeper for emphasis while staying legible
+black = "#2a2833"
+red = "#8a0026"
+green = "#005a3c"
+yellow = "#6e4800"
+blue = "#003090"
+magenta = "#700a98"
+cyan = "#005666"
+white = "#3a3845"

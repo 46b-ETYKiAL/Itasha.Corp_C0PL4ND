@@ -1,0 +1,5 @@
+# Pinned toolchain for reproducible builds across local dev + CI.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

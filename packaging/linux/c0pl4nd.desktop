@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=C0PL4ND
+GenericName=Terminal Emulator
+Comment=Fast, cross-platform terminal emulator
+Exec=c0pl4nd
+Icon=c0pl4nd
+Terminal=false
+Categories=System;TerminalEmulator;Utility;
+Keywords=terminal;shell;console;command;prompt;
+StartupNotify=true
+StartupWMClass=c0pl4nd

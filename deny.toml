@@ -1,0 +1,38 @@
+# cargo-deny configuration — supply-chain gate for C0PL4ND.
+# Run: cargo deny check
+
+[advisories]
+version = 2
+# Fail on any security advisory in the dependency tree.
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Allow the permissive licenses common in the wgpu/winit/glyphon ecosystem.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Warn on multiple versions of the same crate; deny known-bad crates.
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

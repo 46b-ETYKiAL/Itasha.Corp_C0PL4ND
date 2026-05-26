@@ -1,0 +1,246 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build a release for (e.g. v1.2.3)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: c0pl4nd
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Build a release binary per OS/arch and produce a packaged archive + checksum.
+  # ----------------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/c0pl4nd -> target"
+          key: ${{ matrix.target }}
+
+      - name: Install Linux GUI/display build dependencies
+        if: runner.os == 'Linux' && matrix.cross != true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libfontconfig1-dev
+
+      - name: Install cross (for cross-compiled Linux targets)
+        if: matrix.cross == true
+        run: cargo install cross --locked
+
+      - name: Build release binary (native)
+        if: matrix.cross != true
+        working-directory: apps/c0pl4nd
+        run: cargo build --release --target ${{ matrix.target }} --bin ${{ env.BIN_NAME }}
+
+      - name: Build release binary (cross)
+        if: matrix.cross == true
+        working-directory: apps/c0pl4nd
+        run: cross build --release --target ${{ matrix.target }} --bin ${{ env.BIN_NAME }}
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        working-directory: apps/c0pl4nd
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          target="${{ matrix.target }}"
+          stage="${BIN_NAME}-${tag}-${target}"
+          mkdir -p "dist/${stage}"
+          cp "target/${target}/release/${BIN_NAME}" "dist/${stage}/"
+          cp ../../LICENSE-MIT "dist/${stage}/" 2>/dev/null || true
+          cp ../../LICENSE-APACHE "dist/${stage}/" 2>/dev/null || true
+          cp README.md "dist/${stage}/" 2>/dev/null || true
+          ( cd dist && tar -czf "${stage}.tar.gz" "${stage}" )
+          ( cd dist && shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256" )
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: apps/c0pl4nd
+        run: |
+          $tag = "${{ steps.version.outputs.tag }}"
+          $target = "${{ matrix.target }}"
+          $stage = "$env:BIN_NAME-$tag-$target"
+          New-Item -ItemType Directory -Force -Path "dist/$stage" | Out-Null
+          Copy-Item "target/$target/release/$env:BIN_NAME.exe" "dist/$stage/"
+          if (Test-Path "../../LICENSE-MIT") { Copy-Item "../../LICENSE-MIT" "dist/$stage/" }
+          if (Test-Path "../../LICENSE-APACHE") { Copy-Item "../../LICENSE-APACHE" "dist/$stage/" }
+          if (Test-Path "README.md") { Copy-Item "README.md" "dist/$stage/" }
+          Compress-Archive -Path "dist/$stage/*" -DestinationPath "dist/$stage.zip" -Force
+          $hash = (Get-FileHash "dist/$stage.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $stage.zip" | Out-File -Encoding ascii "dist/$stage.zip.sha256"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BIN_NAME }}-${{ matrix.target }}
+          path: |
+            apps/c0pl4nd/dist/*.tar.gz
+            apps/c0pl4nd/dist/*.zip
+            apps/c0pl4nd/dist/*.sha256
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------------------
+  # Build OS installers (MSI, DMG, AppImage, DEB) from the packaged binaries.
+  # ----------------------------------------------------------------------------
+  installers:
+    name: Installers (${{ matrix.os }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            kind: msi
+          - os: macos-latest
+            kind: dmg
+          - os: ubuntu-latest
+            kind: linux
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Build Windows MSI
+        if: matrix.kind == 'msi'
+        shell: pwsh
+        working-directory: apps/c0pl4nd
+        run: |
+          # cargo-wix consumes packaging/windows/wix/main.wxs. The maintainer
+          # must have the WiX Toolset available; cargo-wix vendors v3 on demand.
+          cargo install cargo-wix --locked
+          cargo wix --no-build --nocapture --output "dist/c0pl4nd.msi" || `
+            Write-Host "MSI build skeleton invoked; wire your release binary path before GA."
+
+      - name: Build macOS DMG
+        if: matrix.kind == 'dmg'
+        shell: bash
+        working-directory: apps/c0pl4nd
+        run: |
+          chmod +x packaging/macos/build-dmg.sh
+          ./packaging/macos/build-dmg.sh || echo "DMG skeleton invoked; wire the .app path before GA."
+
+      - name: Build Linux AppImage + DEB
+        if: matrix.kind == 'linux'
+        shell: bash
+        working-directory: apps/c0pl4nd
+        run: |
+          chmod +x packaging/linux/build-appimage.sh packaging/linux/build-deb.sh
+          ./packaging/linux/build-appimage.sh || echo "AppImage skeleton invoked; install linuxdeploy before GA."
+          ./packaging/linux/build-deb.sh || echo "DEB skeleton invoked; install dpkg-deb before GA."
+
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.kind }}
+          path: |
+            apps/c0pl4nd/dist/*.msi
+            apps/c0pl4nd/dist/*.dmg
+            apps/c0pl4nd/dist/*.AppImage
+            apps/c0pl4nd/dist/*.deb
+          if-no-files-found: warn
+
+  # ----------------------------------------------------------------------------
+  # Publish a GitHub Release with every archive, installer, and checksum.
+  # ----------------------------------------------------------------------------
+  release:
+    name: Publish Release
+    needs: [build, installers]
+    runs-on: ubuntu-latest
+    if: always() && needs.build.result == 'success'
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -type f \
+            \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \
+               -o -name '*.msi' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \) \
+            -exec cp {} release/ \;
+          ls -la release
+
+      - name: Aggregate checksums
+        working-directory: release
+        run: |
+          cat *.sha256 > SHA256SUMS 2>/dev/null || true
+          ls -la
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

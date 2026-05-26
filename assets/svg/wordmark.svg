@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="180" viewBox="0 0 720 180" role="img" aria-label="C0PL4ND wordmark">
+  <title>C0PL4ND</title>
+  <desc>Terminal-mono wordmark in signal teal with neon pink chromatic-aberration offset over void black with scanlines and a blinking cursor block.</desc>
+  <defs>
+    <pattern id="wm-scan" width="4" height="4" patternUnits="userSpaceOnUse">
+      <rect width="4" height="4" fill="#08060d"/>
+      <rect width="4" height="1" y="0" fill="#f0eef5" opacity="0.04"/>
+    </pattern>
+  </defs>
+
+  <!-- void black backdrop -->
+  <rect width="720" height="180" fill="#08060d"/>
+  <!-- faint scanline texture -->
+  <rect width="720" height="180" fill="url(#wm-scan)"/>
+
+  <!-- thin frame ticks -->
+  <g stroke="#a020ff" stroke-width="2" opacity="0.5">
+    <line x1="16" y1="16" x2="40" y2="16"/>
+    <line x1="16" y1="16" x2="16" y2="40"/>
+    <line x1="704" y1="164" x2="680" y2="164"/>
+    <line x1="704" y1="164" x2="704" y2="140"/>
+  </g>
+
+  <!-- wordmark with chromatic-aberration shadow -->
+  <g font-family="'Courier New', 'DejaVu Sans Mono', monospace" font-size="96" font-weight="700" letter-spacing="6">
+    <!-- neon pink offset (chromatic aberration) -->
+    <text x="44" y="118" fill="#e020ff" opacity="0.85">C0PL4ND</text>
+    <!-- signal teal primary -->
+    <text x="40" y="116" fill="#00e5ff">C0PL4ND</text>
+  </g>
+
+  <!-- blinking cursor block after the word -->
+  <rect x="592" y="48" width="40" height="72" fill="#00ffb3">
+    <animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.5;0.5;1" dur="1.1s" repeatCount="indefinite"/>
+  </rect>
+</svg>

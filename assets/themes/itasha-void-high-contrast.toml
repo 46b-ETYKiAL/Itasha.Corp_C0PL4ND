@@ -1,0 +1,35 @@
+# Itasha Void High Contrast — accessibility variant of the flagship.
+# Same void-black hull and signal-teal cursor, but every ANSI color is
+# brightened toward its bright-variant so each is independently legible
+# against the void background and distinguishable from its neighbors.
+# WCAG contrast (foreground on background): 17.51:1 (AAA, far exceeds 7:1).
+name = "Itasha Void High Contrast"
+author = "Itasha.Corp"
+
+# base UI colors
+background = "#08060d"
+foreground = "#f0eef5"
+cursor = "#00e5ff"
+cursor_text = "#08060d"
+selection_background = "#552380"
+selection_foreground = "#f0eef5"
+
+[normal]   # ANSI 0-7 — brightened so each clears a high-contrast floor on void
+black = "#4a4858"
+red = "#ff4d7d"
+green = "#3dffc4"
+yellow = "#ffce5c"
+blue = "#4d94ff"
+magenta = "#ec5cff"
+cyan = "#33ecff"
+white = "#dcd8e6"
+
+[bright]   # ANSI 8-15 — maximally saturated/light, all clearly separable
+black = "#7a7888"
+red = "#ff80a6"
+green = "#8affe0"
+yellow = "#ffe08a"
+blue = "#80b3ff"
+magenta = "#f59aff"
+cyan = "#99f5ff"
+white = "#ffffff"

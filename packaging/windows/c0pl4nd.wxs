@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Standalone WiX MSI definition for C0PL4ND (alternative to wix/main.wxs).
+
+  This variant is for maintainers who drive WiX directly rather than via
+  cargo-wix. Build with the WiX Toolset v3 candle/light pipeline:
+
+    candle.exe packaging\windows\c0pl4nd.wxs -o c0pl4nd.wixobj
+    light.exe  c0pl4nd.wixobj -ext WixUIExtension -o c0pl4nd.msi
+
+  Replace the UpgradeCode GUID once and keep it stable across all releases.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="C0PL4ND"
+    UpgradeCode="11111111-1111-1111-1111-111111111111"
+    Manufacturer="Itasha.Corp"
+    Language="1033"
+    Version="0.1.0">
+
+    <Package
+      InstallerVersion="450"
+      Compressed="yes"
+      InstallScope="perMachine"
+      Description="C0PL4ND terminal emulator"
+      Manufacturer="Itasha.Corp" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of C0PL4ND is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="C0PL4ND" />
+      </Directory>
+    </Directory>
+
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <Component Id="MainExe" Guid="*">
+        <File
+          Id="c0pl4ndExe"
+          Name="c0pl4nd.exe"
+          Source="target\release\c0pl4nd.exe"
+          KeyPath="yes" />
+        <Environment
+          Id="PathEnv"
+          Name="PATH"
+          Value="[INSTALLFOLDER]"
+          Permanent="no"
+          Part="last"
+          Action="set"
+          System="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="C0PL4ND" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+    </Feature>
+
+    <Property Id="ARPHELPLINK" Value="https://github.com/itasha-corp/c0pl4nd" />
+    <UIRef Id="WixUI_InstallDir" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+  </Product>
+</Wix>
