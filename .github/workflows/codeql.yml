@@ -1,0 +1,70 @@
+name: CodeQL
+
+# Free GitHub Advanced Security code scanning for public repos.
+# CodeQL Rust analysis went GA in Oct 2025 (CodeQL 2.23.3); `build-mode: none`
+# means no separate cargo build step is needed. Actions workflows are also
+# scanned. Prefer GitHub's "default setup" UI toggle if you want zero YAML —
+# this advanced-setup workflow is the alternative when you want explicit
+# control (custom queries, schedule, SHA-pinned action).
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Weekly full scan catches advisories that land between commits.
+    - cron: "27 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # Required by CodeQL to upload SARIF results to the Security tab.
+      security-events: write
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: none
+          - language: actions
+            build-mode: none
+    steps:
+      - name: Harden the runner (egress audit)
+        # step-security/harden-runner@v2.19.4
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        # github/codeql-action/init@v3.30.3
+        uses: github/codeql-action/init@192325c86100d080feab897ff886c34abd4c83a3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # security-extended adds the higher-recall query suite.
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        # github/codeql-action/analyze@v3.30.3
+        uses: github/codeql-action/analyze@192325c86100d080feab897ff886c34abd4c83a3
+        with:
+          category: "/language:${{ matrix.language }}"

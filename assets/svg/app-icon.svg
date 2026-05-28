@@ -1,55 +1,79 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="C0PL4ND app icon">
-  <title>C0PL4ND app icon</title>
-  <desc>App icon: terminal prompt chevron and cursor block in signal teal on void black, operator violet ring, CRT vignette curvature, corner registration ticks, scanlines.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="C0PL4ND app icon — app icon">
+  <title>C0PL4ND app icon — Concept A: summoning ring (master tier)</title>
+  <desc>CONCEPT, master tier only. Void-black CRT plate with the unchanged C0PL4ND core mark (phosphor-cyan prompt chevron + teal cursor block) centered as the operative figure of an ORIGINAL summoning seal: a double operator-violet ring with 12 radial seal-ticks, two cybersigilism fronds, a faint magic-square-derived sigil polyline behind the mark (original, traced from no grimoire), and a three-prong fork (daemon trident = fork() syscall) at the bottom of the ring with an Akira-red center-prong glint. 16px-read: ALL seal chrome vanishes; only the violet keyline + cyan chevron silhouette remain — the proven legible mark. Seal detail is strictly additive luxury; never load-bearing for recognition.</desc>
   <defs>
-    <pattern id="ai-scan" width="8" height="8" patternUnits="userSpaceOnUse">
-      <rect width="8" height="8" fill="#08060d"/>
-      <rect width="8" height="1.6" fill="#f0eef5" opacity="0.05"/>
+    <pattern id="ca-scan" width="16" height="16" patternUnits="userSpaceOnUse">
+      <rect width="16" height="16" fill="#08060d"/>
+      <rect width="16" height="3" fill="#f0eef5" opacity="0.045"/>
     </pattern>
-    <radialGradient id="ai-crt" cx="50%" cy="46%" r="62%">
+    <radialGradient id="ca-vig" cx="50%" cy="46%" r="64%">
       <stop offset="0%" stop-color="#08060d" stop-opacity="0"/>
-      <stop offset="74%" stop-color="#08060d" stop-opacity="0"/>
-      <stop offset="100%" stop-color="#08060d" stop-opacity="0.85"/>
+      <stop offset="78%" stop-color="#08060d" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#08060d" stop-opacity="0.6"/>
     </radialGradient>
-    <radialGradient id="ai-glow" cx="50%" cy="50%" r="55%">
-      <stop offset="0%" stop-color="#00e5ff" stop-opacity="0.10"/>
+    <radialGradient id="ca-glow" cx="50%" cy="50%" r="56%">
+      <stop offset="0%" stop-color="#00e5ff" stop-opacity="0.12"/>
       <stop offset="100%" stop-color="#00e5ff" stop-opacity="0"/>
     </radialGradient>
-    <clipPath id="ai-clip">
-      <rect x="40" y="40" width="432" height="432" rx="88"/>
-    </clipPath>
+    <filter id="ca-phos" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="ca-clip"><rect x="80" y="80" width="864" height="864" rx="176"/></clipPath>
   </defs>
 
-  <!-- backdrop -->
-  <rect width="512" height="512" fill="#08060d"/>
+  <rect x="80" y="80" width="864" height="864" rx="176" fill="#08060d"/>
+  <g clip-path="url(#ca-clip)">
+    <rect x="80" y="80" width="864" height="864" fill="url(#ca-scan)"/>
+    <rect x="80" y="80" width="864" height="864" fill="url(#ca-glow)"/>
 
-  <!-- icon plate -->
-  <rect x="40" y="40" width="432" height="432" rx="88" fill="#08060d"/>
-  <g clip-path="url(#ai-clip)">
-    <rect x="40" y="40" width="432" height="432" fill="url(#ai-scan)"/>
-    <rect x="40" y="40" width="432" height="432" fill="url(#ai-glow)"/>
-    <!-- CRT curvature vignette -->
-    <rect x="40" y="40" width="432" height="432" fill="url(#ai-crt)"/>
+    <!-- ORIGINAL magic-square (Method A) tracery behind the mark; faint violet, derived from brand string -->
+    <g stroke="#a020ff" stroke-width="4" fill="none" opacity="0.16" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="392" cy="392" r="9" fill="#a020ff" stroke="none"/>
+      <path d="M392 392 L632 444 L452 560 L660 612 L420 668 L600 700"/>
+      <line x1="600" y1="700" x2="652" y2="724"/>
+    </g>
+
+    <rect x="80" y="80" width="864" height="864" fill="url(#ca-vig)"/>
   </g>
 
-  <!-- operator violet ring -->
-  <rect x="40" y="40" width="432" height="432" rx="88" fill="none" stroke="#a020ff" stroke-width="6"/>
+  <!-- plate keyline (the small-tier survivor) -->
+  <rect x="80" y="80" width="864" height="864" rx="176" fill="none" stroke="#a020ff" stroke-width="10"/>
 
-  <!-- corner registration ticks (infra signage) -->
-  <g stroke="#00e5ff" stroke-width="4" opacity="0.7">
-    <line x1="84" y1="84" x2="124" y2="84"/>
-    <line x1="84" y1="84" x2="84" y2="124"/>
-    <line x1="428" y1="84" x2="388" y2="84"/>
-    <line x1="428" y1="84" x2="428" y2="124"/>
-    <line x1="84" y1="428" x2="124" y2="428"/>
-    <line x1="84" y1="428" x2="84" y2="388"/>
-    <line x1="428" y1="428" x2="388" y2="428"/>
-    <line x1="428" y1="428" x2="428" y2="388"/>
+  <!-- ORIGINAL double summoning ring + 12 radial seal-ticks (Method B rose, abstract — no real script) -->
+  <g stroke="#a020ff" fill="none">
+    <circle cx="512" cy="512" r="372" stroke-width="6" opacity="0.85"/>
+    <circle cx="512" cy="512" r="344" stroke-width="3" opacity="0.55"/>
+    <g stroke-width="7" opacity="0.8">
+      <line x1="512" y1="140" x2="512" y2="168"/>
+      <line x1="698" y1="190.2" x2="684" y2="214.4"/>
+      <line x1="834" y1="326" x2="809.8" y2="340"/>
+      <line x1="884" y1="512" x2="856" y2="512"/>
+      <line x1="834" y1="698" x2="809.8" y2="684"/>
+      <line x1="698" y1="833.8" x2="684" y2="809.6"/>
+      <line x1="326" y1="833.8" x2="340" y2="809.6"/>
+      <line x1="190" y1="698" x2="214.2" y2="684"/>
+      <line x1="140" y1="512" x2="168" y2="512"/>
+      <line x1="190" y1="326" x2="214.2" y2="340"/>
+      <line x1="326" y1="190.2" x2="340" y2="214.4"/>
+    </g>
+    <!-- two cybersigilism fronds (sharp, thin, radial — taste-limited to 2) -->
+    <g stroke-width="3" opacity="0.55" stroke-linecap="round">
+      <path d="M698 190 L724 150 L712 188 M724 150 L754 162"/>
+      <path d="M326 190 L300 150 L312 188 M300 150 L270 162"/>
+    </g>
   </g>
 
-  <!-- prompt chevron ">" -->
-  <path d="M168 184 L246 256 L168 328" fill="none" stroke="#00e5ff" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- daemon trident = fork(): three prongs at bottom of ring; center prong Akira-red glint -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M512 884 L512 940" stroke="#ff0040" stroke-width="9"/>
+    <path d="M470 902 L470 936 M554 902 L554 936" stroke="#a020ff" stroke-width="9" opacity="0.85"/>
+    <path d="M470 902 L512 884 L554 902" stroke="#a020ff" stroke-width="9" opacity="0.85"/>
+    <circle cx="512" cy="884" r="7" fill="#ff0040" stroke="none"/>
+  </g>
 
-  <!-- cursor block -->
-  <rect x="276" y="296" width="92" height="34" rx="4" fill="#00ffb3"/>
+  <!-- UNCHANGED core mark: phosphor-cyan chevron + teal cursor block -->
+  <g filter="url(#ca-phos)">
+    <path d="M312 336 L520 512 L312 688" fill="none" stroke="#00e5ff" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="576" y="566" width="168" height="64" rx="8" fill="#00ffb3"/>
+  </g>
 </svg>

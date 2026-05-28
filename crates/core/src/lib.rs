@@ -11,6 +11,8 @@ pub mod fetch;
 pub mod fuzzy;
 pub mod grid;
 pub mod image;
+pub mod layout;
+pub mod layout_persist;
 pub mod plugin;
 pub mod pty;
 pub mod search;

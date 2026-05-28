@@ -1,0 +1,33 @@
+# Dependabot — free for public repos. Place at .github/dependabot.yml
+# (NOT .github/workflows/). Covers: cargo deps, GitHub Actions pins, and the
+# release-toolchain submodules if any. Security updates (auto-PRs for advisory
+# fixes) are enabled separately in repo Settings -> Code security (see enablement.md).
+version: 2
+updates:
+  # Rust crate dependencies.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps-dev"
+    # Group patch/minor bumps to reduce PR noise; majors stay individual.
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+    labels: [dependencies, rust]
+
+  # Keep pinned GitHub Actions SHAs current. Dependabot updates the SHA AND the
+  # version comment, so the pin-by-SHA discipline is preserved automatically.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "ci"
+    labels: [dependencies, github-actions]

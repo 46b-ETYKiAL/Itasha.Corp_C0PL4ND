@@ -1,0 +1,46 @@
+name: Dependency Review
+
+# Blocks PRs that introduce vulnerable or disallowed-license dependencies
+# BEFORE they merge. Reads the Cargo.lock diff against the base branch using
+# the GitHub dependency graph. Free for public repos. Complements cargo-deny
+# (which runs against the full tree on every push); this is the per-PR delta gate.
+
+on:
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Dependency review
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Allows the action to post a summary comment on the PR.
+      pull-requests: write
+    steps:
+      - name: Harden the runner (egress audit)
+        # step-security/harden-runner@v2.19.4
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Dependency Review
+        # actions/dependency-review-action@v5.0.0
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294
+        with:
+          # Fail the PR on any moderate-or-higher advisory.
+          fail-on-severity: moderate
+          comment-summary-in-pr: always
+          # Keep the license allow-list in lockstep with deny.toml.
+          allow-licenses: >-
+            MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause,
+            BSD-3-Clause, ISC, Zlib, Unicode-3.0, MPL-2.0, CC0-1.0, BSL-1.0

@@ -65,7 +65,9 @@ fn main() -> Result<()> {
     crate::run_gui(&config)
 }
 
+mod drag;
 mod image_render;
+mod pane_render;
 mod screenshot;
 mod update;
 mod window;

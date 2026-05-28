@@ -1,39 +1,43 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 160" width="1280" height="160">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 170" width="1280" height="170" role="img" aria-label="ITASHA.CORP // C0PL4ND — present day, present time">
   <defs>
-    <style>
-      @keyframes blink-cursor { 0%,50% { opacity: 1; } 51%,100% { opacity: 0; } }
-      text, tspan { font-family: 'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',Consolas,monospace; }
-    </style>
-    <pattern id="scanlines-f" patternUnits="userSpaceOnUse" width="1280" height="4">
-      <rect width="1280" height="2" fill="white" opacity="0.15"/>
+    <pattern id="scanf" patternUnits="userSpaceOnUse" width="1280" height="4">
+      <rect width="1280" height="2" fill="transparent"/><rect y="2" width="1280" height="2" fill="rgba(0,0,0,0.16)"/>
     </pattern>
-    <radialGradient id="vignette-f" cx="50%" cy="50%" r="70%">
-      <stop offset="0%" stop-color="transparent"/>
-      <stop offset="100%" stop-color="rgba(0,0,0,0.4)"/>
+    <radialGradient id="vigf" cx="50%" cy="50%" r="80%">
+      <stop offset="0%" stop-color="transparent"/><stop offset="100%" stop-color="rgba(0,0,0,0.32)"/>
     </radialGradient>
-    <filter id="phosphor-f"><feGaussianBlur stdDeviation="0.8"/></filter>
+    <filter id="phosf"><feGaussianBlur in="SourceGraphic" stdDeviation="0.6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <clipPath id="clipf"><rect x="20" y="16" width="1240" height="128" rx="4"/></clipPath>
   </defs>
-
-  <!-- Bezel + screen -->
-  <rect x="0" y="0" width="1280" height="160" rx="12" ry="12" fill="#111118" stroke="#2a2833" stroke-width="1.5"/>
-  <rect x="8" y="8" width="1264" height="144" rx="8" ry="8" fill="#18181f"/>
-  <rect x="16" y="16" width="1248" height="120" rx="4" ry="4" fill="#08060d"/>
-  <rect x="16" y="16" width="1248" height="120" rx="4" ry="4" fill="url(#scanlines-f)"/>
-  <rect x="16" y="16" width="1248" height="120" rx="4" ry="4" fill="url(#vignette-f)"/>
-
-  <!-- Tagline + cursor -->
-  <text x="640" y="56" text-anchor="middle" fill="#00e5ff" font-size="14" filter="url(#phosphor-f)" opacity="0.95">the operator's shell into the wired.</text>
-  <rect x="836" y="45" width="9" height="14" fill="#00e5ff" style="animation: blink-cursor 1.1s step-end infinite;"/>
-
-  <!-- Status line -->
-  <text x="640" y="82" text-anchor="middle" fill="#b0aec0" font-size="12" filter="url(#phosphor-f)">session: shell attached &#183; gpu online &#183; no telemetry</text>
-
-  <!-- Node type -->
-  <text x="640" y="106" text-anchor="middle" fill="#a09eb0" font-size="10" letter-spacing="4">OPERATOR_TERMINAL</text>
-
-  <!-- Bezel labels + power LED -->
-  <text x="30" y="153" font-size="8" fill="#4a4859">ITASHA.CORP</text>
-  <text x="1220" y="153" text-anchor="end" font-size="8" fill="#4a4859">CRT-C0PL4ND</text>
-  <circle cx="1240" cy="148" r="3.5" fill="#01fe36" opacity="0.8"/>
-  <circle cx="1240" cy="148" r="2" fill="#01fe36" opacity="1.0"/>
+  <style>
+    text { font-family: 'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',Consolas,monospace; }
+    @keyframes sweepf { 0% { transform: translateY(0); } 100% { transform: translateY(128px); } }
+    @keyframes flickerf { 0%,95%,100% { opacity: 1; } 96% { opacity: 0.96; } 98% { opacity: 0.99; } }
+    @keyframes edgeGlowf { 0% { stroke-dashoffset: 2700; } 100% { stroke-dashoffset: 0; } }
+    @keyframes heartbeatf { 0%,100% { r: 3; opacity: 0.5; } 18% { r: 4; opacity: 0.95; } 36% { r: 3; opacity: 0.5; } }
+    @keyframes pulsef { 0% { stroke-dashoffset: 16; opacity: 0.8; } 100% { stroke-dashoffset: 0; opacity: 0.25; } }
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+  </style>
+  <rect x="0" y="0" width="1280" height="170" rx="10" fill="#111118"/>
+  <rect x="2" y="2" width="1276" height="166" rx="9" fill="#18181f" stroke="#2a2833" stroke-width="1"/>
+  <rect x="20" y="16" width="1240" height="128" rx="4" fill="#08060d"/>
+  <g clip-path="url(#clipf)">
+    <rect x="20" y="16" width="1240" height="3" fill="#00fffe" opacity="0.05" style="animation: sweepf 8s linear infinite;"/>
+  </g>
+  <rect x="20" y="16" width="1240" height="128" rx="4" fill="url(#scanf)"/>
+  <rect x="20" y="16" width="1240" height="128" rx="4" fill="url(#vigf)"/>
+  <rect x="20" y="16" width="1240" height="128" rx="4" fill="none" stroke="#00fffe" stroke-width="1" opacity="0.06" stroke-dasharray="18,2682" style="animation: edgeGlowf 10s linear infinite;"/>
+  <g stroke="#a020ff" stroke-width="1.2" fill="none" opacity="0.5">
+    <path d="M44 40 h20 M44 40 v20"/><path d="M1236 40 h-20 M1236 40 v20"/>
+    <path d="M44 130 h20 M44 130 v-20"/><path d="M1236 130 h-20 M1236 130 v-20"/>
+  </g>
+  <g style="animation: flickerf 7s infinite;" filter="url(#phosf)" text-anchor="middle">
+    <text x="640" y="62" font-size="13" fill="#00fffe" letter-spacing="2">present day · present time</text>
+    <line x1="372" y1="76" x2="908" y2="76" stroke="#a020ff" stroke-width="1.2" opacity="0.45" stroke-dasharray="6,3" style="animation: pulsef 2.2s linear infinite;"/>
+    <text x="640" y="98" font-size="11" fill="#5a5869" letter-spacing="2">GPU-RENDERED · SPLIT-TREE · NESTED TABS · SIXEL/KITTY · NO TELEMETRY</text>
+    <text x="640" y="126" font-size="9" fill="#2a2833" letter-spacing="4">I T A S H A . C O R P   //   T E R M I N A L</text>
+  </g>
+  <text x="40" y="157" font-size="8" fill="#2a2833" letter-spacing="1">ITASHA.CORP</text>
+  <text x="1146" y="157" font-size="8" fill="#2a2833">CRT-IC // C0PL4ND</text>
+  <circle cx="1244" cy="154" r="3" fill="#01fe36" opacity="0.6" style="animation: heartbeatf 2.6s ease-in-out infinite;"/>
 </svg>

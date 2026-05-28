@@ -6,14 +6,25 @@
 //! `c0pl4nd-core` and forwards keyboard input to the PTY. Redraws on a light
 //! poll so shell output appears promptly while an idle screen stays cheap.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use c0pl4nd_core::layout::{
+    Axis, Direction, Layout, LeafId, Preset, Rect as LRect, SplitOutcome, TabGroup,
+};
+use c0pl4nd_core::layout_persist::{self, LayoutSnapshot, LeafView};
 use c0pl4nd_core::{theme::parse_hex, Config, Session, Theme};
 use glyphon::{
     Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+};
+
+use crate::drag::{classify_zone, DragState, DropZone};
+use crate::pane_render::{
+    cell_tabbar_text, chrome_quads, leaf_scissor, leaf_text_bounds, leaf_text_origin,
+    ChromeRenderer, ColorRect, BORDER_PX,
 };
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -23,6 +34,13 @@ use winit::window::{ResizeDirection, Window, WindowId};
 
 const LINE_HEIGHT: f32 = 20.0;
 const CELL_W: f32 = 9.0;
+/// Height in physical pixels of a cell's nested-tab strip (one line). The strip
+/// is drawn only when a cell holds >=2 tabs AND the cell is tall enough to spare
+/// the line (auto-hide on short cells; reappears on hover via [`App::hover_leaf`]).
+const CELL_TABBAR_H: f32 = LINE_HEIGHT;
+/// A cell shorter than this (after borders) hides its tab strip to keep the
+/// terminal grid usable; the strip reappears when the cursor hovers the cell.
+const CELL_STRIP_MIN_H: i32 = (CELL_TABBAR_H as i32) + 3 * LINE_HEIGHT as i32;
 /// Height of the custom (frameless) title bar, in physical pixels.
 const TITLEBAR_H: f32 = 30.0;
 /// Each title-bar button occupies this many monospace cells. The button glyphs
@@ -69,12 +87,27 @@ struct Gpu {
     atlas: TextAtlas,
     viewport: Viewport,
     text_renderer: TextRenderer,
-    grid_buffer: Buffer,
+    metrics: Metrics,
+    /// One grid text buffer per visible leaf, keyed by `LeafId`. Recreated /
+    /// resized as the layout changes; a single-pane window keeps one entry.
+    leaf_buffers: HashMap<LeafId, Buffer>,
+    /// One nested-tab-strip text buffer per visible cell that currently shows a
+    /// strip (>=2 tabs, or a short cell under the cursor). Keyed by `LeafId`.
+    tabbar_buffers: HashMap<LeafId, Buffer>,
     chrome_buffer: Buffer,
     palette_buffer: Buffer,
     splash_buffer: Buffer,
     image_renderer: crate::image_render::ImageRenderer,
+    chrome_renderer: ChromeRenderer,
     gpu_name: String,
+}
+
+impl Gpu {
+    /// Drop grid + tab-strip buffers for leaves no longer present in `live`.
+    fn retain_leaf_buffers(&mut self, live: &[LeafId]) {
+        self.leaf_buffers.retain(|id, _| live.contains(id));
+        self.tabbar_buffers.retain(|id, _| live.contains(id));
+    }
 }
 
 struct App {
@@ -86,6 +119,9 @@ struct App {
     gpu: Option<Gpu>,
     next_poll: Instant,
     cursor: (f64, f64),
+    /// Leaf currently under the cursor (drives the short-cell tab-strip hover
+    /// reveal in T4.2). `None` when the cursor is over chrome / no cell.
+    hover_leaf: Option<LeafId>,
     modifiers: ModifiersState,
     search_mode: bool,
     search_query: String,
@@ -97,37 +133,141 @@ struct App {
     /// neofetch-style startup splash (logo + system info), drawn as an overlay
     /// over the first tab until the first keypress. `None` once dismissed.
     splash: Option<String>,
+    /// Latest pending surface size whose per-leaf PTY resize has not yet been
+    /// applied. Set on every `Resized`; drained at ~30 Hz in `about_to_wait`
+    /// so a rapid interactive resize issues at most ~30 PTY resizes/sec while
+    /// the final size is always applied.
+    pending_resize: Option<(u32, u32)>,
+    /// Timestamp of the last applied per-leaf PTY resize (debounce clock).
+    last_pty_resize: Instant,
+    /// Mouse pane-drag state machine (Phase 5). `Idle` unless a `Ctrl+Shift`
+    /// drag is in progress.
+    drag: DragState,
+    /// `true` while the OS reports a reduced-motion preference; disables the
+    /// drag ghost / relayout glide animations (accessibility axis).
+    reduced_motion: bool,
+    /// Active modal workspace prompt (Phase 6): saving asks for a name,
+    /// restoring lists saved workspaces. `None` when no prompt is open.
+    workspace_prompt: Option<WorkspacePrompt>,
 }
 
-/// Actions available from the command palette.
+/// A modal overlay for the Phase-6 workspace save / restore flow. Reuses the
+/// command-palette text-input idiom (typed query + arrow selection) so the UX
+/// is consistent and keyboard-complete (accessibility axis: no mouse path
+/// required).
+enum WorkspacePrompt {
+    /// "Save Layout As…": the user types a workspace name; Enter writes it.
+    Save { name: String },
+    /// "Restore Layout": pick one of the discovered saved workspaces.
+    Restore { names: Vec<String>, idx: usize },
+}
+
+/// Actions available from the command palette. The `Layout: …` entries apply a
+/// quick-layout preset; "Save Layout As…" / "Restore Layout" open the workspace
+/// prompts (Phase 6).
 const PALETTE_ACTIONS: &[&str] = &[
     "New Tab",
     "Close Tab",
     "Next Tab",
     "Previous Tab",
+    "New Cell Tab",
+    "Next Cell Tab",
+    "Previous Cell Tab",
     "Split Right",
     "Split Down",
     "Focus Next Pane",
+    "Zoom Pane",
+    "Equalize Panes",
+    "Auto Arrange",
+    "Layout: 1",
+    "Layout: 1x2",
+    "Layout: 2x1",
+    "Layout: 1+2",
+    "Layout: 2x2",
+    "Layout: 1+3",
+    "Layout: 2x3",
+    "Save Layout As\u{2026}",
+    "Restore Layout",
     "Search",
     "Scroll To Bottom",
     "Quit",
 ];
 
-/// A tab holds one or more split panes (each its own shell session).
+/// A grid cell (one leaf): a core [`TabGroup`] tracking the tab structure plus
+/// the live `Session`s, one per tab, parallel to `group.tabs`. The visible
+/// session is `sessions[group.active]`. A 1-tab cell renders no tab strip.
+struct Cell {
+    group: TabGroup,
+    sessions: Vec<Session>,
+}
+
+impl Cell {
+    /// A single-tab cell for `id` holding `session`.
+    fn single(id: LeafId, session: Session) -> Self {
+        Cell {
+            group: TabGroup::new(id, 0),
+            sessions: vec![session],
+        }
+    }
+
+    /// The visible tab's session.
+    fn active(&self) -> Option<&Session> {
+        self.sessions.get(self.group.active)
+    }
+
+    /// The visible tab's session (mutable).
+    fn active_mut(&mut self) -> Option<&mut Session> {
+        self.sessions.get_mut(self.group.active)
+    }
+
+    /// Append `session` as a new tab and make it active.
+    fn add(&mut self, session: Session) {
+        self.group.add_tab(self.sessions.len() as u64);
+        self.sessions.push(session);
+    }
+
+    /// Close the visible tab. Returns true when the cell is now empty (the
+    /// caller must collapse the leaf out of the tree).
+    fn close_active(&mut self) -> bool {
+        let idx = self.group.active.min(self.sessions.len().saturating_sub(1));
+        if idx < self.sessions.len() {
+            self.sessions.remove(idx);
+        }
+        let (_slot, empty) = self.group.close_active();
+        empty
+    }
+
+    /// Number of tabs in this cell.
+    fn tab_count(&self) -> usize {
+        self.sessions.len()
+    }
+}
+
+/// A window tab holds a split-tree [`Layout`] and one [`Cell`] per leaf. Each
+/// cell is a `TabGroup` that may hold multiple nested terminal tabs.
 struct Tab {
-    panes: Vec<Session>,
-    focus: usize,
-    /// true = panes stacked vertically; false = side by side.
-    stacked: bool,
+    layout: Layout,
+    cells: HashMap<LeafId, Cell>,
 }
 
 impl Tab {
+    /// A fresh tab: a single leaf (the root) holding a single-tab `session`.
     fn single(session: Session) -> Self {
-        Tab {
-            panes: vec![session],
-            focus: 0,
-            stacked: false,
-        }
+        let layout = Layout::new();
+        let mut cells = HashMap::new();
+        cells.insert(layout.focused, Cell::single(layout.focused, session));
+        Tab { layout, cells }
+    }
+
+    /// The focused leaf's visible session.
+    fn focused_session(&self) -> Option<&Session> {
+        self.cells.get(&self.layout.focused).and_then(Cell::active)
+    }
+
+    /// The focused leaf's visible session (mutable).
+    fn focused_session_mut(&mut self) -> Option<&mut Session> {
+        let f = self.layout.focused;
+        self.cells.get_mut(&f).and_then(Cell::active_mut)
     }
 }
 
@@ -142,6 +282,7 @@ impl App {
             gpu: None,
             next_poll: Instant::now(),
             cursor: (0.0, 0.0),
+            hover_leaf: None,
             modifiers: ModifiersState::empty(),
             search_mode: false,
             search_query: String::new(),
@@ -151,6 +292,15 @@ impl App {
             palette_query: String::new(),
             palette_idx: 0,
             splash: None,
+            pending_resize: None,
+            last_pty_resize: Instant::now(),
+            drag: DragState::Idle,
+            // No portable winit query for reduced-motion; honour the env var
+            // convention used by CI / accessibility tooling. Defaults to off.
+            reduced_motion: std::env::var("C0PL4ND_REDUCED_MOTION")
+                .map(|v| v != "0" && !v.is_empty())
+                .unwrap_or(false),
+            workspace_prompt: None,
         }
     }
 
@@ -203,9 +353,24 @@ impl App {
             "Close Tab" => self.close_active_tab(event_loop),
             "Next Tab" => self.next_tab(),
             "Previous Tab" => self.prev_tab(),
-            "Split Right" => self.split_active(false),
-            "Split Down" => self.split_active(true),
+            "New Cell Tab" => self.spawn_cell_tab(),
+            "Next Cell Tab" => self.next_cell_tab(),
+            "Previous Cell Tab" => self.prev_cell_tab(),
+            "Split Right" => self.split_active(Axis::Horizontal),
+            "Split Down" => self.split_active(Axis::Vertical),
             "Focus Next Pane" => self.focus_next_pane(),
+            "Zoom Pane" => self.toggle_zoom(),
+            "Equalize Panes" => self.equalize(),
+            "Auto Arrange" => self.auto_balance(),
+            "Layout: 1" => self.apply_preset(Preset::Single),
+            "Layout: 1x2" => self.apply_preset(Preset::TwoColumns),
+            "Layout: 2x1" => self.apply_preset(Preset::TwoRows),
+            "Layout: 1+2" => self.apply_preset(Preset::MainLeftTwoStacked),
+            "Layout: 2x2" => self.apply_preset(Preset::Grid2x2),
+            "Layout: 1+3" => self.apply_preset(Preset::MainLeftThreeStacked),
+            "Layout: 2x3" => self.apply_preset(Preset::Grid2x3),
+            "Save Layout As\u{2026}" => self.open_save_prompt(),
+            "Restore Layout" => self.open_restore_prompt(),
             "Search" => self.enter_search(),
             "Scroll To Bottom" => {
                 if let Some(s) = self.active_session() {
@@ -291,61 +456,764 @@ impl App {
     }
 
     fn active_session(&self) -> Option<&Session> {
-        self.tabs
-            .get(self.active)
-            .and_then(|t| t.panes.get(t.focus))
+        self.tabs.get(self.active).and_then(|t| t.focused_session())
     }
 
     fn active_session_mut(&mut self) -> Option<&mut Session> {
         self.tabs
             .get_mut(self.active)
-            .and_then(|t| t.panes.get_mut(t.focus))
+            .and_then(|t| t.focused_session_mut())
     }
 
-    /// Split the active tab, adding a pane. `stacked` chooses the orientation.
-    fn split_active(&mut self, stacked: bool) {
-        let (cols, rows) = self.grid_dims();
-        if let Ok(s) = Session::spawn_shell(self.config.shell.as_deref(), rows, cols) {
-            if let Some(tab) = self.tabs.get_mut(self.active) {
-                tab.stacked = stacked;
-                tab.panes.push(s);
-                tab.focus = tab.panes.len() - 1;
-                self.relayout_active();
+    /// The window's content area below the title bar, in physical pixels.
+    fn content_rect(&self) -> LRect {
+        match &self.gpu {
+            Some(g) => {
+                let w = g.surface_config.width as i32;
+                let h = (g.surface_config.height as i32 - TITLEBAR_H as i32).max(1);
+                LRect::new(0, TITLEBAR_H as i32, w, h)
             }
+            None => LRect::new(
+                0,
+                TITLEBAR_H as i32,
+                (self.config.window.cols as f32 * CELL_W) as i32,
+                (self.config.window.rows as f32 * LINE_HEIGHT) as i32,
+            ),
         }
     }
 
-    fn focus_next_pane(&mut self) {
-        if let Some(tab) = self.tabs.get_mut(self.active) {
-            if !tab.panes.is_empty() {
-                tab.focus = (tab.focus + 1) % tab.panes.len();
+    /// The leaf whose cell contains the physical-pixel point `(x, y)`, or `None`
+    /// when the point is over chrome / outside any cell. A linear scan over the
+    /// cached <=6 leaf rects (cheap by the MAX_PANES guardrail).
+    fn leaf_at(&self, x: f64, y: f64) -> Option<LeafId> {
+        let content = self.content_rect();
+        let tab = self.active_tab()?;
+        let (px, py) = (x as i32, y as i32);
+        tab.layout
+            .cascade(content)
+            .into_iter()
+            .find(|(_, r)| r.contains_point(px, py))
+            .map(|(id, _)| id)
+    }
+
+    /// The cell rect for `leaf` in the active tab's current cascade, if present.
+    fn leaf_rect(&self, leaf: LeafId) -> Option<LRect> {
+        let content = self.content_rect();
+        self.active_tab()?
+            .layout
+            .cascade(content)
+            .into_iter()
+            .find(|(id, _)| *id == leaf)
+            .map(|(_, r)| r)
+    }
+
+    /// The drop zone under the cursor for the pane being dragged, or `None` when
+    /// the cursor is not over a *different* pane than the source. Drives both the
+    /// overlay highlight and the drop resolution.
+    fn drag_target(&self) -> Option<(LeafId, DropZone)> {
+        let source = self.drag.dragging_leaf()?;
+        let (cx, cy) = self.drag.cursor()?;
+        let target = self.leaf_at(cx, cy)?;
+        if target == source {
+            return None;
+        }
+        let rect = self.leaf_rect(target)?;
+        Some((target, classify_zone(rect, cx as i32, cy as i32)))
+    }
+
+    /// Resolve a completed drag of `source` onto the pane/zone under the cursor.
+    /// Edge zones move the source beside the target (a tree split); the center
+    /// merges the source's nested tabs into the target's TabGroup. A drop onto
+    /// the source itself, or onto no pane, is a no-op.
+    fn resolve_drop(&mut self, source: LeafId) {
+        let Some((target, zone)) = self.drag_target() else {
+            return;
+        };
+        let content = self.content_rect();
+        match zone.edge_split() {
+            Some((axis, before)) => {
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.layout.move_leaf(source, target, axis, before);
+                }
+                self.relayout_active(content);
             }
+            None => self.merge_into(source, target),
         }
     }
 
-    /// Resize every pane in the active tab to its share of the grid.
-    fn relayout_active(&mut self) {
-        let (cols, rows) = self.grid_dims();
-        if let Some(tab) = self.tabs.get_mut(self.active) {
-            let n = tab.panes.len().max(1) as u16;
-            let (pc, pr) = if tab.stacked {
-                (cols, (rows / n).max(1))
-            } else {
-                ((cols / n).max(1), rows)
-            };
-            for p in &mut tab.panes {
-                let _ = p.resize(pr, pc);
-            }
-        }
-    }
-
-    /// Collect inline-image draw quads for the focused pane, positioned in the
-    /// current viewport (skips images scrolled out of view).
-    fn collect_image_quads(&self) -> Vec<crate::image_render::ImageQuad> {
+    /// Build the drag overlay quads (in physical-pixel surface coords): a dim
+    /// veil over the dragged source pane, a highlight over the pending drop
+    /// zone's sub-rect, and a small ghost following the cursor. Empty when not
+    /// dragging. The ghost lerp / glide is skipped under reduced-motion (the
+    /// quads are static either way — only animated movement is suppressed).
+    fn drag_overlay_quads(&self, accent: GColor) -> Vec<ColorRect> {
         let mut out = Vec::new();
-        let Some(s) = self.active_session() else {
+        let Some(source) = self.drag.dragging_leaf() else {
             return out;
         };
+        // Dim the source pane so it reads as "lifted".
+        if let Some(src) = self.leaf_rect(source) {
+            out.push(ColorRect::new(
+                src.x,
+                src.y,
+                src.w,
+                src.h,
+                [0.0, 0.0, 0.0, 0.35],
+            ));
+        }
+        let acc = [
+            accent.r() as f32 / 255.0,
+            accent.g() as f32 / 255.0,
+            accent.b() as f32 / 255.0,
+            0.35,
+        ];
+        // Highlight the pending drop zone's sub-rect on the target pane.
+        if let Some((target, zone)) = self.drag_target() {
+            if let Some(tr) = self.leaf_rect(target) {
+                out.push(zone_highlight_rect(tr, zone, acc));
+            }
+        }
+        // A ghost square at the cursor. With motion enabled, a larger, fainter
+        // halo conveys movement; under reduced-motion, only the crisp square is
+        // drawn (no motion-suggesting trail — accessibility axis).
+        if let Some((cx, cy)) = self.drag.cursor() {
+            let (cx, cy) = (cx as i32, cy as i32);
+            if !self.reduced_motion {
+                let halo = 40;
+                out.push(ColorRect::new(
+                    cx - halo / 2,
+                    cy - halo / 2,
+                    halo,
+                    halo,
+                    [acc[0], acc[1], acc[2], 0.18],
+                ));
+            }
+            let g = 26;
+            out.push(ColorRect::new(
+                cx - g / 2,
+                cy - g / 2,
+                g,
+                g,
+                [acc[0], acc[1], acc[2], 0.6],
+            ));
+        }
+        out
+    }
+
+    /// Center-zone drop: append every session/tab of `source`'s cell to
+    /// `target`'s cell (as nested tabs), then remove the now-empty source leaf
+    /// from the tree. Focus follows to the target. Core owns the structure;
+    /// the app owns the sessions, so the merge lives here.
+    fn merge_into(&mut self, source: LeafId, target: LeafId) {
+        let content = self.content_rect();
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        if source == target {
+            return;
+        }
+        // Detach the source cell (its sessions) and fold them into target.
+        let Some(src_cell) = tab.cells.remove(&source) else {
+            return;
+        };
+        if let Some(dst) = tab.cells.get_mut(&target) {
+            for s in src_cell.sessions {
+                dst.add(s);
+            }
+        } else {
+            // Target cell missing (shouldn't happen) — put the source back to
+            // avoid losing live shells.
+            tab.cells.insert(source, src_cell);
+            return;
+        }
+        let _ = tab.layout.remove(source);
+        tab.layout.focused = target;
+        self.relayout_active(content);
+    }
+
+    /// Split the focused leaf along `axis` (Horizontal = side-by-side,
+    /// Vertical = stacked), spawning a fresh shell into the new leaf. Rejected
+    /// silently at `MAX_PANES` (the readability guardrail).
+    fn split_active(&mut self, axis: Axis) {
+        let content = self.content_rect();
+        let target = match self.tabs.get(self.active) {
+            Some(t) => t.layout.focused,
+            None => return,
+        };
+        // Reserve the new leaf via the guarded action layer first so a spawn
+        // failure cannot leave a leaf without a session.
+        let new_leaf = match self.tabs.get_mut(self.active) {
+            Some(t) => match t.layout.try_split(target, axis) {
+                SplitOutcome::Split(id) => id,
+                _ => return, // AtCapacity / NotFound — no-op.
+            },
+            None => return,
+        };
+        match Session::spawn_shell(self.config.shell.as_deref(), 24, 80) {
+            Ok(s) => {
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.cells.insert(new_leaf, Cell::single(new_leaf, s));
+                }
+                self.relayout_active(content);
+            }
+            Err(e) => {
+                // Roll the split back so the tree never references a leaf with
+                // no session.
+                tracing::error!("failed to spawn split pane: {e}");
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    let _ = tab.layout.remove(new_leaf);
+                }
+            }
+        }
+    }
+
+    /// Spawn a fresh nested tab inside the FOCUSED cell and make it active
+    /// (`Ctrl+Shift+T`). Distinct from `spawn_tab`, which creates a window-level
+    /// tab. The new shell is sized to the focused cell's current grid.
+    fn spawn_cell_tab(&mut self) {
+        let content = self.content_rect();
+        let (rows, cols) = self.focused_cell_dims(content);
+        match Session::spawn_shell(self.config.shell.as_deref(), rows, cols) {
+            Ok(s) => {
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    let f = tab.layout.focused;
+                    if let Some(cell) = tab.cells.get_mut(&f) {
+                        cell.add(s);
+                    }
+                }
+                self.relayout_active(content);
+            }
+            Err(e) => tracing::error!("failed to spawn cell tab: {e}"),
+        }
+    }
+
+    /// Switch to the next nested tab in the focused cell (`Ctrl+PageDown`).
+    /// Acts ONLY on the focused cell (distinct from window-level `Ctrl+Tab` and
+    /// from `Alt+Arrow` cell focus — resolves pre-mortem #4). Sizes the
+    /// now-visible (previously background) tab lazily on activation.
+    fn next_cell_tab(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            let f = tab.layout.focused;
+            if let Some(cell) = tab.cells.get_mut(&f) {
+                cell.group.next_tab();
+            }
+        }
+        self.relayout_active(self.content_rect());
+    }
+
+    /// Switch to the previous nested tab in the focused cell (`Ctrl+PageUp`).
+    fn prev_cell_tab(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            let f = tab.layout.focused;
+            if let Some(cell) = tab.cells.get_mut(&f) {
+                cell.group.prev_tab();
+            }
+        }
+        self.relayout_active(self.content_rect());
+    }
+
+    /// The (rows, cols) of the focused cell's grid for the current cascade,
+    /// accounting for the border and (when present) the nested-tab strip.
+    fn focused_cell_dims(&self, content: LRect) -> (u16, u16) {
+        let Some(tab) = self.active_tab() else {
+            return (24, 80);
+        };
+        let f = tab.layout.focused;
+        for (leaf, rect) in tab.layout.cascade(content) {
+            if leaf != f {
+                continue;
+            }
+            let iw = (rect.w - 2 * BORDER_PX).max(CELL_W as i32);
+            let ih = (rect.h - 2 * BORDER_PX).max(LINE_HEIGHT as i32);
+            // A 2nd tab will make the strip appear once tab_count >= 2; reserve
+            // its line up-front so the new shell starts at the right height.
+            let strip = if (rect.h - 2 * BORDER_PX) >= CELL_STRIP_MIN_H {
+                CELL_TABBAR_H as i32
+            } else {
+                0
+            };
+            let cols = (iw as f32 / CELL_W).floor().max(1.0) as u16;
+            let rows = ((ih - strip) as f32 / LINE_HEIGHT).floor().max(1.0) as u16;
+            return (rows, cols);
+        }
+        (24, 80)
+    }
+
+    /// Cycle focus to the next leaf in DFS order (preserves the legacy
+    /// `Ctrl+Shift+O` "focus next pane" behaviour on the tree model).
+    fn focus_next_pane(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            let leaves = tab.layout.leaves();
+            if leaves.len() > 1 {
+                let cur = leaves
+                    .iter()
+                    .position(|&id| id == tab.layout.focused)
+                    .unwrap_or(0);
+                tab.layout.focused = leaves[(cur + 1) % leaves.len()];
+            }
+        }
+    }
+
+    /// Move focus directionally (Phase 3 wires the chords; the tree walk is
+    /// available now for the action layer and parity tests).
+    fn focus_dir(&mut self, dir: Direction) {
+        let content = self.content_rect();
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.layout.focus_dir(dir, content);
+        }
+    }
+
+    /// Toggle pane-zoom on the focused leaf. Zoom is a pure render override in
+    /// core (`cascade` returns one full rect), so the renderer needs no special
+    /// case; relayout resizes the zoomed PTY to the window and leaves hidden
+    /// siblings at their last size.
+    fn toggle_zoom(&mut self) {
+        let content = self.content_rect();
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.layout.toggle_zoom();
+        }
+        self.relayout_active(content);
+    }
+
+    /// Swap the focused pane with its neighbour in `dir` (keyboard fallback for
+    /// drag-rearrange; the keyboard layer ships before mouse drag).
+    fn swap_dir(&mut self, dir: Direction) {
+        let content = self.content_rect();
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.layout.swap_focused(dir, content);
+        }
+        self.relayout_active(content);
+    }
+
+    /// Grow (Right/Down) or shrink (Left/Up) the focused split by a fixed flex
+    /// step. The core clamps so neither side falls below the minimum cell.
+    fn resize_focused(&mut self, dir: Direction) {
+        let content = self.content_rect();
+        let (delta, axis_extent) = match dir {
+            Direction::Right => (0.05_f32, content.w),
+            Direction::Left => (-0.05_f32, content.w),
+            Direction::Down => (0.05_f32, content.h),
+            Direction::Up => (-0.05_f32, content.h),
+        };
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            let f = tab.layout.focused;
+            tab.layout.resize(f, delta, axis_extent);
+        }
+        self.relayout_active(content);
+    }
+
+    /// Equalize every split ratio (the "balance panes" action).
+    fn equalize(&mut self) {
+        let content = self.content_rect();
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.layout.equalize();
+        }
+        self.relayout_active(content);
+    }
+
+    /// Rebuild the layout as the squarest grid that holds the current leaves
+    /// (the "auto-arrange" preset).
+    fn auto_balance(&mut self) {
+        let content = self.content_rect();
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.layout.rebalance_squarest();
+        }
+        self.relayout_active(content);
+    }
+
+    // --- Phase 6: quick-layout presets + workspace save/restore -----------
+
+    /// Apply a quick-layout `preset` to the active tab: build the preset tree,
+    /// then materialise one fresh shell per leaf (re-homing the focused cell's
+    /// current session into the first leaf so the user's active shell is kept).
+    /// Spawn failures roll back the affected leaf so the tree never references
+    /// a cell with no session.
+    fn apply_preset(&mut self, preset: Preset) {
+        let content = self.content_rect();
+        let Some(active) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let layout = Layout::from_preset(preset);
+        let leaf_ids = layout.leaves();
+
+        // Re-home one existing session (the focused cell's visible tab) into the
+        // first leaf so applying a preset never throws away the user's shell.
+        let mut kept: Option<Session> = active
+            .cells
+            .remove(&active.layout.focused)
+            .and_then(|mut c| {
+                if c.sessions.is_empty() {
+                    None
+                } else {
+                    Some(c.sessions.remove(c.group.active.min(c.sessions.len() - 1)))
+                }
+            });
+
+        let mut cells: HashMap<LeafId, Cell> = HashMap::new();
+        let (rows, cols) = self.preset_cell_dims(content, &layout);
+        for (i, &id) in leaf_ids.iter().enumerate() {
+            if i == 0 {
+                if let Some(s) = kept.take() {
+                    cells.insert(id, Cell::single(id, s));
+                    continue;
+                }
+            }
+            match Session::spawn_shell(self.config.shell.as_deref(), rows, cols) {
+                Ok(s) => {
+                    cells.insert(id, Cell::single(id, s));
+                }
+                Err(e) => {
+                    tracing::error!("preset {} pane spawn failed: {e}", preset.label());
+                }
+            }
+        }
+
+        // Drop any leaf whose session failed to spawn so the tree stays valid.
+        let Some(active) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        active.layout = layout;
+        active.cells = cells;
+        let missing: Vec<LeafId> = active
+            .layout
+            .leaves()
+            .into_iter()
+            .filter(|id| !active.cells.contains_key(id))
+            .collect();
+        for id in missing {
+            let _ = active.layout.remove(id);
+        }
+        if !active.cells.contains_key(&active.layout.focused) {
+            if let Some(first) = active.layout.leaves().first().copied() {
+                active.layout.focused = first;
+            }
+        }
+        self.relayout_active(content);
+        self.request_redraw();
+    }
+
+    /// (rows, cols) for an average cell of `layout` over `content` — used to
+    /// size freshly-spawned preset shells close to their final grid.
+    fn preset_cell_dims(&self, content: LRect, layout: &Layout) -> (u16, u16) {
+        let rects = layout.cascade(content);
+        let (w, h) = rects
+            .iter()
+            .map(|(_, r)| (r.w, r.h))
+            .min_by_key(|(w, h)| (*w as i64) * (*h as i64))
+            .unwrap_or((content.w, content.h));
+        let iw = (w - 2 * BORDER_PX).max(CELL_W as i32);
+        let ih = (h - 2 * BORDER_PX).max(LINE_HEIGHT as i32);
+        let cols = (iw as f32 / CELL_W).floor().max(1.0) as u16;
+        let rows = (ih as f32 / LINE_HEIGHT).floor().max(1.0) as u16;
+        (rows, cols)
+    }
+
+    /// Directory holding saved workspace layouts, next to the config file
+    /// (`<config-dir>/workspaces/`). `None` when no per-user config dir exists.
+    fn workspaces_dir() -> Option<std::path::PathBuf> {
+        Config::default_path().and_then(|p| p.parent().map(|d| d.join("workspaces")))
+    }
+
+    /// Path of the named workspace file (`<workspaces>/<name>.layout.json`).
+    /// `name` is sanitised to a safe file stem so a hostile name cannot escape
+    /// the workspaces dir.
+    fn workspace_path(name: &str) -> Option<std::path::PathBuf> {
+        let safe = sanitize_workspace_name(name);
+        Self::workspaces_dir().map(|d| d.join(format!("{safe}.layout.json")))
+    }
+
+    /// Capture the active tab's layout as a persistence snapshot. Each leaf's
+    /// metadata records its tab count, active tab, and the configured shell as
+    /// the profile (the app does not track a per-pane cwd, so `cwd` is `None`
+    /// and fresh shells launch in the process working directory on restore).
+    fn capture_snapshot(&self) -> Option<LayoutSnapshot> {
+        let tab = self.active_tab()?;
+        let profile = self.config.shell.clone();
+        Some(LayoutSnapshot::capture(&tab.layout, |id| {
+            match tab.cells.get(&id) {
+                Some(c) => layout_persist::leaf_view_for(&c.group, None, profile.clone()),
+                None => LeafView::single(),
+            }
+        }))
+    }
+
+    /// Save the active tab's layout to the named workspace file. `"default"` is
+    /// the workspace restored on the next launch.
+    fn save_workspace(&self, name: &str) {
+        let Some(snap) = self.capture_snapshot() else {
+            return;
+        };
+        let Some(path) = Self::workspace_path(name) else {
+            tracing::warn!("no config dir; cannot save workspace");
+            return;
+        };
+        match snap.save(&path) {
+            Ok(()) => tracing::info!("saved workspace {name:?} to {}", path.display()),
+            Err(e) => tracing::error!("failed to save workspace {name:?}: {e}"),
+        }
+    }
+
+    /// Replace the active tab with the layout saved under `name`, spawning fresh
+    /// shells per leaf. A missing/corrupt file degrades to a single pane (the
+    /// `layout_persist::load` fallback) — never a crash.
+    fn restore_workspace(&mut self, name: &str) {
+        let Some(path) = Self::workspace_path(name) else {
+            return;
+        };
+        if !path.exists() {
+            tracing::warn!("workspace {name:?} not found at {}", path.display());
+            return;
+        }
+        let restored = layout_persist::load(&path);
+        self.materialize_restored(restored);
+    }
+
+    /// Turn a [`layout_persist::RestoredLayout`] into a live active tab: one
+    /// fresh shell per leaf, sized to its cell, focus on the restored leaf.
+    fn materialize_restored(&mut self, restored: layout_persist::RestoredLayout) {
+        let content = self.content_rect();
+        let (rows, cols) = self.preset_cell_dims(content, &restored.layout);
+        let mut cells: HashMap<LeafId, Cell> = HashMap::new();
+        for (id, view) in &restored.leaves {
+            // Spawn the active tab's shell; additional cell tabs in this leaf
+            // are spawned lazily by the user (live process state is not
+            // restored — by design).
+            match Session::spawn_shell(self.config.shell.as_deref(), rows, cols) {
+                Ok(s) => {
+                    let mut cell = Cell::single(*id, s);
+                    cell.group.active = view.active.min(cell.group.len() - 1);
+                    cells.insert(*id, cell);
+                }
+                Err(e) => tracing::error!("restore: pane spawn failed: {e}"),
+            }
+        }
+        if cells.is_empty() {
+            // Could not spawn anything — keep whatever we have rather than wedge.
+            return;
+        }
+        let mut layout = restored.layout;
+        let missing: Vec<LeafId> = layout
+            .leaves()
+            .into_iter()
+            .filter(|id| !cells.contains_key(id))
+            .collect();
+        for id in missing {
+            let _ = layout.remove(id);
+        }
+        if !cells.contains_key(&layout.focused) {
+            if let Some(first) = layout.leaves().first().copied() {
+                layout.focused = first;
+            }
+        }
+        if let Some(active) = self.tabs.get_mut(self.active) {
+            active.layout = layout;
+            active.cells = cells;
+        } else {
+            self.tabs.push(Tab {
+                layout,
+                cells,
+            });
+            self.active = self.tabs.len() - 1;
+        }
+        self.relayout_active(content);
+        self.request_redraw();
+    }
+
+    /// On launch, restore the saved `default` workspace if present (fresh
+    /// shells); otherwise leave the single pane spawn_tab created.
+    fn restore_default_workspace_on_startup(&mut self) {
+        let Some(path) = Self::workspace_path("default") else {
+            return;
+        };
+        if !path.exists() {
+            return;
+        }
+        let restored = layout_persist::load(&path);
+        // Only restore a real multi-pane layout; a single-pane default is the
+        // same as the fresh tab we already have.
+        if restored.layout.leaf_count() > 1 {
+            self.materialize_restored(restored);
+        }
+    }
+
+    /// Discover the saved workspace names (file stems under the workspaces dir).
+    fn discover_workspaces() -> Vec<String> {
+        let Some(dir) = Self::workspaces_dir() else {
+            return Vec::new();
+        };
+        let mut names = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                // Files are `<name>.layout.json`; strip the doubled extension.
+                if let Some(file) = p.file_name().and_then(|s| s.to_str()) {
+                    if let Some(stem) = file.strip_suffix(".layout.json") {
+                        names.push(stem.to_string());
+                    }
+                }
+            }
+        }
+        names.sort();
+        names
+    }
+
+    /// Open the "Save Layout As…" prompt (a name text-input overlay).
+    fn open_save_prompt(&mut self) {
+        self.workspace_prompt = Some(WorkspacePrompt::Save {
+            name: String::new(),
+        });
+        self.request_redraw();
+    }
+
+    /// Open the "Restore Layout" prompt listing saved workspaces. No saved
+    /// workspaces → a no-op (logged), so the prompt never opens empty.
+    fn open_restore_prompt(&mut self) {
+        let names = Self::discover_workspaces();
+        if names.is_empty() {
+            tracing::info!("no saved workspaces to restore");
+            return;
+        }
+        self.workspace_prompt = Some(WorkspacePrompt::Restore { names, idx: 0 });
+        self.request_redraw();
+    }
+
+    /// Handle a key while a workspace prompt is open. Mirrors the palette's
+    /// Escape/Enter/arrow/text-edit idiom.
+    fn handle_workspace_prompt_key(&mut self, key: &Key) {
+        match self.workspace_prompt.as_mut() {
+            Some(WorkspacePrompt::Save { name }) => match key {
+                Key::Named(NamedKey::Escape) => self.workspace_prompt = None,
+                Key::Named(NamedKey::Enter) => {
+                    let n = if name.trim().is_empty() {
+                        "default".to_string()
+                    } else {
+                        name.trim().to_string()
+                    };
+                    self.workspace_prompt = None;
+                    self.save_workspace(&n);
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    name.pop();
+                }
+                Key::Character(s) => name.push_str(s),
+                _ => {}
+            },
+            Some(WorkspacePrompt::Restore { names, idx }) => match key {
+                Key::Named(NamedKey::Escape) => self.workspace_prompt = None,
+                Key::Named(NamedKey::ArrowDown) => {
+                    *idx = (*idx + 1) % names.len().max(1);
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    *idx = (*idx + names.len().saturating_sub(1)) % names.len().max(1);
+                }
+                Key::Named(NamedKey::Enter) => {
+                    let pick = names.get(*idx).cloned();
+                    self.workspace_prompt = None;
+                    if let Some(name) = pick {
+                        self.restore_workspace(&name);
+                    }
+                }
+                _ => {}
+            },
+            None => {}
+        }
+        self.request_redraw();
+    }
+
+    /// Resize every visible leaf's PTY to its cell's cols/rows for the current
+    /// cascade over `content`.
+    fn relayout_active(&mut self, content: LRect) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            for (leaf, cell) in tab.layout.cascade(content) {
+                let inner_h = (cell.h - 2 * BORDER_PX).max(LINE_HEIGHT as i32);
+                // The cell tab strip (when the cell has >=2 tabs and is tall
+                // enough) steals one line from the terminal grid; account for it
+                // so the visible shell's rows match its drawable area.
+                let strip = if tab
+                    .cells
+                    .get(&leaf)
+                    .is_some_and(|c| cell_strip_visible(c, cell))
+                {
+                    CELL_TABBAR_H as i32
+                } else {
+                    0
+                };
+                let inner_w = (cell.w - 2 * BORDER_PX).max(CELL_W as i32);
+                let cols = (inner_w as f32 / CELL_W).floor().max(1.0) as u16;
+                let rows = ((inner_h - strip) as f32 / LINE_HEIGHT).floor().max(1.0) as u16;
+                if let Some(s) = tab.cells.get_mut(&leaf).and_then(Cell::active_mut) {
+                    let _ = s.resize(rows, cols);
+                }
+            }
+        }
+    }
+
+    /// Resize every visible leaf's PTY across ALL tabs to the cascade over a
+    /// `w`×`h` surface. Called from the debounced window-resize path so a
+    /// tab switch shows correct dimensions immediately.
+    fn apply_pty_resize(&mut self, w: u32, h: u32) {
+        let content = LRect::new(
+            0,
+            TITLEBAR_H as i32,
+            w as i32,
+            (h as i32 - TITLEBAR_H as i32).max(1),
+        );
+        for ti in 0..self.tabs.len() {
+            let cascade: Vec<(LeafId, LRect)> = self.tabs[ti].layout.cascade(content);
+            let edits: Vec<(LeafId, u16, u16)> = cascade
+                .into_iter()
+                .map(|(leaf, cell)| {
+                    let iw = (cell.w - 2 * BORDER_PX).max(CELL_W as i32);
+                    let ih = (cell.h - 2 * BORDER_PX).max(LINE_HEIGHT as i32);
+                    let strip = if self.tabs[ti]
+                        .cells
+                        .get(&leaf)
+                        .is_some_and(|c| cell_strip_visible(c, cell))
+                    {
+                        CELL_TABBAR_H as i32
+                    } else {
+                        0
+                    };
+                    let cols = (iw as f32 / CELL_W).floor().max(1.0) as u16;
+                    let rows = ((ih - strip) as f32 / LINE_HEIGHT).floor().max(1.0) as u16;
+                    (leaf, rows, cols)
+                })
+                .collect();
+            for (leaf, rows, cols) in edits {
+                if let Some(s) = self.tabs[ti]
+                    .cells
+                    .get_mut(&leaf)
+                    .and_then(Cell::active_mut)
+                {
+                    let _ = s.resize(rows, cols);
+                }
+            }
+        }
+    }
+
+    /// Collect inline-image draw quads for `leaf`, offset into `cell` and
+    /// positioned in that leaf's current viewport (skips out-of-view images).
+    fn collect_leaf_image_quads(
+        &self,
+        leaf: LeafId,
+        cell: LRect,
+    ) -> Vec<crate::image_render::ImageQuad> {
+        let mut out = Vec::new();
+        let Some(tab) = self.active_tab() else {
+            return out;
+        };
+        let Some(c) = tab.cells.get(&leaf) else {
+            return out;
+        };
+        let Some(s) = c.active() else {
+            return out;
+        };
+        let strip = if cell_strip_visible(c, cell) {
+            CELL_TABBAR_H
+        } else {
+            0.0
+        };
+        let (ox, oy) = leaf_text_origin(cell, BORDER_PX, 8.0, 2.0 + strip);
         if let Ok(t) = s.terminal().lock() {
             let rows = t.grid().rows();
             let window_start = t.scrollback_len().saturating_sub(t.view_offset());
@@ -361,66 +1229,52 @@ impl App {
                     rgba: img.image.rgba.clone(),
                     width: img.image.width as u32,
                     height: img.image.height as u32,
-                    x: 8.0 + img.col as f32 * CELL_W,
-                    y: TITLEBAR_H + 2.0 + vrow as f32 * LINE_HEIGHT,
+                    x: ox + img.col as f32 * CELL_W,
+                    y: oy + vrow as f32 * LINE_HEIGHT,
                 });
             }
         }
         out
     }
 
-    /// Compose the active tab's panes into a single grid of cells: side-by-side
-    /// panes are separated by a vertical rule, stacked panes by a horizontal
-    /// one. Clears each pane's damage flag as it is read.
-    fn compose_active_rows(&self) -> Vec<Vec<c0pl4nd_core::Cell>> {
-        use c0pl4nd_core::{Cell, CellFlags, Color};
-        let sep = |c: char| Cell {
-            c,
-            fg: Color::Indexed(8),
-            bg: Color::Default,
-            flags: CellFlags::empty(),
+    /// Snapshot one leaf's terminal grid into per-colour foreground spans,
+    /// clearing its damage flag. Returns `None` when the leaf has no session.
+    fn leaf_spans(&self, leaf: LeafId, fg: GColor) -> Option<Vec<(String, GColor)>> {
+        let tab = self.active_tab()?;
+        let s = tab.cells.get(&leaf).and_then(Cell::active)?;
+        let default_rgb = parse_hex(&self.theme.foreground).unwrap_or((240, 238, 245));
+        let rows = {
+            // Bind the Arc<Mutex<…>> to a local so the guard does not outlive a
+            // temporary (the `if let Ok(t) = s.terminal().lock()` form in
+            // `collect_leaf_image_quads` extends the temporary; this `let` form
+            // would otherwise drop it at the `;`).
+            let term = s.terminal();
+            let mut t = term.lock().ok()?;
+            let rows = t.display_rows();
+            t.grid_mut().clear_damage();
+            rows
         };
-        let Some(tab) = self.active_tab() else {
-            return Vec::new();
-        };
-        let mut pane_rows: Vec<Vec<Vec<Cell>>> = Vec::new();
-        for p in &tab.panes {
-            if let Ok(mut t) = p.terminal().lock() {
-                let rows = t.display_rows();
-                t.grid_mut().clear_damage();
-                pane_rows.push(rows);
-            }
-        }
-        if pane_rows.len() <= 1 {
-            return pane_rows.into_iter().next().unwrap_or_default();
-        }
-        if tab.stacked {
-            let mut out = Vec::new();
-            for (i, pr) in pane_rows.iter().enumerate() {
-                if i > 0 {
-                    let width = pr.first().map(|r| r.len()).unwrap_or(1).max(1);
-                    out.push(vec![sep('\u{2500}'); width]);
-                }
-                out.extend(pr.iter().cloned());
-            }
-            out
-        } else {
-            let nrows = pane_rows.iter().map(|p| p.len()).max().unwrap_or(0);
-            let mut out = Vec::with_capacity(nrows);
-            for i in 0..nrows {
-                let mut line = Vec::new();
-                for (pi, pr) in pane_rows.iter().enumerate() {
-                    if pi > 0 {
-                        line.push(sep('\u{2502}'));
+        let mut spans: Vec<(String, GColor)> = Vec::new();
+        for row in &rows {
+            let mut run = String::new();
+            let mut run_color: Option<GColor> = None;
+            for cell in row {
+                let rgb = resolve_fg(cell.fg, &self.theme, default_rgb);
+                let gcol = GColor::rgb(rgb.0, rgb.1, rgb.2);
+                if run_color != Some(gcol) {
+                    if let Some(pc) = run_color {
+                        spans.push((std::mem::take(&mut run), pc));
                     }
-                    if let Some(row) = pr.get(i) {
-                        line.extend(row.iter().cloned());
-                    }
+                    run_color = Some(gcol);
                 }
-                out.push(line);
+                run.push(cell.c);
             }
-            out
+            if let Some(pc) = run_color {
+                spans.push((run, pc));
+            }
+            spans.push(("\n".to_string(), fg));
         }
+        Some(spans)
     }
 
     fn request_redraw(&self) {
@@ -464,14 +1318,27 @@ impl App {
     }
 
     fn close_active_tab(&mut self, event_loop: &ActiveEventLoop) {
-        // Close the focused pane first if the tab is split.
+        let content = self.content_rect();
+        // Layered close, narrowest scope first:
+        //   1. focused cell has >=2 nested tabs → close the active cell tab;
+        //   2. else the window tab is split into >1 pane → close the focused leaf;
+        //   3. else >1 window tab → close the window tab;
+        //   4. else → quit.
         if let Some(tab) = self.tabs.get_mut(self.active) {
-            if tab.panes.len() > 1 {
-                tab.panes.remove(tab.focus);
-                if tab.focus >= tab.panes.len() {
-                    tab.focus = tab.panes.len() - 1;
+            let focused = tab.layout.focused;
+            if let Some(cell) = tab.cells.get_mut(&focused) {
+                if cell.tab_count() > 1 {
+                    cell.close_active();
+                    self.relayout_active(content);
+                    return;
                 }
-                self.relayout_active();
+            }
+            if tab.layout.leaf_count() > 1 {
+                let closed = tab.layout.focused;
+                // remove() moves focus to a surviving leaf; drop the cell.
+                let _ = tab.layout.remove(closed);
+                tab.cells.remove(&closed);
+                self.relayout_active(content);
                 return;
             }
         }
@@ -526,21 +1393,98 @@ impl App {
                     true
                 }
                 Some('d') => {
-                    self.split_active(false);
+                    // Legacy d = side-by-side split → Horizontal axis.
+                    self.split_active(Axis::Horizontal);
                     true
                 }
                 Some('e') => {
-                    self.split_active(true);
+                    // Legacy e = stacked split → Vertical axis.
+                    self.split_active(Axis::Vertical);
                     true
                 }
                 Some('o') => {
                     self.focus_next_pane();
                     true
                 }
+                Some('=') | Some('+') => {
+                    self.equalize();
+                    true
+                }
+                Some('\\') => {
+                    self.auto_balance();
+                    true
+                }
                 _ => false,
             },
             Key::Named(NamedKey::Tab) => {
                 self.next_tab();
+                true
+            }
+            // Directional focus across the split-tree (Ctrl/Cmd+Shift+Arrow).
+            Key::Named(NamedKey::ArrowLeft) => {
+                self.focus_dir(Direction::Left);
+                true
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                self.focus_dir(Direction::Right);
+                true
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.focus_dir(Direction::Up);
+                true
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                self.focus_dir(Direction::Down);
+                true
+            }
+            // Pane zoom (toggle the focused leaf full-window).
+            Key::Named(NamedKey::Enter) => {
+                self.toggle_zoom();
+                true
+            }
+            _ => false,
+        };
+        if handled {
+            self.request_redraw();
+        }
+        handled
+    }
+
+    /// Handle an Alt-modified combo: `Alt+Arrow` swaps the focused pane with its
+    /// neighbour, `Alt+Shift+Arrow` resizes the focused split. Returns true if
+    /// consumed (so the arrow is not also forwarded to the PTY).
+    fn handle_alt_combo(&mut self, key: &Key) -> bool {
+        let dir = match key {
+            Key::Named(NamedKey::ArrowLeft) => Direction::Left,
+            Key::Named(NamedKey::ArrowRight) => Direction::Right,
+            Key::Named(NamedKey::ArrowUp) => Direction::Up,
+            Key::Named(NamedKey::ArrowDown) => Direction::Down,
+            _ => return false,
+        };
+        if self.modifiers.shift_key() {
+            self.resize_focused(dir);
+        } else {
+            self.swap_dir(dir);
+        }
+        self.request_redraw();
+        true
+    }
+
+    /// Handle a Ctrl-only (no Shift/Alt) nested-cell-tab combo. Returns true if
+    /// consumed (so the key is not forwarded to the PTY). `Ctrl+T` is the cell's
+    /// new-tab chord; the window's new-tab chord stays `Ctrl+Shift+T`.
+    fn handle_cell_tab_combo(&mut self, key: &Key) -> bool {
+        let handled = match key {
+            Key::Named(NamedKey::PageDown) => {
+                self.next_cell_tab();
+                true
+            }
+            Key::Named(NamedKey::PageUp) => {
+                self.prev_cell_tab();
+                true
+            }
+            Key::Character(s) if s.chars().next().map(|c| c.to_ascii_lowercase()) == Some('t') => {
+                self.spawn_cell_tab();
                 true
             }
             _ => false,
@@ -661,6 +1605,12 @@ impl ApplicationHandler for App {
         self.gpu = Some(gpu);
         if self.tabs.is_empty() {
             self.spawn_tab();
+            // Plan-575 P6 T6.4: restore the saved `default` workspace on
+            // launch when it carries a real multi-pane layout. Single-pane
+            // defaults are a no-op (same shape as the fresh tab above).
+            // Without this call the saved-on-exit default layout never
+            // re-materialises — the P0 wiring gap caught at QA review.
+            self.restore_default_workspace_on_startup();
         }
         if let Some(g) = &self.gpu {
             g.window.request_redraw();
@@ -672,12 +1622,53 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
+                // Feed the drag state machine; a press becomes a drag only past
+                // the 6px threshold, so normal clicks are never eaten.
+                let was_dragging = self.drag.is_dragging();
+                let now_dragging = self.drag.cursor_moved((position.x, position.y)).is_some();
+                if now_dragging {
+                    if !was_dragging {
+                        // First frame of a real drag — show the move cursor.
+                        // The `.into()` is omitted here: winit::Window::set_cursor
+                        // takes `impl Into<Cursor>` and CursorIcon implements that
+                        // trivially. Adding `.into()` in this call site triggers
+                        // E0283 (type-annotation needed) because the inference
+                        // context cannot pick a unique Into target — the sibling
+                        // call sites below succeed because their context resolves
+                        // differently, but the safe form is the direct one.
+                        if let Some(g) = &self.gpu {
+                            g.window.set_cursor(winit::window::CursorIcon::Grabbing);
+                        }
+                    }
+                    if let Some(g) = &self.gpu {
+                        g.window.request_redraw();
+                    }
+                    return;
+                }
+                let hov = self.leaf_at(position.x, position.y);
+                if hov != self.hover_leaf {
+                    self.hover_leaf = hov;
+                    // A hover change can reveal/hide a short cell's tab strip.
+                    if let Some(g) = &self.gpu {
+                        g.window.request_redraw();
+                    }
+                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
+                // Ctrl+Shift + press on a pane arms a pane-rearrange drag (the
+                // Tabby model). Held first so it pre-empts titlebar/resize hits.
+                let drag_mod = (self.modifiers.control_key() || self.modifiers.super_key())
+                    && self.modifiers.shift_key();
+                if drag_mod {
+                    if let Some(leaf) = self.leaf_at(self.cursor.0, self.cursor.1) {
+                        self.drag = DragState::press(leaf, self.cursor);
+                        return;
+                    }
+                }
                 // Frameless edge/corner resize takes priority over the titlebar.
                 if let Some(dir) = self.hit_resize_edge(self.cursor.0, self.cursor.1) {
                     if let Some(gpu) = &self.gpu {
@@ -701,24 +1692,36 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            WindowEvent::Resized(size) => {
-                if let Some(gpu) = &mut self.gpu {
-                    gpu.resize(size.width.max(1), size.height.max(1));
-                    let cols = (size.width as f32 / CELL_W).floor().max(1.0) as u16;
-                    let usable_h = (size.height as f32 - TITLEBAR_H).max(LINE_HEIGHT);
-                    let rows = (usable_h / LINE_HEIGHT).floor().max(1.0) as u16;
-                    for tab in &mut self.tabs {
-                        let n = tab.panes.len().max(1) as u16;
-                        let (pc, pr) = if tab.stacked {
-                            (cols, (rows / n).max(1))
-                        } else {
-                            ((cols / n).max(1), rows)
-                        };
-                        for p in &mut tab.panes {
-                            let _ = p.resize(pr, pc);
-                        }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                // End any pane drag; a real drag (past threshold) resolves a drop,
+                // a sub-threshold press is just a click and is discarded.
+                if let Some(source) = self.drag.release() {
+                    self.resolve_drop(source);
+                    if let Some(g) = &self.gpu {
+                        g.window.set_cursor(winit::window::CursorIcon::Default);
+                        g.window.request_redraw();
                     }
-                    gpu.window.request_redraw();
+                }
+            }
+            WindowEvent::Resized(size) => {
+                let w = size.width.max(1);
+                let h = size.height.max(1);
+                if self.gpu.is_some() {
+                    // The surface reconfigure + redraw stay immediate for visual
+                    // smoothness; the per-leaf PTY resize (which fires SIGWINCH
+                    // into every shell) is debounced via `pending_resize`, drained
+                    // at ~30 Hz in `about_to_wait`.
+                    if let Some(gpu) = &mut self.gpu {
+                        gpu.resize(w, h);
+                    }
+                    self.pending_resize = Some((w, h));
+                    if let Some(g) = &self.gpu {
+                        g.window.request_redraw();
+                    }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -746,11 +1749,32 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
+                // Releasing the drag modifier mid-gesture cancels the drag (no
+                // drop) so a pane is never moved by accident.
+                let drag_mod = (self.modifiers.control_key() || self.modifiers.super_key())
+                    && self.modifiers.shift_key();
+                if !drag_mod && self.drag != DragState::Idle {
+                    self.drag.cancel();
+                    if let Some(g) = &self.gpu {
+                        g.window
+                            .set_cursor(winit::window::CursorIcon::Default);
+                        g.window.request_redraw();
+                    }
+                }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 // Any keypress dismisses the startup splash overlay.
                 self.splash = None;
                 // Overlay modes capture keystrokes instead of the PTY.
+                // The Save-/Restore-Layout prompts are routed FIRST because
+                // they're opened via the palette ("Save Layout As…" /
+                // "Restore Layout") and overlay on top of it; without this
+                // route the prompt would render but every keystroke would
+                // fall through to the PTY (P0 functional gap caught at QA).
+                if self.workspace_prompt.is_some() {
+                    self.handle_workspace_prompt_key(&event.logical_key);
+                    return;
+                }
                 if self.palette_mode {
                     self.handle_palette_key(&event.logical_key, event_loop);
                     return;
@@ -759,10 +1783,30 @@ impl ApplicationHandler for App {
                     self.handle_search_key(&event.logical_key);
                     return;
                 }
+                // Nested-cell-tab combos on Ctrl WITHOUT Shift (distinct from the
+                // window-level Ctrl+Shift+… family and the Alt cell-focus family,
+                // so the three tab/focus levels never collide — pre-mortem #4):
+                //   Ctrl+PageDown / Ctrl+PageUp  → next / prev tab in focused cell
+                //   Ctrl+T                       → new tab in focused cell
+                let ctrl_only = (self.modifiers.control_key() || self.modifiers.super_key())
+                    && !self.modifiers.shift_key()
+                    && !self.modifiers.alt_key();
+                if ctrl_only && self.handle_cell_tab_combo(&event.logical_key) {
+                    return;
+                }
                 // Tab control combos (Ctrl+Shift+… ; on macOS Cmd+Shift+…).
                 let mod_combo = (self.modifiers.control_key() || self.modifiers.super_key())
                     && self.modifiers.shift_key();
                 if mod_combo && self.handle_tab_combo(&event.logical_key, event_loop) {
+                    return;
+                }
+                // Pane move/resize family on Alt (Alt+Arrow = swap focused pane,
+                // Alt+Shift+Arrow = resize focused split) — kept off the
+                // Ctrl/Cmd+Shift+Arrow directional-focus chords.
+                let alt_only = self.modifiers.alt_key()
+                    && !self.modifiers.control_key()
+                    && !self.modifiers.super_key();
+                if alt_only && self.handle_alt_combo(&event.logical_key) {
                     return;
                 }
                 if let Some(bytes) = key_to_bytes(&event.logical_key, &event.text) {
@@ -781,12 +1825,24 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+        // Drain a pending interactive-resize at ~30 Hz: a rapid window drag
+        // issues at most ~30 per-leaf PTY resizes/sec, and because the pending
+        // size persists until drained, the final size is always applied.
+        if let Some((w, h)) = self.pending_resize {
+            if now.duration_since(self.last_pty_resize) >= Duration::from_millis(33) {
+                self.apply_pty_resize(w, h);
+                self.pending_resize = None;
+                self.last_pty_resize = now;
+            }
+        }
         if now >= self.next_poll {
             self.next_poll = now + Duration::from_millis(16);
             let damaged = self
                 .active_tab()
                 .map(|tab| {
-                    tab.panes.iter().any(|p| {
+                    // Only the visible (active) tab of each cell paints, so only
+                    // its damage forces a redraw — background nested tabs do not.
+                    tab.cells.values().filter_map(Cell::active).any(|p| {
                         p.terminal()
                             .lock()
                             .map(|t| t.grid().is_damaged())
@@ -810,30 +1866,71 @@ impl App {
         let accent = self.accent_color();
         let bg = self.bg_color();
         let signal_red = GColor::rgb(255, 0, 64);
-        let default_rgb = parse_hex(&self.theme.foreground).unwrap_or((240, 238, 245));
+        let to_rgba = |c: GColor| {
+            [
+                c.r() as f32 / 255.0,
+                c.g() as f32 / 255.0,
+                c.b() as f32 / 255.0,
+                c.a() as f32 / 255.0,
+            ]
+        };
 
-        // Snapshot the grid into per-colour foreground spans.
-        let composed = self.compose_active_rows();
-        let mut spans: Vec<(String, GColor)> = Vec::new();
-        for row in &composed {
-            let mut run = String::new();
-            let mut run_color: Option<GColor> = None;
-            for cell in row {
-                let rgb = resolve_fg(cell.fg, &self.theme, default_rgb);
-                let gcol = GColor::rgb(rgb.0, rgb.1, rgb.2);
-                if run_color != Some(gcol) {
-                    if let Some(pc) = run_color {
-                        spans.push((std::mem::take(&mut run), pc));
-                    }
-                    run_color = Some(gcol);
-                }
-                run.push(cell.c);
+        // Cascade the focused tab into per-leaf cells over the content area.
+        let content = self.content_rect();
+        let cells: Vec<(LeafId, LRect)> = self
+            .active_tab()
+            .map(|t| t.layout.cascade(content))
+            .unwrap_or_default();
+        let focused = self
+            .active_tab()
+            .map(|t| t.layout.focused)
+            .unwrap_or(LeafId(0));
+
+        // Snapshot each VISIBLE leaf's grid into colour spans (clears damage)
+        // and collect its inline-image quads, offset into the leaf's cell.
+        type LeafSpan = (LeafId, LRect, Vec<(String, GColor)>);
+        let mut leaf_spans: Vec<LeafSpan> = Vec::with_capacity(cells.len());
+        let mut image_quads: Vec<(LeafId, crate::image_render::ImageQuad)> = Vec::new();
+        for (leaf, cell) in &cells {
+            if let Some(spans) = self.leaf_spans(*leaf, fg) {
+                leaf_spans.push((*leaf, *cell, spans));
             }
-            if let Some(pc) = run_color {
-                spans.push((run, pc));
+            for q in self.collect_leaf_image_quads(*leaf, *cell) {
+                image_quads.push((*leaf, q));
             }
-            spans.push(("\n".to_string(), fg));
         }
+        let live_leaves: Vec<LeafId> = cells.iter().map(|(id, _)| *id).collect();
+
+        // Nested-tab strips for visible cells (>=2 tabs and tall enough, OR a
+        // short cell currently hovered — the auto-hide/hover-reveal of T4.2).
+        // Each entry: (leaf, cell rect, strip text). Built before borrowing gpu.
+        // Each entry: (leaf, cell rect, strip text, laid_out). `laid_out` = the
+        // strip steals a grid line (tall cell, matches PTY sizing); otherwise it
+        // is a hover-only overlay on a short cell that does not change geometry.
+        type StripInfo = (LeafId, LRect, String, bool);
+        let mut strips: Vec<StripInfo> = Vec::new();
+        if let Some(tab) = self.active_tab() {
+            for (leaf, cell) in &cells {
+                if let Some(c) = tab.cells.get(leaf) {
+                    let tall_enough = (cell.h - 2 * BORDER_PX) >= CELL_STRIP_MIN_H;
+                    let hovered = self.hover_leaf == Some(*leaf);
+                    let show = c.tab_count() > 1 && (tall_enough || hovered);
+                    if show {
+                        let max_cols =
+                            (((cell.w - 2 * BORDER_PX) as f32 / CELL_W).floor()).max(0.0) as usize;
+                        let text = cell_tabbar_text(c.tab_count(), c.group.active, max_cols);
+                        if !text.is_empty() {
+                            strips.push((*leaf, *cell, text, tall_enough));
+                        }
+                    }
+                }
+            }
+        }
+        let laid_out_strip: std::collections::HashSet<LeafId> = strips
+            .iter()
+            .filter(|(_, _, _, laid)| *laid)
+            .map(|(id, _, _, _)| *id)
+            .collect();
 
         // Command-palette overlay text (built before borrowing gpu).
         let palette_text = if self.palette_mode {
@@ -860,28 +1957,72 @@ impl App {
             None
         };
 
-        let image_quads = self.collect_image_quads();
         let splash_text = self.splash.clone();
+        // Drag overlay quads (dim source + zone highlight + cursor ghost),
+        // computed before the gpu borrow since they read the active tab.
+        let drag_overlay = self.drag_overlay_quads(accent);
+        // No pane border/inset for a single leaf — visually identical to the
+        // pre-split renderer; a 1px border only appears once the window splits.
+        let border = if cells.len() > 1 { BORDER_PX } else { 0 };
 
         let Some(gpu) = &mut self.gpu else { return };
         let width = gpu.surface_config.width as f32;
 
-        // Terminal grid (coloured spans) below the title bar.
+        // Fill one grid text buffer per visible leaf, sized to its cell, and
+        // drop buffers for leaves that no longer exist. (Inlined rather than via
+        // `Gpu::leaf_buffer` so `font_system` stays a disjoint field borrow
+        // alongside the `leaf_buffers` entry.)
+        gpu.retain_leaf_buffers(&live_leaves);
+        let metrics = gpu.metrics;
         let default_attrs = Attrs::new().family(Family::Monospace).color(fg);
-        gpu.grid_buffer.set_rich_text(
-            &mut gpu.font_system,
-            spans.iter().map(|(s, col)| {
-                (
-                    s.as_str(),
-                    Attrs::new().family(Family::Monospace).color(*col),
-                )
-            }),
-            &default_attrs,
-            Shaping::Advanced,
-            None,
-        );
-        gpu.grid_buffer
-            .shape_until_scroll(&mut gpu.font_system, false);
+        for (leaf, cell, spans) in &leaf_spans {
+            // A laid-out strip steals one line from the grid's drawable height.
+            let strip_h = if laid_out_strip.contains(leaf) {
+                CELL_TABBAR_H
+            } else {
+                0.0
+            };
+            let cw = (cell.w - 2 * border).max(1) as f32;
+            let ch = ((cell.h - 2 * border) as f32 - strip_h).max(1.0);
+            let fs = &mut gpu.font_system;
+            let buf = gpu
+                .leaf_buffers
+                .entry(*leaf)
+                .or_insert_with(|| Buffer::new(fs, metrics));
+            buf.set_size(fs, Some(cw), Some(ch));
+            buf.set_rich_text(
+                fs,
+                spans.iter().map(|(s, col)| {
+                    (
+                        s.as_str(),
+                        Attrs::new().family(Family::Monospace).color(*col),
+                    )
+                }),
+                &default_attrs,
+                Shaping::Advanced,
+                None,
+            );
+            buf.shape_until_scroll(fs, false);
+        }
+
+        // Nested-tab-strip buffers (one short line per visible strip cell).
+        for (leaf, cell, text, _) in &strips {
+            let cw = (cell.w - 2 * border).max(1) as f32;
+            let fs = &mut gpu.font_system;
+            let buf = gpu
+                .tabbar_buffers
+                .entry(*leaf)
+                .or_insert_with(|| Buffer::new(fs, metrics));
+            buf.set_size(fs, Some(cw), Some(CELL_TABBAR_H));
+            buf.set_text(
+                fs,
+                text,
+                &Attrs::new().family(Family::Monospace).color(accent),
+                Shaping::Advanced,
+                None,
+            );
+            buf.shape_until_scroll(fs, false);
+        }
 
         // Custom chrome: wordmark (accent) on the left, buttons flush right.
         // The button cluster begins at the SAME pixel `hit_titlebar` uses.
@@ -999,22 +2140,54 @@ impl App {
                 default_color: fg,
                 custom_glyphs: &[],
             },
-            // Terminal grid.
-            TextArea {
-                buffer: &gpu.grid_buffer,
-                left: 8.0,
-                top: TITLEBAR_H + 2.0,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: TITLEBAR_H as i32,
-                    right: w,
-                    bottom: h,
-                },
-                default_color: fg,
-                custom_glyphs: &[],
-            },
         ];
+        // One terminal-grid TextArea per visible leaf, placed at its cell origin
+        // and clipped to the cell. glyphon clips text via `bounds`, so no wgpu
+        // scissor is needed for the grid layer.
+        for (leaf, cell, _) in &leaf_spans {
+            if let Some(buf) = gpu.leaf_buffers.get(leaf) {
+                // Push the grid below a laid-out tab strip (tall cells); a
+                // hover-only overlay strip leaves the grid origin unchanged.
+                let strip_top = if laid_out_strip.contains(leaf) {
+                    CELL_TABBAR_H
+                } else {
+                    0.0
+                };
+                let (lx, ly) = leaf_text_origin(*cell, border, 8.0, 2.0 + strip_top);
+                areas.push(TextArea {
+                    buffer: buf,
+                    left: lx,
+                    top: ly,
+                    scale: 1.0,
+                    bounds: leaf_text_bounds(*cell, border),
+                    default_color: fg,
+                    custom_glyphs: &[],
+                });
+            }
+        }
+        // Cell tab strips, drawn at the top of their cell (over the grid for a
+        // hover-only overlay; above the pushed-down grid for a laid-out strip).
+        for (leaf, cell, _, _) in &strips {
+            if let Some(buf) = gpu.tabbar_buffers.get(leaf) {
+                let left = cell.x as f32 + border as f32 + 4.0;
+                let top = cell.y as f32 + border as f32 + 1.0;
+                areas.push(TextArea {
+                    buffer: buf,
+                    left,
+                    top,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: cell.x + border,
+                        top: cell.y + border,
+                        right: (cell.x + cell.w - border).max(cell.x + border),
+                        bottom: (cell.y + border + CELL_TABBAR_H as i32)
+                            .min(cell.y + cell.h - border),
+                    },
+                    default_color: accent,
+                    custom_glyphs: &[],
+                });
+            }
+        }
         if splash_text.is_some() {
             // neofetch-style startup splash, drawn over the grid until the
             // first keypress dismisses it.
@@ -1064,10 +2237,53 @@ impl App {
             return;
         }
 
-        // Prepare inline-image quads (uploaded textures + vertex buffers).
-        let prepared_images =
-            gpu.image_renderer
-                .prepare(&gpu.device, &gpu.queue, w as f32, h as f32, &image_quads);
+        // Pane chrome: a full-content gutter fill (= bg, harmless for a single
+        // pane where chrome_quads returns empty) plus a 1px border per leaf,
+        // accent on the focused leaf and muted on the rest.
+        let chrome = chrome_quads(
+            &cells,
+            focused,
+            to_rgba(accent),
+            [0.30, 0.30, 0.34, 1.0],
+            // `bg` is a wgpu::Color (f64 0..1 fields), distinct from glyphon::Color.
+            [bg.r as f32, bg.g as f32, bg.b as f32, bg.a as f32],
+            content,
+        );
+        let prepared_chrome = gpu
+            .chrome_renderer
+            .prepare(&gpu.device, w as f32, h as f32, &chrome);
+        // Drag overlay draws LAST (over text + images), so prepare it separately.
+        let prepared_overlay =
+            gpu.chrome_renderer
+                .prepare(&gpu.device, w as f32, h as f32, &drag_overlay);
+
+        // Prepare inline-image quads grouped by leaf, so each group can be
+        // scissored to its cell — images cannot bleed across a pane border.
+        let cell_of: std::collections::HashMap<LeafId, LRect> = cells.iter().copied().collect();
+        let mut img_by_leaf: std::collections::HashMap<
+            LeafId,
+            Vec<crate::image_render::ImageQuad>,
+        > = std::collections::HashMap::new();
+        for (leaf, q) in image_quads {
+            img_by_leaf.entry(leaf).or_default().push(q);
+        }
+        type ImageGroup = ((u32, u32, u32, u32), Vec<crate::image_render::Prepared>);
+        let prepared_image_groups: Vec<ImageGroup> = img_by_leaf
+            .into_iter()
+            .filter_map(|(leaf, quads)| {
+                let cell = *cell_of.get(&leaf)?;
+                let scissor = leaf_scissor(
+                    cell,
+                    border,
+                    gpu.surface_config.width,
+                    gpu.surface_config.height,
+                );
+                let prepared =
+                    gpu.image_renderer
+                        .prepare(&gpu.device, &gpu.queue, w as f32, h as f32, &quads);
+                Some((scissor, prepared))
+            })
+            .collect();
 
         let mut encoder = gpu
             .device
@@ -1091,11 +2307,26 @@ impl App {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // Pane chrome (gutter + borders) under the text.
+            gpu.chrome_renderer.draw(&mut pass, &prepared_chrome);
             let _ = gpu
                 .text_renderer
                 .render(&gpu.atlas, &gpu.viewport, &mut pass);
-            // Draw inline images over the grid.
-            gpu.image_renderer.draw(&mut pass, &prepared_images);
+            // Inline images, each scissored to its leaf's cell so an image
+            // taller/wider than its pane cannot paint over a neighbour.
+            for (scissor, prepared) in &prepared_image_groups {
+                let (sx, sy, sw, sh) = *scissor;
+                if sw > 0 && sh > 0 {
+                    pass.set_scissor_rect(sx, sy, sw, sh);
+                    gpu.image_renderer.draw(&mut pass, prepared);
+                }
+            }
+            // Drag overlay on top of everything (reset the scissor first, as the
+            // image loop may have left a per-cell scissor set).
+            if !prepared_overlay.is_empty() {
+                pass.set_scissor_rect(0, 0, gpu.surface_config.width, gpu.surface_config.height);
+                gpu.chrome_renderer.draw(&mut pass, &prepared_overlay);
+            }
         }
         gpu.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
@@ -1155,12 +2386,6 @@ impl Gpu {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let metrics = Metrics::new(font_size.max(8.0), LINE_HEIGHT.max(font_size + 2.0));
-        let mut grid_buffer = Buffer::new(&mut font_system, metrics);
-        grid_buffer.set_size(
-            &mut font_system,
-            Some(size.width as f32),
-            Some(size.height as f32),
-        );
         let mut chrome_buffer = Buffer::new(&mut font_system, metrics);
         chrome_buffer.set_size(&mut font_system, Some(size.width as f32), Some(TITLEBAR_H));
         let mut palette_buffer = Buffer::new(&mut font_system, metrics);
@@ -1176,6 +2401,7 @@ impl Gpu {
             Some(size.height as f32),
         );
         let image_renderer = crate::image_render::ImageRenderer::new(&device, format);
+        let chrome_renderer = ChromeRenderer::new(&device, format);
         let gpu_name = adapter.get_info().name;
 
         Ok(Gpu {
@@ -1189,11 +2415,14 @@ impl Gpu {
             atlas,
             viewport,
             text_renderer,
-            grid_buffer,
+            metrics,
+            leaf_buffers: HashMap::new(),
+            tabbar_buffers: HashMap::new(),
             chrome_buffer,
             palette_buffer,
             splash_buffer,
             image_renderer,
+            chrome_renderer,
             gpu_name,
         })
     }
@@ -1202,11 +2431,8 @@ impl Gpu {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
-        self.grid_buffer.set_size(
-            &mut self.font_system,
-            Some(width as f32),
-            Some(height as f32),
-        );
+        // Per-leaf grid buffers are sized per-frame from the layout cascade in
+        // `render`; only the fixed-height chrome buffer is resized here.
         self.chrome_buffer
             .set_size(&mut self.font_system, Some(width as f32), Some(TITLEBAR_H));
     }
@@ -1214,6 +2440,44 @@ impl Gpu {
     fn reconfigure(&mut self) {
         self.surface.configure(&self.device, &self.surface_config);
     }
+}
+
+/// Whether `cell`'s nested-tab strip occupies a grid line for the cell drawn at
+/// `rect`. The strip is laid out (stealing one terminal row) only when the cell
+/// has >=2 tabs AND is tall enough ([`CELL_STRIP_MIN_H`]); on a short cell the
+/// strip auto-hides and reappears as a render-only hover overlay
+/// ([`App::hover_strip_leaf`]) without disturbing the grid geometry / PTY size.
+fn cell_strip_visible(cell: &Cell, rect: LRect) -> bool {
+    strip_laid_out(cell.tab_count(), rect)
+}
+
+/// Pure predicate for whether a tab strip is LAID OUT (steals a grid line) for a
+/// cell with `tab_count` tabs drawn at `rect`. The render layer additionally
+/// reveals a strip as a hover overlay on a short cell, but that path does not
+/// change geometry, so PTY sizing keys off this stable predicate only.
+fn strip_laid_out(tab_count: usize, rect: LRect) -> bool {
+    tab_count > 1 && (rect.h - 2 * BORDER_PX) >= CELL_STRIP_MIN_H
+}
+
+/// The sub-rectangle of `target` a drop `zone` would fill, used for the drag
+/// overlay highlight: an edge zone highlights that 1/3 band; the center
+/// highlights the central region. Pure geometry.
+fn zone_highlight_rect(target: LRect, zone: DropZone, rgba: [f32; 4]) -> ColorRect {
+    let third_w = (target.w / 3).max(1);
+    let third_h = (target.h / 3).max(1);
+    let (x, y, w, h) = match zone {
+        DropZone::Left => (target.x, target.y, third_w, target.h),
+        DropZone::Right => (target.x + target.w - third_w, target.y, third_w, target.h),
+        DropZone::Top => (target.x, target.y, target.w, third_h),
+        DropZone::Bottom => (target.x, target.y + target.h - third_h, target.w, third_h),
+        DropZone::Center => (
+            target.x + third_w,
+            target.y + third_h,
+            target.w - 2 * third_w,
+            target.h - 2 * third_h,
+        ),
+    };
+    ColorRect::new(x, y, w.max(1), h.max(1), rgba)
 }
 
 /// Resolve a cell's foreground [`c0pl4nd_core::Color`] to an RGB triple.
@@ -1226,6 +2490,33 @@ fn resolve_fg(
         c0pl4nd_core::Color::Default => default_rgb,
         c0pl4nd_core::Color::Indexed(i) => theme.ansi(i),
         c0pl4nd_core::Color::Rgb(r, g, b) => (r, g, b),
+    }
+}
+
+/// Reduce a user-supplied workspace name to a safe file stem.
+///
+/// Allowed: ASCII alphanumerics, `-`, `_`. Every other char (slash, dot, NUL,
+/// control, Unicode) maps to `_`. Names longer than 64 chars truncate; an
+/// empty name becomes `"default"`. The result contains no path separator and
+/// no `..`, so `../../etc/passwd` is mapped to a flat stem with no path
+/// escape possible. Workspace files are then stored as
+/// `<workspaces-dir>/<stem>.layout.json` under the per-user config dir.
+fn sanitize_workspace_name(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+    if s.is_empty() {
+        "default".to_string()
+    } else {
+        s
     }
 }
 
@@ -1280,4 +2571,34 @@ fn load_theme(name: &str) -> Option<Theme> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_hidden_for_single_tab_cell() {
+        // A 1-tab cell never lays out a strip, regardless of size.
+        let tall = LRect::new(0, 0, 400, 600);
+        assert!(!strip_laid_out(1, tall));
+        assert!(!strip_laid_out(0, tall));
+    }
+
+    #[test]
+    fn strip_laid_out_when_tall_enough_and_multi_tab() {
+        let tall = LRect::new(0, 0, 400, CELL_STRIP_MIN_H + 2 * BORDER_PX + 5);
+        assert!(
+            strip_laid_out(2, tall),
+            "tall multi-tab cell lays out a strip"
+        );
+    }
+
+    #[test]
+    fn strip_not_laid_out_on_short_cell() {
+        // Below the min height the strip auto-hides (it can still hover-reveal as
+        // an overlay, but is NOT laid out — grid geometry is unchanged).
+        let short = LRect::new(0, 0, 400, CELL_TABBAR_H as i32 + 2 * BORDER_PX);
+        assert!(!strip_laid_out(3, short));
+    }
 }

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="C0PL4ND symbolic icon">
+  <title>C0PL4ND app icon — monochrome / symbolic</title>
+  <desc>Single-colour symbolic variant for Windows tray, Linux hicolor-symbolic, and notification glyphs. currentColor (defaults to phosphor white), transparent background, no plate, no occult chrome — the bare prompt chevron + cursor block with the daemon fork() trident notch.</desc>
+  <path d="M312 336 L520 512 L312 688" fill="none" stroke="currentColor" color="#e9f7ff" stroke-width="96" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="576" y="560" width="172" height="72" rx="8" fill="currentColor" color="#e9f7ff"/>
+  <g stroke="currentColor" color="#e9f7ff" stroke-width="14" stroke-linecap="round" fill="none">
+    <line x1="748" y1="596" x2="800" y2="558"/>
+    <line x1="748" y1="596" x2="810" y2="596"/>
+    <line x1="748" y1="596" x2="800" y2="634"/>
+  </g>
+</svg>

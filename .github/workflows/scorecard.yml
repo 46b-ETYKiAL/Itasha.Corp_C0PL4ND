@@ -1,0 +1,59 @@
+name: Scorecard supply-chain security
+
+# OpenSSF Scorecard — automated supply-chain best-practice scoring.
+# Free for public repos; results publish to the Security tab as SARIF and
+# (optionally) to the OpenSSF REST API so you can display a Scorecard badge.
+
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: "31 5 * * 2"
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions: read-all
+
+concurrency:
+  group: scorecard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to upload SARIF results to the Security tab.
+      security-events: write
+      # Needed for the OIDC token used to publish results to the OpenSSF API.
+      id-token: write
+      contents: read
+      actions: read
+    steps:
+      - name: Harden the runner (egress audit)
+        # step-security/harden-runner@v2.19.4
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        # ossf/scorecard-action@v2.4.3
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # publish_results=true enables the public Scorecard badge (REST API).
+          # Set to false if you do not want results published externally.
+          publish_results: true
+
+      - name: Upload SARIF to code scanning
+        # github/codeql-action/upload-sarif@v3.30.3
+        uses: github/codeql-action/upload-sarif@192325c86100d080feab897ff886c34abd4c83a3
+        with:
+          sarif_file: results.sarif
