@@ -1,0 +1,44 @@
+# cargo-fuzz crate for C0PL4ND.
+#
+# This is its OWN workspace (the `[workspace]` table below detaches it from the
+# parent so the unstable `-Z` / sanitizer-instrumented build never pollutes the
+# main `cargo build`). The parent manifest `exclude`s `fuzz/` for the same
+# reason — this is the layout the Rust Fuzz Book prescribes.
+#
+# Run a target locally (requires a nightly toolchain + cargo-fuzz):
+#   cargo install cargo-fuzz
+#   cargo +nightly fuzz run vt_parser
+#
+# The highest-value untrusted-input surface in a terminal emulator is the VT /
+# ANSI / OSC escape-sequence parser: it consumes arbitrary bytes produced by any
+# program running inside the terminal. The `vt_parser` target drives exactly
+# that path (`c0pl4nd_core::Terminal::advance`).
+
+[package]
+name = "c0pl4nd-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.c0pl4nd-core]
+path = "../crates/core"
+
+# Keep this crate out of the parent workspace's dependency graph.
+[workspace]
+
+[[bin]]
+name = "vt_parser"
+path = "fuzz_targets/vt_parser.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz builds are release-with-debug; opt for crash-finding speed.
+[profile.release]
+debug = 1

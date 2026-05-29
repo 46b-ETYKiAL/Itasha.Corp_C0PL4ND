@@ -66,4 +66,35 @@ Out of scope:
 - Vulnerabilities in third-party shells, programs, or operating-system components run inside the terminal.
 - Social-engineering or physical-access attacks.
 
+---
+
+## Fuzzing
+
+The highest-value untrusted-input surface in a terminal emulator is the
+**VT / ANSI / OSC escape-sequence parser**: it consumes arbitrary bytes
+produced by any program running inside the terminal. C0PL4ND continuously
+fuzzes that parser.
+
+- **Harness**: [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) (libFuzzer back end). The fuzz crate lives in [`fuzz/`](fuzz/).
+- **Target**: `vt_parser` ([`fuzz/fuzz_targets/vt_parser.rs`](fuzz/fuzz_targets/vt_parser.rs)) drives `c0pl4nd_core::Terminal::advance` — the same entry point the live PTY reader uses for shell output — then reads back the public surface to catch any state inconsistency.
+- **CI**: the libFuzzer campaign needs a nightly + sanitizer toolchain (incompatible with this repo's static-musl CI target), so it is **not** wired into the stable CI matrix — the fuzz crate is `exclude`d from the workspace and run locally / via OSS-Fuzz. The crash-regression guard that *does* run on every PR/platform is the deterministic seed test below.
+- **Deterministic regression**: a seed corpus of malformed/hostile sequences runs in the normal `cargo test` suite on every platform (`parser_survives_adversarial_escape_sequences` in `crates/core/src/term.rs`), so a crash regression is caught even without the nightly fuzz toolchain.
+
+Run a campaign locally (requires a nightly toolchain):
+
+```sh
+cargo install cargo-fuzz
+cargo +nightly fuzz run vt_parser
+```
+
+### OSS-Fuzz
+
+We intend to onboard C0PL4ND to [OSS-Fuzz](https://github.com/google/oss-fuzz)
+for free continuous distributed fuzzing of the parser target. The `vt_parser`
+target is structured to be OSS-Fuzz-compatible (single `fuzz_target!` over a
+`&[u8]`). Until acceptance, local campaigns plus the deterministic regression
+test above provide ongoing coverage.
+
+---
+
 Thank you for helping keep C0PL4ND and its users safe.

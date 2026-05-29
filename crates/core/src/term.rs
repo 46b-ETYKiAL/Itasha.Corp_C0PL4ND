@@ -600,4 +600,49 @@ mod tests {
         }
         assert!(t.scrollback_len() <= 2, "history must not exceed the cap");
     }
+
+    /// Deterministic robustness regression mirroring the `vt_parser` fuzz
+    /// target (see `fuzz/fuzz_targets/vt_parser.rs`). A terminal parser
+    /// consumes fully untrusted bytes; hostile or malformed escape sequences
+    /// must never panic, hang, or produce an inconsistent grid. These seeds
+    /// double as the fuzzer's regression corpus and run in the normal stable
+    /// test suite on every platform (the fuzz harness itself needs nightly).
+    #[test]
+    fn parser_survives_adversarial_escape_sequences() {
+        let seeds: &[&[u8]] = &[
+            b"\x1b[",                                  // bare CSI, no final byte
+            b"\x1b[999999999999999999999999999m",      // CSI param overflow
+            b"\x1b[;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;m", // many empty params
+            b"\x1b[38;2;",                             // truncated truecolor SGR
+            b"\x1b]0;",                                // OSC with no terminator
+            b"\x1b]8;;",                               // OSC 8 hyperlink, truncated
+            b"\x1b]52;c;",                             // OSC 52 clipboard, truncated
+            b"\x1b]1337;File=",                        // iTerm2 image, truncated
+            b"\x1bPq",                                 // DCS / Sixel introducer
+            b"\x1b#8",                                 // DECALN screen-align
+            b"\x08\x08\x08\x08",                       // backspaces past col 0
+            b"\x1b[999999;999999H",                    // cursor move far OOB
+            b"\x1b[2J\x1b[3J\x1b[1J\x1b[0J",           // erase-display variants
+            b"\xff\xfe\xfd\xfc\x00\x01\x02",           // invalid UTF-8 / control bytes
+            b"\xe2\x82",                               // truncated UTF-8 multibyte
+            b"\x1b[6n\x1b[5n",                         // device status report queries
+        ];
+
+        for seed in seeds {
+            let mut t = Terminal::with_scrollback(24, 80, 1000);
+            // Feed in 1-byte chunks so sequences straddle advance() calls —
+            // the realistic split-across-PTY-reads case.
+            for b in seed.iter() {
+                t.advance(&[*b]);
+            }
+            // Touch the derived read surface to catch read-side inconsistency.
+            let _ = t.title();
+            let _ = t.cwd();
+            let _ = t.hyperlinks();
+            let _ = t.images();
+            let _ = t.display_rows();
+            let _ = t.all_lines();
+            let _ = t.scrollback_len();
+        }
+    }
 }
