@@ -122,7 +122,10 @@ impl Layout {
         }
         // Detach the source. (Collapsing a parent is fine — target keeps its id,
         // which is all we look up next.)
-        if matches!(self.remove(source), RemoveOutcome::NotFound | RemoveOutcome::LastLeaf) {
+        if matches!(
+            self.remove(source),
+            RemoveOutcome::NotFound | RemoveOutcome::LastLeaf
+        ) {
             return false;
         }
         if !self.contains(target) {

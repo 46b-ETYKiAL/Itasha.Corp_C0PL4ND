@@ -13,6 +13,9 @@ fn grid(n: usize) -> Layout {
     let mut l = Layout::new();
     while l.leaf_count() < n {
         let f = l.focused;
+        // `usize::is_multiple_of` requires Rust 1.87+; this crate's MSRV is 1.80.
+        // Suppress the Rust-1.95 clippy lint locally until the MSRV moves up.
+        #[allow(clippy::manual_is_multiple_of)]
         let axis = if l.leaf_count() % 2 == 0 {
             Axis::Horizontal
         } else {
