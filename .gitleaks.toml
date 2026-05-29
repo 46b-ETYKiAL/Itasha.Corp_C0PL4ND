@@ -1,0 +1,27 @@
+# gitleaks configuration for C0PL4ND.
+#
+# Extends the upstream default ruleset (so every built-in detector still runs)
+# and adds a narrowly-scoped allowlist for a deterministic test sentinel that
+# the `generic-api-key` heuristic flags as a false positive.
+#
+# Run locally:  gitleaks detect --source . --no-banner --redact
+#
+# Note: GitHub's hosted secret-scanning (which is the authoritative gate on the
+# public repo) reports zero open alerts; this file keeps the supplementary
+# local/CI gitleaks scan equally clean.
+
+[extend]
+useDefault = true
+
+[[rules]]
+# Re-scope the built-in generic-api-key rule so the PTY round-trip test
+# sentinel is not treated as a credential.
+id = "generic-api-key"
+[rules.allowlist]
+description = "PTY echo round-trip test sentinel — a literal string echoed by a child process to verify the pty read path; not a credential."
+regexes = [
+  '''c0pl4nd_pty_ok''',
+]
+paths = [
+  '''crates/core/src/pty/mod\.rs''',
+]

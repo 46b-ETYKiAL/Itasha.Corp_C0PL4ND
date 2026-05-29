@@ -84,10 +84,23 @@ jobs:
 
       - name: Cache cargo registry and target
         # Swatinem/rust-cache@v2.9.1
+        # zizmor: ignore[cache-poisoning]
+        # zizmor's cache-poisoning heuristic is Low-confidence and fires on the
+        # mere presence of rust-cache in a tag-triggered job; it does not parse
+        # `save-if`. We set `save-if: false` below so this step is RESTORE-ONLY
+        # and can never persist a poisoned cache. The residual restore risk is
+        # neutralised by `--locked` builds. Annotation documents the disposition.
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
         with:
           workspaces: ". -> target"
           key: ${{ matrix.target }}
+          # zizmor cache-poisoning remedy: this release job runs on tag pushes
+          # (a privileged, artifact-producing context). Restore caches but never
+          # SAVE one from here, so a release build can never persist a poisoned
+          # cache that a later build would restore. Builds use `--locked` so a
+          # cold cache only costs time, not correctness.
+          # https://docs.zizmor.sh/audits/#cache-poisoning
+          save-if: false
 
       - name: Install Linux GUI/display build dependencies
         if: runner.os == 'Linux' && matrix.cross != true
@@ -113,10 +126,17 @@ jobs:
       - name: Determine version
         id: version
         shell: bash
+        # zizmor template-injection remedy: pass workflow context through the
+        # `env:` block so the values arrive as shell variables, never as raw
+        # `${{ ... }}` text spliced into the script body. See
+        # https://docs.zizmor.sh/audits/#template-injection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
           else
             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
@@ -124,10 +144,15 @@ jobs:
       - name: Package (Unix)
         if: runner.os != 'Windows'
         shell: bash
+        # zizmor template-injection remedy: context values via `env:`, not
+        # spliced into the script body.
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          tag="${{ steps.version.outputs.tag }}"
-          target="${{ matrix.target }}"
+          tag="${TAG}"
+          target="${TARGET}"
           stage="${BIN_NAME}-${tag}-${target}"
           mkdir -p "dist/${stage}"
           cp "target/${target}/release/${BIN_NAME}" "dist/${stage}/"
@@ -139,10 +164,15 @@ jobs:
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        # zizmor template-injection remedy: context values via `env:`, not
+        # spliced into the script body.
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          TARGET: ${{ matrix.target }}
         run: |
           $ErrorActionPreference = "Stop"
-          $tag = "${{ steps.version.outputs.tag }}"
-          $target = "${{ matrix.target }}"
+          $tag = $env:TAG
+          $target = $env:TARGET
           $stage = "$env:BIN_NAME-$tag-$target"
           New-Item -ItemType Directory -Force -Path "dist/$stage" | Out-Null
           Copy-Item "target/$target/release/$env:BIN_NAME.exe" "dist/$stage/"
@@ -268,6 +298,12 @@ jobs:
 
       - name: Create GitHub Release
         # softprops/action-gh-release@v2.6.2
+        # zizmor: ignore[superfluous-actions]
+        # Deliberate: this action is SHA-pinned, gives declarative asset globs
+        # (`files: release/*`), `generate_release_notes`, and prerelease
+        # detection that a hand-rolled `gh release create` script would have to
+        # re-implement. The functionality overlaps the runner's `gh` CLI but the
+        # ergonomic + auditable surface is worth keeping; no security delta.
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda
         with:
           name: ${{ github.ref_name }}
