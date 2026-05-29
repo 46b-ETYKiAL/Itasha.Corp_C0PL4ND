@@ -3,6 +3,10 @@
 [workspace]
 resolver = "2"
 members = ["crates/core", "crates/renderer", "crates/app"]
+# The cargo-fuzz crate is its own workspace and requires a nightly,
+# sanitizer-instrumented toolchain — keep it out of the default `cargo build`
+# / `cargo test --workspace` graph so the stable CI matrix is unaffected.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
