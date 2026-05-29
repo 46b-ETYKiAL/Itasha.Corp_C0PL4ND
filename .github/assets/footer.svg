@@ -7,7 +7,7 @@
       <stop offset="0%" stop-color="transparent"/><stop offset="100%" stop-color="rgba(0,0,0,0.5)"/>
     </radialGradient>
     <linearGradient id="wire" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#34e0d0" stop-opacity="0"/><stop offset="50%" stop-color="#34e0d0" stop-opacity="0.9"/><stop offset="100%" stop-color="#34e0d0" stop-opacity="0"/>
+      <stop offset="0%" stop-color="#B48CE8" stop-opacity="0"/><stop offset="50%" stop-color="#B48CE8" stop-opacity="0.9"/><stop offset="100%" stop-color="#B48CE8" stop-opacity="0"/>
     </linearGradient>
     <filter id="fphos"><feGaussianBlur in="SourceGraphic" stdDeviation="0.7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
     <filter id="fglow"><feGaussianBlur stdDeviation="2.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
@@ -29,7 +29,7 @@
   <rect x="24" y="20" width="1232" height="174" rx="5" fill="url(#fvig)"/>
   <rect x="24" y="20" width="1232" height="174" rx="5" fill="none" stroke="#1a242b"/>
 
-  <g stroke="#34e0d0" stroke-width="1.2" fill="none" opacity="0.55">
+  <g stroke="#B48CE8" stroke-width="1.2" fill="none" opacity="0.55">
     <path d="M48 44 h22 M48 44 v22"/><path d="M1232 44 h-22 M1232 44 v22"/>
     <path d="M48 170 h22 M48 170 v-22"/><path d="M1232 170 h-22 M1232 170 v-22"/>
   </g>
@@ -37,7 +37,7 @@
   <!-- the wired bus + C0PL4ND unique right-zone motion: a mini split-tree, pane-focus cycle -->
   <g style="animation: fflicker 7s infinite;">
     <line x1="120" y1="107" x2="1160" y2="107" stroke="#1f2b32" stroke-width="1"/>
-    <g fill="#34e0d0">
+    <g fill="#B48CE8">
       <circle cx="260" cy="107" r="2.2" style="animation: nodeOn 3s ease-in-out 0s infinite;"/>
       <circle cx="470" cy="107" r="2.2" style="animation: nodeOn 3s ease-in-out 0.5s infinite;"/>
       <circle cx="810" cy="107" r="2.2" style="animation: nodeOn 3s ease-in-out 1s infinite;"/>
@@ -49,11 +49,11 @@
 
     <!-- mini split-tree: four panes cycle focus (C0PL4ND signature) -->
     <g transform="translate(1054, 64)" opacity="0.9">
-      <rect x="0" y="0" width="92" height="86" rx="3" fill="none" stroke="#34e0d0" stroke-width="0.8" opacity="0.5"/>
-      <line x1="46" y1="3" x2="46" y2="83" stroke="#34e0d0" stroke-width="0.5" opacity="0.4"/>
-      <line x1="3" y1="44" x2="46" y2="44" stroke="#34e0d0" stroke-width="0.5" opacity="0.4"/>
-      <line x1="46" y1="52" x2="89" y2="52" stroke="#34e0d0" stroke-width="0.5" opacity="0.4"/>
-      <rect x="4" y="4" width="38" height="36" rx="1.5" fill="#34e0d0" opacity="0.12" style="animation: paneFocus 5.2s ease-in-out 0s infinite;"/>
+      <rect x="0" y="0" width="92" height="86" rx="3" fill="none" stroke="#B48CE8" stroke-width="0.8" opacity="0.5"/>
+      <line x1="46" y1="3" x2="46" y2="83" stroke="#B48CE8" stroke-width="0.5" opacity="0.4"/>
+      <line x1="3" y1="44" x2="46" y2="44" stroke="#B48CE8" stroke-width="0.5" opacity="0.4"/>
+      <line x1="46" y1="52" x2="89" y2="52" stroke="#B48CE8" stroke-width="0.5" opacity="0.4"/>
+      <rect x="4" y="4" width="38" height="36" rx="1.5" fill="#B48CE8" opacity="0.12" style="animation: paneFocus 5.2s ease-in-out 0s infinite;"/>
       <rect x="4" y="48" width="38" height="34" rx="1.5" fill="#f2b33d" opacity="0.12" style="animation: paneFocus 5.2s ease-in-out 1.3s infinite;"/>
       <rect x="50" y="4" width="38" height="44" rx="1.5" fill="#8c6cd0" opacity="0.12" style="animation: paneFocus 5.2s ease-in-out 2.6s infinite;"/>
       <rect x="50" y="56" width="38" height="26" rx="1.5" fill="#6fb89a" opacity="0.12" style="animation: paneFocus 5.2s ease-in-out 3.9s infinite;"/>
@@ -67,7 +67,7 @@
   <!-- bezel status strip: 3 clusters (LEFT ITASHA.CORP · MIDDLE wordmark · RIGHT CRT-IC v2) -->
   <g>
     <circle cx="52" cy="200" r="3.2" fill="#6fb89a" opacity="0.7" style="animation: fheart 2.4s ease-in-out infinite; transform-origin: 52px 200px;"/>
-    <circle cx="66" cy="200" r="2.6" fill="#34e0d0" opacity="0.45"/>
+    <circle cx="66" cy="200" r="2.6" fill="#B48CE8" opacity="0.45"/>
     <circle cx="80" cy="200" r="2.6" fill="#5050ff" opacity="0.3"/>
     <text x="100" y="200" font-size="8.5" fill="#3a4a52" letter-spacing="3" dominant-baseline="central">ITASHA.CORP</text>
     <text x="640" y="200" text-anchor="middle" font-size="8.5" fill="#2c3a42" letter-spacing="2.4" dominant-baseline="central">WIRED-SHELL · present day · present time</text>
