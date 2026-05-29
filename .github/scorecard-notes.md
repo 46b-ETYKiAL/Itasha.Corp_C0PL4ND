@@ -16,15 +16,34 @@ action.
 ### `Vulnerabilities` (RUSTSEC-2017-0008)
 
 - **What**: The unmaintained [`serial`](https://rustsec.org/advisories/RUSTSEC-2017-0008.html)
-  crate was present in the dependency tree.
-- **Root cause**: It was pulled in transitively by `portable-pty 0.8.1`
-  (Windows serial-port handling).
-- **Fix**: Upgrade `portable-pty` to `0.9.0`, which replaced the unmaintained
-  `serial` crate with the maintained `serial2`. This is a **real upstream fix**,
-  not an ignore — `serial` is fully removed from `Cargo.lock`. The
-  `[advisories] ignore = ["RUSTSEC-2017-0008"]` entry in `deny.toml` was
-  consequently removed; `cargo audit` and `cargo deny check` are clean with no
-  ignores. (See dependency PR bumping `portable-pty`.)
+  crate is present in the dependency tree.
+- **Severity**: RUSTSEC-2017-0008 is an **`unmaintained` informational advisory**,
+  not a memory-safety or exploitable-vulnerability advisory. `serial` is no
+  longer maintained; it has no known exploitable defect.
+- **Root cause**: It is pulled in transitively by `portable-pty 0.8.1`
+  (Windows serial-port handling). C0PL4ND does not use the serial-port API
+  surface — it uses `portable-pty` only for ConPTY/openpty shell spawning.
+- **Why the real upgrade is blocked**: The next `portable-pty` release that
+  drops `serial` (for the maintained `serial2`) is `0.9.0` — but **`0.9.0` has
+  an open, unfixed Windows regression**: `pty.read` returns garbage/empty
+  output on ConPTY, breaking the terminal's core read path on Windows. See
+  upstream [wezterm/wezterm#6783](https://github.com/wezterm/wezterm/issues/6783)
+  (status: **open**, no fixed release published — `0.9.0` is the latest version
+  on crates.io as of this writing). This was reproduced locally: under `0.9.0`
+  the PTY round-trip test produces empty output and the child-wait blocks.
+  Merging the `0.9.0` bump would trade an informational advisory for a broken
+  Windows terminal, which is not an acceptable exchange for the product's
+  primary platform.
+- **Decision**: **Retain the justified `[advisories] ignore = ["RUSTSEC-2017-0008"]`**
+  in `deny.toml` (with the rationale comment), since the advisory is
+  informational and the only fix version regresses the core product on Windows.
+  This satisfies the "unmaintained-only advisory with no usable fix → justified
+  ignore" path. **Re-evaluate when `portable-pty > 0.9.0` ships with the
+  wezterm#6783 ConPTY fix** — at that point bump the dependency and remove the
+  ignore.
+- **Verification**: `cargo audit` reports the advisory as the single *allowed
+  warning* (the ignore is honoured); `cargo deny check` passes. No
+  memory-safety or exploitable advisory is present.
 
 ### `Fuzzing`
 

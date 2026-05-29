@@ -5,8 +5,14 @@
 version = 2
 # Fail on any security advisory in the dependency tree.
 yanked = "deny"
-# RUSTSEC-2017-0008: `serial` unmaintained (informational, not a vulnerability);
-# transitive via portable-pty Windows serial handling, no upstream fix.
+# RUSTSEC-2017-0008: `serial` unmaintained (informational advisory, NOT a
+# memory-safety/exploitable vulnerability). Pulled in transitively by
+# portable-pty 0.8.1's Windows serial handling; C0PL4ND does not use the
+# serial API surface. The fix (portable-pty 0.9.0, which swaps `serial` for
+# `serial2`) is BLOCKED: 0.9.0 has an open, unfixed Windows ConPTY regression
+# where pty.read returns garbage/empty output — https://github.com/wezterm/wezterm/issues/6783
+# (0.9.0 is the latest crates.io release). Re-evaluate and drop this ignore when
+# portable-pty > 0.9.0 ships the wezterm#6783 fix. See .github/scorecard-notes.md.
 ignore = ["RUSTSEC-2017-0008"]
 
 [licenses]

@@ -1,0 +1,13 @@
+# cargo-audit configuration (RustSec advisory DB).
+# Mirrors the [advisories] ignore in deny.toml so the standalone `cargo audit`
+# CI step and `cargo deny check` agree. Run: cargo audit
+
+[advisories]
+# RUSTSEC-2017-0008: `serial` unmaintained (informational advisory, NOT a
+# memory-safety/exploitable vulnerability). Transitive via portable-pty 0.8.1
+# (Windows serial handling); C0PL4ND does not use the serial API surface. The
+# fix (portable-pty 0.9.0, swapping `serial` -> `serial2`) is BLOCKED by the
+# open Windows ConPTY regression https://github.com/wezterm/wezterm/issues/6783
+# (0.9.0 is the latest crates.io release). Re-evaluate and remove this entry
+# when portable-pty > 0.9.0 ships the fix. See .github/scorecard-notes.md.
+ignore = ["RUSTSEC-2017-0008"]
