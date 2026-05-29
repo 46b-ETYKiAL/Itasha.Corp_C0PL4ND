@@ -432,7 +432,11 @@ mod tests {
                 "preset {} leaf count",
                 preset.label()
             );
-            assert!(l.leaf_count() <= MAX_PANES, "preset {} over cap", preset.label());
+            assert!(
+                l.leaf_count() <= MAX_PANES,
+                "preset {} over cap",
+                preset.label()
+            );
             // Cascades cleanly with no empty cells.
             let win = Rect::new(0, 0, 1200, 900);
             let rects = l.cascade(win);

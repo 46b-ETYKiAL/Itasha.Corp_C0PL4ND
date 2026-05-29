@@ -75,7 +75,12 @@ impl LeafView {
 
     /// A leaf carrying explicit launch intent.
     #[must_use]
-    pub fn new(tab_count: usize, active: usize, cwd: Option<String>, profile: Option<String>) -> Self {
+    pub fn new(
+        tab_count: usize,
+        active: usize,
+        cwd: Option<String>,
+        profile: Option<String>,
+    ) -> Self {
         LeafView {
             tab_count,
             active,

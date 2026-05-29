@@ -46,7 +46,10 @@ fn snapshot_round_trip_is_structurally_equal_and_byte_stable() {
     assert_eq!(snap, back, "round-trip must be structurally identical");
 
     let json2 = back.to_json().expect("reserialize");
-    assert_eq!(json, json2, "serde output must be byte-stable for a fixed tree");
+    assert_eq!(
+        json, json2,
+        "serde output must be byte-stable for a fixed tree"
+    );
 }
 
 #[test]
@@ -58,7 +61,12 @@ fn save_then_load_restores_the_same_geometry_with_fresh_ids() {
     layout_persist::save(&l, &path, |_| LeafView::single()).expect("save");
     let restored = layout_persist::load_strict(&path).expect("load");
 
-    let after: Vec<_> = restored.layout.cascade(WIN).into_iter().map(|(_, r)| r).collect();
+    let after: Vec<_> = restored
+        .layout
+        .cascade(WIN)
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect();
     assert_eq!(before, after, "restored cascade geometry must match");
     assert_eq!(restored.leaves.len(), 6);
 

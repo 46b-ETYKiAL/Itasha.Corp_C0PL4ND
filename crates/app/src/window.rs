@@ -838,16 +838,17 @@ impl App {
 
         // Re-home one existing session (the focused cell's visible tab) into the
         // first leaf so applying a preset never throws away the user's shell.
-        let mut kept: Option<Session> = active
-            .cells
-            .remove(&active.layout.focused)
-            .and_then(|mut c| {
-                if c.sessions.is_empty() {
-                    None
-                } else {
-                    Some(c.sessions.remove(c.group.active.min(c.sessions.len() - 1)))
-                }
-            });
+        let mut kept: Option<Session> =
+            active
+                .cells
+                .remove(&active.layout.focused)
+                .and_then(|mut c| {
+                    if c.sessions.is_empty() {
+                        None
+                    } else {
+                        Some(c.sessions.remove(c.group.active.min(c.sessions.len() - 1)))
+                    }
+                });
 
         let mut cells: HashMap<LeafId, Cell> = HashMap::new();
         let (rows, cols) = self.preset_cell_dims(content, &layout);
@@ -1009,10 +1010,7 @@ impl App {
             active.layout = layout;
             active.cells = cells;
         } else {
-            self.tabs.push(Tab {
-                layout,
-                cells,
-            });
+            self.tabs.push(Tab { layout, cells });
             self.active = self.tabs.len() - 1;
         }
         self.relayout_active(content);
@@ -1756,8 +1754,7 @@ impl ApplicationHandler for App {
                 if !drag_mod && self.drag != DragState::Idle {
                     self.drag.cancel();
                     if let Some(g) = &self.gpu {
-                        g.window
-                            .set_cursor(winit::window::CursorIcon::Default);
+                        g.window.set_cursor(winit::window::CursorIcon::Default);
                         g.window.request_redraw();
                     }
                 }

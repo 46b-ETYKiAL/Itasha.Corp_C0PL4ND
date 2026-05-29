@@ -237,7 +237,10 @@ mod tests {
     #[test]
     fn zone_edge_split_mapping() {
         assert_eq!(DropZone::Left.edge_split(), Some((Axis::Horizontal, true)));
-        assert_eq!(DropZone::Right.edge_split(), Some((Axis::Horizontal, false)));
+        assert_eq!(
+            DropZone::Right.edge_split(),
+            Some((Axis::Horizontal, false))
+        );
         assert_eq!(DropZone::Top.edge_split(), Some((Axis::Vertical, true)));
         assert_eq!(DropZone::Bottom.edge_split(), Some((Axis::Vertical, false)));
         assert_eq!(DropZone::Center.edge_split(), None);
