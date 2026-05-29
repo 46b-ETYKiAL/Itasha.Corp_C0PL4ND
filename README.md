@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/svg/banner.svg" alt="C0PL4ND — the operator's shell into the wired" width="100%" />
+  <img src=".github/assets/header.svg" alt="C0PL4ND — the operator's shell into the wired" width="100%" />
 </p>
 
 <h1 align="center">C0PL4ND</h1>

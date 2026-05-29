@@ -1,43 +1,78 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 170" width="1280" height="170" role="img" aria-label="ITASHA.CORP // C0PL4ND — present day, present time">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 214" width="1280" height="214" role="img" aria-label="C0PL4ND — the operator's shell into the wired">
   <defs>
-    <pattern id="scanf" patternUnits="userSpaceOnUse" width="1280" height="4">
+    <pattern id="fscan" patternUnits="userSpaceOnUse" width="1280" height="4">
       <rect width="1280" height="2" fill="transparent"/><rect y="2" width="1280" height="2" fill="rgba(0,0,0,0.16)"/>
     </pattern>
-    <radialGradient id="vigf" cx="50%" cy="50%" r="80%">
-      <stop offset="0%" stop-color="transparent"/><stop offset="100%" stop-color="rgba(0,0,0,0.32)"/>
+    <radialGradient id="fvig" cx="50%" cy="50%" r="75%">
+      <stop offset="0%" stop-color="transparent"/><stop offset="100%" stop-color="rgba(0,0,0,0.5)"/>
     </radialGradient>
-    <filter id="phosf"><feGaussianBlur in="SourceGraphic" stdDeviation="0.6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-    <clipPath id="clipf"><rect x="20" y="16" width="1240" height="128" rx="4"/></clipPath>
+    <linearGradient id="wire" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#B48CE8" stop-opacity="0"/><stop offset="50%" stop-color="#B48CE8" stop-opacity="0.9"/><stop offset="100%" stop-color="#B48CE8" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="fphos"><feGaussianBlur in="SourceGraphic" stdDeviation="0.7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="fglow"><feGaussianBlur stdDeviation="2.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
   </defs>
   <style>
     text { font-family: 'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',Consolas,monospace; }
-    @keyframes sweepf { 0% { transform: translateY(0); } 100% { transform: translateY(128px); } }
-    @keyframes flickerf { 0%,95%,100% { opacity: 1; } 96% { opacity: 0.96; } 98% { opacity: 0.99; } }
-    @keyframes edgeGlowf { 0% { stroke-dashoffset: 2700; } 100% { stroke-dashoffset: 0; } }
-    @keyframes heartbeatf { 0%,100% { r: 3; opacity: 0.5; } 18% { r: 4; opacity: 0.95; } 36% { r: 3; opacity: 0.5; } }
-    @keyframes pulsef { 0% { stroke-dashoffset: 16; opacity: 0.8; } 100% { stroke-dashoffset: 0; opacity: 0.25; } }
+    @keyframes fheart { 0%,100% { transform: scale(1); opacity: 0.55; } 15% { transform: scale(1.3); opacity: 0.95; } 30% { transform: scale(1); opacity: 0.55; } }
+    @keyframes wireTravel { 0% { transform: translateX(-220px); } 100% { transform: translateX(1280px); } }
+    @keyframes fflicker { 0%,96%,100% { opacity: 1; } 97% { opacity: 0.96; } 98% { opacity: 0.99; } }
+    @keyframes nodeOn { 0%,100% { opacity: 0.3; } 50% { opacity: 0.9; } }
+    @keyframes paneFocus { 0%,100% { opacity: 0.35; } 50% { opacity: 1; } }
     @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
   </style>
-  <rect x="0" y="0" width="1280" height="170" rx="10" fill="#111118"/>
-  <rect x="2" y="2" width="1276" height="166" rx="9" fill="#18181f" stroke="#2a2833" stroke-width="1"/>
-  <rect x="20" y="16" width="1240" height="128" rx="4" fill="#08060d"/>
-  <g clip-path="url(#clipf)">
-    <rect x="20" y="16" width="1240" height="3" fill="#00fffe" opacity="0.05" style="animation: sweepf 8s linear infinite;"/>
+
+  <rect x="0" y="0" width="1280" height="214" rx="12" fill="#0b0f12"/>
+  <rect x="2" y="2" width="1276" height="210" rx="11" fill="#1a242b" stroke="#2a3a42" stroke-width="1"/>
+  <rect x="24" y="20" width="1232" height="174" rx="5" fill="#070a0c"/>
+  <rect x="24" y="20" width="1232" height="174" rx="5" fill="url(#fscan)"/>
+  <rect x="24" y="20" width="1232" height="174" rx="5" fill="url(#fvig)"/>
+  <rect x="24" y="20" width="1232" height="174" rx="5" fill="none" stroke="#1a242b"/>
+
+  <g stroke="#B48CE8" stroke-width="1.2" fill="none" opacity="0.55">
+    <path d="M48 44 h22 M48 44 v22"/><path d="M1232 44 h-22 M1232 44 v22"/>
+    <path d="M48 170 h22 M48 170 v-22"/><path d="M1232 170 h-22 M1232 170 v-22"/>
   </g>
-  <rect x="20" y="16" width="1240" height="128" rx="4" fill="url(#scanf)"/>
-  <rect x="20" y="16" width="1240" height="128" rx="4" fill="url(#vigf)"/>
-  <rect x="20" y="16" width="1240" height="128" rx="4" fill="none" stroke="#00fffe" stroke-width="1" opacity="0.06" stroke-dasharray="18,2682" style="animation: edgeGlowf 10s linear infinite;"/>
-  <g stroke="#a020ff" stroke-width="1.2" fill="none" opacity="0.5">
-    <path d="M44 40 h20 M44 40 v20"/><path d="M1236 40 h-20 M1236 40 v20"/>
-    <path d="M44 130 h20 M44 130 v-20"/><path d="M1236 130 h-20 M1236 130 v-20"/>
+
+  <!-- the wired bus + C0PL4ND unique right-zone motion: a mini split-tree, pane-focus cycle -->
+  <g style="animation: fflicker 7s infinite;">
+    <line x1="120" y1="107" x2="1160" y2="107" stroke="#1f2b32" stroke-width="1"/>
+    <g fill="#B48CE8">
+      <circle cx="260" cy="107" r="2.2" style="animation: nodeOn 3s ease-in-out 0s infinite;"/>
+      <circle cx="470" cy="107" r="2.2" style="animation: nodeOn 3s ease-in-out 0.5s infinite;"/>
+      <circle cx="810" cy="107" r="2.2" style="animation: nodeOn 3s ease-in-out 1s infinite;"/>
+      <circle cx="1020" cy="107" r="2.2" style="animation: nodeOn 3s ease-in-out 1.5s infinite;"/>
+    </g>
+    <g style="animation: wireTravel 5s linear infinite;">
+      <rect x="0" y="106" width="220" height="2" fill="url(#wire)"/>
+    </g>
+
+    <!-- mini split-tree: four panes cycle focus (C0PL4ND signature) -->
+    <g transform="translate(1054, 64)" opacity="0.9">
+      <rect x="0" y="0" width="92" height="86" rx="3" fill="none" stroke="#B48CE8" stroke-width="0.8" opacity="0.5"/>
+      <line x1="46" y1="3" x2="46" y2="83" stroke="#B48CE8" stroke-width="0.5" opacity="0.4"/>
+      <line x1="3" y1="44" x2="46" y2="44" stroke="#B48CE8" stroke-width="0.5" opacity="0.4"/>
+      <line x1="46" y1="52" x2="89" y2="52" stroke="#B48CE8" stroke-width="0.5" opacity="0.4"/>
+      <rect x="4" y="4" width="38" height="36" rx="1.5" fill="#B48CE8" opacity="0.12" style="animation: paneFocus 5.2s ease-in-out 0s infinite;"/>
+      <rect x="4" y="48" width="38" height="34" rx="1.5" fill="#f2b33d" opacity="0.12" style="animation: paneFocus 5.2s ease-in-out 1.3s infinite;"/>
+      <rect x="50" y="4" width="38" height="44" rx="1.5" fill="#8c6cd0" opacity="0.12" style="animation: paneFocus 5.2s ease-in-out 2.6s infinite;"/>
+      <rect x="50" y="56" width="38" height="26" rx="1.5" fill="#6fb89a" opacity="0.12" style="animation: paneFocus 5.2s ease-in-out 3.9s infinite;"/>
+    </g>
+
+    <!-- centered brand wordmark + repo tagline -->
+    <text x="640" y="86" text-anchor="middle" font-size="20" font-weight="bold" letter-spacing="8" fill="#e9f7ff" filter="url(#fglow)">C0PL4ND</text>
+    <text x="640" y="128" text-anchor="middle" font-size="11" letter-spacing="4" fill="#8c6cd0" filter="url(#fphos)">the operator's shell into the wired · GPU · split-tree</text>
   </g>
-  <g style="animation: flickerf 7s infinite;" filter="url(#phosf)" text-anchor="middle">
-    <text x="640" y="62" font-size="13" fill="#00fffe" letter-spacing="2">present day · present time</text>
-    <line x1="372" y1="76" x2="908" y2="76" stroke="#a020ff" stroke-width="1.2" opacity="0.45" stroke-dasharray="6,3" style="animation: pulsef 2.2s linear infinite;"/>
-    <text x="640" y="98" font-size="11" fill="#5a5869" letter-spacing="2">GPU-RENDERED · SPLIT-TREE · NESTED TABS · SIXEL/KITTY · NO TELEMETRY</text>
-    <text x="640" y="126" font-size="9" fill="#2a2833" letter-spacing="4">I T A S H A . C O R P   //   T E R M I N A L</text>
+
+  <!-- bezel status strip: 3 clusters (LEFT ITASHA.CORP · MIDDLE wordmark · RIGHT CRT-IC v2) -->
+  <g>
+    <circle cx="52" cy="200" r="3.2" fill="#6fb89a" opacity="0.7" style="animation: fheart 2.4s ease-in-out infinite; transform-origin: 52px 200px;"/>
+    <circle cx="66" cy="200" r="2.6" fill="#B48CE8" opacity="0.45"/>
+    <circle cx="80" cy="200" r="2.6" fill="#5050ff" opacity="0.3"/>
+    <text x="100" y="200" font-size="8.5" fill="#3a4a52" letter-spacing="3" dominant-baseline="central">ITASHA.CORP</text>
+    <text x="640" y="200" text-anchor="middle" font-size="8.5" fill="#2c3a42" letter-spacing="2.4" dominant-baseline="central">WIRED-SHELL · present day · present time</text>
+    <text x="1232" y="200" font-size="8.5" fill="#3a4a52" letter-spacing="2.4" dominant-baseline="central" text-anchor="end">CRT-IC v2</text>
+    <circle cx="1248" cy="200" r="3.4" fill="#6fb89a" opacity="0.5"/>
+    <circle cx="1248" cy="200" r="1.8" fill="#6fb89a" opacity="0.95" style="animation: fheart 2.4s ease-in-out infinite; transform-origin: 1248px 200px;"/>
   </g>
-  <text x="40" y="157" font-size="8" fill="#2a2833" letter-spacing="1">ITASHA.CORP</text>
-  <text x="1146" y="157" font-size="8" fill="#2a2833">CRT-IC // C0PL4ND</text>
-  <circle cx="1244" cy="154" r="3" fill="#01fe36" opacity="0.6" style="animation: heartbeatf 2.6s ease-in-out infinite;"/>
 </svg>
