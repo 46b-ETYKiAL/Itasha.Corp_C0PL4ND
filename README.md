@@ -9,7 +9,7 @@
 <p align="center">
   <a href="#"><img alt="CI" src="https://img.shields.io/badge/CI-passing-22d3c7?style=flat-square" /></a>
   <a href="#license"><img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-ff2d78?style=flat-square" /></a>
-  <a href="#"><img alt="Latest release" src="https://img.shields.io/badge/release-v0.0.0-0b0b0f?style=flat-square" /></a>
+  <a href="../../releases/latest"><img alt="Latest release" src="https://img.shields.io/badge/release-v0.1.0-0b0b0f?style=flat-square" /></a>
   <a href="#"><img alt="Platforms" src="https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-22d3c7?style=flat-square" /></a>
 </p>
 
@@ -124,8 +124,8 @@ For multiplexing and layout — the split-tree grid, nested tabs, drag-to-rearra
 C0PL4ND is built with Rust. You'll need a recent stable toolchain (install via [rustup](https://rustup.rs)).
 
 ```bash
-git clone https://github.com/itasha-corp/c0pl4nd.git
-cd c0pl4nd
+git clone https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND.git
+cd Itasha.Corp_C0PL4ND
 cargo build --release
 ```
 
