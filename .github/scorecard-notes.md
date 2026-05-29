@@ -50,10 +50,13 @@ action.
 - **What**: Scorecard reports no fuzzing integration.
 - **Fix**: Added a `cargo-fuzz` crate (`fuzz/`) with a `vt_parser` target on the
   VT/ANSI/OSC escape-sequence parser — the highest-value untrusted-input
-  surface for a terminal emulator. Wired `.github/workflows/fuzz.yml`
-  (build-on-change + nightly campaign + manual dispatch) and a deterministic
-  adversarial-seed regression test in the stable `cargo test` suite. OSS-Fuzz
-  onboarding is documented in `SECURITY.md`.
+  surface for a terminal emulator (Scorecard detects the `fuzz_target!`
+  integration). The crate is `exclude`d from the stable workspace because
+  libFuzzer needs a nightly + sanitizer toolchain incompatible with this repo's
+  static-musl CI target; it is run locally (`cargo +nightly fuzz run vt_parser`)
+  and is structured for OSS-Fuzz onboarding (documented in `SECURITY.md`). A
+  deterministic adversarial-seed regression test mirrors the fuzz seeds and runs
+  in the stable `cargo test` suite on every platform / every PR.
 
 ### `Code-Review` / `Branch-Protection`
 
