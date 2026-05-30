@@ -7,6 +7,7 @@
 //! poll so shell output appears promptly while an idle screen stays cheap.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,7 @@ use c0pl4nd_core::layout::{
     Axis, Direction, Layout, LeafId, Preset, Rect as LRect, SplitOutcome, TabGroup,
 };
 use c0pl4nd_core::layout_persist::{self, LayoutSnapshot, LeafView};
+use c0pl4nd_core::config::CursorStyle;
 use c0pl4nd_core::{theme::parse_hex, Config, Session, Theme};
 use glyphon::{
     Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -108,6 +110,40 @@ fn action_hint(action: &str) -> &'static str {
     }
 }
 
+/// True when a saved window rect (physical px) keeps at least a usable strip
+/// on-screen across the currently-connected monitors — the D2 multi-monitor
+/// safety check. Requires ≥64px of the window to overlap some monitor so an
+/// unplugged display / resolution change can't orphan the window off-screen.
+fn geometry_on_screen(
+    px: i32,
+    py: i32,
+    sw: u32,
+    sh: u32,
+    monitors: &[winit::monitor::MonitorHandle],
+) -> bool {
+    if monitors.is_empty() {
+        // No monitor info (e.g. Wayland headless) — accept the size, decline to
+        // assert position validity by treating it as on-screen (winit will
+        // place it). Conservative: better than discarding a valid size.
+        return true;
+    }
+    const MIN_VISIBLE: i32 = 64;
+    let (wx0, wy0, wx1, wy1) = (px, py, px + sw as i32, py + sh as i32);
+    monitors.iter().any(|m| {
+        let mp = m.position();
+        let ms = m.size();
+        let (mx0, my0, mx1, my1) = (
+            mp.x,
+            mp.y,
+            mp.x + ms.width as i32,
+            mp.y + ms.height as i32,
+        );
+        let ox = (wx1.min(mx1) - wx0.max(mx0)).max(0);
+        let oy = (wy1.min(my1) - wy0.max(my0)).max(0);
+        ox >= MIN_VISIBLE && oy >= MIN_VISIBLE
+    })
+}
+
 /// Which title-bar button a point falls on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TitlebarHit {
@@ -167,6 +203,17 @@ struct App {
     /// Timestamp of the last left-press on the titlebar drag area, so a second
     /// press within the double-click window toggles maximize (standard chrome).
     last_titlebar_click: Option<Instant>,
+    /// Caption button currently under the cursor (drives the hover backplate).
+    /// Only Minimize/Maximize/Close are meaningful; None otherwise.
+    hovered_button: Option<TitlebarHit>,
+    /// Caption button currently pressed (mouse down on it), for the stronger
+    /// active-state backplate. Cleared on mouse release.
+    pressed_button: Option<TitlebarHit>,
+    /// Debounce clock + dirty flag for window-geometry persistence (D2). A
+    /// rapid interactive resize/move sets `geom_dirty`; the actual config write
+    /// is throttled in `about_to_wait` so we never write per drag pixel.
+    geom_dirty: bool,
+    last_geom_save: Instant,
     /// Leaf currently under the cursor (drives the short-cell tab-strip hover
     /// reveal in T4.2). `None` when the cursor is over chrome / no cell.
     hover_leaf: Option<LeafId>,
@@ -197,6 +244,8 @@ struct App {
     /// Active modal workspace prompt (Phase 6): saving asks for a name,
     /// restoring lists saved workspaces. `None` when no prompt is open.
     workspace_prompt: Option<WorkspacePrompt>,
+    /// Active in-app settings panel (D3). `None` when closed.
+    settings: Option<SettingsPanel>,
 }
 
 /// A modal overlay for the Phase-6 workspace save / restore flow. Reuses the
@@ -208,6 +257,55 @@ enum WorkspacePrompt {
     Save { name: String },
     /// "Restore Layout": pick one of the discovered saved workspaces.
     Restore { names: Vec<String>, idx: usize },
+}
+
+/// The in-app settings panel (D3): a keyboard-driven overlay listing the most
+/// useful settings. Up/Down move the selection, Left/Right adjust the focused
+/// value, Esc closes. Every change is applied live where possible and written
+/// back to the TOML config so the panel and the file stay consistent.
+struct SettingsPanel {
+    /// Currently selected row.
+    idx: usize,
+    /// Theme file stems discovered under the themes dir, for the theme cycler.
+    themes: Vec<String>,
+}
+
+/// The ordered list of editable settings rows in the panel. Each maps to a
+/// `Config` field; the render + key handler drive them generically.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingRow {
+    FontSize,
+    Theme,
+    CursorStyle,
+    CursorBlink,
+    Scrollback,
+    Opacity,
+    StartupPanel,
+}
+
+impl SettingRow {
+    /// Rows in display order.
+    const ALL: [SettingRow; 7] = [
+        SettingRow::FontSize,
+        SettingRow::Theme,
+        SettingRow::CursorStyle,
+        SettingRow::CursorBlink,
+        SettingRow::Scrollback,
+        SettingRow::Opacity,
+        SettingRow::StartupPanel,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            SettingRow::FontSize => "Font size",
+            SettingRow::Theme => "Theme",
+            SettingRow::CursorStyle => "Cursor style",
+            SettingRow::CursorBlink => "Cursor blink",
+            SettingRow::Scrollback => "Scrollback lines",
+            SettingRow::Opacity => "Opacity",
+            SettingRow::StartupPanel => "Startup panel",
+        }
+    }
 }
 
 /// Actions available from the command palette. The `Layout: …` entries apply a
@@ -334,6 +432,10 @@ impl App {
             cursor: (0.0, 0.0),
             chrome_cursor: winit::window::CursorIcon::Default,
             last_titlebar_click: None,
+            hovered_button: None,
+            pressed_button: None,
+            geom_dirty: false,
+            last_geom_save: Instant::now(),
             hover_leaf: None,
             modifiers: ModifiersState::empty(),
             search_mode: false,
@@ -353,6 +455,7 @@ impl App {
                 .map(|v| v != "0" && !v.is_empty())
                 .unwrap_or(false),
             workspace_prompt: None,
+            settings: None,
         }
     }
 
@@ -431,7 +534,8 @@ impl App {
                     }
                 }
             }
-            "Settings" | "Open Config File" => self.open_config_file(),
+            "Settings" => self.open_settings_panel(),
+            "Open Config File" => self.open_config_file(),
             "Quit" => event_loop.exit(),
             _ => {}
         }
@@ -459,6 +563,195 @@ impl App {
             );
         }
         open_path(&path);
+    }
+
+    /// Open the in-app settings panel (D3). Discovers the available theme
+    /// stems so the theme row can cycle them.
+    fn open_settings_panel(&mut self) {
+        let themes = Self::discover_themes();
+        self.settings = Some(SettingsPanel { idx: 0, themes });
+        self.request_redraw();
+    }
+
+    /// Discover theme file stems from the bundled `assets/themes/` dir and the
+    /// user's config `themes/` dir (deduped, sorted). Always includes the
+    /// current config theme so the cycler can represent it even if the dir scan
+    /// misses it.
+    fn discover_themes() -> Vec<String> {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        dirs.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..")
+                .join("assets")
+                .join("themes"),
+        );
+        if let Some(cfg) = Config::default_path() {
+            if let Some(parent) = cfg.parent() {
+                dirs.push(parent.join("themes"));
+            }
+        }
+        let mut names: Vec<String> = Vec::new();
+        for dir in dirs {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if let Some(stem) = p.file_name().and_then(|s| s.to_str()) {
+                        if let Some(name) = stem.strip_suffix(".toml") {
+                            if !names.iter().any(|n| n == name) {
+                                names.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        names.sort();
+        if names.is_empty() {
+            names.push("itasha-void".to_string());
+        }
+        names
+    }
+
+    /// Persist the current in-memory config to the user config file (D3). The
+    /// settings panel calls this after every change so the file and the live
+    /// state never drift. Errors are logged, never fatal.
+    fn persist_config(&self) {
+        if let Some(path) = Config::default_path() {
+            if let Err(e) = self.config.save_to(&path) {
+                tracing::warn!("could not save config: {e}");
+            }
+        }
+    }
+
+    /// Handle a key while the settings panel is open (D3). Up/Down move the
+    /// selection; Left/Right (and Enter for toggles) adjust the focused value
+    /// with immediate live-apply + persist; Esc closes.
+    fn handle_settings_key(&mut self, key: &Key) {
+        let rows = SettingRow::ALL;
+        // Read the panel state into locals so we never hold a borrow of
+        // `self.settings` across a `self`-mutating call below.
+        let Some((idx, themes)) = self
+            .settings
+            .as_ref()
+            .map(|p| (p.idx, p.themes.clone()))
+        else {
+            return;
+        };
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                self.settings = None;
+                self.request_redraw();
+                return;
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                if let Some(p) = self.settings.as_mut() {
+                    p.idx = (idx + 1) % rows.len();
+                }
+                self.request_redraw();
+                return;
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                if let Some(p) = self.settings.as_mut() {
+                    p.idx = (idx + rows.len() - 1) % rows.len();
+                }
+                self.request_redraw();
+                return;
+            }
+            _ => {}
+        }
+        // Value-change keys: Left = decrement, Right/Enter/Space = increment
+        // (Enter/Space toggle booleans / advance enums).
+        let delta: i32 = match key {
+            Key::Named(NamedKey::ArrowLeft) => -1,
+            Key::Named(NamedKey::ArrowRight)
+            | Key::Named(NamedKey::Enter)
+            | Key::Named(NamedKey::Space) => 1,
+            _ => return,
+        };
+        let row = rows[idx];
+        self.adjust_setting(row, delta, &themes);
+        self.persist_config();
+        self.request_redraw();
+    }
+
+    /// Apply a single +/- step to a settings row, mutating `self.config` (and
+    /// live state like `self.theme`) in place. The renderer reads `self.config`
+    /// / `self.theme` each frame, so most changes are visible immediately;
+    /// font size is baked into the GPU metrics at window creation, so it applies
+    /// on the next launch (noted in the panel).
+    fn adjust_setting(&mut self, row: SettingRow, delta: i32, themes: &[String]) {
+        match row {
+            SettingRow::FontSize => {
+                let s = (self.config.font.size + delta as f32 * 0.5).clamp(6.0, 48.0);
+                self.config.font.size = s;
+            }
+            SettingRow::Theme => {
+                if !themes.is_empty() {
+                    let cur = themes.iter().position(|t| *t == self.config.theme);
+                    let len = themes.len() as i32;
+                    let next = match cur {
+                        Some(i) => (((i as i32) + delta).rem_euclid(len)) as usize,
+                        None => 0,
+                    };
+                    self.config.theme = themes[next].clone();
+                    // Live-apply the theme: the renderer reads self.theme.
+                    if let Some(t) = load_theme(&self.config.theme) {
+                        self.theme = t;
+                    }
+                }
+            }
+            SettingRow::CursorStyle => {
+                self.config.cursor.style = match (self.config.cursor.style, delta) {
+                    (CursorStyle::Block, d) if d > 0 => CursorStyle::Bar,
+                    (CursorStyle::Bar, d) if d > 0 => CursorStyle::Underline,
+                    (CursorStyle::Underline, d) if d > 0 => CursorStyle::Block,
+                    (CursorStyle::Block, _) => CursorStyle::Underline,
+                    (CursorStyle::Bar, _) => CursorStyle::Block,
+                    (CursorStyle::Underline, _) => CursorStyle::Bar,
+                };
+            }
+            SettingRow::CursorBlink => {
+                self.config.cursor.blink = !self.config.cursor.blink;
+            }
+            SettingRow::Scrollback => {
+                let step = 1000i64;
+                let v = self.config.scrollback_lines as i64 + delta as i64 * step;
+                self.config.scrollback_lines = v.clamp(0, 1_000_000) as usize;
+            }
+            SettingRow::Opacity => {
+                let o = (self.config.opacity + delta as f32 * 0.05).clamp(0.1, 1.0);
+                self.config.opacity = o;
+            }
+            SettingRow::StartupPanel => {
+                self.config.startup_panel = !self.config.startup_panel;
+            }
+        }
+    }
+
+    /// Render text for the settings panel overlay (D3), or `None` when closed.
+    fn settings_text(&self) -> Option<String> {
+        let panel = self.settings.as_ref()?;
+        let mut s = String::from("\u{2592} settings\n\n");
+        for (i, row) in SettingRow::ALL.iter().enumerate() {
+            let marker = if i == panel.idx { "\u{25b8} " } else { "  " };
+            let value = match row {
+                SettingRow::FontSize => format!("{:.1}  (applies next launch)", self.config.font.size),
+                SettingRow::Theme => self.config.theme.clone(),
+                SettingRow::CursorStyle => match self.config.cursor.style {
+                    CursorStyle::Block => "block".into(),
+                    CursorStyle::Bar => "bar".into(),
+                    CursorStyle::Underline => "underline".into(),
+                },
+                SettingRow::CursorBlink => bool_label(self.config.cursor.blink),
+                SettingRow::Scrollback => self.config.scrollback_lines.to_string(),
+                SettingRow::Opacity => format!("{:.2}", self.config.opacity),
+                SettingRow::StartupPanel => bool_label(self.config.startup_panel),
+            };
+            s.push_str(&format!("{marker}{:<18}{}\n", row.label(), value));
+        }
+        s.push_str("\n  \u{2191}/\u{2193} select   \u{2190}/\u{2192} change   Esc close");
+        Some(s)
     }
 
     fn enter_search(&mut self) {
@@ -1626,6 +1919,69 @@ impl App {
         width - BUTTONS_CELLS * CELL_W - BTN_RIGHT_MARGIN
     }
 
+    /// Capture the live window geometry into `self.config.window` and persist
+    /// it to the config file (D2). Best-effort: a failed `outer_position()`
+    /// (e.g. Wayland) just skips the position. Only the geometry fields are
+    /// written; every other config field the user set is preserved by
+    /// `Config::persist_geometry`.
+    fn save_window_geometry(&mut self) {
+        let Some(g) = &self.gpu else { return };
+        let win = &g.window;
+        let size = win.inner_size();
+        let maximized = win.is_maximized();
+        // Don't capture the (transient) inner size while maximized — that would
+        // overwrite the user's restored size with the maximized extent. Keep the
+        // previously-saved size and only flip the maximized flag.
+        if !maximized {
+            self.config.window.size_w = Some(size.width.max(1));
+            self.config.window.size_h = Some(size.height.max(1));
+            if let Ok(pos) = win.outer_position() {
+                self.config.window.pos_x = Some(pos.x);
+                self.config.window.pos_y = Some(pos.y);
+            }
+        }
+        self.config.window.maximized = Some(maximized);
+        self.config.window.monitor = win.current_monitor().and_then(|m| m.name());
+        let _ = Config::persist_geometry(self.config.window.clone());
+    }
+
+    /// Backplate quads for the caption buttons under hover / press (D1). A
+    /// frameless window has no OS-drawn button highlights, so we paint a solid
+    /// rect behind the hovered button (and a stronger one while pressed) using
+    /// the SAME geometry as `hit_titlebar`/the chrome glyphs. Close hover is the
+    /// danger red; minimize/maximize hover is a subtle foreground wash. The rect
+    /// is drawn BEFORE the chrome text so the glyph stays legible on top.
+    fn caption_backplates(&self, width: f32, fg_rgba: [f32; 4]) -> Vec<ColorRect> {
+        let mut out = Vec::new();
+        let btn_w = (BUTTON_CELLS * CELL_W) as i32;
+        let left = Self::buttons_left_px(width);
+        // (button, index-in-cluster)
+        let slots = [
+            (TitlebarHit::Minimize, 0),
+            (TitlebarHit::Maximize, 1),
+            (TitlebarHit::Close, 2),
+        ];
+        for (btn, idx) in slots {
+            let pressed = self.pressed_button == Some(btn);
+            let hovered = self.hovered_button == Some(btn);
+            if !pressed && !hovered {
+                continue;
+            }
+            let rgba = if btn == TitlebarHit::Close {
+                // Danger red (matches the close glyph colour), Windows-style.
+                let a = if pressed { 0.85 } else { 0.65 };
+                [1.0, 0.0, 0.25, a]
+            } else {
+                // Subtle foreground wash for min/max.
+                let a = if pressed { 0.22 } else { 0.14 };
+                [fg_rgba[0], fg_rgba[1], fg_rgba[2], a]
+            };
+            let x = (left as i32) + idx * btn_w;
+            out.push(ColorRect::new(x, 0, btn_w, TITLEBAR_H as i32, rgba));
+        }
+        out
+    }
+
     /// Classify a point against the window's resize edges. A frameless window
     /// has no OS resize border, so we hit-test a thin band ourselves and ask
     /// winit to drive the native resize.
@@ -1669,11 +2025,41 @@ impl ApplicationHandler for App {
         let width = (cols as f32 * CELL_W) as u32 + 16;
         let height = (rows as f32 * LINE_HEIGHT) as u32 + 16 + TITLEBAR_H as u32;
 
-        let attrs = Window::default_attributes()
+        let mut attrs = Window::default_attributes()
             .with_title(c0pl4nd_core::PRODUCT_NAME)
             .with_decorations(false)
-            .with_resizable(true)
-            .with_inner_size(winit::dpi::LogicalSize::new(width as f64, height as f64));
+            .with_resizable(true);
+        // D2: restore remembered geometry when it lands on a still-connected
+        // monitor; otherwise fall back to the cols/rows-derived default size.
+        // The on-screen validity check guards against a monitor being
+        // unplugged or resolution-changed between runs (a saved position that
+        // is now fully off-screen would orphan the window).
+        let wc = &self.config.window;
+        let restored = match (wc.size_w, wc.size_h) {
+            (Some(sw), Some(sh)) if sw > 0 && sh > 0 => {
+                let monitors: Vec<_> = event_loop.available_monitors().collect();
+                let pos_ok = match (wc.pos_x, wc.pos_y) {
+                    (Some(px), Some(py)) => geometry_on_screen(px, py, sw, sh, &monitors),
+                    _ => false,
+                };
+                attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(sw, sh));
+                if pos_ok {
+                    attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(
+                        wc.pos_x.unwrap_or(0),
+                        wc.pos_y.unwrap_or(0),
+                    ));
+                }
+                if wc.maximized == Some(true) {
+                    attrs = attrs.with_maximized(true);
+                }
+                true
+            }
+            _ => false,
+        };
+        if !restored {
+            attrs =
+                attrs.with_inner_size(winit::dpi::LogicalSize::new(width as f64, height as f64));
+        }
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
         let gpu = match pollster::block_on(Gpu::new(window.clone(), self.config.font.size)) {
@@ -1702,7 +2088,11 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // D2: persist final geometry before we tear down.
+                self.save_window_geometry();
+                event_loop.exit();
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
                 // Feed the drag state machine; a press becomes a drag only past
@@ -1735,20 +2125,37 @@ impl ApplicationHandler for App {
                 // button shows the hand. Only fires on a zone change.
                 {
                     use winit::window::{CursorIcon, ResizeDirection::*};
-                    let icon = if let Some(d) = self.hit_resize_edge(position.x, position.y) {
+                    let edge = self.hit_resize_edge(position.x, position.y);
+                    // Track which caption button (if any) the cursor is over, so
+                    // the render pass can paint its hover backplate. An edge hit
+                    // takes priority and clears the button hover.
+                    let new_hover_btn = if edge.is_some() {
+                        None
+                    } else {
+                        match self.hit_titlebar(position.x, position.y) {
+                            h @ (TitlebarHit::Minimize
+                            | TitlebarHit::Maximize
+                            | TitlebarHit::Close) => Some(h),
+                            _ => None,
+                        }
+                    };
+                    if new_hover_btn != self.hovered_button {
+                        self.hovered_button = new_hover_btn;
+                        if let Some(g) = &self.gpu {
+                            g.window.request_redraw();
+                        }
+                    }
+                    let icon = if let Some(d) = edge {
                         match d {
                             East | West => CursorIcon::EwResize,
                             North | South => CursorIcon::NsResize,
                             NorthWest | SouthEast => CursorIcon::NwseResize,
                             NorthEast | SouthWest => CursorIcon::NeswResize,
                         }
+                    } else if new_hover_btn.is_some() {
+                        CursorIcon::Pointer
                     } else {
-                        match self.hit_titlebar(position.x, position.y) {
-                            TitlebarHit::Minimize | TitlebarHit::Maximize | TitlebarHit::Close => {
-                                CursorIcon::Pointer
-                            }
-                            _ => CursorIcon::Default,
-                        }
+                        CursorIcon::Default
                     };
                     if self.chrome_cursor != icon {
                         if let Some(g) = &self.gpu {
@@ -1801,6 +2208,12 @@ impl ApplicationHandler for App {
                 } else {
                     false
                 };
+                // Record a press on a caption button for the active-state
+                // backplate (cleared on release). Harmless for non-button hits.
+                self.pressed_button = match hit {
+                    TitlebarHit::Minimize | TitlebarHit::Maximize | TitlebarHit::Close => Some(hit),
+                    _ => None,
+                };
                 if let Some(gpu) = &self.gpu {
                     match hit {
                         TitlebarHit::Close => event_loop.exit(),
@@ -1819,6 +2232,9 @@ impl ApplicationHandler for App {
                         }
                         TitlebarHit::None => {}
                     }
+                    if self.pressed_button.is_some() {
+                        gpu.window.request_redraw();
+                    }
                 }
             }
             WindowEvent::MouseInput {
@@ -1826,6 +2242,13 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                // Clear any caption-button press state (drops the active-state
+                // backplate back to hover/none).
+                if self.pressed_button.take().is_some() {
+                    if let Some(g) = &self.gpu {
+                        g.window.request_redraw();
+                    }
+                }
                 // End any pane drag; a real drag (past threshold) resolves a drop,
                 // a sub-threshold press is just a click and is discarded.
                 if let Some(source) = self.drag.release() {
@@ -1848,10 +2271,18 @@ impl ApplicationHandler for App {
                         gpu.resize(w, h);
                     }
                     self.pending_resize = Some((w, h));
+                    // D2: mark geometry dirty; the actual config write is
+                    // throttled in `about_to_wait` so a drag doesn't write per
+                    // pixel.
+                    self.geom_dirty = true;
                     if let Some(g) = &self.gpu {
                         g.window.request_redraw();
                     }
                 }
+            }
+            WindowEvent::Moved(_) => {
+                // D2: window dragged to a new position — remember it (debounced).
+                self.geom_dirty = true;
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (up, lines) = match delta {
@@ -1899,6 +2330,10 @@ impl ApplicationHandler for App {
                 // "Restore Layout") and overlay on top of it; without this
                 // route the prompt would render but every keystroke would
                 // fall through to the PTY (P0 functional gap caught at QA).
+                if self.settings.is_some() {
+                    self.handle_settings_key(&event.logical_key);
+                    return;
+                }
                 if self.workspace_prompt.is_some() {
                     self.handle_workspace_prompt_key(&event.logical_key);
                     return;
@@ -1971,6 +2406,14 @@ impl ApplicationHandler for App {
                 self.pending_resize = None;
                 self.last_pty_resize = now;
             }
+        }
+        // D2: debounced window-geometry persistence. A resize/move sets
+        // `geom_dirty`; we write at most ~once/600ms so an interactive drag
+        // doesn't thrash the config file.
+        if self.geom_dirty && now.duration_since(self.last_geom_save) >= Duration::from_millis(600) {
+            self.geom_dirty = false;
+            self.last_geom_save = now;
+            self.save_window_geometry();
         }
         if now >= self.next_poll {
             self.next_poll = now + Duration::from_millis(16);
@@ -2099,10 +2542,21 @@ impl App {
             None
         };
 
+        // Settings panel overlay text (D3), built before borrowing gpu.
+        let settings_text = self.settings_text();
+
         let splash_text = self.splash.clone();
         // Drag overlay quads (dim source + zone highlight + cursor ghost),
         // computed before the gpu borrow since they read the active tab.
         let drag_overlay = self.drag_overlay_quads(accent);
+        // Caption-button hover/press backplates (D1). Computed here, before the
+        // `&mut self.gpu` borrow below, so it can borrow `self` immutably; the
+        // surface width is read from the (still-shared) gpu first.
+        let caption_backplates = self
+            .gpu
+            .as_ref()
+            .map(|g| self.caption_backplates(g.surface_config.width as f32, to_rgba(fg)))
+            .unwrap_or_default();
         // No pane border/inset for a single leaf — visually identical to the
         // pre-split renderer; a 1px border only appears once the window splits.
         let border = if cells.len() > 1 { BORDER_PX } else { 0 };
@@ -2216,7 +2670,7 @@ impl App {
         gpu.chrome_buffer
             .shape_until_scroll(&mut gpu.font_system, false);
 
-        if let Some(pt) = &palette_text {
+        if let Some(pt) = palette_text.as_ref().or(settings_text.as_ref()) {
             gpu.palette_buffer.set_text(
                 &mut gpu.font_system,
                 pt,
@@ -2349,8 +2803,9 @@ impl App {
                 custom_glyphs: &[],
             });
         }
-        if palette_text.is_some() {
-            // Centered command-palette overlay.
+        if palette_text.is_some() || settings_text.is_some() {
+            // Centered command-palette / settings overlay (mutually exclusive
+            // modes share the palette buffer).
             areas.push(TextArea {
                 buffer: &gpu.palette_buffer,
                 left: (w as f32 * 0.25).max(40.0),
@@ -2383,7 +2838,7 @@ impl App {
         // Pane chrome: a full-content gutter fill (= bg, harmless for a single
         // pane where chrome_quads returns empty) plus a 1px border per leaf,
         // accent on the focused leaf and muted on the rest.
-        let chrome = chrome_quads(
+        let mut chrome = chrome_quads(
             &cells,
             focused,
             to_rgba(accent),
@@ -2392,6 +2847,10 @@ impl App {
             [bg.r as f32, bg.g as f32, bg.b as f32, bg.a as f32],
             content,
         );
+        // Caption-button hover/press backplates (D1), drawn before the chrome
+        // text so the button glyph stays legible on top (computed above the gpu
+        // borrow to avoid an aliasing conflict).
+        chrome.extend(caption_backplates);
         let prepared_chrome = gpu
             .chrome_renderer
             .prepare(&gpu.device, w as f32, h as f32, &chrome);
@@ -2661,6 +3120,11 @@ fn sanitize_workspace_name(name: &str) -> String {
     } else {
         s
     }
+}
+
+/// Render a boolean setting as a compact on/off label for the settings panel.
+fn bool_label(b: bool) -> String {
+    if b { "on".to_string() } else { "off".to_string() }
 }
 
 /// Approximate sRGB(0-255) → linear(0-1) for the wgpu clear color.
