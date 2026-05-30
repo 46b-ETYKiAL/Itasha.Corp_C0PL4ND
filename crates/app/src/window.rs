@@ -7,10 +7,12 @@
 //! poll so shell output appears promptly while an idle screen stays cheap.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use c0pl4nd_core::config::CursorStyle;
 use c0pl4nd_core::layout::{
     Axis, Direction, Layout, LeafId, Preset, Rect as LRect, SplitOutcome, TabGroup,
 };
@@ -3118,6 +3120,11 @@ fn sanitize_workspace_name(name: &str) -> String {
     } else {
         s
     }
+}
+
+/// Human-readable on/off label for a boolean setting row.
+fn bool_label(on: bool) -> String {
+    if on { "on".to_string() } else { "off".to_string() }
 }
 
 /// Approximate sRGB(0-255) → linear(0-1) for the wgpu clear color.
