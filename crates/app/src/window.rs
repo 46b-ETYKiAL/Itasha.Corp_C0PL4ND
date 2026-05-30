@@ -17,6 +17,9 @@ use c0pl4nd_core::layout::{
 };
 use c0pl4nd_core::layout_persist::{self, LayoutSnapshot, LeafView};
 use c0pl4nd_core::config::CursorStyle;
+use c0pl4nd_core::term::{
+    MouseButton as TermMouseButton, MouseEventKind, MouseMode, MouseModifiers,
+};
 use c0pl4nd_core::{theme::parse_hex, Config, Session, Theme};
 use glyphon::{
     Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -68,6 +71,53 @@ pub fn run_gui(config: &Config) -> Result<()> {
     let mut app = App::new(config.clone());
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// Read the OS clipboard as UTF-8 text without a third-party crate (the build
+/// environment cannot fetch new dependencies). Shells out to the platform's
+/// standard clipboard tool: PowerShell `Get-Clipboard` on Windows, `pbpaste`
+/// on macOS, and `wl-paste`/`xclip`/`xsel` on Linux (first available). Returns
+/// `None` when no tool succeeds. CRLF is normalised to LF and a single trailing
+/// newline that the tools append is trimmed.
+fn read_os_clipboard() -> Option<String> {
+    use std::process::Command;
+    let out = {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            Command::new("powershell")
+                .args(["-NoProfile", "-Command", "Get-Clipboard -Raw"])
+                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                .output()
+                .ok()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Command::new("pbpaste").output().ok()
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            ["wl-paste", "xclip", "xsel"]
+                .iter()
+                .find_map(|tool| {
+                    let mut cmd = Command::new(tool);
+                    if *tool == "xclip" {
+                        cmd.args(["-selection", "clipboard", "-o"]);
+                    } else if *tool == "xsel" {
+                        cmd.args(["--clipboard", "--output"]);
+                    }
+                    cmd.output().ok().filter(|o| o.status.success())
+                })
+        }
+    }?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut s = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    if s.ends_with('\n') {
+        s.pop();
+    }
+    Some(s)
 }
 
 /// Open a path with the OS default handler (editor for config.toml). Detached +
@@ -214,6 +264,12 @@ struct App {
     /// is throttled in `about_to_wait` so we never write per drag pixel.
     geom_dirty: bool,
     last_geom_save: Instant,
+    /// Phase clock for the terminal cursor blink (E5/E7); a 530ms half-period
+    /// toggle keyed off this start instant.
+    blink_start: Instant,
+    /// Last time a blink-driven redraw was issued, so an idle window with a
+    /// blinking cursor still animates without redrawing every poll tick.
+    last_blink_redraw: Instant,
     /// Leaf currently under the cursor (drives the short-cell tab-strip hover
     /// reveal in T4.2). `None` when the cursor is over chrome / no cell.
     hover_leaf: Option<LeafId>,
@@ -436,6 +492,8 @@ impl App {
             pressed_button: None,
             geom_dirty: false,
             last_geom_save: Instant::now(),
+            blink_start: Instant::now(),
+            last_blink_redraw: Instant::now(),
             hover_leaf: None,
             modifiers: ModifiersState::empty(),
             search_mode: false,
@@ -761,6 +819,45 @@ impl App {
         self.search_idx = 0;
     }
 
+    /// Paste the OS clipboard into the focused pane's PTY (E3). Honors
+    /// bracketed-paste mode (`?2004`): when the running program requested it,
+    /// the text is wrapped in `ESC[200~ … ESC[201~` and any embedded end
+    /// sentinel is stripped first, so a pasted payload cannot smuggle control
+    /// of the bracket (the canonical paste-injection guard). Falls back to a
+    /// raw paste when bracketed mode is off.
+    fn paste_clipboard(&mut self) {
+        let Some(text) = read_os_clipboard() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        // Read the bracketed-paste flag under a short lock, dropped before the
+        // mutable session borrow below.
+        let bracketed = self
+            .active_session()
+            .and_then(|s| s.terminal().lock().ok().map(|t| t.bracketed_paste()))
+            .unwrap_or(false);
+        let bytes: Vec<u8> = if bracketed {
+            // Strip any embedded end-sentinel so the payload can't terminate the
+            // bracket early and inject commands into the shell.
+            let cleaned = text.replace("\x1b[201~", "");
+            let mut b = Vec::with_capacity(cleaned.len() + 12);
+            b.extend_from_slice(b"\x1b[200~");
+            b.extend_from_slice(cleaned.as_bytes());
+            b.extend_from_slice(b"\x1b[201~");
+            b
+        } else {
+            text.into_bytes()
+        };
+        if let Some(s) = self.active_session_mut() {
+            if let Ok(mut term) = s.terminal().lock() {
+                term.scroll_to_bottom();
+            }
+            let _ = s.write_input(&bytes);
+        }
+    }
+
     fn exit_search(&mut self) {
         self.search_mode = false;
         self.search_query.clear();
@@ -875,6 +972,125 @@ impl App {
             .into_iter()
             .find(|(id, _)| *id == leaf)
             .map(|(_, r)| r)
+    }
+
+    /// Forward a mouse event to the focused pane's PTY when the running program
+    /// enabled mouse reporting (E6). Returns `true` when the event was consumed
+    /// as a mouse report (so the caller skips the normal scroll/selection path).
+    /// `(px, py)` is the physical-pixel cursor position. Cells are 1-based per
+    /// the xterm protocol; the column/row are derived from the focused leaf's
+    /// grid origin (matching the render placement: border + 8.0/2.0 pad).
+    fn forward_mouse(&mut self, button: TermMouseButton, kind: MouseEventKind, px: f64, py: f64) -> bool {
+        let focused = self.active_tab().map(|t| t.layout.focused);
+        let Some(leaf) = focused else { return false };
+        let Some(cell) = self.leaf_rect(leaf) else {
+            return false;
+        };
+        let border = self
+            .active_tab()
+            .map(|t| if t.layout.leaf_count() > 1 { BORDER_PX } else { 0 })
+            .unwrap_or(0);
+        let (ox, oy) = leaf_text_origin(cell, border, 8.0, 2.0);
+        // 1-based cell coordinates, clamped to the cell's grid extent.
+        let col = (((px as f32 - ox) / CELL_W).floor() as i64).max(0) as usize + 1;
+        let row = (((py as f32 - oy) / LINE_HEIGHT).floor() as i64).max(0) as usize + 1;
+        let mods = MouseModifiers {
+            shift: self.modifiers.shift_key(),
+            alt: self.modifiers.alt_key(),
+            control: self.modifiers.control_key(),
+        };
+        let Some(s) = self.active_session_mut() else {
+            return false;
+        };
+        let term_arc = s.terminal();
+        let bytes = {
+            let Ok(term) = term_arc.lock() else {
+                return false;
+            };
+            if term.mouse_mode() == MouseMode::Off {
+                return false;
+            }
+            term.encode_mouse(button, mods, col, row, kind)
+        };
+        match bytes {
+            Some(b) => {
+                let _ = s.write_input(&b);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Cursor quad(s) for the focused pane's terminal cursor (E5/E7). Honors
+    /// DECTCEM visibility (`?25`), DECSCUSR shape (block/bar/underline), and
+    /// blink (530ms half-period). Returns empty when the cursor is hidden,
+    /// blinked-off, or scrolled into scrollback. Block is drawn semi-transparent
+    /// so the glyph beneath stays readable (the quad layer is behind the text).
+    /// Must be called before the `&mut self.gpu` borrow (it locks the terminal).
+    fn cursor_quads(
+        &self,
+        focused: LeafId,
+        cells: &[(LeafId, LRect)],
+        border: i32,
+        laid_out_strip: &std::collections::HashSet<LeafId>,
+        accent: GColor,
+    ) -> Vec<ColorRect> {
+        let Some(cell) = cells.iter().find(|(id, _)| *id == focused).map(|(_, r)| *r) else {
+            return Vec::new();
+        };
+        let Some(tab) = self.active_tab() else {
+            return Vec::new();
+        };
+        let Some(pane) = tab.cells.get(&focused).and_then(Cell::active) else {
+            return Vec::new();
+        };
+        let term_arc = pane.terminal();
+        let (row, col, shape, blink) = {
+            let Ok(t) = term_arc.lock() else {
+                return Vec::new();
+            };
+            if !t.is_cursor_visible() {
+                return Vec::new();
+            }
+            match t.cursor_position() {
+                Some((r, c)) => (r, c, t.cursor_shape(), t.cursor_blink()),
+                None => return Vec::new(),
+            }
+        };
+        // Blink: when enabled, suppress the cursor during the off half-period.
+        if blink {
+            let on = (self.blink_start.elapsed().as_millis() / 530) % 2 == 0;
+            if !on {
+                return Vec::new();
+            }
+        }
+        let strip_top = if laid_out_strip.contains(&focused) {
+            CELL_TABBAR_H
+        } else {
+            0.0
+        };
+        let (ox, oy) = leaf_text_origin(cell, border, 8.0, 2.0 + strip_top);
+        let x = (ox + col as f32 * CELL_W) as i32;
+        let y = (oy + row as f32 * LINE_HEIGHT) as i32;
+        let cw = CELL_W.ceil() as i32;
+        let ch = LINE_HEIGHT.ceil() as i32;
+        let a = accent;
+        let (ar, ag, ab) = (a.r() as f32 / 255.0, a.g() as f32 / 255.0, a.b() as f32 / 255.0);
+        let rect = match shape {
+            // Block: full cell, semi-transparent so the glyph shows through.
+            c0pl4nd_core::term::CursorShape::Block => {
+                ColorRect::new(x, y, cw, ch, [ar, ag, ab, 0.55])
+            }
+            // Bar: 2px vertical at the cell's left edge (opaque).
+            c0pl4nd_core::term::CursorShape::Bar => {
+                ColorRect::new(x, y, 2, ch, [ar, ag, ab, 0.95])
+            }
+            // Underline: 2px horizontal at the cell's bottom (opaque).
+            c0pl4nd_core::term::CursorShape::Underline => {
+                ColorRect::new(x, (y + ch - 2).max(y), cw, 2, [ar, ag, ab, 0.95])
+            }
+        };
+        vec![rect]
     }
 
     /// The drop zone under the cursor for the pane being dragged, or `None` when
@@ -1788,6 +2004,10 @@ impl App {
                     self.enter_search();
                     true
                 }
+                Some('v') => {
+                    self.paste_clipboard();
+                    true
+                }
                 Some('p') => {
                     self.enter_palette();
                     true
@@ -2220,6 +2440,19 @@ impl ApplicationHandler for App {
                     return;
                 }
                 let hit = self.hit_titlebar(self.cursor.0, self.cursor.1);
+                // E6: a press in pane content (not chrome) forwards to the PTY
+                // when the program enabled mouse reporting (vim/tmux/htop). The
+                // titlebar/resize paths above still win, so window controls work.
+                if hit == TitlebarHit::None
+                    && self.forward_mouse(
+                        TermMouseButton::Left,
+                        MouseEventKind::Press,
+                        self.cursor.0,
+                        self.cursor.1,
+                    )
+                {
+                    return;
+                }
                 // Double-click the drag area → toggle maximize (standard window
                 // behaviour). Computed before borrowing gpu to avoid a borrow clash.
                 let dbl_titlebar = if hit == TitlebarHit::Drag {
@@ -2273,6 +2506,19 @@ impl ApplicationHandler for App {
                         g.window.request_redraw();
                     }
                 }
+                // E6: forward the release to the PTY when mouse reporting is on
+                // and no pane-drag is in progress (a drag owns the release).
+                if !self.drag.is_dragging()
+                    && self.hit_titlebar(self.cursor.0, self.cursor.1) == TitlebarHit::None
+                    && self.forward_mouse(
+                        TermMouseButton::Left,
+                        MouseEventKind::Release,
+                        self.cursor.0,
+                        self.cursor.1,
+                    )
+                {
+                    return;
+                }
                 // End any pane drag; a real drag (past threshold) resolves a drop,
                 // a sub-threshold press is just a click and is discarded.
                 if let Some(source) = self.drag.release() {
@@ -2318,6 +2564,32 @@ impl ApplicationHandler for App {
                         ((p.y.abs() / LINE_HEIGHT as f64).ceil() as usize).max(1),
                     ),
                 };
+                // E6: when the program enabled mouse reporting, the wheel is sent
+                // to the PTY (one report per line) instead of scrolling the local
+                // scrollback view — alt-screen apps (less/vim) drive their own.
+                let wheel_btn = if up {
+                    TermMouseButton::WheelUp
+                } else {
+                    TermMouseButton::WheelDown
+                };
+                let reporting = self
+                    .active_session()
+                    .and_then(|s| s.terminal().lock().ok().map(|t| t.mouse_mode() != MouseMode::Off))
+                    .unwrap_or(false);
+                if reporting {
+                    for _ in 0..lines {
+                        self.forward_mouse(
+                            wheel_btn,
+                            MouseEventKind::Press,
+                            self.cursor.0,
+                            self.cursor.1,
+                        );
+                    }
+                    if let Some(g) = &self.gpu {
+                        g.window.request_redraw();
+                    }
+                    return;
+                }
                 if let Some(s) = self.active_session() {
                     if let Ok(mut term) = s.terminal().lock() {
                         if up {
@@ -2454,7 +2726,21 @@ impl ApplicationHandler for App {
                     })
                 })
                 .unwrap_or(false);
-            if damaged {
+            // E5/E7: drive the cursor blink — once per 530ms half-period issue a
+            // redraw so an idle window still animates the cursor. Cheap (<2 Hz)
+            // and only when the focused pane's cursor actually blinks.
+            let blink_due = now.duration_since(self.last_blink_redraw)
+                >= Duration::from_millis(530)
+                && self
+                    .active_session()
+                    .and_then(|s| s.terminal().lock().ok().map(|t| {
+                        t.is_cursor_visible() && t.cursor_blink()
+                    }))
+                    .unwrap_or(false);
+            if blink_due {
+                self.last_blink_redraw = now;
+            }
+            if damaged || blink_due {
                 if let Some(g) = &self.gpu {
                     g.window.request_redraw();
                 }
@@ -2590,6 +2876,9 @@ impl App {
         // No pane border/inset for a single leaf — visually identical to the
         // pre-split renderer; a 1px border only appears once the window splits.
         let border = if cells.len() > 1 { BORDER_PX } else { 0 };
+        // Terminal cursor quads (E5/E7), computed before the gpu borrow since
+        // they lock the focused terminal.
+        let cursor_quads = self.cursor_quads(focused, &cells, border, &laid_out_strip, accent);
 
         let Some(gpu) = &mut self.gpu else { return };
         let width = gpu.surface_config.width as f32;
@@ -2895,6 +3184,8 @@ impl App {
                 chrome.push(ColorRect::new(x, y, cw, ch, *rgba));
             }
         }
+        // Terminal cursor (E5/E7), behind the text so the glyph stays readable.
+        chrome.extend(cursor_quads);
         // Caption-button hover/press backplates (D1), drawn before the chrome
         // text so the button glyph stays legible on top (computed above the gpu
         // borrow to avoid an aliasing conflict).
