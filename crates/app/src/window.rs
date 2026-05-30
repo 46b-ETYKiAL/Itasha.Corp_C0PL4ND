@@ -1605,12 +1605,6 @@ impl App {
         out
     }
 
-    /// Snapshot one leaf's terminal grid into per-colour foreground spans,
-    /// clearing its damage flag. Returns `None` when the leaf has no session.
-    fn leaf_spans(&self, leaf: LeafId, fg: GColor) -> Option<Vec<(String, GColor)>> {
-        Some(self.leaf_render(leaf, fg)?.0)
-    }
-
     /// Snapshot one leaf's grid into BOTH foreground spans (for glyphon) and
     /// per-cell background paints (for the solid-quad layer). This is the single
     /// place the grid is read+damage-cleared per frame, so foreground and
