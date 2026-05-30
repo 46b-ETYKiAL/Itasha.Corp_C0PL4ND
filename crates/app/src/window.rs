@@ -18,7 +18,8 @@ use c0pl4nd_core::layout::{
 use c0pl4nd_core::layout_persist::{self, LayoutSnapshot, LeafView};
 use c0pl4nd_core::config::CursorStyle;
 use c0pl4nd_core::term::{
-    MouseButton as TermMouseButton, MouseEventKind, MouseMode, MouseModifiers,
+    ColorSet, DynamicColor, MouseButton as TermMouseButton, MouseEventKind, MouseMode,
+    MouseModifiers,
 };
 use c0pl4nd_core::{theme::parse_hex, Config, Session, Theme};
 use glyphon::{
@@ -71,6 +72,61 @@ pub fn run_gui(config: &Config) -> Result<()> {
     let mut app = App::new(config.clone());
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// Write `text` to the OS clipboard without a third-party crate (offline build:
+/// no new deps). Feeds the text via the child's stdin to the platform clipboard
+/// tool: `clip` on Windows, `pbcopy` on macOS, `wl-copy`/`xclip`/`xsel` on Linux
+/// (first available). Best-effort — failures are logged, never fatal. Used to
+/// honour OSC 52 clipboard-write requests (E10 wiring).
+fn write_os_clipboard(text: &str) {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let spawn = |mut cmd: Command| -> bool {
+        cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        match cmd.spawn() {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                // Dropping stdin closes it; wait so the tool flushes the clipboard.
+                child.wait().map(|s| s.success()).unwrap_or(false)
+            }
+            Err(_) => false,
+        }
+    };
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = Command::new("clip");
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        if !spawn(cmd) {
+            tracing::warn!("clipboard write failed (clip)");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if !spawn(Command::new("pbcopy")) {
+            tracing::warn!("clipboard write failed (pbcopy)");
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let ok = [
+            ("wl-copy", &[][..]),
+            ("xclip", &["-selection", "clipboard"][..]),
+            ("xsel", &["--clipboard", "--input"][..]),
+        ]
+        .iter()
+        .any(|(tool, args)| {
+            let mut cmd = Command::new(tool);
+            cmd.args(*args);
+            spawn(cmd)
+        });
+        if !ok {
+            tracing::warn!("clipboard write failed (no wl-copy/xclip/xsel)");
+        }
+    }
 }
 
 /// Read the OS clipboard as UTF-8 text without a third-party crate (the build
@@ -1704,6 +1760,110 @@ impl App {
         self.request_redraw();
     }
 
+    /// Drain each live session's terminal-produced side outputs and act on them
+    /// (E10/E11 app wiring): OSC query replies go back to that session's PTY;
+    /// OSC 52 clipboard writes go to the OS clipboard; OSC 4/10/11/12 color sets
+    /// update the live theme; OSC 9/777 notifications are logged. Runs every
+    /// poll tick. Each terminal is locked only briefly to collect the queued
+    /// items, then the lock is dropped before any PTY write / shell-out.
+    fn pump_terminal_io(&mut self) {
+        // Collect (session-address, pty_response) plus aggregated clipboard /
+        // color / notification effects across all live sessions. Session
+        // address is (tab_index, leaf, tab_slot) so we can write the PTY reply
+        // back to the exact originating session afterwards.
+        let mut responses: Vec<(usize, LeafId, usize, Vec<u8>)> = Vec::new();
+        let mut clipboard: Vec<String> = Vec::new();
+        let mut colors: Vec<ColorSet> = Vec::new();
+        let mut redraw = false;
+        for (ti, tab) in self.tabs.iter().enumerate() {
+            for (leaf, cell) in tab.cells.iter() {
+                for (slot, sess) in cell.sessions.iter().enumerate() {
+                    let term_arc = sess.terminal();
+                    let Ok(mut term) = term_arc.lock() else {
+                        continue;
+                    };
+                    let resp = term.take_pty_response();
+                    if !resp.is_empty() {
+                        responses.push((ti, *leaf, slot, resp));
+                    }
+                    for cw in term.take_clipboard_writes() {
+                        clipboard.push(cw.text);
+                    }
+                    let cs = term.take_color_sets();
+                    if !cs.is_empty() {
+                        colors.extend(cs);
+                        redraw = true;
+                    }
+                    while let Some(n) = term.take_notification() {
+                        if n.title.is_empty() {
+                            tracing::info!("notification: {}", n.body);
+                        } else {
+                            tracing::info!("notification: {} — {}", n.title, n.body);
+                        }
+                    }
+                }
+            }
+        }
+        // PTY query replies: write to the exact originating session.
+        for (ti, leaf, slot, bytes) in responses {
+            if let Some(sess) = self
+                .tabs
+                .get_mut(ti)
+                .and_then(|t| t.cells.get_mut(&leaf))
+                .and_then(|c| c.sessions.get_mut(slot))
+            {
+                let _ = sess.write_input(&bytes);
+            }
+        }
+        // OSC 52 → OS clipboard (write only; reads stay default-off in core).
+        for text in clipboard {
+            write_os_clipboard(&text);
+        }
+        // OSC 4/10/11/12 → live theme. Dynamic colors map to the theme's
+        // foreground/background/cursor; indexed sets update the ANSI rows.
+        for set in colors {
+            self.apply_color_set(set);
+        }
+        if redraw {
+            self.request_redraw();
+        }
+    }
+
+    /// Apply an OSC color-set to the live theme so the change is visible on the
+    /// next frame (E11 wiring).
+    fn apply_color_set(&mut self, set: ColorSet) {
+        let hex = |(r, g, b): (u8, u8, u8)| format!("#{r:02x}{g:02x}{b:02x}");
+        match set {
+            ColorSet::Dynamic { which, rgb } => match which {
+                DynamicColor::Foreground => self.theme.foreground = hex(rgb),
+                DynamicColor::Background => self.theme.background = hex(rgb),
+                DynamicColor::Cursor => self.theme.cursor = hex(rgb),
+            },
+            ColorSet::Indexed { index, rgb } => {
+                let row = if index < 8 {
+                    &mut self.theme.normal
+                } else if index < 16 {
+                    &mut self.theme.bright
+                } else {
+                    // 256-color cube entries aren't represented in the 16-slot
+                    // theme; ignore rather than misplace them.
+                    return;
+                };
+                let slot = match index % 8 {
+                    0 => &mut row.black,
+                    1 => &mut row.red,
+                    2 => &mut row.green,
+                    3 => &mut row.yellow,
+                    4 => &mut row.blue,
+                    5 => &mut row.magenta,
+                    6 => &mut row.cyan,
+                    _ => &mut row.white,
+                };
+                *slot = hex(rgb);
+            }
+        }
+    }
+
     /// Resize every visible leaf's PTY to its cell's cols/rows for the current
     /// cascade over `content`.
     fn relayout_active(&mut self, content: LRect) {
@@ -2719,6 +2879,9 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+        // E10/E11: drain terminal-produced OSC side effects (query replies,
+        // clipboard writes, color sets, notifications) for every live session.
+        self.pump_terminal_io();
         // Drain a pending interactive-resize at ~30 Hz: a rapid window drag
         // issues at most ~30 per-leaf PTY resizes/sec, and because the pending
         // size persists until drained, the final size is always applied.
