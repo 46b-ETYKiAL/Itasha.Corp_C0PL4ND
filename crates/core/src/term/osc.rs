@@ -5,8 +5,12 @@
 //! includes a dependency-free RFC 4648 base64 codec (for OSC 52 clipboard
 //! payloads), X-style color spec parsing/formatting (for OSC 4/10/11/12), and
 //! the small value types the public API hands back to the application.
+//!
+//! Colors are plain `(u8, u8, u8)` RGB triples — the same representation
+//! [`crate::grid::Color::Rgb`] carries — so no new color type is introduced.
 
-use crate::term::Rgb;
+/// An RGB triple `(r, g, b)`, matching [`crate::grid::Color::Rgb`]'s fields.
+pub type Rgb = (u8, u8, u8);
 
 // ============================================================================
 // Clipboard (OSC 52)
@@ -33,6 +37,42 @@ pub struct ClipboardWrite {
     pub selection: ClipboardSelection,
     /// The decoded UTF-8 text to place on the clipboard.
     pub text: String,
+}
+
+// ============================================================================
+// Dynamic colors / notifications
+// ============================================================================
+
+/// Which dynamic color an OSC 10/11/12 (or 110/111/112 reset) targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DynamicColor {
+    /// Default foreground (OSC 10).
+    Foreground,
+    /// Default background (OSC 11).
+    Background,
+    /// Cursor color (OSC 12).
+    Cursor,
+}
+
+/// A pending color-set request drained by the application so it can update its
+/// live theme. Produced by OSC 4 (indexed) and OSC 10/11/12 (dynamic) sets, and
+/// by OSC 104/110/111/112 resets (the `rgb` then carries the default value).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorSet {
+    /// Set indexed palette entry `index` to `rgb`.
+    Indexed { index: u8, rgb: Rgb },
+    /// Set a dynamic color (fg/bg/cursor) to `rgb`.
+    Dynamic { which: DynamicColor, rgb: Rgb },
+}
+
+/// A pending desktop notification (OSC 9 / OSC 777) drained by the application.
+///
+/// OSC 9 carries only a body; its `title` is empty. OSC 777 (`notify`) carries
+/// both a title and a body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notification {
+    pub title: String,
+    pub body: String,
 }
 
 // ============================================================================
@@ -156,7 +196,7 @@ pub fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
 // Color spec parsing / formatting (OSC 4 / 10 / 11 / 12)
 // ============================================================================
 
-/// Parses an X11-style color spec into an [`Rgb`].
+/// Parses an X11-style color spec into an [`Rgb`] triple.
 ///
 /// Supports the two forms terminals commonly emit:
 /// - `rgb:RR/GG/BB`, `rgb:RRRR/GGGG/BBBB` (1-4 hex digits per channel; scaled
@@ -175,7 +215,7 @@ pub fn parse_color_spec(spec: &str) -> Option<Rgb> {
         if parts.next().is_some() {
             return None;
         }
-        return Some(Rgb::new(r, g, b));
+        return Some((r, g, b));
     }
     if let Some(rest) = spec.strip_prefix('#') {
         let per = match rest.len() {
@@ -187,7 +227,7 @@ pub fn parse_color_spec(spec: &str) -> Option<Rgb> {
         let r = scale_hex_channel(&rest[0..per])?;
         let g = scale_hex_channel(&rest[per..per * 2])?;
         let b = scale_hex_channel(&rest[per * 2..per * 3])?;
-        return Some(Rgb::new(r, g, b));
+        return Some((r, g, b));
     }
     None
 }
@@ -209,8 +249,8 @@ fn scale_hex_channel(s: &str) -> Option<u8> {
     Some(((v * 255 + max / 2) / max) as u8)
 }
 
-/// Formats an [`Rgb`] as the `rgb:RRRR/GGGG/BBBB` 16-bit-per-channel reply form
-/// xterm uses in OSC 4/10/11/12 query responses.
+/// Formats an [`Rgb`] triple as the `rgb:RRRR/GGGG/BBBB` 16-bit-per-channel
+/// reply form xterm uses in OSC 4/10/11/12 query responses.
 ///
 /// Each 8-bit channel is replicated into the high byte (`v -> v*0x101`) so that
 /// `0xff` becomes `ffff`, matching xterm's reported values.
@@ -218,9 +258,9 @@ pub fn format_color_reply(rgb: Rgb) -> String {
     let expand = |v: u8| (v as u16) * 0x101;
     format!(
         "rgb:{:04x}/{:04x}/{:04x}",
-        expand(rgb.r),
-        expand(rgb.g),
-        expand(rgb.b)
+        expand(rgb.0),
+        expand(rgb.1),
+        expand(rgb.2)
     )
 }
 
@@ -274,22 +314,16 @@ mod tests {
 
     #[test]
     fn test_parse_color_spec_rgb() {
-        assert_eq!(parse_color_spec("rgb:ff/00/00"), Some(Rgb::new(255, 0, 0)));
-        assert_eq!(
-            parse_color_spec("rgb:ffff/0000/8080"),
-            Some(Rgb::new(255, 0, 128))
-        );
-        assert_eq!(parse_color_spec("rgb:f/0/0"), Some(Rgb::new(255, 0, 0)));
+        assert_eq!(parse_color_spec("rgb:ff/00/00"), Some((255, 0, 0)));
+        assert_eq!(parse_color_spec("rgb:ffff/0000/8080"), Some((255, 0, 128)));
+        assert_eq!(parse_color_spec("rgb:f/0/0"), Some((255, 0, 0)));
     }
 
     #[test]
     fn test_parse_color_spec_hash() {
-        assert_eq!(parse_color_spec("#ff0000"), Some(Rgb::new(255, 0, 0)));
-        assert_eq!(parse_color_spec("#f00"), Some(Rgb::new(255, 0, 0)));
-        assert_eq!(
-            parse_color_spec("#ffff00008080"),
-            Some(Rgb::new(255, 0, 128))
-        );
+        assert_eq!(parse_color_spec("#ff0000"), Some((255, 0, 0)));
+        assert_eq!(parse_color_spec("#f00"), Some((255, 0, 0)));
+        assert_eq!(parse_color_spec("#ffff00008080"), Some((255, 0, 128)));
     }
 
     #[test]
@@ -301,13 +335,7 @@ mod tests {
 
     #[test]
     fn test_format_color_reply() {
-        assert_eq!(
-            format_color_reply(Rgb::new(255, 0, 0)),
-            "rgb:ffff/0000/0000"
-        );
-        assert_eq!(
-            format_color_reply(Rgb::new(26, 27, 38)),
-            "rgb:1a1a/1b1b/2626"
-        );
+        assert_eq!(format_color_reply((255, 0, 0)), "rgb:ffff/0000/0000");
+        assert_eq!(format_color_reply((26, 27, 38)), "rgb:1a1a/1b1b/2626");
     }
 }
