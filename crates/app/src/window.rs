@@ -47,13 +47,15 @@ const TITLEBAR_H: f32 = 30.0;
 /// are rendered in the chrome text buffer (CELL_W per cell), so the hit zones
 /// are derived from the SAME geometry — keeping the visuals and click targets
 /// aligned at any window width.
-const BUTTON_CELLS: f32 = 3.0;
+const BUTTON_CELLS: f32 = 5.0;
 /// Total cells for the 3-button (min / max / close) cluster.
 const BUTTONS_CELLS: f32 = BUTTON_CELLS * 3.0;
 /// Gap in pixels between the close button and the window's right edge.
 const BTN_RIGHT_MARGIN: f32 = 8.0;
 /// Thickness in pixels of the invisible window-edge resize band (frameless).
-const RESIZE_BORDER: f64 = 6.0;
+/// 8px is the comfortable grab target for a decorations(false) window (a 6px
+/// band is hard to hit, which read as "not resizable").
+const RESIZE_BORDER: f64 = 8.0;
 /// Left inset (px) of the chrome text buffer; used for column<->pixel mapping.
 const CHROME_LEFT: f32 = 6.0;
 
@@ -64,6 +66,46 @@ pub fn run_gui(config: &Config) -> Result<()> {
     let mut app = App::new(config.clone());
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// Open a path with the OS default handler (editor for config.toml). Detached +
+/// no console window; failures are non-fatal (the user can open it manually).
+fn open_path(path: &std::path::Path) {
+    use std::process::Command;
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(path).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = Command::new("xdg-open").arg(path).spawn();
+    }
+}
+
+/// Keyboard shortcut shown next to a command-palette action, so the palette
+/// teaches its own shortcuts (the standard discoverability bridge). Empty when
+/// the action has no global shortcut. `Ctrl` is `Cmd` on macOS.
+fn action_hint(action: &str) -> &'static str {
+    match action {
+        "New Tab" => "Ctrl+Shift+T",
+        "Close Tab" => "Ctrl+Shift+W",
+        "Next Tab" => "Ctrl+Shift+]",
+        "Previous Tab" => "Ctrl+Shift+[",
+        "Split Right" => "Ctrl+Shift+D",
+        "Split Down" => "Ctrl+Shift+E",
+        "Search" => "Ctrl+Shift+F",
+        "Settings" => "Ctrl+,",
+        _ => "",
+    }
 }
 
 /// Which title-bar button a point falls on.
@@ -119,6 +161,9 @@ struct App {
     gpu: Option<Gpu>,
     next_poll: Instant,
     cursor: (f64, f64),
+    /// Last cursor icon we asked winit for, so frameless edge/button hover only
+    /// issues a `set_cursor` when the zone actually changes (avoids per-pixel churn).
+    chrome_cursor: winit::window::CursorIcon,
     /// Leaf currently under the cursor (drives the short-cell tab-strip hover
     /// reveal in T4.2). `None` when the cursor is over chrome / no cell.
     hover_leaf: Option<LeafId>,
@@ -190,6 +235,8 @@ const PALETTE_ACTIONS: &[&str] = &[
     "Restore Layout",
     "Search",
     "Scroll To Bottom",
+    "Settings",
+    "Open Config File",
     "Quit",
 ];
 
@@ -282,6 +329,7 @@ impl App {
             gpu: None,
             next_poll: Instant::now(),
             cursor: (0.0, 0.0),
+            chrome_cursor: winit::window::CursorIcon::Default,
             hover_leaf: None,
             modifiers: ModifiersState::empty(),
             search_mode: false,
@@ -379,9 +427,34 @@ impl App {
                     }
                 }
             }
+            "Settings" | "Open Config File" => self.open_config_file(),
             "Quit" => event_loop.exit(),
             _ => {}
         }
+    }
+
+    /// Open the user config (`%APPDATA%\c0pl4nd\config.toml` / `~/.config/...`)
+    /// in the OS default editor, creating a commented starter file if absent.
+    /// The config is live-reloaded on save (see `Config::default_path`), so this
+    /// is the discoverable Settings entry point until the in-app panel lands.
+    fn open_config_file(&self) {
+        let Some(path) = Config::default_path() else {
+            return;
+        };
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(
+                &path,
+                "# C0PL4ND configuration — see CONFIG.md for all options.\n\
+                 # Edits are applied on save.\n\n\
+                 [window]\n# cols = 100\n# rows = 30\n\n\
+                 [font]\n# size = 14.0\n\n\
+                 [theme]\n# name = \"wired-noir\"\n",
+            );
+        }
+        open_path(&path);
     }
 
     fn enter_search(&mut self) {
@@ -1308,7 +1381,15 @@ impl App {
                 if first && self.config.startup_panel && self.splash.is_none() {
                     let gpu = self.gpu.as_ref().map(|g| g.gpu_name.as_str());
                     let info = c0pl4nd_core::fetch::SystemInfo::gather(gpu);
-                    self.splash = Some(c0pl4nd_core::fetch::render_panel(&info));
+                    let mut panel = c0pl4nd_core::fetch::render_panel(&info);
+                    // First-run discoverability hint — the cheapest way to teach
+                    // the command palette + the core shortcuts (any keypress
+                    // dismisses the splash).
+                    panel.push_str(
+                        "\n  Ctrl+Shift+P  commands   ·   Ctrl+Shift+T  new tab\n  \
+                         Ctrl+Shift+D / E  split   ·   Ctrl+,  settings\n",
+                    );
+                    self.splash = Some(panel);
                 }
             }
             Err(e) => tracing::error!("failed to spawn tab: {e}"),
@@ -1643,6 +1724,35 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
+                // Frameless resize/pointer cursor feedback. A decorations(false)
+                // window has no OS resize cursor, so we drive it ourselves —
+                // hovering an edge shows the directional resize cursor (the thing
+                // that makes the window FEEL resizable) and hovering a caption
+                // button shows the hand. Only fires on a zone change.
+                {
+                    use winit::window::{CursorIcon, ResizeDirection::*};
+                    let icon = if let Some(d) = self.hit_resize_edge(position.x, position.y) {
+                        match d {
+                            East | West => CursorIcon::EwResize,
+                            North | South => CursorIcon::NsResize,
+                            NorthWest | SouthEast => CursorIcon::NwseResize,
+                            NorthEast | SouthWest => CursorIcon::NeswResize,
+                        }
+                    } else {
+                        match self.hit_titlebar(position.x, position.y) {
+                            TitlebarHit::Minimize | TitlebarHit::Maximize | TitlebarHit::Close => {
+                                CursorIcon::Pointer
+                            }
+                            _ => CursorIcon::Default,
+                        }
+                    };
+                    if self.chrome_cursor != icon {
+                        if let Some(g) = &self.gpu {
+                            g.window.set_cursor(icon);
+                        }
+                        self.chrome_cursor = icon;
+                    }
+                }
                 let hov = self.leaf_at(position.x, position.y);
                 if hov != self.hover_leaf {
                     self.hover_leaf = hov;
@@ -1788,6 +1898,15 @@ impl ApplicationHandler for App {
                 let ctrl_only = (self.modifiers.control_key() || self.modifiers.super_key())
                     && !self.modifiers.shift_key()
                     && !self.modifiers.alt_key();
+                // Ctrl+, → open settings (the universal "preferences" shortcut).
+                if ctrl_only {
+                    if let Key::Character(c) = &event.logical_key {
+                        if c.as_str() == "," {
+                            self.open_config_file();
+                            return;
+                        }
+                    }
+                }
                 if ctrl_only && self.handle_cell_tab_combo(&event.logical_key) {
                     return;
                 }
@@ -1946,7 +2065,12 @@ impl App {
                     "  "
                 };
                 s.push_str(marker);
-                s.push_str(it);
+                let hint = action_hint(it);
+                if hint.is_empty() {
+                    s.push_str(it);
+                } else {
+                    s.push_str(&format!("{it:<26}{hint}"));
+                }
                 s.push('\n');
             }
             Some(s)
@@ -2048,12 +2172,13 @@ impl App {
         while chrome.chars().count() < pad_cols {
             chrome.push(' ');
         }
-        // Each button is exactly 3 monospace cells: space, glyph, space.
+        // Each button is exactly BUTTON_CELLS (5) monospace cells: the glyph is
+        // centred with padding so the click target is a comfortable size.
         let chrome_spans = [
             (chrome, accent),
-            (" \u{2014} ".to_string(), fg),         // minimize  —
-            (" \u{25a1} ".to_string(), fg),         // maximize  □
-            (" \u{2715} ".to_string(), signal_red), // close     ✕
+            ("  \u{2014}  ".to_string(), fg),         // minimize  —
+            ("  \u{25a1}  ".to_string(), fg),         // maximize  □
+            ("  \u{2715}  ".to_string(), signal_red), // close     ✕
         ];
         gpu.chrome_buffer.set_rich_text(
             &mut gpu.font_system,
