@@ -17,6 +17,9 @@ use c0pl4nd_core::layout::{
 };
 use c0pl4nd_core::layout_persist::{self, LayoutSnapshot, LeafView};
 use c0pl4nd_core::config::CursorStyle;
+use c0pl4nd_core::term::{
+    MouseButton as TermMouseButton, MouseEventKind, MouseMode, MouseModifiers,
+};
 use c0pl4nd_core::{theme::parse_hex, Config, Session, Theme};
 use glyphon::{
     Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -961,6 +964,53 @@ impl App {
             .into_iter()
             .find(|(id, _)| *id == leaf)
             .map(|(_, r)| r)
+    }
+
+    /// Forward a mouse event to the focused pane's PTY when the running program
+    /// enabled mouse reporting (E6). Returns `true` when the event was consumed
+    /// as a mouse report (so the caller skips the normal scroll/selection path).
+    /// `(px, py)` is the physical-pixel cursor position. Cells are 1-based per
+    /// the xterm protocol; the column/row are derived from the focused leaf's
+    /// grid origin (matching the render placement: border + 8.0/2.0 pad).
+    fn forward_mouse(&mut self, button: TermMouseButton, kind: MouseEventKind, px: f64, py: f64) -> bool {
+        let focused = self.active_tab().map(|t| t.layout.focused);
+        let Some(leaf) = focused else { return false };
+        let Some(cell) = self.leaf_rect(leaf) else {
+            return false;
+        };
+        let border = self
+            .active_tab()
+            .map(|t| if t.layout.leaf_count() > 1 { BORDER_PX } else { 0 })
+            .unwrap_or(0);
+        let (ox, oy) = leaf_text_origin(cell, border, 8.0, 2.0);
+        // 1-based cell coordinates, clamped to the cell's grid extent.
+        let col = (((px as f32 - ox) / CELL_W).floor() as i64).max(0) as usize + 1;
+        let row = (((py as f32 - oy) / LINE_HEIGHT).floor() as i64).max(0) as usize + 1;
+        let mods = MouseModifiers {
+            shift: self.modifiers.shift_key(),
+            alt: self.modifiers.alt_key(),
+            control: self.modifiers.control_key(),
+        };
+        let Some(s) = self.active_session_mut() else {
+            return false;
+        };
+        let term_arc = s.terminal();
+        let bytes = {
+            let Ok(term) = term_arc.lock() else {
+                return false;
+            };
+            if term.mouse_mode() == MouseMode::Off {
+                return false;
+            }
+            term.encode_mouse(button, mods, col, row, kind)
+        };
+        match bytes {
+            Some(b) => {
+                let _ = s.write_input(&b);
+                true
+            }
+            None => false,
+        }
     }
 
     /// The drop zone under the cursor for the pane being dragged, or `None` when
@@ -2310,6 +2360,19 @@ impl ApplicationHandler for App {
                     return;
                 }
                 let hit = self.hit_titlebar(self.cursor.0, self.cursor.1);
+                // E6: a press in pane content (not chrome) forwards to the PTY
+                // when the program enabled mouse reporting (vim/tmux/htop). The
+                // titlebar/resize paths above still win, so window controls work.
+                if hit == TitlebarHit::None
+                    && self.forward_mouse(
+                        TermMouseButton::Left,
+                        MouseEventKind::Press,
+                        self.cursor.0,
+                        self.cursor.1,
+                    )
+                {
+                    return;
+                }
                 // Double-click the drag area → toggle maximize (standard window
                 // behaviour). Computed before borrowing gpu to avoid a borrow clash.
                 let dbl_titlebar = if hit == TitlebarHit::Drag {
@@ -2363,6 +2426,19 @@ impl ApplicationHandler for App {
                         g.window.request_redraw();
                     }
                 }
+                // E6: forward the release to the PTY when mouse reporting is on
+                // and no pane-drag is in progress (a drag owns the release).
+                if !self.drag.is_dragging()
+                    && self.hit_titlebar(self.cursor.0, self.cursor.1) == TitlebarHit::None
+                    && self.forward_mouse(
+                        TermMouseButton::Left,
+                        MouseEventKind::Release,
+                        self.cursor.0,
+                        self.cursor.1,
+                    )
+                {
+                    return;
+                }
                 // End any pane drag; a real drag (past threshold) resolves a drop,
                 // a sub-threshold press is just a click and is discarded.
                 if let Some(source) = self.drag.release() {
@@ -2408,6 +2484,32 @@ impl ApplicationHandler for App {
                         ((p.y.abs() / LINE_HEIGHT as f64).ceil() as usize).max(1),
                     ),
                 };
+                // E6: when the program enabled mouse reporting, the wheel is sent
+                // to the PTY (one report per line) instead of scrolling the local
+                // scrollback view — alt-screen apps (less/vim) drive their own.
+                let wheel_btn = if up {
+                    TermMouseButton::WheelUp
+                } else {
+                    TermMouseButton::WheelDown
+                };
+                let reporting = self
+                    .active_session()
+                    .and_then(|s| s.terminal().lock().ok().map(|t| t.mouse_mode() != MouseMode::Off))
+                    .unwrap_or(false);
+                if reporting {
+                    for _ in 0..lines {
+                        self.forward_mouse(
+                            wheel_btn,
+                            MouseEventKind::Press,
+                            self.cursor.0,
+                            self.cursor.1,
+                        );
+                    }
+                    if let Some(g) = &self.gpu {
+                        g.window.request_redraw();
+                    }
+                    return;
+                }
                 if let Some(s) = self.active_session() {
                     if let Ok(mut term) = s.terminal().lock() {
                         if up {
