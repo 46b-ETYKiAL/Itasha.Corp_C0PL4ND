@@ -126,12 +126,24 @@ impl Default for CursorConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowConfig {
     pub cols: u16,
     pub rows: u16,
     pub padding: u16,
+    /// Remembered window geometry (physical pixels), persisted on resize/move/
+    /// exit and restored on launch. `None` = use the cols/rows-derived default.
+    /// Optional so configs written before this field still parse cleanly.
+    pub pos_x: Option<i32>,
+    pub pos_y: Option<i32>,
+    pub size_w: Option<u32>,
+    pub size_h: Option<u32>,
+    pub maximized: Option<bool>,
+    /// Identifies the monitor the geometry was captured on, so a saved position
+    /// is only restored when that monitor is still connected (multi-monitor
+    /// safety). Matched against `MonitorHandle::name()` at restore time.
+    pub monitor: Option<String>,
 }
 
 impl Default for WindowConfig {
@@ -140,6 +152,12 @@ impl Default for WindowConfig {
             cols: 80,
             rows: 24,
             padding: 8,
+            pos_x: None,
+            pos_y: None,
+            size_w: None,
+            size_h: None,
+            maximized: None,
+            monitor: None,
         }
     }
 }
@@ -262,6 +280,47 @@ impl Config {
                 source: e,
             }),
         }
+    }
+
+    /// Serialize to a pretty TOML string. The inverse of [`Config::from_toml`].
+    pub fn to_toml(&self) -> Result<String, ConfigError> {
+        toml::to_string_pretty(self).map_err(|e| ConfigError::Invalid(e.to_string()))
+    }
+
+    /// Persist to a specific path, creating parent directories as needed.
+    /// Used by the settings panel and the window-geometry persistence so the
+    /// config file stays the single source of truth.
+    pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| ConfigError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+        let body = self.to_toml()?;
+        std::fs::write(path, body).map_err(|e| ConfigError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })
+    }
+
+    /// Update only the persisted window-geometry fields on the file at
+    /// [`Config::default_path`], preserving every other field the user set.
+    /// Best-effort: a load/parse failure falls back to the in-memory config so
+    /// a corrupt file never blocks geometry capture. Returns the path written.
+    pub fn persist_geometry(window: WindowConfig) -> Option<PathBuf> {
+        let path = Config::default_path()?;
+        let mut cfg = Config::load_from(&path).unwrap_or_default();
+        // Copy only geometry; leave cols/rows/padding (size-on-first-launch)
+        // untouched so an explicit user value is never clobbered.
+        cfg.window.pos_x = window.pos_x;
+        cfg.window.pos_y = window.pos_y;
+        cfg.window.size_w = window.size_w;
+        cfg.window.size_h = window.size_h;
+        cfg.window.maximized = window.maximized;
+        cfg.window.monitor = window.monitor;
+        cfg.save_to(&path).ok()?;
+        Some(path)
     }
 }
 
