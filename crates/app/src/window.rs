@@ -250,6 +250,47 @@ fn geometry_on_screen(
     })
 }
 
+/// Find a URL spanning column `col` within a row of characters (E9). Expands
+/// left/right from the click column over non-whitespace, then accepts the token
+/// only if it begins with `http://`, `https://`, or `file://`. Trailing
+/// punctuation common in prose (`.,;:!?` and closing brackets/quotes) is
+/// trimmed so a URL at the end of a sentence opens cleanly. Returns `None` when
+/// no URL covers the column.
+fn find_url_in_line(chars: &[char], col: usize) -> Option<String> {
+    if chars.is_empty() {
+        return None;
+    }
+    let col = col.min(chars.len() - 1);
+    if chars[col].is_whitespace() {
+        return None;
+    }
+    let mut start = col;
+    while start > 0 && !chars[start - 1].is_whitespace() {
+        start -= 1;
+    }
+    let mut end = col;
+    while end + 1 < chars.len() && !chars[end + 1].is_whitespace() {
+        end += 1;
+    }
+    let mut token: String = chars[start..=end].iter().collect();
+    // Trim trailing punctuation that is rarely part of the URL.
+    while let Some(last) = token.chars().last() {
+        if matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '"' | '\'' | '>') {
+            token.pop();
+        } else {
+            break;
+        }
+    }
+    let is_url = token.starts_with("http://")
+        || token.starts_with("https://")
+        || token.starts_with("file://");
+    if is_url && token.len() > "https://".len() {
+        Some(token)
+    } else {
+        None
+    }
+}
+
 /// Which title-bar button a point falls on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TitlebarHit {
@@ -1075,6 +1116,32 @@ impl App {
             }
             None => false,
         }
+    }
+
+    /// The URL under the physical-pixel point `(px, py)`, if any (E9). Maps the
+    /// point to the focused leaf's grid cell (same origin math as
+    /// `forward_mouse`), reads that display row, and scans for an http(s)/file
+    /// URL covering the column. Returns `None` over chrome / empty space / when
+    /// the row holds no URL at that column.
+    fn url_at(&self, px: f64, py: f64) -> Option<String> {
+        let leaf = self.active_tab().map(|t| t.layout.focused)?;
+        let cell = self.leaf_rect(leaf)?;
+        let border = self
+            .active_tab()
+            .map(|t| if t.layout.leaf_count() > 1 { BORDER_PX } else { 0 })
+            .unwrap_or(0);
+        let (ox, oy) = leaf_text_origin(cell, border, 8.0, 2.0);
+        if (px as f32) < ox || (py as f32) < oy {
+            return None;
+        }
+        let col = ((px as f32 - ox) / CELL_W).floor() as usize;
+        let row = ((py as f32 - oy) / LINE_HEIGHT).floor() as usize;
+        let sess = self.active_tab()?.cells.get(&leaf)?.active()?;
+        let term_arc = sess.terminal();
+        let rows = term_arc.lock().ok()?.display_rows();
+        let line = rows.get(row)?;
+        let chars: Vec<char> = line.iter().map(|c| c.c).collect();
+        find_url_in_line(&chars, col)
     }
 
     /// Cursor quad(s) for the focused pane's terminal cursor (E5/E7). Honors
