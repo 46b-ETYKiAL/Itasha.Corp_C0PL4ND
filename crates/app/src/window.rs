@@ -154,6 +154,24 @@ enum TitlebarHit {
     Close,
 }
 
+/// A single non-default background cell, in grid `(row, col)` coordinates. The
+/// renderer offsets these by the leaf's text origin to place a solid quad
+/// behind the glyph (colored backgrounds, reverse video, selections).
+#[derive(Debug, Clone, Copy)]
+struct CellBg {
+    row: usize,
+    col: usize,
+    rgba: [f32; 4],
+}
+
+/// One leaf's per-frame grid snapshot: foreground colour spans plus the
+/// per-cell background quads (grid coordinates). Produced under a single grid
+/// lock by [`App::leaf_spans`].
+struct LeafSnapshot {
+    spans: Vec<(String, GColor)>,
+    bgs: Vec<CellBg>,
+}
+
 struct Gpu {
     window: Arc<Window>,
     device: wgpu::Device,
@@ -1605,12 +1623,21 @@ impl App {
         out
     }
 
-    /// Snapshot one leaf's terminal grid into per-colour foreground spans,
-    /// clearing its damage flag. Returns `None` when the leaf has no session.
-    fn leaf_spans(&self, leaf: LeafId, fg: GColor) -> Option<Vec<(String, GColor)>> {
+    /// Snapshot one leaf's terminal grid into per-colour foreground spans plus
+    /// the per-cell background quads (in grid `(row, col)` coordinates), clearing
+    /// its damage flag. Returns `None` when the leaf has no session.
+    ///
+    /// Foreground colour, the reverse/inverse SGR attribute, and non-default
+    /// backgrounds are all resolved here in a single grid lock so the renderer
+    /// never reads the grid twice per frame. For a cell with the `inverse` flag
+    /// the fg and bg are swapped (so `\e[7m` reverse video renders correctly):
+    /// the span colour becomes the cell's background colour and the background
+    /// quad is forced to the cell's foreground colour.
+    fn leaf_spans(&self, leaf: LeafId, fg: GColor) -> Option<LeafSnapshot> {
         let tab = self.active_tab()?;
         let s = tab.cells.get(&leaf).and_then(Cell::active)?;
-        let default_rgb = parse_hex(&self.theme.foreground).unwrap_or((240, 238, 245));
+        let default_fg = parse_hex(&self.theme.foreground).unwrap_or((240, 238, 245));
+        let default_bg = parse_hex(&self.theme.background).unwrap_or((8, 6, 13));
         let rows = {
             // Bind the Arc<Mutex<…>> to a local so the guard does not outlive a
             // temporary (the `if let Ok(t) = s.terminal().lock()` form in
@@ -1623,26 +1650,54 @@ impl App {
             rows
         };
         let mut spans: Vec<(String, GColor)> = Vec::new();
-        for row in &rows {
+        let mut bgs: Vec<CellBg> = Vec::new();
+        for (r, row) in rows.iter().enumerate() {
             let mut run = String::new();
-            let mut run_color: Option<GColor> = None;
-            for cell in row {
-                let rgb = resolve_fg(cell.fg, &self.theme, default_rgb);
-                let gcol = GColor::rgb(rgb.0, rgb.1, rgb.2);
-                if run_color != Some(gcol) {
-                    if let Some(pc) = run_color {
-                        spans.push((std::mem::take(&mut run), pc));
+            // Track the run colour as an RGB tuple (which derives PartialEq) and
+            // only build the glyphon Color when a span is pushed — glyphon's
+            // Color type is not PartialEq, so comparing tuples keeps the
+            // run-coalescing typecheck-clean and allocation-free.
+            let mut run_rgb: Option<(u8, u8, u8)> = None;
+            for (c, cell) in row.iter().enumerate() {
+                // Resolve the cell's own fg/bg, then swap them under reverse video.
+                let cell_fg = resolve_fg(cell.fg, &self.theme, default_fg);
+                let cell_bg = resolve_bg(cell.bg, &self.theme, default_bg);
+                let (draw_fg, draw_bg): ((u8, u8, u8), Option<(u8, u8, u8)>) = if cell.flags.inverse
+                {
+                    // Reverse video: text takes the background colour (defaulting
+                    // to the theme background) and the cell is painted with the
+                    // foreground colour — always a quad, since even a default-bg
+                    // cell must show a solid fg block behind inverted text.
+                    (cell_bg.unwrap_or(default_bg), Some(cell_fg))
+                } else {
+                    (cell_fg, cell_bg)
+                };
+                if run_rgb != Some(draw_fg) {
+                    if let Some((pr, pg, pb)) = run_rgb {
+                        spans.push((std::mem::take(&mut run), GColor::rgb(pr, pg, pb)));
                     }
-                    run_color = Some(gcol);
+                    run_rgb = Some(draw_fg);
                 }
                 run.push(cell.c);
+                if let Some((br, bg2, bb)) = draw_bg {
+                    bgs.push(CellBg {
+                        row: r,
+                        col: c,
+                        rgba: [
+                            br as f32 / 255.0,
+                            bg2 as f32 / 255.0,
+                            bb as f32 / 255.0,
+                            1.0,
+                        ],
+                    });
+                }
             }
-            if let Some(pc) = run_color {
-                spans.push((run, pc));
+            if let Some((pr, pg, pb)) = run_rgb {
+                spans.push((run, GColor::rgb(pr, pg, pb)));
             }
             spans.push(("\n".to_string(), fg));
         }
-        Some(spans)
+        Some(LeafSnapshot { spans, bgs })
     }
 
     fn request_redraw(&self) {
@@ -2466,14 +2521,15 @@ impl App {
             .map(|t| t.layout.focused)
             .unwrap_or(LeafId(0));
 
-        // Snapshot each VISIBLE leaf's grid into colour spans (clears damage)
-        // and collect its inline-image quads, offset into the leaf's cell.
-        type LeafSpan = (LeafId, LRect, Vec<(String, GColor)>);
+        // Snapshot each VISIBLE leaf's grid into colour spans + per-cell
+        // background quads (clears damage) and collect its inline-image quads,
+        // offset into the leaf's cell.
+        type LeafSpan = (LeafId, LRect, LeafSnapshot);
         let mut leaf_spans: Vec<LeafSpan> = Vec::with_capacity(cells.len());
         let mut image_quads: Vec<(LeafId, crate::image_render::ImageQuad)> = Vec::new();
         for (leaf, cell) in &cells {
-            if let Some(spans) = self.leaf_spans(*leaf, fg) {
-                leaf_spans.push((*leaf, *cell, spans));
+            if let Some(snap) = self.leaf_spans(*leaf, fg) {
+                leaf_spans.push((*leaf, *cell, snap));
             }
             for q in self.collect_leaf_image_quads(*leaf, *cell) {
                 image_quads.push((*leaf, q));
@@ -2571,7 +2627,7 @@ impl App {
         gpu.retain_leaf_buffers(&live_leaves);
         let metrics = gpu.metrics;
         let default_attrs = Attrs::new().family(Family::Monospace).color(fg);
-        for (leaf, cell, spans) in &leaf_spans {
+        for (leaf, cell, snap) in &leaf_spans {
             // A laid-out strip steals one line from the grid's drawable height.
             let strip_h = if laid_out_strip.contains(leaf) {
                 CELL_TABBAR_H
@@ -2588,7 +2644,7 @@ impl App {
             buf.set_size(fs, Some(cw), Some(ch));
             buf.set_rich_text(
                 fs,
-                spans.iter().map(|(s, col)| {
+                snap.spans.iter().map(|(s, col)| {
                     (
                         s.as_str(),
                         Attrs::new().family(Family::Monospace).color(*col),
@@ -2847,6 +2903,34 @@ impl App {
             [bg.r as f32, bg.g as f32, bg.b as f32, bg.a as f32],
             content,
         );
+        // Per-cell background quads (colored backgrounds + reverse video),
+        // drawn UNDER the terminal text via the same solid-quad pipeline. Each
+        // quad uses the SAME origin as the leaf's text buffer so a cell's
+        // background aligns exactly with its glyph; quads are clamped to the
+        // leaf's interior so they never paint over the pane border.
+        for (leaf, cell, snap) in &leaf_spans {
+            if snap.bgs.is_empty() {
+                continue;
+            }
+            let strip_top = if laid_out_strip.contains(leaf) {
+                CELL_TABBAR_H
+            } else {
+                0.0
+            };
+            let (ox, oy) = leaf_text_origin(*cell, border, 8.0, 2.0 + strip_top);
+            let clip_right = cell.x + cell.w - border;
+            let clip_bottom = cell.y + cell.h - border;
+            for cb in &snap.bgs {
+                let x = (ox + cb.col as f32 * CELL_W) as i32;
+                let y = (oy + cb.row as f32 * LINE_HEIGHT) as i32;
+                // Clamp the quad's extent so it cannot bleed past the cell edge.
+                let w = ((CELL_W.ceil() as i32).min(clip_right - x)).max(0);
+                let h = ((LINE_HEIGHT.ceil() as i32).min(clip_bottom - y)).max(0);
+                if w > 0 && h > 0 && x >= cell.x && y >= cell.y {
+                    chrome.push(ColorRect::new(x, y, w, h, cb.rgba));
+                }
+            }
+        }
         // Caption-button hover/press backplates (D1), drawn before the chrome
         // text so the button glyph stays legible on top (computed above the gpu
         // borrow to avoid an aliasing conflict).
@@ -3092,6 +3176,22 @@ fn resolve_fg(
         c0pl4nd_core::Color::Default => default_rgb,
         c0pl4nd_core::Color::Indexed(i) => theme.ansi(i),
         c0pl4nd_core::Color::Rgb(r, g, b) => (r, g, b),
+    }
+}
+
+/// Resolve a cell's background [`c0pl4nd_core::Color`] to an RGB triple, or
+/// `None` for [`c0pl4nd_core::Color::Default`] — the default background needs no
+/// per-cell quad because the whole surface is already cleared to it, so we skip
+/// it to keep the quad count down.
+fn resolve_bg(
+    color: c0pl4nd_core::Color,
+    theme: &Theme,
+    default_rgb: (u8, u8, u8),
+) -> Option<(u8, u8, u8)> {
+    match color {
+        c0pl4nd_core::Color::Default => None,
+        c0pl4nd_core::Color::Indexed(i) => Some(theme.ansi(i)),
+        c0pl4nd_core::Color::Rgb(r, g, b) => Some((r, g, b)),
     }
 }
 
