@@ -346,40 +346,42 @@ jobs:
           name: c0pl4nd-x86_64-pc-windows-msvc
           path: winbin
       - name: Forge branded NSIS installer
-        shell: pwsh
+        shell: bash
         run: |
-          $ErrorActionPreference = "Stop"
-          $zip = Get-ChildItem winbin -Recurse -Filter *.zip | Select-Object -First 1
-          if (-not $zip) { throw "no windows binary zip found under winbin/" }
-          Expand-Archive $zip.FullName -DestinationPath winbin/extracted -Force
-          $exe = Get-ChildItem winbin/extracted -Recurse -Filter c0pl4nd.exe | Select-Object -First 1
-          if (-not $exe) { throw "c0pl4nd.exe not found in extracted zip" }
-          $env:ITASHA_BINARY_PATH = $exe.FullName
-          Write-Host "Binary input: $($exe.FullName)"
-          # cargo-packager 0.11.8 mishandles --config <abs-path> on Windows
-          # (canonicalizes to a \\?\ verbatim path -> ERROR_DIRECTORY/267, the
-          # error build.ps1 hit). Use config AUTO-DISCOVERY instead: merge to
-          # Packager.toml in the framework root and invoke cargo-packager from
-          # there so the relative branding/ asset paths resolve from CWD.
-          python tests/merge_config.py c0pl4nd --root . --output Packager.toml --binary-path "$($exe.FullName)"
-          Write-Host "==> Packaging via auto-discovered Packager.toml (nsis only)"
-          cargo-packager --formats nsis
+          set -euo pipefail
+          # extract the compiled Windows binary built by the `build` job
+          zip="$(find winbin -name '*.zip' | head -1)"
+          [ -n "$zip" ] || { echo "no windows binary zip under winbin/"; exit 1; }
+          python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall('winbin/extracted')" "$zip"
+          exe="$(find winbin/extracted -name 'c0pl4nd.exe' | head -1)"
+          [ -n "$exe" ] || { echo "c0pl4nd.exe not found in zip"; exit 1; }
+          exe_win="$(cygpath -w "$(realpath "$exe")")"
+          echo "Binary input: $exe_win"
+          # Merge shared template + per-app override -> standalone config.
+          python tests/merge_config.py c0pl4nd --root . --output merged.packager.toml --binary-path "$exe_win"
+          # cargo-packager 0.11.8 hits os error 267 on Windows for --config <FILE>
+          # (the file-read branch is broken). Pass the config as a RAW JSON STRING
+          # (the documented alternative) to bypass file reading. Also normalize the
+          # template's packaging/build-relative license path (../../X -> X) since we
+          # package from the framework root.
+          CFG="$(python -c "import tomllib,json; d=tomllib.load(open('merged.packager.toml','rb')); d={k:(v[6:] if isinstance(v,str) and v.startswith('../../') else v) for k,v in d.items()}; print(json.dumps(d,separators=(',',':')))")"
+          echo "==> Packaging via raw-JSON config (nsis only); cargo-packager auto-fetches NSIS"
+          cargo-packager -c "$CFG" --formats nsis
       - name: Collect + name installer
-        shell: pwsh
+        shell: bash
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path dist-out | Out-Null
-          $setup = Get-ChildItem -Recurse -Path dist -Filter *.exe -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'setup|c0pl4nd' } | Select-Object -First 1
-          if (-not $setup) { $setup = Get-ChildItem -Recurse -Path dist -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1 }
-          if (-not $setup) { throw "cargo-packager produced no .exe installer under dist/" }
-          $tag = if ($env:TAG) { $env:TAG } else { "v0.0.0" }
-          $name = "c0pl4nd-$tag-x86_64-setup.exe"
-          Copy-Item $setup.FullName "dist-out/$name"
-          $hash = (Get-FileHash "dist-out/$name" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $name" | Out-File -Encoding ascii "dist-out/$name.sha256"
-          Write-Host "Installer: $name ($hash)"
+          set -euo pipefail
+          mkdir -p dist-out
+          setup="$(find . -maxdepth 2 -name '*-setup.exe' -not -path './winbin/*' -not -path './dist-out/*' | head -1)"
+          [ -n "$setup" ] || { echo "cargo-packager produced no -setup.exe"; ls -la; exit 1; }
+          tag="${TAG:-v0.0.0}"
+          name="c0pl4nd-${tag}-x86_64-setup.exe"
+          cp "$setup" "dist-out/$name"
+          ( cd dist-out && sha256sum "$name" > "$name.sha256" )
+          echo "Installer: $name"
+          cat "dist-out/$name.sha256"
       - name: Attest installer provenance (SLSA)
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
         with:
