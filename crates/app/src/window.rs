@@ -70,6 +70,53 @@ pub fn run_gui(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Read the OS clipboard as UTF-8 text without a third-party crate (the build
+/// environment cannot fetch new dependencies). Shells out to the platform's
+/// standard clipboard tool: PowerShell `Get-Clipboard` on Windows, `pbpaste`
+/// on macOS, and `wl-paste`/`xclip`/`xsel` on Linux (first available). Returns
+/// `None` when no tool succeeds. CRLF is normalised to LF and a single trailing
+/// newline that the tools append is trimmed.
+fn read_os_clipboard() -> Option<String> {
+    use std::process::Command;
+    let out = {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            Command::new("powershell")
+                .args(["-NoProfile", "-Command", "Get-Clipboard -Raw"])
+                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                .output()
+                .ok()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Command::new("pbpaste").output().ok()
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            ["wl-paste", "xclip", "xsel"]
+                .iter()
+                .find_map(|tool| {
+                    let mut cmd = Command::new(tool);
+                    if *tool == "xclip" {
+                        cmd.args(["-selection", "clipboard", "-o"]);
+                    } else if *tool == "xsel" {
+                        cmd.args(["--clipboard", "--output"]);
+                    }
+                    cmd.output().ok().filter(|o| o.status.success())
+                })
+        }
+    }?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut s = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    if s.ends_with('\n') {
+        s.pop();
+    }
+    Some(s)
+}
+
 /// Open a path with the OS default handler (editor for config.toml). Detached +
 /// no console window; failures are non-fatal (the user can open it manually).
 fn open_path(path: &std::path::Path) {
@@ -759,6 +806,45 @@ impl App {
         self.search_query.clear();
         self.search_matches.clear();
         self.search_idx = 0;
+    }
+
+    /// Paste the OS clipboard into the focused pane's PTY (E3). Honors
+    /// bracketed-paste mode (`?2004`): when the running program requested it,
+    /// the text is wrapped in `ESC[200~ … ESC[201~` and any embedded end
+    /// sentinel is stripped first, so a pasted payload cannot smuggle control
+    /// of the bracket (the canonical paste-injection guard). Falls back to a
+    /// raw paste when bracketed mode is off.
+    fn paste_clipboard(&mut self) {
+        let Some(text) = read_os_clipboard() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        // Read the bracketed-paste flag under a short lock, dropped before the
+        // mutable session borrow below.
+        let bracketed = self
+            .active_session()
+            .and_then(|s| s.terminal().lock().ok().map(|t| t.bracketed_paste()))
+            .unwrap_or(false);
+        let bytes: Vec<u8> = if bracketed {
+            // Strip any embedded end-sentinel so the payload can't terminate the
+            // bracket early and inject commands into the shell.
+            let cleaned = text.replace("\x1b[201~", "");
+            let mut b = Vec::with_capacity(cleaned.len() + 12);
+            b.extend_from_slice(b"\x1b[200~");
+            b.extend_from_slice(cleaned.as_bytes());
+            b.extend_from_slice(b"\x1b[201~");
+            b
+        } else {
+            text.into_bytes()
+        };
+        if let Some(s) = self.active_session_mut() {
+            if let Ok(mut term) = s.terminal().lock() {
+                term.scroll_to_bottom();
+            }
+            let _ = s.write_input(&bytes);
+        }
     }
 
     fn exit_search(&mut self) {
@@ -1786,6 +1872,10 @@ impl App {
                 }
                 Some('f') => {
                     self.enter_search();
+                    true
+                }
+                Some('v') => {
+                    self.paste_clipboard();
                     true
                 }
                 Some('p') => {
