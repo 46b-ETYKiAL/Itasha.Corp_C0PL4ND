@@ -1605,12 +1605,23 @@ impl App {
         out
     }
 
-    /// Snapshot one leaf's terminal grid into per-colour foreground spans,
-    /// clearing its damage flag. Returns `None` when the leaf has no session.
-    fn leaf_spans(&self, leaf: LeafId, fg: GColor) -> Option<Vec<(String, GColor)>> {
+    /// Snapshot one leaf's grid into BOTH foreground spans (for glyphon) and
+    /// per-cell background paints (for the solid-quad layer). This is the single
+    /// place the grid is read+damage-cleared per frame, so foreground and
+    /// background stay consistent. Honors SGR inverse/reverse video by swapping
+    /// the effective fg/bg per cell. The bg list holds `(row, col, rgba)` for
+    /// every cell whose effective background differs from the window default;
+    /// the caller turns these into `ColorRect`s at the leaf's pixel origin.
+    #[allow(clippy::type_complexity)]
+    fn leaf_render(
+        &self,
+        leaf: LeafId,
+        fg: GColor,
+    ) -> Option<(Vec<(String, GColor)>, Vec<(usize, usize, [f32; 4])>)> {
         let tab = self.active_tab()?;
         let s = tab.cells.get(&leaf).and_then(Cell::active)?;
-        let default_rgb = parse_hex(&self.theme.foreground).unwrap_or((240, 238, 245));
+        let default_fg = parse_hex(&self.theme.foreground).unwrap_or((240, 238, 245));
+        let default_bg = parse_hex(&self.theme.background).unwrap_or((8, 6, 13));
         let rows = {
             // Bind the Arc<Mutex<…>> to a local so the guard does not outlive a
             // temporary (the `if let Ok(t) = s.terminal().lock()` form in
@@ -1623,12 +1634,25 @@ impl App {
             rows
         };
         let mut spans: Vec<(String, GColor)> = Vec::new();
-        for row in &rows {
+        let mut bg_cells: Vec<(usize, usize, [f32; 4])> = Vec::new();
+        for (r, row) in rows.iter().enumerate() {
             let mut run = String::new();
             let mut run_color: Option<GColor> = None;
-            for cell in row {
-                let rgb = resolve_fg(cell.fg, &self.theme, default_rgb);
-                let gcol = GColor::rgb(rgb.0, rgb.1, rgb.2);
+            for (c, cell) in row.iter().enumerate() {
+                let (fg_rgb, bg_rgb) = cell_render_colors(cell, &self.theme, default_fg, default_bg);
+                if let Some(bg) = bg_rgb {
+                    bg_cells.push((
+                        r,
+                        c,
+                        [
+                            bg.0 as f32 / 255.0,
+                            bg.1 as f32 / 255.0,
+                            bg.2 as f32 / 255.0,
+                            1.0,
+                        ],
+                    ));
+                }
+                let gcol = GColor::rgb(fg_rgb.0, fg_rgb.1, fg_rgb.2);
                 if run_color != Some(gcol) {
                     if let Some(pc) = run_color {
                         spans.push((std::mem::take(&mut run), pc));
@@ -1642,7 +1666,7 @@ impl App {
             }
             spans.push(("\n".to_string(), fg));
         }
-        Some(spans)
+        Some((spans, bg_cells))
     }
 
     fn request_redraw(&self) {
@@ -2470,10 +2494,16 @@ impl App {
         // and collect its inline-image quads, offset into the leaf's cell.
         type LeafSpan = (LeafId, LRect, Vec<(String, GColor)>);
         let mut leaf_spans: Vec<LeafSpan> = Vec::with_capacity(cells.len());
+        // E1: per-cell background paints per leaf, as (row, col, rgba). Turned
+        // into ColorRects below (before the gpu borrow) and drawn behind text.
+        let mut leaf_bgs: Vec<(LeafId, LRect, Vec<(usize, usize, [f32; 4])>)> = Vec::new();
         let mut image_quads: Vec<(LeafId, crate::image_render::ImageQuad)> = Vec::new();
         for (leaf, cell) in &cells {
-            if let Some(spans) = self.leaf_spans(*leaf, fg) {
+            if let Some((spans, bgs)) = self.leaf_render(*leaf, fg) {
                 leaf_spans.push((*leaf, *cell, spans));
+                if !bgs.is_empty() {
+                    leaf_bgs.push((*leaf, *cell, bgs));
+                }
             }
             for q in self.collect_leaf_image_quads(*leaf, *cell) {
                 image_quads.push((*leaf, q));
@@ -2847,6 +2877,24 @@ impl App {
             [bg.r as f32, bg.g as f32, bg.b as f32, bg.a as f32],
             content,
         );
+        // E1: per-cell background quads, drawn over the gutter fill but behind
+        // the grid text. Uses the SAME origin math as the text-area placement
+        // below so a cell's background aligns exactly under its glyph.
+        for (leaf, cell, bgs) in &leaf_bgs {
+            let strip_top = if laid_out_strip.contains(leaf) {
+                CELL_TABBAR_H
+            } else {
+                0.0
+            };
+            let (ox, oy) = leaf_text_origin(*cell, border, 8.0, 2.0 + strip_top);
+            let cw = CELL_W.ceil() as i32;
+            let ch = LINE_HEIGHT.ceil() as i32;
+            for (r, c, rgba) in bgs {
+                let x = (ox + *c as f32 * CELL_W) as i32;
+                let y = (oy + *r as f32 * LINE_HEIGHT) as i32;
+                chrome.push(ColorRect::new(x, y, cw, ch, *rgba));
+            }
+        }
         // Caption-button hover/press backplates (D1), drawn before the chrome
         // text so the button glyph stays legible on top (computed above the gpu
         // borrow to avoid an aliasing conflict).
@@ -3092,6 +3140,33 @@ fn resolve_fg(
         c0pl4nd_core::Color::Default => default_rgb,
         c0pl4nd_core::Color::Indexed(i) => theme.ansi(i),
         c0pl4nd_core::Color::Rgb(r, g, b) => (r, g, b),
+    }
+}
+
+/// Resolve a cell's effective `(foreground, Option<background>)` RGB, applying
+/// SGR inverse/reverse video. The background is `None` when it should use the
+/// window's default background (so the renderer can skip painting a quad for
+/// the common case). For an inverse cell, the effective foreground is the
+/// cell's background colour and vice-versa — matching every mainstream terminal
+/// (selections, `\e[7m`, cursor-on-cell all rely on this).
+fn cell_render_colors(
+    cell: &c0pl4nd_core::Cell,
+    theme: &Theme,
+    default_fg: (u8, u8, u8),
+    default_bg: (u8, u8, u8),
+) -> ((u8, u8, u8), Option<(u8, u8, u8)>) {
+    let fg = resolve_fg(cell.fg, theme, default_fg);
+    let bg = match cell.bg {
+        c0pl4nd_core::Color::Default => None,
+        other => Some(resolve_fg(other, theme, default_bg)),
+    };
+    if cell.flags.inverse {
+        // Swap: the (possibly-default) background becomes the foreground, and
+        // the foreground becomes a now-explicit background quad.
+        let eff_bg = bg.unwrap_or(default_bg);
+        (eff_bg, Some(fg))
+    } else {
+        (fg, bg)
     }
 }
 
