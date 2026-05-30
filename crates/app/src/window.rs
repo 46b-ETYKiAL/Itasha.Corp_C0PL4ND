@@ -264,6 +264,12 @@ struct App {
     /// is throttled in `about_to_wait` so we never write per drag pixel.
     geom_dirty: bool,
     last_geom_save: Instant,
+    /// Phase clock for the terminal cursor blink (E5/E7); a 530ms half-period
+    /// toggle keyed off this start instant.
+    blink_start: Instant,
+    /// Last time a blink-driven redraw was issued, so an idle window with a
+    /// blinking cursor still animates without redrawing every poll tick.
+    last_blink_redraw: Instant,
     /// Leaf currently under the cursor (drives the short-cell tab-strip hover
     /// reveal in T4.2). `None` when the cursor is over chrome / no cell.
     hover_leaf: Option<LeafId>,
@@ -486,6 +492,8 @@ impl App {
             pressed_button: None,
             geom_dirty: false,
             last_geom_save: Instant::now(),
+            blink_start: Instant::now(),
+            last_blink_redraw: Instant::now(),
             hover_leaf: None,
             modifiers: ModifiersState::empty(),
             search_mode: false,
@@ -1011,6 +1019,78 @@ impl App {
             }
             None => false,
         }
+    }
+
+    /// Cursor quad(s) for the focused pane's terminal cursor (E5/E7). Honors
+    /// DECTCEM visibility (`?25`), DECSCUSR shape (block/bar/underline), and
+    /// blink (530ms half-period). Returns empty when the cursor is hidden,
+    /// blinked-off, or scrolled into scrollback. Block is drawn semi-transparent
+    /// so the glyph beneath stays readable (the quad layer is behind the text).
+    /// Must be called before the `&mut self.gpu` borrow (it locks the terminal).
+    fn cursor_quads(
+        &self,
+        focused: LeafId,
+        cells: &[(LeafId, LRect)],
+        border: i32,
+        laid_out_strip: &std::collections::HashSet<LeafId>,
+        accent: GColor,
+    ) -> Vec<ColorRect> {
+        let Some(cell) = cells.iter().find(|(id, _)| *id == focused).map(|(_, r)| *r) else {
+            return Vec::new();
+        };
+        let Some(tab) = self.active_tab() else {
+            return Vec::new();
+        };
+        let Some(pane) = tab.cells.get(&focused).and_then(Cell::active) else {
+            return Vec::new();
+        };
+        let term_arc = pane.terminal();
+        let (row, col, shape, blink) = {
+            let Ok(t) = term_arc.lock() else {
+                return Vec::new();
+            };
+            if !t.is_cursor_visible() {
+                return Vec::new();
+            }
+            match t.cursor_position() {
+                Some((r, c)) => (r, c, t.cursor_shape(), t.cursor_blink()),
+                None => return Vec::new(),
+            }
+        };
+        // Blink: when enabled, suppress the cursor during the off half-period.
+        if blink {
+            let on = (self.blink_start.elapsed().as_millis() / 530) % 2 == 0;
+            if !on {
+                return Vec::new();
+            }
+        }
+        let strip_top = if laid_out_strip.contains(&focused) {
+            CELL_TABBAR_H
+        } else {
+            0.0
+        };
+        let (ox, oy) = leaf_text_origin(cell, border, 8.0, 2.0 + strip_top);
+        let x = (ox + col as f32 * CELL_W) as i32;
+        let y = (oy + row as f32 * LINE_HEIGHT) as i32;
+        let cw = CELL_W.ceil() as i32;
+        let ch = LINE_HEIGHT.ceil() as i32;
+        let a = accent;
+        let (ar, ag, ab) = (a.r() as f32 / 255.0, a.g() as f32 / 255.0, a.b() as f32 / 255.0);
+        let rect = match shape {
+            // Block: full cell, semi-transparent so the glyph shows through.
+            c0pl4nd_core::term::CursorShape::Block => {
+                ColorRect::new(x, y, cw, ch, [ar, ag, ab, 0.55])
+            }
+            // Bar: 2px vertical at the cell's left edge (opaque).
+            c0pl4nd_core::term::CursorShape::Bar => {
+                ColorRect::new(x, y, 2, ch, [ar, ag, ab, 0.95])
+            }
+            // Underline: 2px horizontal at the cell's bottom (opaque).
+            c0pl4nd_core::term::CursorShape::Underline => {
+                ColorRect::new(x, (y + ch - 2).max(y), cw, 2, [ar, ag, ab, 0.95])
+            }
+        };
+        vec![rect]
     }
 
     /// The drop zone under the cursor for the pane being dragged, or `None` when
@@ -2646,7 +2726,21 @@ impl ApplicationHandler for App {
                     })
                 })
                 .unwrap_or(false);
-            if damaged {
+            // E5/E7: drive the cursor blink — once per 530ms half-period issue a
+            // redraw so an idle window still animates the cursor. Cheap (<2 Hz)
+            // and only when the focused pane's cursor actually blinks.
+            let blink_due = now.duration_since(self.last_blink_redraw)
+                >= Duration::from_millis(530)
+                && self
+                    .active_session()
+                    .and_then(|s| s.terminal().lock().ok().map(|t| {
+                        t.is_cursor_visible() && t.cursor_blink()
+                    }))
+                    .unwrap_or(false);
+            if blink_due {
+                self.last_blink_redraw = now;
+            }
+            if damaged || blink_due {
                 if let Some(g) = &self.gpu {
                     g.window.request_redraw();
                 }
@@ -3087,6 +3181,8 @@ impl App {
                 chrome.push(ColorRect::new(x, y, cw, ch, *rgba));
             }
         }
+        // Terminal cursor (E5/E7), behind the text so the glyph stays readable.
+        chrome.extend(cursor_quads);
         // Caption-button hover/press backplates (D1), drawn before the chrome
         // text so the button glyph stays legible on top (computed above the gpu
         // borrow to avoid an aliasing conflict).
