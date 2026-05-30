@@ -2298,6 +2298,14 @@ impl App {
         // Drag overlay quads (dim source + zone highlight + cursor ghost),
         // computed before the gpu borrow since they read the active tab.
         let drag_overlay = self.drag_overlay_quads(accent);
+        // Caption-button hover/press backplates (D1). Computed here, before the
+        // `&mut self.gpu` borrow below, so it can borrow `self` immutably; the
+        // surface width is read from the (still-shared) gpu first.
+        let caption_backplates = self
+            .gpu
+            .as_ref()
+            .map(|g| self.caption_backplates(g.surface_config.width as f32, to_rgba(fg)))
+            .unwrap_or_default();
         // No pane border/inset for a single leaf — visually identical to the
         // pre-split renderer; a 1px border only appears once the window splits.
         let border = if cells.len() > 1 { BORDER_PX } else { 0 };
@@ -2588,8 +2596,9 @@ impl App {
             content,
         );
         // Caption-button hover/press backplates (D1), drawn before the chrome
-        // text so the button glyph stays legible on top.
-        chrome.extend(self.caption_backplates(w as f32, to_rgba(fg)));
+        // text so the button glyph stays legible on top (computed above the gpu
+        // borrow to avoid an aliasing conflict).
+        chrome.extend(caption_backplates);
         let prepared_chrome = gpu
             .chrome_renderer
             .prepare(&gpu.device, w as f32, h as f32, &chrome);
