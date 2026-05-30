@@ -260,6 +260,131 @@ jobs:
           if-no-files-found: error
 
   # --------------------------------------------------------------------------
+  # Brand rasters for the Windows installer — generated on Linux (clean librsvg
+  # rasterization) and handed to the Windows packaging job. The Itasha.Corp
+  # installer framework (F0RG3-W1R3) owns the branding + NSIS config; only the
+  # compiled binary crosses from this repo (binary-input-contract).
+  # --------------------------------------------------------------------------
+  brand-assets:
+    name: Brand rasters (installer art)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        with:
+          egress-policy: audit
+      - name: Checkout installer framework (F0RG3-W1R3)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: 46b-ETYKiAL/Itasha.Corp_F0RG3-W1R3
+          persist-credentials: false
+      - name: Install rasterizers (librsvg + imagemagick)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y librsvg2-bin imagemagick
+      - name: Generate C0PL4ND brand rasters
+        run: |
+          set -euo pipefail
+          chmod +x branding/gen-assets.sh
+          ./branding/gen-assets.sh --app c0pl4nd
+          echo "Generated rasters:"; find branding -type f \( -name '*.ico' -o -name '*.bmp' -o -name '*.png' \) -print
+      - name: Upload brand rasters
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: brand-rasters
+          path: branding/
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # Branded Windows installer — the Itasha.Corp NSIS installer, forged by
+  # F0RG3-W1R3 / cargo-packager from the compiled binary. PRIMARY Windows
+  # download (replaces the stock MSI). Unsigned interim: SmartScreen warns;
+  # SHA-256 + SLSA attestation provided. SignPath Foundation (free OSS) signing
+  # is wired behind secret-presence once the cert is approved.
+  # --------------------------------------------------------------------------
+  windows-installer:
+    name: Windows installer (branded NSIS)
+    needs: [build, brand-assets]
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        with:
+          egress-policy: audit
+      - name: Checkout installer framework (F0RG3-W1R3)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: 46b-ETYKiAL/Itasha.Corp_F0RG3-W1R3
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: stable
+      - name: Install cargo-packager (pinned, locked)
+        shell: bash
+        run: cargo install cargo-packager --version 0.11.8 --locked
+      - name: Download brand rasters
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: brand-rasters
+          path: branding
+      - name: Download Windows binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: c0pl4nd-x86_64-pc-windows-msvc
+          path: winbin
+      - name: Forge branded NSIS installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Get-ChildItem winbin -Recurse -Filter *.zip | Select-Object -First 1
+          if (-not $zip) { throw "no windows binary zip found under winbin/" }
+          Expand-Archive $zip.FullName -DestinationPath winbin/extracted -Force
+          $exe = Get-ChildItem winbin/extracted -Recurse -Filter c0pl4nd.exe | Select-Object -First 1
+          if (-not $exe) { throw "c0pl4nd.exe not found in extracted zip" }
+          $env:ITASHA_BINARY_PATH = $exe.FullName
+          Write-Host "Binary input: $($exe.FullName)"
+          .\scripts\build.ps1 -App c0pl4nd
+      - name: Collect + name installer
+        shell: pwsh
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path dist-out | Out-Null
+          $setup = Get-ChildItem -Recurse -Path dist -Filter *.exe -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'setup|c0pl4nd' } | Select-Object -First 1
+          if (-not $setup) { $setup = Get-ChildItem -Recurse -Path dist -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          if (-not $setup) { throw "cargo-packager produced no .exe installer under dist/" }
+          $tag = if ($env:TAG) { $env:TAG } else { "v0.0.0" }
+          $name = "c0pl4nd-$tag-x86_64-setup.exe"
+          Copy-Item $setup.FullName "dist-out/$name"
+          $hash = (Get-FileHash "dist-out/$name" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name" | Out-File -Encoding ascii "dist-out/$name.sha256"
+          Write-Host "Installer: $name ($hash)"
+      - name: Attest installer provenance (SLSA)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
+        with:
+          subject-path: dist-out/*.exe
+      - name: Upload installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-installer
+          path: dist-out/
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
   # Publish a GitHub Release with every archive, checksum, and the SBOM.
   # (Installer packaging — MSI/DMG/AppImage/DEB — lives in the existing
   #  release.yml installers job; merge that job in unchanged. Attest each
@@ -267,12 +392,12 @@ jobs:
   # --------------------------------------------------------------------------
   release:
     name: Publish Release
-    needs: [build, sbom]
+    needs: [build, sbom, windows-installer]
     runs-on: ubuntu-latest
     permissions:
       # The only job that needs write to create the release + upload assets.
       contents: write
-    if: always() && needs.build.result == 'success'
+    if: always() && needs.build.result == 'success' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Harden the runner (egress audit)
         # step-security/harden-runner@v2.19.4
@@ -291,7 +416,7 @@ jobs:
           set -euo pipefail
           mkdir -p release
           find artifacts -type f \
-            \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' -o -name '*.cdx.json' \) \
+            \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name '*.sha256' -o -name '*.cdx.json' \) \
             -exec cp {} release/ \;
           ( cd release && cat *.sha256 > SHA256SUMS 2>/dev/null || true )
           ls -la release
