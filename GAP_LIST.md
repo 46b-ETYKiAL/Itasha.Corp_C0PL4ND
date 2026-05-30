@@ -71,3 +71,32 @@ Legend: **P0** = expected-everywhere / correctness or breaks real apps · **P1**
 3. **Remaining P1 (E8–E16)** and all P2/P3 — documented backlog; implement opportunistically / future pass with explicit justification (no silent deferral; this list IS the tracked record).
 
 Rationale: a terminal that renders background colors wrong and can't run vim is failing its core job — these P0s outrank chrome polish. All term.rs P0s touch the same files, so they're done sequentially (one commit each, with tests) after D1–D4 frees `window.rs`.
+
+---
+
+## Shipped Status (final update — master 2026-05-30)
+
+This section is the authoritative as-shipped ledger; earlier rows above are the original audit.
+
+### ✅ Shipped & merged to master
+- **D1** caption-button hover/press backplates
+- **D2** remembered window size/position/maximized (multi-monitor + DPI clamp)
+- **D3** in-app settings panel (font/theme/cursor/scrollback/opacity/startup; live-apply + TOML write-back)
+- **VT-core parser**: DEC private modes, alternate screen, DECSCUSR cursor shape, bracketed-paste/cursor-visibility getters, `encode_mouse()`, `cursor_position()`
+- **E1** per-cell background color + inverse-video rendering
+- **E3** clipboard paste + bracketed-paste wrapping (dependency-free shell-out)
+- **E5/E7** terminal cursor draw (block/bar/underline, blink, visibility)
+- **E6** mouse reporting → PTY (DEC 1000/1002/1003 + SGR 1006)
+- **E14** Ctrl+1-9 window-tab switching
+- **OSC suite (core)**: OSC 52 (write; read default-off), OSC 4/10/11/12 query+set, OSC 104 reset, OSC 9/777 notifications, title stack (CSI 22/23 t), `.itermcolors` import, ligatures config flag, PTY-response channel
+- **OSC app-wiring (E10/E11)**: `pump_terminal_io()` drains query replies → PTY, clipboard writes → OS clipboard (`write_os_clipboard`), color sets → live theme, notifications → log
+- **E16** graceful PTY exit (close pane on shell exit; exit app when last pane closes)
+
+### ⏳ Remaining (not yet implemented)
+- **E9** URL detection + Ctrl-click to open — designed (heuristic row-scan for http(s)://|file:// under the cursor → `open_path`); not yet wired into the mouse-press handler.
+
+### ❌ Deferred — with reasons
+- **D4 Win+Arrow Aero snap** — BLOCKED by the offline build environment: requires the `windows` crate, which cannot be fetched (no crates.io access). Environmental constraint, not a scoping choice. Full Win32 subclass recipe (WS_THICKFRAME + WM_NCCALCSIZE/NCHITTEST/GETMINMAXINFO) is recorded for when deps are available.
+- **BiDi/RTL** — needs the `unicode-bidi` crate (offline-blocked) plus visual reordering in the shaper.
+- **Programming ligatures** — core `ligatures` flag shipped; the renderer-side cosmic-text shaping change is deferred.
+- **Full kitty graphics protocol** — Sixel already covers inline images; full kitty-graphics is lower-value.
