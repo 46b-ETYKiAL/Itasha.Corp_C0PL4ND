@@ -742,6 +742,23 @@ impl Terminal {
         self.screen.cursor_shape_blink || self.screen.dec_modes.cursor_blink
     }
 
+    /// The cursor position in **display space** (`(row, col)`, 0-based) — the
+    /// coordinate system of [`Terminal::display_rows`], so the renderer can map
+    /// it straight onto the visible grid. Returns `None` when the cursor is not
+    /// in the visible window: the live cursor sits in the bottom `grid.rows()`
+    /// lines, so any non-zero scrollback `view_offset` scrolls it out of view
+    /// (a terminal hides the cursor while you scroll back). The column is
+    /// clamped to the last grid column.
+    pub fn cursor_position(&self) -> Option<(usize, usize)> {
+        if self.screen.view_offset != 0 {
+            return None;
+        }
+        let cols = self.screen.grid.cols();
+        let row = self.screen.row.min(self.screen.grid.rows().saturating_sub(1));
+        let col = self.screen.col.min(cols.saturating_sub(1));
+        Some((row, col))
+    }
+
     /// Encode a mouse event into the byte sequence to write to the PTY, using
     /// the terminal's currently-active mouse mode and encoding.
     ///
@@ -1289,6 +1306,19 @@ mod tests {
     fn decscusr_default_is_block() {
         let t = Terminal::new(2, 10);
         assert_eq!(t.cursor_shape(), CursorShape::Block);
+    }
+
+    #[test]
+    fn cursor_position_tracks_display_space() {
+        let mut t = Terminal::new(4, 20);
+        assert_eq!(t.cursor_position(), Some((0, 0)), "home at start");
+        t.advance(b"hello");
+        assert_eq!(t.cursor_position(), Some((0, 5)), "advanced 5 cols");
+        t.advance(b"\r\nx");
+        assert_eq!(t.cursor_position(), Some((1, 1)), "next row, 1 col");
+        // CSI H homes the cursor.
+        t.advance(b"\x1b[H");
+        assert_eq!(t.cursor_position(), Some((0, 0)), "CUP home");
     }
 
     #[test]
