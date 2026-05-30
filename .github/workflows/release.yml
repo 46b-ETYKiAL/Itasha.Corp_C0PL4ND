@@ -356,7 +356,14 @@ jobs:
           if (-not $exe) { throw "c0pl4nd.exe not found in extracted zip" }
           $env:ITASHA_BINARY_PATH = $exe.FullName
           Write-Host "Binary input: $($exe.FullName)"
-          .\scripts\build.ps1 -App c0pl4nd
+          # cargo-packager 0.11.8 mishandles --config <abs-path> on Windows
+          # (canonicalizes to a \\?\ verbatim path -> ERROR_DIRECTORY/267, the
+          # error build.ps1 hit). Use config AUTO-DISCOVERY instead: merge to
+          # Packager.toml in the framework root and invoke cargo-packager from
+          # there so the relative branding/ asset paths resolve from CWD.
+          python tests/merge_config.py c0pl4nd --root . --output Packager.toml --binary-path "$($exe.FullName)"
+          Write-Host "==> Packaging via auto-discovered Packager.toml (nsis only)"
+          cargo-packager --formats nsis
       - name: Collect + name installer
         shell: pwsh
         env:
