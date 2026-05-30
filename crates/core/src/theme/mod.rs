@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+mod itermcolors;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ThemeError {
     #[error("could not read theme {0}")]
@@ -117,6 +119,17 @@ impl Theme {
             _ => &row.white,
         };
         parse_hex(s).unwrap_or((255, 255, 255))
+    }
+
+    /// Imports an iTerm2 `.itermcolors` plist XML document into a [`Theme`].
+    ///
+    /// Maps `Ansi 0..15 Color` into the [`AnsiRow`] normal (0-7) and bright
+    /// (8-15) rows, and `Foreground`/`Background`/`Cursor Color` into the
+    /// dynamic colors. Missing slots fall back to [`Theme::builtin_void`].
+    /// Returns [`ThemeError::Parse`] if the document carries no recognisable
+    /// color entries. `name` becomes the resulting theme's name.
+    pub fn from_itermcolors(xml: &str, name: &str) -> Result<Theme, ThemeError> {
+        itermcolors::from_itermcolors(xml, name)
     }
 
     /// A hard-coded fallback used only when no theme file can be loaded —
