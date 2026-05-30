@@ -2876,6 +2876,9 @@ impl App {
         // No pane border/inset for a single leaf — visually identical to the
         // pre-split renderer; a 1px border only appears once the window splits.
         let border = if cells.len() > 1 { BORDER_PX } else { 0 };
+        // Terminal cursor quads (E5/E7), computed before the gpu borrow since
+        // they lock the focused terminal.
+        let cursor_quads = self.cursor_quads(focused, &cells, border, &laid_out_strip, accent);
 
         let Some(gpu) = &mut self.gpu else { return };
         let width = gpu.surface_config.width as f32;
