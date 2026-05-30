@@ -2882,6 +2882,8 @@ impl ApplicationHandler for App {
         // E10/E11: drain terminal-produced OSC side effects (query replies,
         // clipboard writes, color sets, notifications) for every live session.
         self.pump_terminal_io();
+        // E16: close panes whose shell exited (may exit the app if it was last).
+        self.reap_dead_panes(event_loop);
         // Drain a pending interactive-resize at ~30 Hz: a rapid window drag
         // issues at most ~30 per-leaf PTY resizes/sec, and because the pending
         // size persists until drained, the final size is always applied.
