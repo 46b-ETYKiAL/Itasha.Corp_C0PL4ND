@@ -10,6 +10,11 @@ use crate::grid::{Cell, CellFlags, Color, Grid};
 use std::collections::VecDeque;
 use vte::{Params, Parser, Perform};
 
+pub mod osc;
+
+pub use osc::{ClipboardSelection, ClipboardWrite, ColorSet, DynamicColor, Notification};
+use osc::{base64_decode, base64_encode, format_color_reply, parse_color_spec, Rgb};
+
 /// Default scrollback line cap when not configured.
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
 
@@ -123,6 +128,52 @@ impl Default for DecModes {
     }
 }
 
+/// Builds the standard xterm 256-color palette as `(r, g, b)` triples.
+///
+/// 0-15 are the canonical xterm ANSI 16; 16-231 are the 6×6×6 color cube;
+/// 232-255 are the 24-step grayscale ramp. The palette seeds OSC 4 query
+/// replies so a program detecting colors gets sensible values before the host
+/// applies its own theme via the [`ColorSet`] drain. The host's theme is the
+/// source of truth for rendering — this palette is only the protocol-default
+/// baseline for query/reset.
+fn build_default_palette() -> [Rgb; 256] {
+    // Canonical xterm ANSI 0-15.
+    const ANSI16: [Rgb; 16] = [
+        (0, 0, 0),       // 0 black
+        (205, 0, 0),     // 1 red
+        (0, 205, 0),     // 2 green
+        (205, 205, 0),   // 3 yellow
+        (0, 0, 238),     // 4 blue
+        (205, 0, 205),   // 5 magenta
+        (0, 205, 205),   // 6 cyan
+        (229, 229, 229), // 7 white
+        (127, 127, 127), // 8 bright black
+        (255, 0, 0),     // 9 bright red
+        (0, 255, 0),     // 10 bright green
+        (255, 255, 0),   // 11 bright yellow
+        (92, 92, 255),   // 12 bright blue
+        (255, 0, 255),   // 13 bright magenta
+        (0, 255, 255),   // 14 bright cyan
+        (255, 255, 255), // 15 bright white
+    ];
+    let mut p: [Rgb; 256] = [(0, 0, 0); 256];
+    p[..16].copy_from_slice(&ANSI16);
+    // 6x6x6 cube: levels are 0, 95, 135, 175, 215, 255.
+    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+    for i in 0..216usize {
+        let r = LEVELS[(i / 36) % 6];
+        let g = LEVELS[(i / 6) % 6];
+        let b = LEVELS[i % 6];
+        p[16 + i] = (r, g, b);
+    }
+    // Grayscale ramp 232-255: 8, 18, ..., 238 (step 10).
+    for i in 0..24usize {
+        let v = (8 + i * 10) as u8;
+        p[232 + i] = (v, v, v);
+    }
+    p
+}
+
 /// Saved primary-screen state captured when switching to the alternate screen.
 #[derive(Debug, Clone)]
 struct SavedScreen {
@@ -202,6 +253,35 @@ struct Screen {
     /// touched while the alt screen is active, so full-screen TUIs never
     /// pollute the user's scrollback.
     saved_primary: Option<SavedScreen>,
+    /// Pending bytes to write back to the PTY (OSC 4/10/11/12 query replies and
+    /// OSC 52 read replies). Drained by [`Terminal::take_pty_response`]. The
+    /// terminal NEVER queues a reply for OSC 133 marks (anti-CVE, capture-only).
+    pty_response: Vec<u8>,
+    /// OSC 52 clipboard WRITE requests, drained by the app. READs are
+    /// DEFAULT-OFF (see `clipboard_read_enabled`) to avoid the canonical
+    /// host-clipboard-exfiltration vulnerability.
+    pending_clipboard_writes: Vec<ClipboardWrite>,
+    clipboard_read_enabled: bool,
+    /// OSC 4 / 10 / 11 / 12 / 104 / 11x color-set requests, drained by the app
+    /// so it can apply them to its live theme.
+    pending_color_sets: Vec<ColorSet>,
+    /// OSC 9 / OSC 777 desktop notifications, drained by the app.
+    pending_notifications: Vec<Notification>,
+    /// XTWINOPS 22/23 t title stack.
+    title_stack: Vec<String>,
+    /// Live indexed palette (256 entries) used to answer OSC 4 queries and
+    /// OSC 104 resets. Seeded from the xterm default; OSC 4 sets update it.
+    palette: [Rgb; 256],
+    /// Immutable default palette for OSC 104 reset.
+    default_palette: [Rgb; 256],
+    /// Live dynamic colors (default fg/bg/cursor) for OSC 10/11/12 queries.
+    dynamic_fg: Rgb,
+    dynamic_bg: Rgb,
+    dynamic_cursor: Rgb,
+    /// Defaults for OSC 110/111/112 reset.
+    default_dynamic_fg: Rgb,
+    default_dynamic_bg: Rgb,
+    default_dynamic_cursor: Rgb,
 }
 
 impl Screen {
@@ -224,6 +304,181 @@ impl Screen {
             cursor_shape: CursorShape::default(),
             cursor_shape_blink: false,
             saved_primary: None,
+            pty_response: Vec::new(),
+            pending_clipboard_writes: Vec::new(),
+            clipboard_read_enabled: false,
+            pending_color_sets: Vec::new(),
+            pending_notifications: Vec::new(),
+            title_stack: Vec::new(),
+            palette: build_default_palette(),
+            default_palette: build_default_palette(),
+            // xterm protocol defaults: white on black, white cursor.
+            dynamic_fg: (229, 229, 229),
+            dynamic_bg: (0, 0, 0),
+            dynamic_cursor: (255, 255, 255),
+            default_dynamic_fg: (229, 229, 229),
+            default_dynamic_bg: (0, 0, 0),
+            default_dynamic_cursor: (255, 255, 255),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // OSC color / clipboard / notification handlers (called by osc_dispatch).
+    // ------------------------------------------------------------------
+
+    /// Handles `OSC 4 ; i ; spec [; i ; spec ...]` (set/query indexed colors).
+    ///
+    /// Multiple `index;spec` pairs may appear. A `spec` of `?` queues a query
+    /// reply reporting the current palette value; any other spec sets it (and
+    /// queues a [`ColorSet`] for the app to apply to its theme).
+    fn handle_osc_4(&mut self, params: &[&[u8]]) {
+        let mut i = 1;
+        while i + 1 < params.len() {
+            let idx = std::str::from_utf8(params[i])
+                .ok()
+                .and_then(|s| s.trim().parse::<u16>().ok());
+            let spec = String::from_utf8_lossy(params[i + 1]);
+            if let Some(idx) = idx {
+                if idx <= 255 {
+                    let idx = idx as u8;
+                    if spec.trim() == "?" {
+                        let reply = format_color_reply(self.palette[idx as usize]);
+                        let resp = format!("\x1b]4;{};{}\x07", idx, reply);
+                        self.pty_response.extend_from_slice(resp.as_bytes());
+                    } else if let Some(rgb) = parse_color_spec(&spec) {
+                        self.palette[idx as usize] = rgb;
+                        self.pending_color_sets
+                            .push(ColorSet::Indexed { index: idx, rgb });
+                    }
+                }
+            }
+            i += 2;
+        }
+    }
+
+    /// Handles `OSC 10/11/12 ; spec` (set/query default fg/bg/cursor).
+    fn handle_dynamic_color(&mut self, params: &[&[u8]], which: DynamicColor) {
+        let Some(spec) = params.get(1) else {
+            return;
+        };
+        let spec = String::from_utf8_lossy(spec);
+        if spec.trim() == "?" {
+            let current = match which {
+                DynamicColor::Foreground => self.dynamic_fg,
+                DynamicColor::Background => self.dynamic_bg,
+                DynamicColor::Cursor => self.dynamic_cursor,
+            };
+            let code = match which {
+                DynamicColor::Foreground => 10,
+                DynamicColor::Background => 11,
+                DynamicColor::Cursor => 12,
+            };
+            let resp = format!("\x1b]{};{}\x07", code, format_color_reply(current));
+            self.pty_response.extend_from_slice(resp.as_bytes());
+        } else if let Some(rgb) = parse_color_spec(&spec) {
+            match which {
+                DynamicColor::Foreground => self.dynamic_fg = rgb,
+                DynamicColor::Background => self.dynamic_bg = rgb,
+                DynamicColor::Cursor => self.dynamic_cursor = rgb,
+            }
+            self.pending_color_sets
+                .push(ColorSet::Dynamic { which, rgb });
+        }
+    }
+
+    /// Handles `OSC 104 [; i ...]` (reset indexed palette entries to defaults).
+    ///
+    /// With no index arguments, resets the entire palette. Otherwise resets only
+    /// the named indices. Each reset queues a [`ColorSet`] carrying the default
+    /// color so the app can mirror the change.
+    fn handle_osc_104(&mut self, params: &[&[u8]]) {
+        if params.len() <= 1 {
+            self.palette = self.default_palette;
+            for (idx, &rgb) in self.default_palette.iter().enumerate() {
+                self.pending_color_sets.push(ColorSet::Indexed {
+                    index: idx as u8,
+                    rgb,
+                });
+            }
+            return;
+        }
+        for raw in &params[1..] {
+            if let Some(idx) = std::str::from_utf8(raw)
+                .ok()
+                .and_then(|s| s.trim().parse::<u16>().ok())
+            {
+                if idx <= 255 {
+                    let idx = idx as u8;
+                    let rgb = self.default_palette[idx as usize];
+                    self.palette[idx as usize] = rgb;
+                    self.pending_color_sets
+                        .push(ColorSet::Indexed { index: idx, rgb });
+                }
+            }
+        }
+    }
+
+    /// Resets a dynamic color (OSC 110/111/112) to its default value.
+    fn reset_dynamic_color(&mut self, which: DynamicColor) {
+        let rgb = match which {
+            DynamicColor::Foreground => self.default_dynamic_fg,
+            DynamicColor::Background => self.default_dynamic_bg,
+            DynamicColor::Cursor => self.default_dynamic_cursor,
+        };
+        match which {
+            DynamicColor::Foreground => self.dynamic_fg = rgb,
+            DynamicColor::Background => self.dynamic_bg = rgb,
+            DynamicColor::Cursor => self.dynamic_cursor = rgb,
+        }
+        self.pending_color_sets
+            .push(ColorSet::Dynamic { which, rgb });
+    }
+
+    /// Handles `OSC 52 ; <selection> ; <base64|?>` (clipboard set/query).
+    ///
+    /// WRITE-only by default. A `?` payload is a clipboard READ request and is
+    /// ignored unless [`Terminal::set_clipboard_read_enabled`] is opted into —
+    /// and even then the core does not read the host clipboard itself; the app
+    /// must call [`Terminal::respond_clipboard_read`]. This avoids the canonical
+    /// OSC 52 host-clipboard-exfiltration vulnerability.
+    fn handle_osc_52(&mut self, params: &[&[u8]]) {
+        let sel_bytes = params.get(1).copied().unwrap_or(b"c");
+        let payload = params.get(2).copied().unwrap_or(b"");
+
+        // Selection: first recognised char; empty -> clipboard.
+        let selection = sel_bytes
+            .iter()
+            .find_map(|&b| match b {
+                b'c' | b's' | b'0' => Some(ClipboardSelection::Clipboard),
+                b'p' => Some(ClipboardSelection::Primary),
+                _ => None,
+            })
+            .unwrap_or(ClipboardSelection::Clipboard);
+
+        if payload == b"?" {
+            // Clipboard READ request: DEFAULT-OFF; never auto-respond with host
+            // clipboard contents. Dropped; the app may later call
+            // respond_clipboard_read after opting in.
+            return;
+        }
+
+        if let Some(decoded) = base64_decode(payload) {
+            let text = String::from_utf8_lossy(&decoded).into_owned();
+            self.pending_clipboard_writes
+                .push(ClipboardWrite { selection, text });
+        }
+    }
+
+    /// Pushes the current title onto the title stack (XTWINOPS `CSI 22 t`).
+    fn push_title(&mut self) {
+        self.title_stack.push(self.title.clone());
+    }
+
+    /// Pops a title from the title stack into the current title
+    /// (XTWINOPS `CSI 23 t`). No-op when the stack is empty.
+    fn pop_title(&mut self) {
+        if let Some(t) = self.title_stack.pop() {
+            self.title = t;
         }
     }
 
@@ -542,6 +797,23 @@ impl Perform for Screen {
                     self.grid.set(self.row, c, Cell::default());
                 }
             }
+            't' => {
+                // XTWINOPS. We implement only the title-stack ops; geometry
+                // window-manipulation ops are intentionally ignored (the app
+                // owns the window). 22;n pushes the title, 23;n pops it; n
+                // selects icon(1)/window(2)/both(0) title — we keep a single
+                // title, so n is accepted but treated uniformly.
+                let op = params
+                    .iter()
+                    .next()
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(0);
+                match op {
+                    22 => self.push_title(),
+                    23 => self.pop_title(),
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
@@ -580,6 +852,45 @@ impl Perform for Screen {
                     if self.prompt_marks.last() != Some(&abs) {
                         self.prompt_marks.push(abs);
                     }
+                }
+            }
+            Some("4") => self.handle_osc_4(params),
+            Some("10") => self.handle_dynamic_color(params, DynamicColor::Foreground),
+            Some("11") => self.handle_dynamic_color(params, DynamicColor::Background),
+            Some("12") => self.handle_dynamic_color(params, DynamicColor::Cursor),
+            Some("52") => self.handle_osc_52(params),
+            Some("104") => self.handle_osc_104(params),
+            Some("110") => self.reset_dynamic_color(DynamicColor::Foreground),
+            Some("111") => self.reset_dynamic_color(DynamicColor::Background),
+            Some("112") => self.reset_dynamic_color(DynamicColor::Cursor),
+            Some("9") => {
+                // OSC 9: desktop notification (body only).
+                if let Some(body) = params
+                    .get(1)
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .filter(|b| !b.is_empty())
+                {
+                    self.pending_notifications.push(Notification {
+                        title: String::new(),
+                        body: body.to_string(),
+                    });
+                }
+            }
+            // OSC 777: rxvt-unicode extension.
+            // Format: OSC 777 ; notify ; <title> ; <body> ST
+            Some("777") if params.get(1).copied() == Some(b"notify".as_slice()) => {
+                let title = params
+                    .get(2)
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .unwrap_or("")
+                    .to_string();
+                let body = params
+                    .get(3)
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .unwrap_or("")
+                    .to_string();
+                if !title.is_empty() || !body.is_empty() {
+                    self.pending_notifications.push(Notification { title, body });
                 }
             }
             _ => {}
@@ -729,6 +1040,115 @@ impl Terminal {
     /// Whether synchronized output (`?2026`) is currently requested.
     pub fn sync_output(&self) -> bool {
         self.screen.dec_modes.sync_output
+    }
+
+    /// Drains pending bytes to write back to the PTY.
+    ///
+    /// These are replies the terminal owes the running program: OSC 4/10/11/12
+    /// color query responses and OSC 52 clipboard read responses (only when
+    /// reads are opted into). The host event loop calls this each frame and
+    /// writes any returned bytes to the PTY master. Returns an empty vec when
+    /// there is nothing to send. The terminal NEVER queues a reply for OSC 133
+    /// marks (anti-CVE, capture-only).
+    pub fn take_pty_response(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.screen.pty_response)
+    }
+
+    /// Drains the oldest pending OSC 52 clipboard-write request, if any.
+    ///
+    /// The host calls this each frame to learn whether a program requested a
+    /// clipboard update, then applies it to the host clipboard. Only WRITE
+    /// requests are ever produced here; clipboard READ requests are ignored
+    /// unless [`Terminal::set_clipboard_read_enabled`] is opted into.
+    pub fn take_clipboard_write(&mut self) -> Option<ClipboardWrite> {
+        if self.screen.pending_clipboard_writes.is_empty() {
+            None
+        } else {
+            Some(self.screen.pending_clipboard_writes.remove(0))
+        }
+    }
+
+    /// Drains all pending OSC 52 clipboard-write requests at once.
+    pub fn take_clipboard_writes(&mut self) -> Vec<ClipboardWrite> {
+        std::mem::take(&mut self.screen.pending_clipboard_writes)
+    }
+
+    /// Enables (or disables) responding to OSC 52 clipboard READ requests.
+    ///
+    /// DEFAULT-OFF. When disabled (the default), an `OSC 52 ; c ; ?` query is
+    /// silently dropped — the terminal never leaks host clipboard contents back
+    /// to a program, which is the canonical OSC 52 read vulnerability. Even when
+    /// enabled, the core never reads the host clipboard itself; the host
+    /// supplies the text via [`Terminal::respond_clipboard_read`].
+    pub fn set_clipboard_read_enabled(&mut self, enabled: bool) {
+        self.screen.clipboard_read_enabled = enabled;
+    }
+
+    /// Returns whether OSC 52 clipboard READ responses are enabled.
+    pub fn clipboard_read_enabled(&self) -> bool {
+        self.screen.clipboard_read_enabled
+    }
+
+    /// Queues an OSC 52 clipboard READ reply for the given selection and text.
+    ///
+    /// No-op unless [`Terminal::clipboard_read_enabled`] is `true`. The host
+    /// supplies the clipboard text so the core never reads the clipboard itself.
+    /// Encoded as standard base64, matching the OSC 52 write encoding. The
+    /// queued bytes are drained via [`Terminal::take_pty_response`].
+    pub fn respond_clipboard_read(&mut self, selection: ClipboardSelection, text: &str) {
+        if !self.screen.clipboard_read_enabled {
+            return;
+        }
+        let sel = match selection {
+            ClipboardSelection::Clipboard => 'c',
+            ClipboardSelection::Primary => 'p',
+        };
+        let encoded = base64_encode(text.as_bytes());
+        let resp = format!("\x1b]52;{};{}\x07", sel, encoded);
+        self.screen.pty_response.extend_from_slice(resp.as_bytes());
+    }
+
+    /// Drains all pending color-set requests (OSC 4 / 10 / 11 / 12 / 104 / 11x).
+    ///
+    /// The host applies each to its live theme. Reset operations are surfaced as
+    /// sets carrying the default color value.
+    pub fn take_color_sets(&mut self) -> Vec<ColorSet> {
+        std::mem::take(&mut self.screen.pending_color_sets)
+    }
+
+    /// Drains the oldest pending desktop notification (OSC 9 / OSC 777).
+    pub fn take_notification(&mut self) -> Option<Notification> {
+        if self.screen.pending_notifications.is_empty() {
+            None
+        } else {
+            Some(self.screen.pending_notifications.remove(0))
+        }
+    }
+
+    /// Drains all pending desktop notifications at once.
+    pub fn take_notifications(&mut self) -> Vec<Notification> {
+        std::mem::take(&mut self.screen.pending_notifications)
+    }
+
+    /// Returns the current indexed-palette color (0-255) as an `(r, g, b)`
+    /// triple. Reflects OSC 4 sets and OSC 104 resets.
+    pub fn palette_color(&self, index: u8) -> (u8, u8, u8) {
+        self.screen.palette[index as usize]
+    }
+
+    /// Returns the current dynamic color (fg/bg/cursor) as an `(r, g, b)`
+    /// triple. Reflects OSC 10/11/12 sets and OSC 110/111/112 resets.
+    pub fn dynamic_color(&self, which: DynamicColor) -> (u8, u8, u8) {
+        match which {
+            DynamicColor::Foreground => self.screen.dynamic_fg,
+            DynamicColor::Background => self.screen.dynamic_bg,
+            DynamicColor::Cursor => self.screen.dynamic_cursor,
+        }
+    }
+
+    /// Returns the current window title-stack depth (XTWINOPS 22/23).
+    pub fn title_stack_depth(&self) -> usize {
+        self.screen.title_stack.len()
     }
 
     /// The requested cursor shape (DECSCUSR `CSI Ps SP q`). Default block.
@@ -1530,5 +1950,203 @@ mod tests {
             )
             .unwrap();
         assert_eq!(out, b"\x1b[<64;1;1M");
+    }
+
+    // ---- OSC 52 clipboard ----
+
+    #[test]
+    fn osc52_clipboard_write_decodes_base64() {
+        let mut t = Terminal::new(4, 20);
+        // "hello" base64 = aGVsbG8=
+        t.advance(b"\x1b]52;c;aGVsbG8=\x07");
+        let w = t.take_clipboard_write().expect("clipboard write");
+        assert_eq!(w.selection, ClipboardSelection::Clipboard);
+        assert_eq!(w.text, "hello");
+        assert!(t.take_clipboard_write().is_none(), "drained once");
+    }
+
+    #[test]
+    fn osc52_primary_selection() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]52;p;aGVsbG8=\x07");
+        let w = t.take_clipboard_write().unwrap();
+        assert_eq!(w.selection, ClipboardSelection::Primary);
+    }
+
+    #[test]
+    fn osc52_read_default_off_emits_nothing() {
+        let mut t = Terminal::new(4, 20);
+        // Read request: payload is '?'. Default-off -> no PTY response, no write.
+        t.advance(b"\x1b]52;c;?\x07");
+        assert!(t.take_clipboard_write().is_none());
+        assert!(
+            t.take_pty_response().is_empty(),
+            "must NOT auto-respond with host clipboard contents"
+        );
+    }
+
+    #[test]
+    fn osc52_read_opt_in_uses_app_provided_text() {
+        let mut t = Terminal::new(4, 20);
+        // Even opted in, the core never reads the host clipboard from the OSC
+        // sequence; the host must supply the text explicitly.
+        t.set_clipboard_read_enabled(true);
+        t.advance(b"\x1b]52;c;?\x07");
+        assert!(
+            t.take_pty_response().is_empty(),
+            "the read request alone emits nothing"
+        );
+        t.respond_clipboard_read(ClipboardSelection::Clipboard, "hi");
+        // "hi" base64 = aGk=
+        assert_eq!(t.take_pty_response().as_slice(), b"\x1b]52;c;aGk=\x07");
+    }
+
+    // ---- OSC 4 / 10 / 11 / 12 colors ----
+
+    #[test]
+    fn osc4_set_indexed_color() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]4;1;rgb:ff/00/00\x07");
+        assert_eq!(t.palette_color(1), (255, 0, 0));
+        assert_eq!(
+            t.take_color_sets(),
+            vec![ColorSet::Indexed {
+                index: 1,
+                rgb: (255, 0, 0)
+            }]
+        );
+    }
+
+    #[test]
+    fn osc4_query_emits_reply() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]4;1;rgb:ff/00/00\x07");
+        let _ = t.take_color_sets();
+        t.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(
+            t.take_pty_response().as_slice(),
+            b"\x1b]4;1;rgb:ffff/0000/0000\x07"
+        );
+    }
+
+    #[test]
+    fn osc11_background_query_emits_reply() {
+        let mut t = Terminal::new(4, 20);
+        // Default background is xterm black -> rgb:0000/0000/0000
+        t.advance(b"\x1b]11;?\x07");
+        assert_eq!(
+            t.take_pty_response().as_slice(),
+            b"\x1b]11;rgb:0000/0000/0000\x07"
+        );
+    }
+
+    #[test]
+    fn osc10_foreground_set() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]10;rgb:12/34/56\x07");
+        assert_eq!(t.dynamic_color(DynamicColor::Foreground), (0x12, 0x34, 0x56));
+        assert_eq!(
+            t.take_color_sets(),
+            vec![ColorSet::Dynamic {
+                which: DynamicColor::Foreground,
+                rgb: (0x12, 0x34, 0x56)
+            }]
+        );
+    }
+
+    #[test]
+    fn osc12_cursor_set() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]12;rgb:00/ff/00\x07");
+        assert_eq!(t.dynamic_color(DynamicColor::Cursor), (0, 255, 0));
+    }
+
+    // ---- OSC 104 / 110-112 reset ----
+
+    #[test]
+    fn osc104_reset_single_index() {
+        let mut t = Terminal::new(4, 20);
+        let original = t.palette_color(2);
+        t.advance(b"\x1b]4;2;rgb:ff/00/00\x07");
+        let _ = t.take_color_sets();
+        assert_eq!(t.palette_color(2), (255, 0, 0));
+        t.advance(b"\x1b]104;2\x07");
+        assert_eq!(t.palette_color(2), original);
+    }
+
+    #[test]
+    fn osc104_reset_all() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]4;5;rgb:ff/00/00\x07");
+        let _ = t.take_color_sets();
+        t.advance(b"\x1b]104\x07");
+        assert_ne!(t.palette_color(5), (255, 0, 0));
+        assert_eq!(t.take_color_sets().len(), 256, "every entry reset is surfaced");
+    }
+
+    #[test]
+    fn osc110_reset_foreground() {
+        let mut t = Terminal::new(4, 20);
+        let original = t.dynamic_color(DynamicColor::Foreground);
+        t.advance(b"\x1b]10;rgb:ff/ff/ff\x07");
+        let _ = t.take_color_sets();
+        t.advance(b"\x1b]110\x07");
+        assert_eq!(t.dynamic_color(DynamicColor::Foreground), original);
+    }
+
+    // ---- OSC 9 / 777 notifications ----
+
+    #[test]
+    fn osc9_notification() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]9;Build complete\x07");
+        let n = t.take_notification().expect("notification");
+        assert_eq!(n.title, "");
+        assert_eq!(n.body, "Build complete");
+    }
+
+    #[test]
+    fn osc777_notification() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]777;notify;Title;Body text\x07");
+        let n = t.take_notification().unwrap();
+        assert_eq!(n.title, "Title");
+        assert_eq!(n.body, "Body text");
+    }
+
+    // ---- Title stack (XTWINOPS 22/23) ----
+
+    #[test]
+    fn title_stack_push_pop() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]2;First\x07");
+        assert_eq!(t.title(), "First");
+        t.advance(b"\x1b[22;0t"); // push
+        assert_eq!(t.title_stack_depth(), 1);
+        t.advance(b"\x1b]2;Second\x07");
+        assert_eq!(t.title(), "Second");
+        t.advance(b"\x1b[23;0t"); // pop
+        assert_eq!(t.title(), "First");
+        assert_eq!(t.title_stack_depth(), 0);
+    }
+
+    #[test]
+    fn title_stack_pop_empty_is_noop() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]2;Only\x07");
+        t.advance(b"\x1b[23;0t"); // pop with empty stack
+        assert_eq!(t.title(), "Only");
+    }
+
+    // ---- OSC 133 still never replies (regression guard) ----
+
+    #[test]
+    fn osc133_never_writes_pty_response() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]133;A\x07");
+        assert!(
+            t.take_pty_response().is_empty(),
+            "OSC 133 marks must remain capture-only (anti-CVE)"
+        );
     }
 }

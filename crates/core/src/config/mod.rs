@@ -200,6 +200,15 @@ pub struct Config {
     pub startup_panel: bool,
     /// Override shell program; `None` = use the platform default shell.
     pub shell: Option<String>,
+    /// Enable font ligatures / complex text shaping in the renderer.
+    ///
+    /// Core-side preference flag only — the actual shaping is the renderer's
+    /// concern (cosmic-text `Shaping::Advanced`). When `false`, the renderer
+    /// should shape per-cell (`Shaping::Basic`) for monospace fidelity; when
+    /// `true`, it may run advanced shaping so programming ligatures (e.g. `->`,
+    /// `!=`) and complex scripts render. Defaults to `false` so monospace grid
+    /// alignment is preserved unless the user opts in.
+    pub ligatures: bool,
 }
 
 impl Default for Config {
@@ -216,6 +225,7 @@ impl Default for Config {
             update: UpdateConfig::default(),
             startup_panel: true,
             shell: None,
+            ligatures: false,
         }
     }
 }
@@ -361,5 +371,21 @@ mod tests {
     fn missing_file_yields_defaults() {
         let c = Config::load_from(&PathBuf::from("/nonexistent/c0pl4nd/config.toml")).unwrap();
         assert_eq!(c, Config::default());
+    }
+
+    #[test]
+    fn ligatures_defaults_off() {
+        let c = Config::default();
+        assert!(!c.ligatures, "monospace fidelity is preserved by default");
+    }
+
+    #[test]
+    fn ligatures_parses_from_partial_toml() {
+        // A config file that only sets ligatures still works via serde(default).
+        let p = PathBuf::from("test.toml");
+        let c = Config::from_toml("ligatures = true\n", &p).unwrap();
+        assert!(c.ligatures);
+        // Untouched fields keep their defaults.
+        assert_eq!(c.theme, "itasha-void");
     }
 }
