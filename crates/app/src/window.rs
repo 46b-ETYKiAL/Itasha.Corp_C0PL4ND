@@ -108,6 +108,40 @@ fn action_hint(action: &str) -> &'static str {
     }
 }
 
+/// True when a saved window rect (physical px) keeps at least a usable strip
+/// on-screen across the currently-connected monitors — the D2 multi-monitor
+/// safety check. Requires ≥64px of the window to overlap some monitor so an
+/// unplugged display / resolution change can't orphan the window off-screen.
+fn geometry_on_screen(
+    px: i32,
+    py: i32,
+    sw: u32,
+    sh: u32,
+    monitors: &[winit::monitor::MonitorHandle],
+) -> bool {
+    if monitors.is_empty() {
+        // No monitor info (e.g. Wayland headless) — accept the size, decline to
+        // assert position validity by treating it as on-screen (winit will
+        // place it). Conservative: better than discarding a valid size.
+        return true;
+    }
+    const MIN_VISIBLE: i32 = 64;
+    let (wx0, wy0, wx1, wy1) = (px, py, px + sw as i32, py + sh as i32);
+    monitors.iter().any(|m| {
+        let mp = m.position();
+        let ms = m.size();
+        let (mx0, my0, mx1, my1) = (
+            mp.x,
+            mp.y,
+            mp.x + ms.width as i32,
+            mp.y + ms.height as i32,
+        );
+        let ox = (wx1.min(mx1) - wx0.max(mx0)).max(0);
+        let oy = (wy1.min(my1) - wy0.max(my0)).max(0);
+        ox >= MIN_VISIBLE && oy >= MIN_VISIBLE
+    })
+}
+
 /// Which title-bar button a point falls on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TitlebarHit {
@@ -1641,6 +1675,32 @@ impl App {
         width - BUTTONS_CELLS * CELL_W - BTN_RIGHT_MARGIN
     }
 
+    /// Capture the live window geometry into `self.config.window` and persist
+    /// it to the config file (D2). Best-effort: a failed `outer_position()`
+    /// (e.g. Wayland) just skips the position. Only the geometry fields are
+    /// written; every other config field the user set is preserved by
+    /// `Config::persist_geometry`.
+    fn save_window_geometry(&mut self) {
+        let Some(g) = &self.gpu else { return };
+        let win = &g.window;
+        let size = win.inner_size();
+        let maximized = win.is_maximized();
+        // Don't capture the (transient) inner size while maximized — that would
+        // overwrite the user's restored size with the maximized extent. Keep the
+        // previously-saved size and only flip the maximized flag.
+        if !maximized {
+            self.config.window.size_w = Some(size.width.max(1));
+            self.config.window.size_h = Some(size.height.max(1));
+            if let Ok(pos) = win.outer_position() {
+                self.config.window.pos_x = Some(pos.x);
+                self.config.window.pos_y = Some(pos.y);
+            }
+        }
+        self.config.window.maximized = Some(maximized);
+        self.config.window.monitor = win.current_monitor().and_then(|m| m.name());
+        let _ = Config::persist_geometry(self.config.window.clone());
+    }
+
     /// Backplate quads for the caption buttons under hover / press (D1). A
     /// frameless window has no OS-drawn button highlights, so we paint a solid
     /// rect behind the hovered button (and a stronger one while pressed) using
@@ -1721,11 +1781,41 @@ impl ApplicationHandler for App {
         let width = (cols as f32 * CELL_W) as u32 + 16;
         let height = (rows as f32 * LINE_HEIGHT) as u32 + 16 + TITLEBAR_H as u32;
 
-        let attrs = Window::default_attributes()
+        let mut attrs = Window::default_attributes()
             .with_title(c0pl4nd_core::PRODUCT_NAME)
             .with_decorations(false)
-            .with_resizable(true)
-            .with_inner_size(winit::dpi::LogicalSize::new(width as f64, height as f64));
+            .with_resizable(true);
+        // D2: restore remembered geometry when it lands on a still-connected
+        // monitor; otherwise fall back to the cols/rows-derived default size.
+        // The on-screen validity check guards against a monitor being
+        // unplugged or resolution-changed between runs (a saved position that
+        // is now fully off-screen would orphan the window).
+        let wc = &self.config.window;
+        let restored = match (wc.size_w, wc.size_h) {
+            (Some(sw), Some(sh)) if sw > 0 && sh > 0 => {
+                let monitors: Vec<_> = event_loop.available_monitors().collect();
+                let pos_ok = match (wc.pos_x, wc.pos_y) {
+                    (Some(px), Some(py)) => geometry_on_screen(px, py, sw, sh, &monitors),
+                    _ => false,
+                };
+                attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(sw, sh));
+                if pos_ok {
+                    attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(
+                        wc.pos_x.unwrap_or(0),
+                        wc.pos_y.unwrap_or(0),
+                    ));
+                }
+                if wc.maximized == Some(true) {
+                    attrs = attrs.with_maximized(true);
+                }
+                true
+            }
+            _ => false,
+        };
+        if !restored {
+            attrs =
+                attrs.with_inner_size(winit::dpi::LogicalSize::new(width as f64, height as f64));
+        }
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
         let gpu = match pollster::block_on(Gpu::new(window.clone(), self.config.font.size)) {
@@ -1754,7 +1844,11 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // D2: persist final geometry before we tear down.
+                self.save_window_geometry();
+                event_loop.exit();
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
                 // Feed the drag state machine; a press becomes a drag only past
@@ -1933,10 +2027,18 @@ impl ApplicationHandler for App {
                         gpu.resize(w, h);
                     }
                     self.pending_resize = Some((w, h));
+                    // D2: mark geometry dirty; the actual config write is
+                    // throttled in `about_to_wait` so a drag doesn't write per
+                    // pixel.
+                    self.geom_dirty = true;
                     if let Some(g) = &self.gpu {
                         g.window.request_redraw();
                     }
                 }
+            }
+            WindowEvent::Moved(_) => {
+                // D2: window dragged to a new position — remember it (debounced).
+                self.geom_dirty = true;
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (up, lines) = match delta {
@@ -2056,6 +2158,14 @@ impl ApplicationHandler for App {
                 self.pending_resize = None;
                 self.last_pty_resize = now;
             }
+        }
+        // D2: debounced window-geometry persistence. A resize/move sets
+        // `geom_dirty`; we write at most ~once/600ms so an interactive drag
+        // doesn't thrash the config file.
+        if self.geom_dirty && now.duration_since(self.last_geom_save) >= Duration::from_millis(600) {
+            self.geom_dirty = false;
+            self.last_geom_save = now;
+            self.save_window_geometry();
         }
         if now >= self.next_poll {
             self.next_poll = now + Duration::from_millis(16);
