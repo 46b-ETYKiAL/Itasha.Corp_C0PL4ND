@@ -865,32 +865,32 @@ impl Perform for Screen {
             Some("112") => self.reset_dynamic_color(DynamicColor::Cursor),
             Some("9") => {
                 // OSC 9: desktop notification (body only).
-                if let Some(body) = params.get(1).and_then(|p| std::str::from_utf8(p).ok()) {
-                    if !body.is_empty() {
-                        self.pending_notifications.push(Notification {
-                            title: String::new(),
-                            body: body.to_string(),
-                        });
-                    }
+                if let Some(body) = params
+                    .get(1)
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .filter(|b| !b.is_empty())
+                {
+                    self.pending_notifications.push(Notification {
+                        title: String::new(),
+                        body: body.to_string(),
+                    });
                 }
             }
-            Some("777") => {
-                // OSC 777: rxvt-unicode extension.
-                // Format: OSC 777 ; notify ; <title> ; <body> ST
-                if params.get(1).copied() == Some(b"notify".as_slice()) {
-                    let title = params
-                        .get(2)
-                        .and_then(|p| std::str::from_utf8(p).ok())
-                        .unwrap_or("")
-                        .to_string();
-                    let body = params
-                        .get(3)
-                        .and_then(|p| std::str::from_utf8(p).ok())
-                        .unwrap_or("")
-                        .to_string();
-                    if !title.is_empty() || !body.is_empty() {
-                        self.pending_notifications.push(Notification { title, body });
-                    }
+            // OSC 777: rxvt-unicode extension.
+            // Format: OSC 777 ; notify ; <title> ; <body> ST
+            Some("777") if params.get(1).copied() == Some(b"notify".as_slice()) => {
+                let title = params
+                    .get(2)
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .unwrap_or("")
+                    .to_string();
+                let body = params
+                    .get(3)
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .unwrap_or("")
+                    .to_string();
+                if !title.is_empty() || !body.is_empty() {
+                    self.pending_notifications.push(Notification { title, body });
                 }
             }
             _ => {}

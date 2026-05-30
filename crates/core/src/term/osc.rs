@@ -148,7 +148,7 @@ pub fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
         symbols.pop();
         pad += 1;
     }
-    if pad > 2 || symbols.iter().any(|&b| b == b'=') {
+    if pad > 2 || symbols.contains(&b'=') {
         return None;
     }
 
