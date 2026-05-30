@@ -1974,6 +1974,24 @@ impl App {
         }
     }
 
+    /// Jump to window tab `n` (1-based). `9` always selects the last tab (the
+    /// standard browser/terminal convention); other out-of-range numbers are
+    /// ignored. Drives the Ctrl+1..9 shortcut (E14).
+    fn select_tab_by_number(&mut self, n: u8) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let idx = if n == 9 {
+            self.tabs.len() - 1
+        } else {
+            (n as usize).saturating_sub(1)
+        };
+        if idx < self.tabs.len() {
+            self.active = idx;
+            self.request_redraw();
+        }
+    }
+
     fn prev_tab(&mut self) {
         if !self.tabs.is_empty() {
             self.active = (self.active + self.tabs.len() - 1) % self.tabs.len();
@@ -2650,12 +2668,20 @@ impl ApplicationHandler for App {
                 let ctrl_only = (self.modifiers.control_key() || self.modifiers.super_key())
                     && !self.modifiers.shift_key()
                     && !self.modifiers.alt_key();
-                // Ctrl+, → open settings (the universal "preferences" shortcut).
+                // Ctrl+, → open settings (the universal "preferences" shortcut);
+                // Ctrl+1..9 → jump directly to window tab N (1-based; 9 = last).
                 if ctrl_only {
                     if let Key::Character(c) = &event.logical_key {
-                        if c.as_str() == "," {
-                            self.open_config_file();
-                            return;
+                        match c.as_str() {
+                            "," => {
+                                self.open_config_file();
+                                return;
+                            }
+                            d if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() && d != "0" => {
+                                self.select_tab_by_number(d.as_bytes()[0] - b'0');
+                                return;
+                            }
+                            _ => {}
                         }
                     }
                 }
