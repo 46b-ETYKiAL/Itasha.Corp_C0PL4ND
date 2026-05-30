@@ -164,6 +164,9 @@ struct App {
     /// Last cursor icon we asked winit for, so frameless edge/button hover only
     /// issues a `set_cursor` when the zone actually changes (avoids per-pixel churn).
     chrome_cursor: winit::window::CursorIcon,
+    /// Timestamp of the last left-press on the titlebar drag area, so a second
+    /// press within the double-click window toggles maximize (standard chrome).
+    last_titlebar_click: Option<Instant>,
     /// Leaf currently under the cursor (drives the short-cell tab-strip hover
     /// reveal in T4.2). `None` when the cursor is over chrome / no cell.
     hover_leaf: Option<LeafId>,
@@ -330,6 +333,7 @@ impl App {
             next_poll: Instant::now(),
             cursor: (0.0, 0.0),
             chrome_cursor: winit::window::CursorIcon::Default,
+            last_titlebar_click: None,
             hover_leaf: None,
             modifiers: ModifiersState::empty(),
             search_mode: false,
@@ -1785,6 +1789,18 @@ impl ApplicationHandler for App {
                     return;
                 }
                 let hit = self.hit_titlebar(self.cursor.0, self.cursor.1);
+                // Double-click the drag area → toggle maximize (standard window
+                // behaviour). Computed before borrowing gpu to avoid a borrow clash.
+                let dbl_titlebar = if hit == TitlebarHit::Drag {
+                    let now = Instant::now();
+                    let dbl = self
+                        .last_titlebar_click
+                        .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(400));
+                    self.last_titlebar_click = Some(now);
+                    dbl
+                } else {
+                    false
+                };
                 if let Some(gpu) = &self.gpu {
                     match hit {
                         TitlebarHit::Close => event_loop.exit(),
@@ -1794,7 +1810,12 @@ impl ApplicationHandler for App {
                             gpu.window.set_maximized(!max);
                         }
                         TitlebarHit::Drag => {
-                            let _ = gpu.window.drag_window();
+                            if dbl_titlebar {
+                                let max = gpu.window.is_maximized();
+                                gpu.window.set_maximized(!max);
+                            } else {
+                                let _ = gpu.window.drag_window();
+                            }
                         }
                         TitlebarHit::None => {}
                     }
