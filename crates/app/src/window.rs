@@ -167,6 +167,17 @@ struct App {
     /// Timestamp of the last left-press on the titlebar drag area, so a second
     /// press within the double-click window toggles maximize (standard chrome).
     last_titlebar_click: Option<Instant>,
+    /// Caption button currently under the cursor (drives the hover backplate).
+    /// Only Minimize/Maximize/Close are meaningful; None otherwise.
+    hovered_button: Option<TitlebarHit>,
+    /// Caption button currently pressed (mouse down on it), for the stronger
+    /// active-state backplate. Cleared on mouse release.
+    pressed_button: Option<TitlebarHit>,
+    /// Debounce clock + dirty flag for window-geometry persistence (D2). A
+    /// rapid interactive resize/move sets `geom_dirty`; the actual config write
+    /// is throttled in `about_to_wait` so we never write per drag pixel.
+    geom_dirty: bool,
+    last_geom_save: Instant,
     /// Leaf currently under the cursor (drives the short-cell tab-strip hover
     /// reveal in T4.2). `None` when the cursor is over chrome / no cell.
     hover_leaf: Option<LeafId>,
@@ -334,6 +345,10 @@ impl App {
             cursor: (0.0, 0.0),
             chrome_cursor: winit::window::CursorIcon::Default,
             last_titlebar_click: None,
+            hovered_button: None,
+            pressed_button: None,
+            geom_dirty: false,
+            last_geom_save: Instant::now(),
             hover_leaf: None,
             modifiers: ModifiersState::empty(),
             search_mode: false,
@@ -1626,6 +1641,43 @@ impl App {
         width - BUTTONS_CELLS * CELL_W - BTN_RIGHT_MARGIN
     }
 
+    /// Backplate quads for the caption buttons under hover / press (D1). A
+    /// frameless window has no OS-drawn button highlights, so we paint a solid
+    /// rect behind the hovered button (and a stronger one while pressed) using
+    /// the SAME geometry as `hit_titlebar`/the chrome glyphs. Close hover is the
+    /// danger red; minimize/maximize hover is a subtle foreground wash. The rect
+    /// is drawn BEFORE the chrome text so the glyph stays legible on top.
+    fn caption_backplates(&self, width: f32, fg_rgba: [f32; 4]) -> Vec<ColorRect> {
+        let mut out = Vec::new();
+        let btn_w = (BUTTON_CELLS * CELL_W) as i32;
+        let left = Self::buttons_left_px(width);
+        // (button, index-in-cluster)
+        let slots = [
+            (TitlebarHit::Minimize, 0),
+            (TitlebarHit::Maximize, 1),
+            (TitlebarHit::Close, 2),
+        ];
+        for (btn, idx) in slots {
+            let pressed = self.pressed_button == Some(btn);
+            let hovered = self.hovered_button == Some(btn);
+            if !pressed && !hovered {
+                continue;
+            }
+            let rgba = if btn == TitlebarHit::Close {
+                // Danger red (matches the close glyph colour), Windows-style.
+                let a = if pressed { 0.85 } else { 0.65 };
+                [1.0, 0.0, 0.25, a]
+            } else {
+                // Subtle foreground wash for min/max.
+                let a = if pressed { 0.22 } else { 0.14 };
+                [fg_rgba[0], fg_rgba[1], fg_rgba[2], a]
+            };
+            let x = (left as i32) + idx * btn_w;
+            out.push(ColorRect::new(x, 0, btn_w, TITLEBAR_H as i32, rgba));
+        }
+        out
+    }
+
     /// Classify a point against the window's resize edges. A frameless window
     /// has no OS resize border, so we hit-test a thin band ourselves and ask
     /// winit to drive the native resize.
@@ -1735,20 +1787,37 @@ impl ApplicationHandler for App {
                 // button shows the hand. Only fires on a zone change.
                 {
                     use winit::window::{CursorIcon, ResizeDirection::*};
-                    let icon = if let Some(d) = self.hit_resize_edge(position.x, position.y) {
+                    let edge = self.hit_resize_edge(position.x, position.y);
+                    // Track which caption button (if any) the cursor is over, so
+                    // the render pass can paint its hover backplate. An edge hit
+                    // takes priority and clears the button hover.
+                    let new_hover_btn = if edge.is_some() {
+                        None
+                    } else {
+                        match self.hit_titlebar(position.x, position.y) {
+                            h @ (TitlebarHit::Minimize
+                            | TitlebarHit::Maximize
+                            | TitlebarHit::Close) => Some(h),
+                            _ => None,
+                        }
+                    };
+                    if new_hover_btn != self.hovered_button {
+                        self.hovered_button = new_hover_btn;
+                        if let Some(g) = &self.gpu {
+                            g.window.request_redraw();
+                        }
+                    }
+                    let icon = if let Some(d) = edge {
                         match d {
                             East | West => CursorIcon::EwResize,
                             North | South => CursorIcon::NsResize,
                             NorthWest | SouthEast => CursorIcon::NwseResize,
                             NorthEast | SouthWest => CursorIcon::NeswResize,
                         }
+                    } else if new_hover_btn.is_some() {
+                        CursorIcon::Pointer
                     } else {
-                        match self.hit_titlebar(position.x, position.y) {
-                            TitlebarHit::Minimize | TitlebarHit::Maximize | TitlebarHit::Close => {
-                                CursorIcon::Pointer
-                            }
-                            _ => CursorIcon::Default,
-                        }
+                        CursorIcon::Default
                     };
                     if self.chrome_cursor != icon {
                         if let Some(g) = &self.gpu {
@@ -1801,6 +1870,12 @@ impl ApplicationHandler for App {
                 } else {
                     false
                 };
+                // Record a press on a caption button for the active-state
+                // backplate (cleared on release). Harmless for non-button hits.
+                self.pressed_button = match hit {
+                    TitlebarHit::Minimize | TitlebarHit::Maximize | TitlebarHit::Close => Some(hit),
+                    _ => None,
+                };
                 if let Some(gpu) = &self.gpu {
                     match hit {
                         TitlebarHit::Close => event_loop.exit(),
@@ -1819,6 +1894,9 @@ impl ApplicationHandler for App {
                         }
                         TitlebarHit::None => {}
                     }
+                    if self.pressed_button.is_some() {
+                        gpu.window.request_redraw();
+                    }
                 }
             }
             WindowEvent::MouseInput {
@@ -1826,6 +1904,13 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                // Clear any caption-button press state (drops the active-state
+                // backplate back to hover/none).
+                if self.pressed_button.take().is_some() {
+                    if let Some(g) = &self.gpu {
+                        g.window.request_redraw();
+                    }
+                }
                 // End any pane drag; a real drag (past threshold) resolves a drop,
                 // a sub-threshold press is just a click and is discarded.
                 if let Some(source) = self.drag.release() {
@@ -2383,7 +2468,7 @@ impl App {
         // Pane chrome: a full-content gutter fill (= bg, harmless for a single
         // pane where chrome_quads returns empty) plus a 1px border per leaf,
         // accent on the focused leaf and muted on the rest.
-        let chrome = chrome_quads(
+        let mut chrome = chrome_quads(
             &cells,
             focused,
             to_rgba(accent),
@@ -2392,6 +2477,9 @@ impl App {
             [bg.r as f32, bg.g as f32, bg.b as f32, bg.a as f32],
             content,
         );
+        // Caption-button hover/press backplates (D1), drawn before the chrome
+        // text so the button glyph stays legible on top.
+        chrome.extend(self.caption_backplates(w as f32, to_rgba(fg)));
         let prepared_chrome = gpu
             .chrome_renderer
             .prepare(&gpu.device, w as f32, h as f32, &chrome);
