@@ -242,6 +242,8 @@ struct App {
     /// Active modal workspace prompt (Phase 6): saving asks for a name,
     /// restoring lists saved workspaces. `None` when no prompt is open.
     workspace_prompt: Option<WorkspacePrompt>,
+    /// Active in-app settings panel (D3). `None` when closed.
+    settings: Option<SettingsPanel>,
 }
 
 /// A modal overlay for the Phase-6 workspace save / restore flow. Reuses the
@@ -253,6 +255,55 @@ enum WorkspacePrompt {
     Save { name: String },
     /// "Restore Layout": pick one of the discovered saved workspaces.
     Restore { names: Vec<String>, idx: usize },
+}
+
+/// The in-app settings panel (D3): a keyboard-driven overlay listing the most
+/// useful settings. Up/Down move the selection, Left/Right adjust the focused
+/// value, Esc closes. Every change is applied live where possible and written
+/// back to the TOML config so the panel and the file stay consistent.
+struct SettingsPanel {
+    /// Currently selected row.
+    idx: usize,
+    /// Theme file stems discovered under the themes dir, for the theme cycler.
+    themes: Vec<String>,
+}
+
+/// The ordered list of editable settings rows in the panel. Each maps to a
+/// `Config` field; the render + key handler drive them generically.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingRow {
+    FontSize,
+    Theme,
+    CursorStyle,
+    CursorBlink,
+    Scrollback,
+    Opacity,
+    StartupPanel,
+}
+
+impl SettingRow {
+    /// Rows in display order.
+    const ALL: [SettingRow; 7] = [
+        SettingRow::FontSize,
+        SettingRow::Theme,
+        SettingRow::CursorStyle,
+        SettingRow::CursorBlink,
+        SettingRow::Scrollback,
+        SettingRow::Opacity,
+        SettingRow::StartupPanel,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            SettingRow::FontSize => "Font size",
+            SettingRow::Theme => "Theme",
+            SettingRow::CursorStyle => "Cursor style",
+            SettingRow::CursorBlink => "Cursor blink",
+            SettingRow::Scrollback => "Scrollback lines",
+            SettingRow::Opacity => "Opacity",
+            SettingRow::StartupPanel => "Startup panel",
+        }
+    }
 }
 
 /// Actions available from the command palette. The `Layout: …` entries apply a
@@ -402,6 +453,7 @@ impl App {
                 .map(|v| v != "0" && !v.is_empty())
                 .unwrap_or(false),
             workspace_prompt: None,
+            settings: None,
         }
     }
 
@@ -480,7 +532,8 @@ impl App {
                     }
                 }
             }
-            "Settings" | "Open Config File" => self.open_config_file(),
+            "Settings" => self.open_settings_panel(),
+            "Open Config File" => self.open_config_file(),
             "Quit" => event_loop.exit(),
             _ => {}
         }
@@ -508,6 +561,195 @@ impl App {
             );
         }
         open_path(&path);
+    }
+
+    /// Open the in-app settings panel (D3). Discovers the available theme
+    /// stems so the theme row can cycle them.
+    fn open_settings_panel(&mut self) {
+        let themes = Self::discover_themes();
+        self.settings = Some(SettingsPanel { idx: 0, themes });
+        self.request_redraw();
+    }
+
+    /// Discover theme file stems from the bundled `assets/themes/` dir and the
+    /// user's config `themes/` dir (deduped, sorted). Always includes the
+    /// current config theme so the cycler can represent it even if the dir scan
+    /// misses it.
+    fn discover_themes() -> Vec<String> {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        dirs.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..")
+                .join("assets")
+                .join("themes"),
+        );
+        if let Some(cfg) = Config::default_path() {
+            if let Some(parent) = cfg.parent() {
+                dirs.push(parent.join("themes"));
+            }
+        }
+        let mut names: Vec<String> = Vec::new();
+        for dir in dirs {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if let Some(stem) = p.file_name().and_then(|s| s.to_str()) {
+                        if let Some(name) = stem.strip_suffix(".toml") {
+                            if !names.iter().any(|n| n == name) {
+                                names.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        names.sort();
+        if names.is_empty() {
+            names.push("itasha-void".to_string());
+        }
+        names
+    }
+
+    /// Persist the current in-memory config to the user config file (D3). The
+    /// settings panel calls this after every change so the file and the live
+    /// state never drift. Errors are logged, never fatal.
+    fn persist_config(&self) {
+        if let Some(path) = Config::default_path() {
+            if let Err(e) = self.config.save_to(&path) {
+                tracing::warn!("could not save config: {e}");
+            }
+        }
+    }
+
+    /// Handle a key while the settings panel is open (D3). Up/Down move the
+    /// selection; Left/Right (and Enter for toggles) adjust the focused value
+    /// with immediate live-apply + persist; Esc closes.
+    fn handle_settings_key(&mut self, key: &Key) {
+        let rows = SettingRow::ALL;
+        // Read the panel state into locals so we never hold a borrow of
+        // `self.settings` across a `self`-mutating call below.
+        let Some((idx, themes)) = self
+            .settings
+            .as_ref()
+            .map(|p| (p.idx, p.themes.clone()))
+        else {
+            return;
+        };
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                self.settings = None;
+                self.request_redraw();
+                return;
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                if let Some(p) = self.settings.as_mut() {
+                    p.idx = (idx + 1) % rows.len();
+                }
+                self.request_redraw();
+                return;
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                if let Some(p) = self.settings.as_mut() {
+                    p.idx = (idx + rows.len() - 1) % rows.len();
+                }
+                self.request_redraw();
+                return;
+            }
+            _ => {}
+        }
+        // Value-change keys: Left = decrement, Right/Enter/Space = increment
+        // (Enter/Space toggle booleans / advance enums).
+        let delta: i32 = match key {
+            Key::Named(NamedKey::ArrowLeft) => -1,
+            Key::Named(NamedKey::ArrowRight)
+            | Key::Named(NamedKey::Enter)
+            | Key::Named(NamedKey::Space) => 1,
+            _ => return,
+        };
+        let row = rows[idx];
+        self.adjust_setting(row, delta, &themes);
+        self.persist_config();
+        self.request_redraw();
+    }
+
+    /// Apply a single +/- step to a settings row, mutating `self.config` (and
+    /// live state like `self.theme`) in place. The renderer reads `self.config`
+    /// / `self.theme` each frame, so most changes are visible immediately;
+    /// font size is baked into the GPU metrics at window creation, so it applies
+    /// on the next launch (noted in the panel).
+    fn adjust_setting(&mut self, row: SettingRow, delta: i32, themes: &[String]) {
+        match row {
+            SettingRow::FontSize => {
+                let s = (self.config.font.size + delta as f32 * 0.5).clamp(6.0, 48.0);
+                self.config.font.size = s;
+            }
+            SettingRow::Theme => {
+                if !themes.is_empty() {
+                    let cur = themes.iter().position(|t| *t == self.config.theme);
+                    let len = themes.len() as i32;
+                    let next = match cur {
+                        Some(i) => (((i as i32) + delta).rem_euclid(len)) as usize,
+                        None => 0,
+                    };
+                    self.config.theme = themes[next].clone();
+                    // Live-apply the theme: the renderer reads self.theme.
+                    if let Some(t) = load_theme(&self.config.theme) {
+                        self.theme = t;
+                    }
+                }
+            }
+            SettingRow::CursorStyle => {
+                self.config.cursor.style = match (self.config.cursor.style, delta) {
+                    (CursorStyle::Block, d) if d > 0 => CursorStyle::Bar,
+                    (CursorStyle::Bar, d) if d > 0 => CursorStyle::Underline,
+                    (CursorStyle::Underline, d) if d > 0 => CursorStyle::Block,
+                    (CursorStyle::Block, _) => CursorStyle::Underline,
+                    (CursorStyle::Bar, _) => CursorStyle::Block,
+                    (CursorStyle::Underline, _) => CursorStyle::Bar,
+                };
+            }
+            SettingRow::CursorBlink => {
+                self.config.cursor.blink = !self.config.cursor.blink;
+            }
+            SettingRow::Scrollback => {
+                let step = 1000i64;
+                let v = self.config.scrollback_lines as i64 + delta as i64 * step;
+                self.config.scrollback_lines = v.clamp(0, 1_000_000) as usize;
+            }
+            SettingRow::Opacity => {
+                let o = (self.config.opacity + delta as f32 * 0.05).clamp(0.1, 1.0);
+                self.config.opacity = o;
+            }
+            SettingRow::StartupPanel => {
+                self.config.startup_panel = !self.config.startup_panel;
+            }
+        }
+    }
+
+    /// Render text for the settings panel overlay (D3), or `None` when closed.
+    fn settings_text(&self) -> Option<String> {
+        let panel = self.settings.as_ref()?;
+        let mut s = String::from("\u{2592} settings\n\n");
+        for (i, row) in SettingRow::ALL.iter().enumerate() {
+            let marker = if i == panel.idx { "\u{25b8} " } else { "  " };
+            let value = match row {
+                SettingRow::FontSize => format!("{:.1}  (applies next launch)", self.config.font.size),
+                SettingRow::Theme => self.config.theme.clone(),
+                SettingRow::CursorStyle => match self.config.cursor.style {
+                    CursorStyle::Block => "block".into(),
+                    CursorStyle::Bar => "bar".into(),
+                    CursorStyle::Underline => "underline".into(),
+                },
+                SettingRow::CursorBlink => bool_label(self.config.cursor.blink),
+                SettingRow::Scrollback => self.config.scrollback_lines.to_string(),
+                SettingRow::Opacity => format!("{:.2}", self.config.opacity),
+                SettingRow::StartupPanel => bool_label(self.config.startup_panel),
+            };
+            s.push_str(&format!("{marker}{:<18}{}\n", row.label(), value));
+        }
+        s.push_str("\n  \u{2191}/\u{2193} select   \u{2190}/\u{2192} change   Esc close");
+        Some(s)
     }
 
     fn enter_search(&mut self) {
@@ -2086,6 +2328,10 @@ impl ApplicationHandler for App {
                 // "Restore Layout") and overlay on top of it; without this
                 // route the prompt would render but every keystroke would
                 // fall through to the PTY (P0 functional gap caught at QA).
+                if self.settings.is_some() {
+                    self.handle_settings_key(&event.logical_key);
+                    return;
+                }
                 if self.workspace_prompt.is_some() {
                     self.handle_workspace_prompt_key(&event.logical_key);
                     return;
@@ -2294,6 +2540,9 @@ impl App {
             None
         };
 
+        // Settings panel overlay text (D3), built before borrowing gpu.
+        let settings_text = self.settings_text();
+
         let splash_text = self.splash.clone();
         // Drag overlay quads (dim source + zone highlight + cursor ghost),
         // computed before the gpu borrow since they read the active tab.
@@ -2419,7 +2668,7 @@ impl App {
         gpu.chrome_buffer
             .shape_until_scroll(&mut gpu.font_system, false);
 
-        if let Some(pt) = &palette_text {
+        if let Some(pt) = palette_text.as_ref().or(settings_text.as_ref()) {
             gpu.palette_buffer.set_text(
                 &mut gpu.font_system,
                 pt,
@@ -2552,8 +2801,9 @@ impl App {
                 custom_glyphs: &[],
             });
         }
-        if palette_text.is_some() {
-            // Centered command-palette overlay.
+        if palette_text.is_some() || settings_text.is_some() {
+            // Centered command-palette / settings overlay (mutually exclusive
+            // modes share the palette buffer).
             areas.push(TextArea {
                 buffer: &gpu.palette_buffer,
                 left: (w as f32 * 0.25).max(40.0),
