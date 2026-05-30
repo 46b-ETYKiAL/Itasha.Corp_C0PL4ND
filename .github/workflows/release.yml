@@ -265,50 +265,16 @@ jobs:
   # installer framework (F0RG3-W1R3) owns the branding + NSIS config; only the
   # compiled binary crosses from this repo (binary-input-contract).
   # --------------------------------------------------------------------------
-  brand-assets:
-    name: Brand rasters (installer art)
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Harden the runner (egress audit)
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
-        with:
-          egress-policy: audit
-      - name: Checkout installer framework (F0RG3-W1R3)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-        with:
-          repository: 46b-ETYKiAL/Itasha.Corp_F0RG3-W1R3
-          persist-credentials: false
-      - name: Install rasterizers (librsvg + imagemagick)
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y librsvg2-bin imagemagick
-      - name: Generate C0PL4ND brand rasters
-        run: |
-          set -euo pipefail
-          chmod +x branding/gen-assets.sh
-          ./branding/gen-assets.sh --app c0pl4nd
-          echo "Generated rasters:"; find branding -type f \( -name '*.ico' -o -name '*.bmp' -o -name '*.png' \) -print
-      - name: Upload brand rasters
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: brand-rasters
-          path: branding/
-          if-no-files-found: error
-
   # --------------------------------------------------------------------------
-  # Branded Windows installer — the Itasha.Corp NSIS installer, forged by
-  # F0RG3-W1R3 / cargo-packager from the compiled binary. PRIMARY Windows
-  # download (replaces the stock MSI). Unsigned interim: SmartScreen warns;
-  # SHA-256 + SLSA attestation provided. SignPath Foundation (free OSS) signing
-  # is wired behind secret-presence once the cert is approved.
+  # Windows installer — the native Itasha.Corp CRT provisioning-console installer
+  # (F0RG3-W1R3, Rust/eframe). Replaces the stock NSIS: the compiled binary +
+  # assets are the payload; the installer is brand-themed, per-machine (pre-fills
+  # C:\Program Files\Itasha.Corp\C0PL4ND), and reusable across apps. SignPath
+  # Foundation signing is gated on SIGNPATH_ORG_ID (unsigned otherwise).
   # --------------------------------------------------------------------------
   windows-installer:
-    name: Windows installer (branded NSIS)
-    needs: [build, brand-assets]
+    name: Windows installer (native CRT)
+    needs: build
     runs-on: windows-latest
     permissions:
       contents: read
@@ -319,10 +285,16 @@ jobs:
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
         with:
           egress-policy: audit
+      - name: Checkout C0PL4ND (assets + licenses)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          path: app
+          persist-credentials: false
       - name: Checkout installer framework (F0RG3-W1R3)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           repository: 46b-ETYKiAL/Itasha.Corp_F0RG3-W1R3
+          path: framework
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
@@ -332,56 +304,73 @@ jobs:
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
           toolchain: stable
-      - name: Install cargo-packager (pinned, locked)
-        shell: bash
-        run: cargo install cargo-packager --version 0.11.8 --locked
-      - name: Download brand rasters
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - name: Cache cargo + installer target
+        # Swatinem/rust-cache@v2.9.1 — restore-only on tag builds (no poisoned save)
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
         with:
-          name: brand-rasters
-          path: branding
+          workspaces: framework/installer -> target
+          key: native-installer
+          save-if: false
       - name: Download Windows binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: c0pl4nd-x86_64-pc-windows-msvc
           path: winbin
-      - name: Forge branded NSIS installer
+      - name: Assemble payload (binary + assets + licenses)
         shell: bash
         run: |
           set -euo pipefail
-          # extract the compiled Windows binary built by the `build` job
           zip="$(find winbin -name '*.zip' | head -1)"
           [ -n "$zip" ] || { echo "no windows binary zip under winbin/"; exit 1; }
-          python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall('winbin/extracted')" "$zip"
-          exe="$(find winbin/extracted -name 'c0pl4nd.exe' | head -1)"
-          [ -n "$exe" ] || { echo "c0pl4nd.exe not found in zip"; exit 1; }
-          exe_win="$(cygpath -w "$(realpath "$exe")")"
-          echo "Binary input: $exe_win"
-          # Merge shared template + per-app override -> standalone config.
-          python tests/merge_config.py c0pl4nd --root . --output merged.packager.toml --binary-path "$exe_win"
-          # cargo-packager 0.11.8 hits os error 267 on Windows for --config <FILE>
-          # (the file-read branch is broken). Pass the config as a RAW JSON STRING
-          # (the documented alternative) to bypass file reading. Also normalize the
-          # template's packaging/build-relative license path (../../X -> X) since we
-          # package from the framework root.
-          CFG="$(python -c "import tomllib,json; d=tomllib.load(open('merged.packager.toml','rb')); d={k:(v[6:] if isinstance(v,str) and v.startswith('../../') else v) for k,v in d.items()}; print(json.dumps(d,separators=(',',':')))")"
-          echo "==> Packaging via raw-JSON config (nsis only); cargo-packager auto-fetches NSIS"
-          cargo-packager -c "$CFG" --formats nsis
-      - name: Collect + name installer
+          python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall('winbin/x')" "$zip"
+          exe="$(find winbin/x -name 'c0pl4nd.exe' | head -1)"
+          [ -n "$exe" ] || { echo "c0pl4nd.exe not found"; exit 1; }
+          mkdir -p payload
+          cp "$exe" payload/
+          if [ -d app/assets ]; then cp -r app/assets payload/assets; fi
+          for f in LICENSE-MIT LICENSE-APACHE README.md; do [ -f "app/$f" ] && cp "app/$f" payload/ || true; done
+          echo "payload contents:"; find payload -maxdepth 2 | head -40
+      - name: Build native installer
         shell: bash
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           mkdir -p dist-out
-          setup="$(find . -maxdepth 2 -name '*-setup.exe' -not -path './winbin/*' -not -path './dist-out/*' | head -1)"
-          [ -n "$setup" ] || { echo "cargo-packager produced no -setup.exe"; ls -la; exit 1; }
-          tag="${TAG:-v0.0.0}"
-          name="c0pl4nd-${tag}-x86_64-setup.exe"
-          cp "$setup" "dist-out/$name"
-          ( cd dist-out && sha256sum "$name" > "$name.sha256" )
-          echo "Installer: $name"
-          cat "dist-out/$name.sha256"
+          python framework/scripts/build_native_installer.py \
+            --app c0pl4nd \
+            --binary-dir payload \
+            --version "$TAG" \
+            --out "dist-out/c0pl4nd-${TAG}-x86_64-setup.exe"
+          ls -la dist-out
+      # --- SignPath Foundation signing (gated; inactive until SIGNPATH_ORG_ID set) ---
+      - name: Upload unsigned installer (for SignPath)
+        id: unsigned
+        if: vars.SIGNPATH_ORG_ID != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: unsigned-installer
+          path: dist-out/*.exe
+      - name: Sign via SignPath Foundation
+        if: vars.SIGNPATH_ORG_ID != ''
+        # SignPath/github-action-submit-signing-request@v2
+        uses: SignPath/github-action-submit-signing-request@b9d91eadd323de506c0c81cf0c7fe7438f3360fd
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORG_ID }}
+          project-slug: c0pl4nd
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: dist-out
+      - name: Checksum installer (final, signed-or-unsigned)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist-out
+          for e in *.exe; do sha256sum "$e" > "$e.sha256"; done
+          cat *.sha256
       - name: Attest installer provenance (SLSA)
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
         with:
@@ -393,12 +382,6 @@ jobs:
           path: dist-out/
           if-no-files-found: error
 
-  # --------------------------------------------------------------------------
-  # Publish a GitHub Release with every archive, checksum, and the SBOM.
-  # (Installer packaging — MSI/DMG/AppImage/DEB — lives in the existing
-  #  release.yml installers job; merge that job in unchanged. Attest each
-  #  installer artifact with the same attest-build-provenance step.)
-  # --------------------------------------------------------------------------
   release:
     name: Publish Release
     needs: [build, sbom, windows-installer]
