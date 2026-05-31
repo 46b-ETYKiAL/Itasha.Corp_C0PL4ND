@@ -18,12 +18,37 @@ pub enum Color {
     Rgb(u8, u8, u8),
 }
 
+/// Underline rendition style (C20 — styled underlines, SGR `4:n`).
+///
+/// `None` is no underline. The renderer (in the app crate) maps each variant to
+/// the appropriate line style; the core only parses + stores the selection. The
+/// legacy plain `underline: bool` is preserved as a derived accessor
+/// ([`CellFlags::underline`]) so existing renderer/extraction code keeps working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum UnderlineStyle {
+    /// No underline (SGR `24` / `4:0`).
+    #[default]
+    None,
+    /// Single underline (SGR `4` / `4:1`).
+    Single,
+    /// Double underline (SGR `4:2` / `21`).
+    Double,
+    /// Curly / "undercurl" underline (SGR `4:3`) — nvim LSP diagnostics.
+    Curly,
+    /// Dotted underline (SGR `4:4`).
+    Dotted,
+    /// Dashed underline (SGR `4:5`).
+    Dashed,
+}
+
 /// Per-cell rendition attributes. Dependency-free flag set (serde-friendly).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CellFlags {
     pub bold: bool,
     pub italic: bool,
-    pub underline: bool,
+    /// Styled-underline selection (C20). `UnderlineStyle::None` means no
+    /// underline. Use [`CellFlags::underline`] for a plain on/off check.
+    pub underline_style: UnderlineStyle,
     pub inverse: bool,
     pub strikeout: bool,
 }
@@ -34,10 +59,16 @@ impl CellFlags {
         CellFlags {
             bold: false,
             italic: false,
-            underline: false,
+            underline_style: UnderlineStyle::None,
             inverse: false,
             strikeout: false,
         }
+    }
+
+    /// Whether ANY underline is active (legacy boolean accessor). `true` for
+    /// every [`UnderlineStyle`] variant except [`UnderlineStyle::None`].
+    pub fn underline(&self) -> bool {
+        self.underline_style != UnderlineStyle::None
     }
 }
 
@@ -48,6 +79,48 @@ pub struct Cell {
     pub fg: Color,
     pub bg: Color,
     pub flags: CellFlags,
+    /// Explicit underline color (C20, SGR `58`). `None` means the underline
+    /// inherits the foreground color. Only meaningful when
+    /// `flags.underline_style != UnderlineStyle::None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline_color: Option<Color>,
+    /// Combining marks / variation selectors appended to the base grapheme
+    /// (C27 / C34). `None` (the common case) means the cell holds just `c`. When
+    /// present, the rendered grapheme is `c` followed by these chars. Bounded to
+    /// [`Cell::MAX_COMBINING`] chars so a hostile stream cannot grow it without
+    /// limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combining: Option<String>,
+}
+
+impl Cell {
+    /// Maximum combining marks appended to a single base grapheme. Past this,
+    /// further zero-width marks are dropped (a Stream-cannot-exhaust-memory
+    /// bound; real text never stacks this many).
+    pub const MAX_COMBINING: usize = 8;
+
+    /// Append a zero-width combining mark (or variation selector) to this cell's
+    /// base grapheme, up to [`Cell::MAX_COMBINING`]. No-op past the cap.
+    pub fn push_combining(&mut self, mark: char) {
+        let s = self.combining.get_or_insert_with(String::new);
+        if s.chars().count() < Self::MAX_COMBINING {
+            s.push(mark);
+        }
+    }
+
+    /// The full grapheme this cell renders: the base char plus any combining
+    /// marks. Allocates only when combining marks are present.
+    pub fn grapheme(&self) -> String {
+        match &self.combining {
+            Some(extra) => {
+                let mut g = String::with_capacity(1 + extra.len());
+                g.push(self.c);
+                g.push_str(extra);
+                g
+            }
+            None => self.c.to_string(),
+        }
+    }
 }
 
 impl Default for Cell {
@@ -57,6 +130,8 @@ impl Default for Cell {
             fg: Color::Default,
             bg: Color::Default,
             flags: CellFlags::empty(),
+            underline_color: None,
+            combining: None,
         }
     }
 }
@@ -75,6 +150,11 @@ pub struct Grid {
     /// hard newline between them). Drives non-lossy reflow on resize. Length is
     /// always `rows`.
     wrapped: Vec<bool>,
+    /// Per-cell continuation flags: `continuation[idx] == true` marks the blank
+    /// trailing spacer of a width-2 (wide) glyph, so the caller can find the
+    /// glyph's base cell (for attaching combining marks, C27). Length is always
+    /// `rows * cols`. Parallel to `cells`.
+    continuation: Vec<bool>,
 }
 
 impl Grid {
@@ -87,6 +167,39 @@ impl Grid {
             cells: vec![Cell::default(); rows * cols],
             damaged: true,
             wrapped: vec![false; rows],
+            continuation: vec![false; rows * cols],
+        }
+    }
+
+    /// Whether the cell at `(row, col)` is the trailing spacer of a wide glyph.
+    pub fn is_continuation(&self, row: usize, col: usize) -> bool {
+        if row < self.rows && col < self.cols {
+            self.continuation[self.idx(row, col)]
+        } else {
+            false
+        }
+    }
+
+    /// Write a cell AND mark it as a wide-glyph continuation spacer. Used by the
+    /// VT layer for the blank second cell of a width-2 glyph (C7/C27).
+    pub fn set_continuation(&mut self, row: usize, col: usize, cell: Cell) {
+        if row < self.rows && col < self.cols {
+            let i = self.idx(row, col);
+            if self.cells[i] != cell || !self.continuation[i] {
+                self.cells[i] = cell;
+                self.continuation[i] = true;
+                self.damaged = true;
+            }
+        }
+    }
+
+    /// Append a combining mark / variation selector to the base grapheme at
+    /// `(row, col)` (C27 / C34). No-op out of bounds or past the per-cell cap.
+    pub fn push_combining_at(&mut self, row: usize, col: usize, mark: char) {
+        if row < self.rows && col < self.cols {
+            let i = self.idx(row, col);
+            self.cells[i].push_combining(mark);
+            self.damaged = true;
         }
     }
 
@@ -138,8 +251,11 @@ impl Grid {
     pub fn set(&mut self, row: usize, col: usize, cell: Cell) {
         if row < self.rows && col < self.cols {
             let i = self.idx(row, col);
-            if self.cells[i] != cell {
+            // A normal write always clears any wide-glyph continuation marker —
+            // the cell is now its own base grapheme.
+            if self.cells[i] != cell || self.continuation[i] {
                 self.cells[i] = cell;
+                self.continuation[i] = false;
                 self.damaged = true;
             }
         }
@@ -153,6 +269,9 @@ impl Grid {
         for w in &mut self.wrapped {
             *w = false;
         }
+        for k in &mut self.continuation {
+            *k = false;
+        }
         self.damaged = true;
     }
 
@@ -161,9 +280,11 @@ impl Grid {
         let rows = rows.max(1);
         let cols = cols.max(1);
         let mut next = vec![Cell::default(); rows * cols];
+        let mut next_cont = vec![false; rows * cols];
         for r in 0..rows.min(self.rows) {
             for c in 0..cols.min(self.cols) {
                 next[r * cols + c] = self.cells[self.idx(r, c)].clone();
+                next_cont[r * cols + c] = self.continuation[self.idx(r, c)];
             }
         }
         let mut next_wrapped = vec![false; rows];
@@ -181,6 +302,7 @@ impl Grid {
         self.cols = cols;
         self.cells = next;
         self.wrapped = next_wrapped;
+        self.continuation = next_cont;
         self.damaged = true;
     }
 
@@ -194,6 +316,11 @@ impl Grid {
         let dropped: Vec<Cell> = self.cells.drain(0..self.cols).collect();
         self.cells
             .extend(std::iter::repeat_n(Cell::default(), self.cols));
+        // Keep the continuation bitset parallel: drop the top row's flags, add a
+        // blank (non-continuation) bottom row.
+        self.continuation.drain(0..self.cols);
+        self.continuation
+            .extend(std::iter::repeat_n(false, self.cols));
         // Shift wrap flags up by one; the new bottom row starts unwrapped.
         if !self.wrapped.is_empty() {
             self.wrapped.remove(0);
@@ -499,5 +626,56 @@ mod tests {
         assert_eq!(g.cell(1, 0).unwrap().c, ' ');
         assert_eq!(g.cell(2, 0).unwrap().c, 'b');
         assert_eq!(g.cell(3, 0).unwrap().c, 'd');
+    }
+
+    // ---- C20: styled-underline model ----
+
+    #[test]
+    fn underline_style_default_is_none() {
+        let f = CellFlags::empty();
+        assert_eq!(f.underline_style, UnderlineStyle::None);
+        assert!(!f.underline(), "empty flags report no underline");
+    }
+
+    #[test]
+    fn underline_boolean_accessor_tracks_style() {
+        let mut f = CellFlags::empty();
+        f.underline_style = UnderlineStyle::Curly;
+        assert!(f.underline(), "any style counts as underlined");
+        f.underline_style = UnderlineStyle::None;
+        assert!(!f.underline());
+    }
+
+    #[test]
+    fn cell_default_has_no_underline_color_or_combining() {
+        let c = Cell::default();
+        assert_eq!(c.underline_color, None);
+        assert_eq!(c.combining, None);
+        assert_eq!(c.grapheme(), " ");
+    }
+
+    // ---- C27 / C34: combining marks on a cell ----
+
+    #[test]
+    fn push_combining_builds_grapheme() {
+        let mut c = Cell {
+            c: 'e',
+            ..Default::default()
+        };
+        c.push_combining('\u{0301}'); // combining acute accent
+        assert_eq!(c.grapheme(), "e\u{0301}");
+    }
+
+    #[test]
+    fn push_combining_is_bounded() {
+        let mut c = Cell {
+            c: 'x',
+            ..Default::default()
+        };
+        for _ in 0..(Cell::MAX_COMBINING + 5) {
+            c.push_combining('\u{0301}');
+        }
+        let count = c.combining.as_ref().unwrap().chars().count();
+        assert_eq!(count, Cell::MAX_COMBINING, "combining marks cap enforced");
     }
 }
