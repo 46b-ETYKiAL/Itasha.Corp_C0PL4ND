@@ -1,0 +1,31 @@
+# cargo-audit configuration — https://github.com/rustsec/rustsec/tree/main/cargo-audit
+#
+# Tracked, justified advisory exceptions. Each entry is an ACCEPTED RISK with a
+# documented reason and a re-evaluation trigger — not a silent suppression.
+
+[advisories]
+ignore = [
+  # RUSTSEC-2017-0008 — the `serial` crate is UNMAINTAINED (informational
+  # advisory, NOT an exploitable vulnerability).
+  #
+  #   Why accepted:
+  #     * `serial` is a TRANSITIVE dependency, pulled in only by
+  #       `portable-pty 0.8` for its serial-PORT support. C0PL4ND is a
+  #       terminal emulator: it uses the PTY path exclusively and never
+  #       touches portable-pty's serial-port API, so the unmaintained code
+  #       is not on any reachable path.
+  #     * The only upgrade that drops `serial` is `portable-pty 0.9`
+  #       (which swaps it for the maintained `serial2`), BUT 0.9.0 is
+  #       KNOWN-BROKEN on Windows — `pty.read` returns garbage / the
+  #       ConPTY round-trip hangs. Verified locally (the shell-spawn echo
+  #       round-trip never completes; session-render test fails) and
+  #       confirmed upstream: wezterm/wezterm#6783 (OPEN, unfixed as of
+  #       2026-05; 0.8.1 works, 0.9.0 does not).
+  #
+  #   Re-evaluation trigger:
+  #     Upgrade to portable-pty >= 0.9.x as soon as wezterm/wezterm#6783
+  #     is fixed and the Windows ConPTY round-trip is verified green, then
+  #     DELETE this ignore. Until then, a working terminal outweighs
+  #     clearing a non-exploitable unmaintained-dep notice.
+  "RUSTSEC-2017-0008",
+]
