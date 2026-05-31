@@ -134,6 +134,17 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
     }
     let width = max_x + 1;
     let height = max_y + 1;
+    // Cap the total pixel count to bound the output allocation against a hostile
+    // stream. The input is already capped at 8 MiB, but a sparse plot could
+    // still imply a very large canvas; 16 Mpx (≈ 4096×4096) is the practical
+    // Sixel ceiling. Mirrors `decode_kitty`'s checked-multiply guard.
+    const MAX_SIXEL_PIXELS: usize = 16 * 1024 * 1024;
+    if width
+        .checked_mul(height)
+        .map_or(true, |n| n > MAX_SIXEL_PIXELS)
+    {
+        return None;
+    }
     let mut rgba = vec![0u8; width * height * 4];
     for ((px, py), c) in pixels {
         let idx = (py * width + px) * 4;
