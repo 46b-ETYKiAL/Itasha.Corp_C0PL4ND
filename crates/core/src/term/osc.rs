@@ -75,6 +75,63 @@ pub struct Notification {
     pub body: String,
 }
 
+/// The state of an `OSC 9 ; 4` taskbar/tab progress report (C26).
+///
+/// Mirrors the Windows-Terminal/ConEmu progress protocol's four states. The app
+/// drives a tab or taskbar indicator from the drained [`Progress`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressState {
+    /// State 0 — remove the progress indicator.
+    Remove,
+    /// State 1 — normal, determinate progress at `percent`.
+    Normal,
+    /// State 2 — error state (typically shown red) at `percent`.
+    Error,
+    /// State 3 — indeterminate (spinner); `percent` is ignored.
+    Indeterminate,
+    /// State 4 — warning/paused (typically shown yellow) at `percent`.
+    Warning,
+}
+
+/// A pending `OSC 9 ; 4 ; state ; percent` progress report (C26), drained by the
+/// application to update a taskbar/tab progress indicator. `percent` is clamped
+/// to 0-100; for [`ProgressState::Remove`] / [`ProgressState::Indeterminate`] it
+/// is `0` and should be ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    pub state: ProgressState,
+    pub percent: u8,
+}
+
+/// Which OSC 133 semantic-prompt zone a [`CommandMark`] records (C28).
+///
+/// `A`/`B` (prompt-start / prompt-end) are tracked separately as
+/// `prompt_marks`; this type captures the command lifecycle: `C` (command
+/// output begins) and `D` (command finished, with an optional exit code).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandMarkKind {
+    /// `OSC 133 ; C` — the command's output starts here.
+    OutputStart,
+    /// `OSC 133 ; D [; exit_code]` — the command finished.
+    CommandEnd {
+        /// Exit code parsed from the `D` mark, if the shell supplied one.
+        exit_code: Option<i32>,
+    },
+}
+
+/// An OSC 133 command-zone mark (C28), anchored to an absolute grid line.
+///
+/// Capture-only: like the prompt marks, the terminal NEVER reports these back to
+/// the PTY (preserves the iTerm2 CVE-2024-38395/38396-class anti-injection
+/// posture). The app reads them to draw success/fail prompt glyphs and command
+/// durations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandMark {
+    pub kind: CommandMarkKind,
+    /// Absolute line index (history length + grid row) where the mark landed.
+    pub line: usize,
+}
+
 // ============================================================================
 // base64 (RFC 4648, standard alphabet)
 // ============================================================================

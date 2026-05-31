@@ -6,13 +6,16 @@
 //! TAB, SGR colour + attributes, cursor positioning, and erase. OSC 7 (cwd)
 //! and the window title are captured; OSC 133 semantic zones hook in here.
 
-use crate::grid::{Cell, CellFlags, Color, Grid};
+use crate::grid::{Cell, CellFlags, Color, Grid, UnderlineStyle};
 use std::collections::VecDeque;
 use vte::{Params, Parser, Perform};
 
 pub mod osc;
 
-pub use osc::{ClipboardSelection, ClipboardWrite, ColorSet, DynamicColor, Notification};
+pub use osc::{
+    ClipboardSelection, ClipboardWrite, ColorSet, CommandMark, CommandMarkKind, DynamicColor,
+    Notification, Progress, ProgressState,
+};
 use osc::{base64_decode, base64_encode, format_color_reply, parse_color_spec, Rgb};
 
 /// Default scrollback line cap when not configured.
@@ -47,6 +50,8 @@ struct Pen {
     fg: Color,
     bg: Color,
     flags: CellFlags,
+    /// Underline color (C20, SGR 58/59). `None` = inherit foreground.
+    underline_color: Option<Color>,
 }
 
 impl Default for Pen {
@@ -55,6 +60,7 @@ impl Default for Pen {
             fg: Color::Default,
             bg: Color::Default,
             flags: CellFlags::empty(),
+            underline_color: None,
         }
     }
 }
@@ -260,6 +266,47 @@ fn dec_line_draw(c: char) -> char {
     }
 }
 
+/// True for the Unicode variation selectors VS15 (U+FE0E, text presentation)
+/// and VS16 (U+FE0F, emoji presentation). They are treated as zero-width
+/// combining marks (C34) — they modify the previous grapheme's presentation
+/// rather than occupying a cell.
+fn is_variation_selector(c: char) -> bool {
+    matches!(c, '\u{FE0E}' | '\u{FE0F}')
+}
+
+/// Map a mode-active boolean to the DECRQM `Pv` value: 1 = set, 2 = reset.
+fn bool_mode(active: bool) -> u8 {
+    if active {
+        1
+    } else {
+        2
+    }
+}
+
+/// Decode an ASCII-hex byte string (XTGETTCAP capability name) into a UTF-8
+/// string. Returns `None` on odd length, non-hex bytes, or invalid UTF-8.
+fn hex_decode(hex: &[u8]) -> Option<String> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    for pair in hex.chunks_exact(2) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        out.push((hi * 16 + lo) as u8);
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Encode bytes as uppercase ASCII-hex (for XTGETTCAP replies).
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push_str(&format!("{b:02X}"));
+    }
+    s
+}
+
 /// Default tab-stop interval (a stop every N columns), matching xterm/VT100.
 const DEFAULT_TAB_INTERVAL: usize = 8;
 
@@ -333,6 +380,10 @@ struct Screen {
     images: Vec<TerminalImage>,
     /// In-progress Sixel DCS payload accumulator (Some between hook and unhook).
     sixel_accum: Option<Vec<u8>>,
+    /// In-progress XTGETTCAP DCS payload accumulator (`DCS + q … ST`, C30). Some
+    /// between hook and unhook when the DCS is an XTGETTCAP request, exclusive
+    /// with `sixel_accum`.
+    xtgettcap_accum: Option<Vec<u8>>,
     /// In-progress Kitty transmissions keyed by image id, accumulated across
     /// `m=1` … `m=0` chunk boundaries (decoded once at the `m=0` boundary).
     /// Format/width/height are captured from the FIRST chunk — the Kitty spec
@@ -374,6 +425,22 @@ struct Screen {
     tab_stops: Vec<bool>,
     /// Last grapheme printed, for REP (`CSI b`).
     last_print: Option<char>,
+    /// IRM insert mode (`CSI 4 h` / `l`, C25). When set, printing a glyph shifts
+    /// the rest of the line right instead of overwriting.
+    insert_mode: bool,
+    /// DECSCNM reverse-video screen (`?5`, C25). When set, the renderer swaps
+    /// default fg/bg for the whole screen. Stored here, read via a getter.
+    reverse_screen: bool,
+    /// DECOM origin mode (`?6`, C25). When set, cursor row addressing (CUP/VPA)
+    /// is relative to the scroll region's top margin and clamped to it.
+    origin_mode: bool,
+    /// OSC 9 ; 4 progress reports (`ConEmu`/Windows-Terminal taskbar progress),
+    /// drained by the app to drive a tab/taskbar indicator (C26).
+    pending_progress: Vec<osc::Progress>,
+    /// OSC 133 command zones (C28): each command's output-start and end (with
+    /// optional exit code) marks, accumulated for prompt success/fail glyphs and
+    /// command-duration display. Capture-only — never reported back to the PTY.
+    command_marks: Vec<osc::CommandMark>,
     /// Pending bytes to write back to the PTY (OSC 4/10/11/12 query replies and
     /// OSC 52 read replies). Drained by [`Terminal::take_pty_response`]. The
     /// terminal NEVER queues a reply for OSC 133 marks (anti-CVE, capture-only).
@@ -422,6 +489,7 @@ impl Screen {
             hyperlinks: Vec::new(),
             images: Vec::new(),
             sixel_accum: None,
+            xtgettcap_accum: None,
             kitty_chunks: std::collections::HashMap::new(),
             kitty_store: std::collections::HashMap::new(),
             dec_modes: DecModes::default(),
@@ -436,6 +504,11 @@ impl Screen {
             use_g1: false,
             tab_stops: default_tab_stops(cols),
             last_print: None,
+            insert_mode: false,
+            reverse_screen: false,
+            origin_mode: false,
+            pending_progress: Vec::new(),
+            command_marks: Vec::new(),
             pty_response: Vec::new(),
             pending_clipboard_writes: Vec::new(),
             clipboard_read_enabled: false,
@@ -601,6 +674,37 @@ impl Screen {
         }
     }
 
+    /// Handles `OSC 9 ; 4 ; <state> ; <percent>` (C26 — taskbar/tab progress).
+    ///
+    /// State 0 removes the indicator, 1 = normal, 2 = error, 3 = indeterminate,
+    /// 4 = warning. `percent` is clamped to 0-100 and ignored for states 0/3.
+    /// Pushes a [`osc::Progress`] into the drained queue; never replies to PTY.
+    fn handle_osc_9_4(&mut self, params: &[&[u8]]) {
+        let state_n = params
+            .get(2)
+            .and_then(|p| std::str::from_utf8(p).ok())
+            .and_then(|s| s.trim().parse::<u8>().ok())
+            .unwrap_or(0);
+        let percent = params
+            .get(3)
+            .and_then(|p| std::str::from_utf8(p).ok())
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+            .min(100) as u8;
+        let state = match state_n {
+            1 => osc::ProgressState::Normal,
+            2 => osc::ProgressState::Error,
+            3 => osc::ProgressState::Indeterminate,
+            4 => osc::ProgressState::Warning,
+            _ => osc::ProgressState::Remove,
+        };
+        let percent = match state {
+            osc::ProgressState::Remove | osc::ProgressState::Indeterminate => 0,
+            _ => percent,
+        };
+        self.pending_progress.push(osc::Progress { state, percent });
+    }
+
     /// Pushes the current title onto the title stack (XTWINOPS `CSI 22 t`).
     fn push_title(&mut self) {
         self.title_stack.push(self.title.clone());
@@ -621,6 +725,14 @@ impl Screen {
     fn set_dec_mode(&mut self, mode: u16, set: bool) {
         match mode {
             1 => self.dec_modes.application_cursor_keys = set,
+            5 => self.reverse_screen = set, // DECSCNM — reverse-video screen (C25).
+            6 => {
+                // DECOM origin mode (C25): toggling it homes the cursor to the
+                // origin (top margin / top-left), per the VT spec.
+                self.origin_mode = set;
+                self.row = if set { self.scroll_top } else { 0 };
+                self.col = 0;
+            }
             7 => self.dec_modes.autowrap = set,
             12 => self.dec_modes.cursor_blink = set,
             25 => self.dec_modes.cursor_visible = set,
@@ -1104,6 +1216,9 @@ impl Screen {
         self.saved_cursor = None;
         self.dec_modes = DecModes::default();
         self.last_print = None;
+        self.insert_mode = false;
+        self.reverse_screen = false;
+        self.origin_mode = false;
         if hard {
             self.history.clear();
             self.history_wrapped.clear();
@@ -1117,27 +1232,47 @@ impl Screen {
     }
 
     fn sgr(&mut self, params: &Params) {
-        // Flatten top-level params to their first subparameter.
-        let codes: Vec<u16> = params
+        // Each top-level param may carry colon-joined sub-parameters (e.g.
+        // `4:3` curly underline, `58:2::r:g:b` underline color). Snapshot the
+        // sub-parameter lists so colon-form attributes (C20) and the legacy
+        // semicolon-form extended colors are both handled.
+        let groups: Vec<Vec<u16>> = params.iter().map(|p| p.to_vec()).collect();
+        // The flat first-subparameter view for the legacy `38;5;n` etc. walk.
+        let codes: Vec<u16> = groups
             .iter()
-            .map(|p| p.first().copied().unwrap_or(0))
+            .map(|g| g.first().copied().unwrap_or(0))
             .collect();
-        let mut i = 0;
         if codes.is_empty() {
             self.pen = Pen::default();
             return;
         }
+        let mut i = 0;
         while i < codes.len() {
             match codes[i] {
                 0 => self.pen = Pen::default(),
                 1 => self.pen.flags.bold = true,
                 3 => self.pen.flags.italic = true,
-                4 => self.pen.flags.underline = true,
+                4 => {
+                    // C20 — styled underline. `4` alone = single. The colon
+                    // sub-parameter form `4:n` selects the style (0=off, 1=single,
+                    // 2=double, 3=curly, 4=dotted, 5=dashed).
+                    let style = match groups[i].get(1).copied() {
+                        None | Some(1) => UnderlineStyle::Single,
+                        Some(0) => UnderlineStyle::None,
+                        Some(2) => UnderlineStyle::Double,
+                        Some(3) => UnderlineStyle::Curly,
+                        Some(4) => UnderlineStyle::Dotted,
+                        Some(5) => UnderlineStyle::Dashed,
+                        Some(_) => UnderlineStyle::Single,
+                    };
+                    self.pen.flags.underline_style = style;
+                }
                 7 => self.pen.flags.inverse = true,
                 9 => self.pen.flags.strikeout = true,
+                21 => self.pen.flags.underline_style = UnderlineStyle::Double,
                 22 => self.pen.flags.bold = false,
                 23 => self.pen.flags.italic = false,
-                24 => self.pen.flags.underline = false,
+                24 => self.pen.flags.underline_style = UnderlineStyle::None,
                 27 => self.pen.flags.inverse = false,
                 29 => self.pen.flags.strikeout = false,
                 30..=37 => self.pen.fg = Color::Indexed((codes[i] - 30) as u8),
@@ -1146,38 +1281,163 @@ impl Screen {
                 100..=107 => self.pen.bg = Color::Indexed((codes[i] - 100 + 8) as u8),
                 39 => self.pen.fg = Color::Default,
                 49 => self.pen.bg = Color::Default,
+                58 => {
+                    // C20 — underline color. Colon form `58:2::r:g:b` (RGB) or
+                    // `58:5:n` (indexed) carries everything in one group;
+                    // semicolon form `58;2;r;g;b` / `58;5;n` spreads across the
+                    // following top-level params (consumed via `i` advance).
+                    if let Some(color) = self.parse_extended_color(&groups[i], &codes, &mut i) {
+                        self.pen.underline_color = Some(color);
+                    }
+                }
+                59 => self.pen.underline_color = None,
                 38 | 48 => {
-                    // Extended colour: 38;5;n (indexed) or 38;2;r;g;b (rgb).
                     let target_is_fg = codes[i] == 38;
-                    if let Some(&kind) = codes.get(i + 1) {
-                        if kind == 5 {
-                            if let Some(&n) = codes.get(i + 2) {
-                                let c = Color::Indexed(n as u8);
-                                if target_is_fg {
-                                    self.pen.fg = c;
-                                } else {
-                                    self.pen.bg = c;
-                                }
-                                i += 2;
-                            }
-                        } else if kind == 2 {
-                            if let (Some(&r), Some(&g), Some(&b)) =
-                                (codes.get(i + 2), codes.get(i + 3), codes.get(i + 4))
-                            {
-                                let c = Color::Rgb(r as u8, g as u8, b as u8);
-                                if target_is_fg {
-                                    self.pen.fg = c;
-                                } else {
-                                    self.pen.bg = c;
-                                }
-                                i += 4;
-                            }
+                    if let Some(color) = self.parse_extended_color(&groups[i], &codes, &mut i) {
+                        if target_is_fg {
+                            self.pen.fg = color;
+                        } else {
+                            self.pen.bg = color;
                         }
                     }
                 }
                 _ => {}
             }
             i += 1;
+        }
+    }
+
+    /// Parse an extended-color operand for SGR 38/48/58. Handles BOTH the colon
+    /// sub-parameter form (everything packed into `group`, e.g. `38:2::r:g:b` or
+    /// `38:5:n`) and the legacy semicolon form (spread across the following
+    /// top-level `codes`, consumed by advancing `i`). Returns the parsed color,
+    /// or `None` when the operand is malformed/truncated.
+    fn parse_extended_color(
+        &self,
+        group: &[u16],
+        codes: &[u16],
+        i: &mut usize,
+    ) -> Option<Color> {
+        // Colon sub-parameter form: the kind + channels live inside `group`.
+        if group.len() >= 2 {
+            let kind = group[1];
+            if kind == 5 {
+                return group.get(2).map(|&n| Color::Indexed(n as u8));
+            }
+            if kind == 2 {
+                // `58:2::r:g:b` carries an empty colorspace slot at index 2, so
+                // the channels may start at index 2 OR 3. Take the LAST three
+                // values present after the kind as r/g/b.
+                let chans: Vec<u16> = group[2..].to_vec();
+                if chans.len() >= 3 {
+                    let r = chans[chans.len() - 3] as u8;
+                    let g = chans[chans.len() - 2] as u8;
+                    let b = chans[chans.len() - 1] as u8;
+                    return Some(Color::Rgb(r, g, b));
+                }
+                return None;
+            }
+            return None;
+        }
+        // Legacy semicolon form: kind + channels are subsequent top-level codes.
+        match codes.get(*i + 1).copied() {
+            Some(5) => {
+                let n = codes.get(*i + 2).copied()?;
+                *i += 2;
+                Some(Color::Indexed(n as u8))
+            }
+            Some(2) => {
+                let r = codes.get(*i + 2).copied()?;
+                let g = codes.get(*i + 3).copied()?;
+                let b = codes.get(*i + 4).copied()?;
+                *i += 4;
+                Some(Color::Rgb(r as u8, g as u8, b as u8))
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a 0-based target row for an absolute cursor move (CUP/VPA),
+    /// honouring DECOM origin mode (C25). When origin mode is set, the row is
+    /// relative to `scroll_top` and clamped to `[scroll_top, scroll_bottom]`;
+    /// otherwise it is an absolute screen row clamped to the grid.
+    fn resolve_row(&self, target: usize) -> usize {
+        if self.origin_mode {
+            (self.scroll_top + target).min(self.scroll_bottom)
+        } else {
+            target.min(self.grid.rows().saturating_sub(1))
+        }
+    }
+
+    /// DECRQM reply (C33): emit `CSI [?] Ps ; Pv $ y` reporting mode `ps`'s
+    /// current value. `Pv` is 1 (set), 2 (reset), or 0 (not recognised).
+    fn report_mode(&mut self, ps: u16, private: bool) {
+        let value: u8 = if private {
+            match ps {
+                1 => bool_mode(self.dec_modes.application_cursor_keys),
+                5 => bool_mode(self.reverse_screen),
+                6 => bool_mode(self.origin_mode),
+                7 => bool_mode(self.dec_modes.autowrap),
+                12 => bool_mode(self.dec_modes.cursor_blink),
+                25 => bool_mode(self.dec_modes.cursor_visible),
+                1000 => bool_mode(self.dec_modes.mouse_mode == MouseMode::Normal),
+                1002 => bool_mode(self.dec_modes.mouse_mode == MouseMode::ButtonEvent),
+                1003 => bool_mode(self.dec_modes.mouse_mode == MouseMode::AnyEvent),
+                1004 => bool_mode(self.dec_modes.focus_reporting),
+                1006 => bool_mode(self.dec_modes.mouse_encoding == MouseEncoding::Sgr),
+                2004 => bool_mode(self.dec_modes.bracketed_paste),
+                2026 => bool_mode(self.dec_modes.sync_output),
+                47 | 1047 | 1049 => bool_mode(self.saved_primary.is_some()),
+                _ => 0,
+            }
+        } else {
+            match ps {
+                4 => bool_mode(self.insert_mode), // IRM
+                _ => 0,
+            }
+        };
+        let lead = if private { "?" } else { "" };
+        let resp = format!("\x1b[{lead}{ps};{value}$y");
+        self.pty_response.extend_from_slice(resp.as_bytes());
+    }
+
+    /// XTGETTCAP reply (C30): the DCS `q` payload is a space-separated list of
+    /// hex-encoded terminfo capability names. For each recognised capability we
+    /// reply `DCS 1 + r <hex-name> = <hex-value> ST`; for unrecognised ones we
+    /// reply the invalid form `DCS 0 + r <hex-name> ST`. Apps that gate styled
+    /// underline / truecolor on this must get a reply or they hang.
+    fn report_xtgettcap(&mut self, payload: &[u8]) {
+        for token in payload.split(|&b| b == b';') {
+            if token.is_empty() {
+                continue;
+            }
+            let Some(name) = hex_decode(token) else {
+                continue;
+            };
+            // Recognised capabilities. `Co`/`colors` = 256, `TN` (terminal name)
+            // = "xterm-256color", `RGB` = present (truecolor).
+            let value: Option<&str> = match name.as_str() {
+                "Co" | "colors" => Some("256"),
+                "TN" | "name" => Some("xterm-256color"),
+                "RGB" => Some(""), // boolean capability — present, empty value.
+                _ => None,
+            };
+            let resp = match value {
+                Some(v) => {
+                    let name_hex = hex_encode(name.as_bytes());
+                    if v.is_empty() {
+                        format!("\x1bP1+r{name_hex}\x1b\\")
+                    } else {
+                        let val_hex = hex_encode(v.as_bytes());
+                        format!("\x1bP1+r{name_hex}={val_hex}\x1b\\")
+                    }
+                }
+                None => {
+                    let name_hex = hex_encode(name.as_bytes());
+                    format!("\x1bP0+r{name_hex}\x1b\\")
+                }
+            };
+            self.pty_response.extend_from_slice(resp.as_bytes());
         }
     }
 
@@ -1210,13 +1470,37 @@ impl Perform for Screen {
         } else {
             c
         };
+
+        // C27 / C34 — a zero-width char (a combining mark, or a variation
+        // selector VS15 U+FE0E / VS16 U+FE0F) does not occupy its own cell: it
+        // attaches to the previous cell's base grapheme. This keeps `é` (e +
+        // U+0301) and emoji presentation selectors in a single cell.
+        let raw_width = UnicodeWidthChar::width(c).unwrap_or(0);
+        if (raw_width == 0 || is_variation_selector(c)) && self.col > 0 {
+            let prev = self.col - 1;
+            // Append to the base cell, not the wide-glyph continuation spacer.
+            let base = if prev > 0 && self.grid.is_continuation(self.row, prev) {
+                prev - 1
+            } else {
+                prev
+            };
+            self.grid.push_combining_at(self.row, base, c);
+            return;
+        }
+
         self.last_print = Some(c);
 
-        // East-Asian width: a wide glyph occupies two columns. Zero-width
-        // (combining) chars are given width 1 so they at least land in a cell
-        // rather than vanishing — full combining-mark stacking is out of scope.
-        let width = UnicodeWidthChar::width(c).unwrap_or(0).max(1);
+        // East-Asian width: a wide glyph occupies two columns. A leading
+        // zero-width char (no previous cell to attach to) still lands in a cell
+        // so it is not lost.
+        let width = raw_width.max(1);
         let cols = self.grid.cols();
+
+        // IRM (insert mode, C25): when set, a printed glyph SHIFTS the rest of
+        // the line right by its width rather than overwriting.
+        if self.insert_mode && self.col < cols {
+            self.grid.insert_blanks(self.row, self.col, width);
+        }
 
         if self.col >= cols {
             if self.dec_modes.autowrap {
@@ -1253,13 +1537,15 @@ impl Perform for Screen {
                 fg: self.pen.fg,
                 bg: self.pen.bg,
                 flags: self.pen.flags,
+                underline_color: self.pen.underline_color,
+                combining: None,
             },
         );
         self.col += 1;
         if width == 2 {
             // Continuation cell: a blank spacer that the renderer skips. Keeping
             // it as a space keeps grid->text extraction sane (one visible glyph).
-            self.grid.set(
+            self.grid.set_continuation(
                 self.row,
                 self.col,
                 Cell {
@@ -1267,6 +1553,8 @@ impl Perform for Screen {
                     fg: self.pen.fg,
                     bg: self.pen.bg,
                     flags: self.pen.flags,
+                    underline_color: self.pen.underline_color,
+                    combining: None,
                 },
             );
             self.col += 1;
@@ -1329,6 +1617,20 @@ impl Perform for Screen {
         _ignore: bool,
         action: char,
     ) {
+        // DECRQM — request mode (C33): `CSI ? Ps $ p` (private) or
+        // `CSI Ps $ p` (ANSI). Reply `CSI [?] Ps ; Pv $ y` where Pv is the
+        // mode value (0 = unrecognised, 1 = set, 2 = reset). Apps that probe
+        // modes hang without a reply.
+        if action == 'p' && intermediates.contains(&b'$') {
+            let ps = params
+                .iter()
+                .next()
+                .and_then(|p| p.first().copied())
+                .unwrap_or(0);
+            let private = intermediates.contains(&b'?');
+            self.report_mode(ps, private);
+            return;
+        }
         // DEC private mode set/reset: `CSI ? Pm h` / `CSI ? Pm l`. The `?`
         // arrives in the intermediates. Every param in the sequence is applied
         // (e.g. `CSI ? 1049 ; 1006 h` toggles both modes).
@@ -1337,6 +1639,17 @@ impl Perform for Screen {
             for p in params.iter() {
                 if let Some(&m) = p.first() {
                     self.set_dec_mode(m, set);
+                }
+            }
+            return;
+        }
+        // ANSI (non-private) mode set/reset: `CSI Pm h` / `CSI Pm l`. The only
+        // ANSI mode we model is IRM (insert/replace, mode 4 — C25).
+        if intermediates.is_empty() && (action == 'h' || action == 'l') {
+            let set = action == 'h';
+            for p in params.iter() {
+                if p.first().copied() == Some(4) {
+                    self.insert_mode = set;
                 }
             }
             return;
@@ -1371,7 +1684,7 @@ impl Perform for Screen {
                     .and_then(|p| p.first().copied())
                     .unwrap_or(1)
                     .max(1) as usize;
-                self.row = (row - 1).min(self.grid.rows() - 1);
+                self.row = self.resolve_row(row - 1);
                 self.col = (col - 1).min(self.grid.cols() - 1);
             }
             'A' => self.row = self.row.saturating_sub(Self::first_param(params, 1)),
@@ -1410,8 +1723,8 @@ impl Perform for Screen {
                 self.clear_tab_stop(mode);
             }
             'd' => {
-                // VPA — vertical position absolute (1-based row).
-                self.row = (Self::first_param(params, 1) - 1).min(self.grid.rows() - 1);
+                // VPA — vertical position absolute (1-based row). Honours DECOM.
+                self.row = self.resolve_row(Self::first_param(params, 1) - 1);
             }
             'r' => {
                 // DECSTBM — set top/bottom scroll margins (1-based). No params
@@ -1644,15 +1957,42 @@ impl Perform for Screen {
                 }
             }
             Some("133") => {
-                // OSC 133 ; A  marks a shell prompt start (jump-to-prompt).
-                // We never route any report-back into the PTY (security: this
-                // is the iTerm2 CVE-2024-38395/38396 class — capture only).
+                // OSC 133 semantic-prompt zones. A/B mark prompt start/end
+                // (jump-to-prompt); C/D mark command-output-start / command-end
+                // with an optional exit code (C28). We never route any
+                // report-back into the PTY (security: iTerm2 CVE-2024-38395/
+                // 38396 class — capture only).
                 let kind = params.get(1).copied();
-                if kind == Some(b"A".as_slice()) || kind == Some(b"B".as_slice()) {
-                    let abs = self.history.len() + self.row;
-                    if self.prompt_marks.last() != Some(&abs) {
+                let abs = self.history.len() + self.row;
+                match kind {
+                    Some(b"A") | Some(b"B")
+                        if self.prompt_marks.last() != Some(&abs) =>
+                    {
                         self.prompt_marks.push(abs);
                     }
+                    Some(b"A") | Some(b"B") => {}
+                    Some(b"C") => {
+                        self.command_marks.push(osc::CommandMark {
+                            kind: osc::CommandMarkKind::OutputStart,
+                            line: abs,
+                        });
+                    }
+                    Some(b"D") => {
+                        // `OSC 133 ; D [; exit_code]`. The exit code may be the
+                        // 3rd field directly or embedded in a `D;aid=…` form;
+                        // parse the first field that looks like an integer.
+                        let exit_code = params.get(2).and_then(|p| {
+                            std::str::from_utf8(p).ok().and_then(|s| {
+                                s.split([';', '='])
+                                    .find_map(|tok| tok.trim().parse::<i32>().ok())
+                            })
+                        });
+                        self.command_marks.push(osc::CommandMark {
+                            kind: osc::CommandMarkKind::CommandEnd { exit_code },
+                            line: abs,
+                        });
+                    }
+                    _ => {}
                 }
             }
             Some("4") => self.handle_osc_4(params),
@@ -1664,6 +2004,10 @@ impl Perform for Screen {
             Some("110") => self.reset_dynamic_color(DynamicColor::Foreground),
             Some("111") => self.reset_dynamic_color(DynamicColor::Background),
             Some("112") => self.reset_dynamic_color(DynamicColor::Cursor),
+            Some("9") if params.get(1).copied() == Some(b"4".as_slice()) => {
+                // OSC 9 ; 4 ; state ; percent — taskbar/tab progress (C26).
+                self.handle_osc_9_4(params);
+            }
             Some("9") => {
                 // OSC 9: desktop notification (body only).
                 if let Some(body) = params
@@ -1698,9 +2042,13 @@ impl Perform for Screen {
         }
     }
 
-    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, action: char) {
-        // DCS with final byte 'q' is a Sixel image; start accumulating payload.
-        if action == 'q' {
+    fn hook(&mut self, _params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        // `DCS + q … ST` is an XTGETTCAP capability request (C30) — the `+`
+        // arrives as an intermediate. `DCS q …` (no intermediate) is a Sixel
+        // image. The two are disambiguated by the intermediate.
+        if action == 'q' && intermediates.contains(&b'+') {
+            self.xtgettcap_accum = Some(Vec::new());
+        } else if action == 'q' {
             self.sixel_accum = Some(Vec::new());
         }
     }
@@ -1709,6 +2057,11 @@ impl Perform for Screen {
         if let Some(buf) = &mut self.sixel_accum {
             // Bound the payload so a hostile stream can't exhaust memory.
             if buf.len() < 8 * 1024 * 1024 {
+                buf.push(byte);
+            }
+        } else if let Some(buf) = &mut self.xtgettcap_accum {
+            // XTGETTCAP names are tiny; bound generously against hostile input.
+            if buf.len() < 4096 {
                 buf.push(byte);
             }
         }
@@ -1723,6 +2076,8 @@ impl Perform for Screen {
                     col: self.col,
                 });
             }
+        } else if let Some(buf) = self.xtgettcap_accum.take() {
+            self.report_xtgettcap(&buf);
         }
     }
 }
@@ -2219,6 +2574,37 @@ impl Terminal {
     /// Drains all pending desktop notifications at once.
     pub fn take_notifications(&mut self) -> Vec<Notification> {
         std::mem::take(&mut self.screen.pending_notifications)
+    }
+
+    /// Whether DECSCNM reverse-video screen mode (`?5`, C25) is active. When
+    /// `true`, the renderer should swap the default fg/bg for the whole screen.
+    pub fn reverse_screen(&self) -> bool {
+        self.screen.reverse_screen
+    }
+
+    /// Whether IRM insert mode (`CSI 4 h`, C25) is active. Exposed for the
+    /// renderer/host; printing already honours it internally.
+    pub fn insert_mode(&self) -> bool {
+        self.screen.insert_mode
+    }
+
+    /// Whether DECOM origin mode (`?6`, C25) is active (cursor addressing is
+    /// relative to the scroll region).
+    pub fn origin_mode(&self) -> bool {
+        self.screen.origin_mode
+    }
+
+    /// Drains all pending `OSC 9 ; 4` taskbar/tab progress reports (C26). The
+    /// host applies the most recent to its tab/taskbar progress indicator.
+    pub fn take_progress(&mut self) -> Vec<osc::Progress> {
+        std::mem::take(&mut self.screen.pending_progress)
+    }
+
+    /// The captured OSC 133 command-zone marks (C28): output-start (`C`) and
+    /// command-end (`D`, with optional exit code). Capture-only — the terminal
+    /// never reports these back to the PTY.
+    pub fn command_marks(&self) -> &[osc::CommandMark] {
+        &self.screen.command_marks
     }
 
     /// Returns the current indexed-palette color (0-255) as an `(r, g, b)`
@@ -3933,5 +4319,410 @@ mod tests {
         assert!(t.alt_screen_active());
         assert_eq!(t.grid().rows(), 6);
         assert_eq!(t.grid().cols(), 10);
+    }
+
+    // ============================================================
+    // VT correctness P2/P3 batch (C20/C22/C25/C26/C27/C28/C30/C33/C34)
+    // ============================================================
+
+    use crate::grid::UnderlineStyle;
+
+    // ---- C20: styled underlines + underline color ----
+
+    #[test]
+    fn sgr_plain_underline_is_single() {
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"\x1b[4mX");
+        assert_eq!(
+            t.grid().cell(0, 0).unwrap().flags.underline_style,
+            UnderlineStyle::Single
+        );
+        assert!(t.grid().cell(0, 0).unwrap().flags.underline());
+    }
+
+    #[test]
+    fn sgr_colon_styled_underlines() {
+        let cases: &[(&[u8], UnderlineStyle)] = &[
+            (b"\x1b[4:0mX", UnderlineStyle::None),
+            (b"\x1b[4:1mX", UnderlineStyle::Single),
+            (b"\x1b[4:2mX", UnderlineStyle::Double),
+            (b"\x1b[4:3mX", UnderlineStyle::Curly),
+            (b"\x1b[4:4mX", UnderlineStyle::Dotted),
+            (b"\x1b[4:5mX", UnderlineStyle::Dashed),
+        ];
+        for (seq, style) in cases {
+            let mut t = Terminal::new(2, 10);
+            t.advance(seq);
+            assert_eq!(
+                t.grid().cell(0, 0).unwrap().flags.underline_style,
+                *style,
+                "style for {seq:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sgr_double_underline_via_21() {
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"\x1b[21mX");
+        assert_eq!(
+            t.grid().cell(0, 0).unwrap().flags.underline_style,
+            UnderlineStyle::Double
+        );
+    }
+
+    #[test]
+    fn sgr_24_resets_underline() {
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"\x1b[4:3m\x1b[24mX");
+        assert_eq!(
+            t.grid().cell(0, 0).unwrap().flags.underline_style,
+            UnderlineStyle::None
+        );
+    }
+
+    #[test]
+    fn sgr_58_underline_color_indexed() {
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"\x1b[4:3;58:5:9mX"); // curly + indexed underline color 9
+        let cell = t.grid().cell(0, 0).unwrap();
+        assert_eq!(cell.flags.underline_style, UnderlineStyle::Curly);
+        assert_eq!(cell.underline_color, Some(Color::Indexed(9)));
+    }
+
+    #[test]
+    fn sgr_58_underline_color_rgb_colon_empty_colorspace() {
+        let mut t = Terminal::new(2, 10);
+        // `58:2::255:0:0` — note the empty colorspace slot between 2 and r.
+        t.advance(b"\x1b[58:2::255:0:0mX");
+        assert_eq!(
+            t.grid().cell(0, 0).unwrap().underline_color,
+            Some(Color::Rgb(255, 0, 0))
+        );
+    }
+
+    #[test]
+    fn sgr_58_underline_color_rgb_semicolon_form() {
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"\x1b[58;2;10;20;30mX");
+        assert_eq!(
+            t.grid().cell(0, 0).unwrap().underline_color,
+            Some(Color::Rgb(10, 20, 30))
+        );
+    }
+
+    #[test]
+    fn sgr_59_resets_underline_color() {
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"\x1b[58:5:9m\x1b[59mX");
+        assert_eq!(t.grid().cell(0, 0).unwrap().underline_color, None);
+    }
+
+    #[test]
+    fn sgr_extended_fg_color_still_works_after_refactor() {
+        // Regression: the sgr() rewrite must not break 38;2 / 38;5.
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"\x1b[38;5;200mA\x1b[38;2;1;2;3mB");
+        assert_eq!(t.grid().cell(0, 0).unwrap().fg, Color::Indexed(200));
+        assert_eq!(t.grid().cell(0, 1).unwrap().fg, Color::Rgb(1, 2, 3));
+    }
+
+    // ---- C22: REP (verify still green after refactor) ----
+
+    #[test]
+    fn rep_after_p2_changes() {
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"q\x1b[2b"); // print q, repeat twice more
+        let line: String = (0..3).map(|c| t.grid().cell(0, c).unwrap().c).collect();
+        assert_eq!(line, "qqq");
+    }
+
+    // ---- C25: DECSCNM / IRM / DECOM ----
+
+    #[test]
+    fn decscnm_reverse_screen_flag() {
+        let mut t = Terminal::new(2, 10);
+        assert!(!t.reverse_screen());
+        t.advance(b"\x1b[?5h");
+        assert!(t.reverse_screen(), "?5h sets reverse-video screen");
+        t.advance(b"\x1b[?5l");
+        assert!(!t.reverse_screen());
+    }
+
+    #[test]
+    fn irm_insert_mode_shifts_line_right() {
+        let mut t = Terminal::new(2, 6);
+        t.advance(b"abcd\x1b[H"); // fill, home
+        t.advance(b"\x1b[4h"); // enable IRM
+        t.advance(b"XY"); // insert at col 0: XYabcd -> XYabcd (d pushed off)
+        assert!(t.insert_mode());
+        let line: String = (0..6).map(|c| t.grid().cell(0, c).unwrap().c).collect();
+        assert_eq!(line, "XYabcd");
+    }
+
+    #[test]
+    fn irm_reset_returns_to_overwrite() {
+        let mut t = Terminal::new(2, 6);
+        t.advance(b"abcd\x1b[H\x1b[4h\x1b[4l"); // set then reset IRM
+        assert!(!t.insert_mode());
+        t.advance(b"X"); // overwrite, not insert
+        let line: String = (0..4).map(|c| t.grid().cell(0, c).unwrap().c).collect();
+        assert_eq!(line, "Xbcd");
+    }
+
+    #[test]
+    fn decom_origin_mode_relative_addressing() {
+        let mut t = Terminal::new(6, 10);
+        t.advance(b"\x1b[2;4r"); // scroll region rows 2..4 (0-based 1..3)
+        t.advance(b"\x1b[?6h"); // enable origin mode (homes to top margin)
+        assert!(t.origin_mode());
+        // CUP row 1 with origin mode -> absolute row = scroll_top (1).
+        t.advance(b"\x1b[1;1H");
+        assert_eq!(t.cursor_position(), Some((1, 0)), "row 1 maps to top margin");
+        // CUP row 2 -> scroll_top + 1 = row 2.
+        t.advance(b"\x1b[2;1H");
+        assert_eq!(t.cursor_position(), Some((2, 0)));
+        // Past the bottom margin clamps to scroll_bottom (3).
+        t.advance(b"\x1b[99;1H");
+        assert_eq!(t.cursor_position(), Some((3, 0)), "clamped to bottom margin");
+    }
+
+    #[test]
+    fn decom_off_uses_absolute_addressing() {
+        let mut t = Terminal::new(6, 10);
+        t.advance(b"\x1b[2;4r"); // region set
+        t.advance(b"\x1b[1;1H"); // origin mode OFF -> absolute row 0
+        assert_eq!(t.cursor_position(), Some((0, 0)));
+    }
+
+    // ---- C26: OSC 9;4 progress ----
+
+    #[test]
+    fn osc9_4_progress_normal() {
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"\x1b]9;4;1;42\x07");
+        let p = t.take_progress();
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].state, ProgressState::Normal);
+        assert_eq!(p[0].percent, 42);
+        assert!(t.take_progress().is_empty(), "drained once");
+    }
+
+    #[test]
+    fn osc9_4_progress_states() {
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"\x1b]9;4;0;0\x07"); // remove
+        t.advance(b"\x1b]9;4;2;99\x07"); // error
+        t.advance(b"\x1b]9;4;3;50\x07"); // indeterminate (percent ignored)
+        t.advance(b"\x1b]9;4;4;75\x07"); // warning
+        let p = t.take_progress();
+        assert_eq!(p[0].state, ProgressState::Remove);
+        assert_eq!(p[1].state, ProgressState::Error);
+        assert_eq!(p[1].percent, 99);
+        assert_eq!(p[2].state, ProgressState::Indeterminate);
+        assert_eq!(p[2].percent, 0, "indeterminate ignores percent");
+        assert_eq!(p[3].state, ProgressState::Warning);
+        assert_eq!(p[3].percent, 75);
+    }
+
+    #[test]
+    fn osc9_4_clamps_percent() {
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"\x1b]9;4;1;250\x07");
+        assert_eq!(t.take_progress()[0].percent, 100, "percent clamps to 100");
+    }
+
+    #[test]
+    fn osc9_plain_notification_not_progress() {
+        // OSC 9 without the ;4 sub-code is still a notification.
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"\x1b]9;Hello\x07");
+        assert!(t.take_progress().is_empty());
+        assert_eq!(t.take_notification().unwrap().body, "Hello");
+    }
+
+    // ---- C27 / C34: combining marks + variation selectors ----
+
+    #[test]
+    fn combining_mark_attaches_to_previous_cell() {
+        let mut t = Terminal::new(2, 10);
+        t.advance("e\u{0301}".as_bytes()); // e + combining acute
+        let cell = t.grid().cell(0, 0).unwrap();
+        assert_eq!(cell.c, 'e');
+        assert_eq!(cell.grapheme(), "e\u{0301}");
+        // The combining mark did NOT advance the cursor into col 1.
+        assert_eq!(t.cursor_position(), Some((0, 1)));
+        assert_eq!(t.grid().cell(0, 1).unwrap().c, ' ', "no own cell for mark");
+    }
+
+    #[test]
+    fn multiple_combining_marks_stack() {
+        let mut t = Terminal::new(2, 10);
+        t.advance("a\u{0301}\u{0302}".as_bytes());
+        assert_eq!(t.grid().cell(0, 0).unwrap().grapheme(), "a\u{0301}\u{0302}");
+    }
+
+    #[test]
+    fn variation_selector_attaches_zero_width() {
+        let mut t = Terminal::new(2, 10);
+        // heart + VS16 (emoji presentation) — VS16 is zero-width, attaches.
+        t.advance("\u{2764}\u{FE0F}".as_bytes());
+        let cell = t.grid().cell(0, 0).unwrap();
+        assert_eq!(cell.c, '\u{2764}');
+        assert_eq!(cell.grapheme(), "\u{2764}\u{FE0F}");
+        assert_eq!(t.cursor_position(), Some((0, 1)), "VS16 did not advance cursor");
+    }
+
+    #[test]
+    fn combining_mark_attaches_to_wide_glyph_base() {
+        let mut t = Terminal::new(2, 10);
+        // Wide CJK glyph occupies cols 0+1; a following combining mark must
+        // attach to the BASE (col 0), not the continuation spacer (col 1).
+        t.advance("世\u{0301}".as_bytes());
+        assert_eq!(t.grid().cell(0, 0).unwrap().grapheme(), "世\u{0301}");
+        assert_eq!(t.cursor_position(), Some((0, 2)));
+    }
+
+    #[test]
+    fn leading_combining_mark_lands_in_cell() {
+        // A combining mark with no preceding cell (col 0) is given a cell so it
+        // is not silently lost.
+        let mut t = Terminal::new(2, 10);
+        t.advance("\u{0301}".as_bytes());
+        assert_eq!(t.cursor_position(), Some((0, 1)), "leading mark occupies a cell");
+    }
+
+    // ---- C28: OSC 133 C/D command marks ----
+
+    #[test]
+    fn osc133_command_output_start_mark() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]133;C\x07");
+        let marks = t.command_marks();
+        assert_eq!(marks.len(), 1);
+        assert!(matches!(marks[0].kind, CommandMarkKind::OutputStart));
+    }
+
+    #[test]
+    fn osc133_command_end_with_exit_code() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]133;D;0\x07"); // success
+        t.advance(b"\x1b]133;D;127\x07"); // failure
+        let marks = t.command_marks();
+        assert_eq!(marks.len(), 2);
+        assert!(matches!(
+            marks[0].kind,
+            CommandMarkKind::CommandEnd { exit_code: Some(0) }
+        ));
+        assert!(matches!(
+            marks[1].kind,
+            CommandMarkKind::CommandEnd {
+                exit_code: Some(127)
+            }
+        ));
+    }
+
+    #[test]
+    fn osc133_command_end_without_exit_code() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]133;D\x07");
+        assert!(matches!(
+            t.command_marks()[0].kind,
+            CommandMarkKind::CommandEnd { exit_code: None }
+        ));
+    }
+
+    #[test]
+    fn osc133_cd_never_writes_pty_response() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]133;C\x07\x1b]133;D;0\x07");
+        assert!(
+            t.take_pty_response().is_empty(),
+            "OSC 133 C/D stay capture-only (anti-CVE)"
+        );
+    }
+
+    #[test]
+    fn osc133_a_still_records_prompt_mark_not_command_mark() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]133;A\x07");
+        assert_eq!(t.prompt_marks().len(), 1);
+        assert_eq!(t.command_marks().len(), 0, "A is a prompt mark, not command");
+    }
+
+    // ---- C30: XTGETTCAP ----
+
+    #[test]
+    fn xtgettcap_replies_to_colors_capability() {
+        let mut t = Terminal::new(4, 20);
+        // "Co" hex = 436F. Query DCS + q 436F ST.
+        t.advance(b"\x1bP+q436F\x1b\\");
+        let resp = t.take_pty_response();
+        // Valid reply form: DCS 1 + r 436F = <hex of "256"> ST.
+        // "256" hex = 323536.
+        assert_eq!(resp.as_slice(), b"\x1bP1+r436F=323536\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_unknown_capability_invalid_reply() {
+        let mut t = Terminal::new(4, 20);
+        // "ZZ" hex = 5A5A — not a capability we report.
+        t.advance(b"\x1bP+q5A5A\x1b\\");
+        let resp = t.take_pty_response();
+        // Invalid form: DCS 0 + r 5A5A ST.
+        assert_eq!(resp.as_slice(), b"\x1bP0+r5A5A\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_does_not_disturb_sixel() {
+        // A plain DCS q (Sixel, no '+') must still go to the image path, not
+        // XTGETTCAP — regression guard for the hook disambiguation.
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1bPq#0;2;100;0;0~\x1b\\");
+        assert_eq!(t.images().len(), 1);
+        assert!(t.take_pty_response().is_empty(), "sixel emits no XTGETTCAP reply");
+    }
+
+    // ---- C33: DECRQM ----
+
+    #[test]
+    fn decrqm_reports_set_private_mode() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[?2004h"); // enable bracketed paste
+        t.advance(b"\x1b[?2004$p"); // DECRQM query
+        // Reply: CSI ? 2004 ; 1 $ y  (1 = set).
+        assert_eq!(t.take_pty_response().as_slice(), b"\x1b[?2004;1$y");
+    }
+
+    #[test]
+    fn decrqm_reports_reset_private_mode() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[?2004$p"); // never enabled -> reset (2)
+        assert_eq!(t.take_pty_response().as_slice(), b"\x1b[?2004;2$y");
+    }
+
+    #[test]
+    fn decrqm_reports_unrecognised_mode_zero() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[?9999$p");
+        assert_eq!(t.take_pty_response().as_slice(), b"\x1b[?9999;0$y");
+    }
+
+    #[test]
+    fn decrqm_reports_ansi_irm() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[4h"); // IRM on
+        t.advance(b"\x1b[4$p"); // ANSI DECRQM (no '?')
+        assert_eq!(t.take_pty_response().as_slice(), b"\x1b[4;1$y");
+    }
+
+    #[test]
+    fn p2p3_modes_reset_on_ris() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[?5h\x1b[4h\x1b[?6h"); // reverse + insert + origin
+        t.advance(b"\x1bc"); // RIS
+        assert!(!t.reverse_screen());
+        assert!(!t.insert_mode());
+        assert!(!t.origin_mode());
     }
 }
