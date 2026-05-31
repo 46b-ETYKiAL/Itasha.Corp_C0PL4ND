@@ -458,6 +458,9 @@ struct App {
     /// (in panes where the program has NOT enabled mouse reporting); cleared on
     /// PTY-bound keypress or a new click. `active` is true while dragging.
     selection: Option<Selection>,
+    /// Clipboard text awaiting paste confirmation (paste-safety). `Some` while
+    /// the multi-line-paste warning overlay is up; Enter commits, Esc cancels.
+    pending_paste: Option<String>,
 }
 
 /// A modal overlay for the Phase-6 workspace save / restore flow. Reuses the
@@ -671,6 +674,7 @@ impl App {
             workspace_prompt: None,
             settings: None,
             selection: None,
+            pending_paste: None,
         }
     }
 
@@ -989,6 +993,34 @@ impl App {
         if text.is_empty() {
             return;
         }
+        // Paste-safety: a multi-line paste can execute shell commands the instant
+        // it lands (the embedded newline). When enabled (default), defer it to a
+        // confirm overlay instead of pasting immediately.
+        if self.config.paste_warn_multiline && (text.contains('\n') || text.contains('\r')) {
+            self.pending_paste = Some(text);
+            self.request_redraw();
+            return;
+        }
+        self.do_paste(text);
+    }
+
+    /// Confirm a deferred multi-line paste (Enter in the paste-safety overlay).
+    fn confirm_paste(&mut self) {
+        if let Some(text) = self.pending_paste.take() {
+            self.do_paste(text);
+            self.request_redraw();
+        }
+    }
+
+    /// Discard a deferred paste (Esc in the paste-safety overlay).
+    fn cancel_paste(&mut self) {
+        if self.pending_paste.take().is_some() {
+            self.request_redraw();
+        }
+    }
+
+    /// Write `text` to the active PTY as a paste, honouring bracketed-paste mode.
+    fn do_paste(&mut self, text: String) {
         // Read the bracketed-paste flag under a short lock, dropped before the
         // mutable session borrow below.
         let bracketed = self
@@ -3263,6 +3295,16 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 // Any keypress dismisses the startup splash overlay.
                 self.splash = None;
+                // Paste-safety overlay captures Enter (paste) / Esc (cancel);
+                // every other key is swallowed while the warning is up.
+                if self.pending_paste.is_some() {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Enter) => self.confirm_paste(),
+                        Key::Named(NamedKey::Escape) => self.cancel_paste(),
+                        _ => {}
+                    }
+                    return;
+                }
                 // Overlay modes capture keystrokes instead of the PTY.
                 // The Save-/Restore-Layout prompts are routed FIRST because
                 // they're opened via the palette ("Save Layout As…" /
@@ -3533,7 +3575,20 @@ impl App {
         // Settings panel overlay text (D3), built before borrowing gpu.
         let settings_text = self.settings_text();
 
-        let splash_text = self.splash.clone();
+        // The paste-safety overlay reuses the splash text layer (it takes
+        // priority over the startup splash while a paste awaits confirmation).
+        let splash_text = self.pending_paste.as_ref().map_or_else(
+            || self.splash.clone(),
+            |t| {
+                let lines = t.lines().count().max(1);
+                Some(format!(
+                    "\u{26a0} Paste {} line{} ({} chars)?\n\n[Enter] paste     [Esc] cancel",
+                    lines,
+                    if lines == 1 { "" } else { "s" },
+                    t.chars().count(),
+                ))
+            },
+        );
         // Drag overlay quads (dim source + zone highlight + cursor ghost),
         // computed before the gpu borrow since they read the active tab.
         let drag_overlay = self.drag_overlay_quads(accent);

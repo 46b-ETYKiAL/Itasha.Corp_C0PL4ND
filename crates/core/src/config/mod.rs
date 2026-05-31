@@ -213,6 +213,11 @@ pub struct Config {
     /// the drag ends (X11-style "copy on select"). Write-only. Defaults to
     /// `false` — copy stays an explicit Ctrl/Cmd+Shift+C unless opted in.
     pub copy_on_select: bool,
+    /// Warn before pasting clipboard text that contains a newline (a multi-line
+    /// paste can run shell commands the instant it lands). When `true` (default)
+    /// such a paste shows a confirm overlay first. A security feature — set
+    /// `false` to paste multi-line content without confirmation.
+    pub paste_warn_multiline: bool,
 }
 
 impl Default for Config {
@@ -231,6 +236,7 @@ impl Default for Config {
             shell: None,
             ligatures: false,
             copy_on_select: false,
+            paste_warn_multiline: true,
         }
     }
 }
