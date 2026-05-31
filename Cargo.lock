@@ -266,6 +266,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "criterion",
+ "image",
  "portable-pty",
  "regex",
  "serde",

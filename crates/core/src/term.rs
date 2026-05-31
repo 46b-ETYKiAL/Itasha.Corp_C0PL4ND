@@ -26,6 +26,21 @@ pub struct TerminalImage {
     pub col: usize,
 }
 
+/// An in-progress Kitty graphics transmission, accumulated across chunks and
+/// keyed by image id. Per the Kitty protocol the format and dimensions ride on
+/// the FIRST chunk only — continuation chunks (`m=1`) resend just `m` + payload
+/// — so `format`/`width`/`height` are captured at creation and reused when the
+/// `m=0` boundary finalises the image.
+#[derive(Debug, Clone)]
+struct KittyChunk {
+    /// Accumulated, still-base64-encoded payload across every chunk.
+    payload: Vec<u8>,
+    /// Pixel format declared on the first chunk (24 = RGB, 32 = RGBA, 100 = PNG).
+    format: u16,
+    width: usize,
+    height: usize,
+}
+
 /// The current drawing pen (colours + attributes applied to printed cells).
 #[derive(Debug, Clone)]
 struct Pen {
@@ -237,10 +252,19 @@ struct Screen {
     prompt_marks: Vec<usize>,
     /// Hyperlink URIs seen via OSC 8, in arrival order.
     hyperlinks: Vec<String>,
-    /// Decoded inline images (Sixel via DCS), anchored to grid positions.
+    /// Decoded inline images (Sixel via DCS, Kitty via APC), anchored to grid
+    /// positions.
     images: Vec<TerminalImage>,
     /// In-progress Sixel DCS payload accumulator (Some between hook and unhook).
     sixel_accum: Option<Vec<u8>>,
+    /// In-progress Kitty transmissions keyed by image id, accumulated across
+    /// `m=1` … `m=0` chunk boundaries (decoded once at the `m=0` boundary).
+    /// Format/width/height are captured from the FIRST chunk — the Kitty spec
+    /// carries them only on the first chunk of a multi-chunk transmission.
+    kitty_chunks: std::collections::HashMap<u32, KittyChunk>,
+    /// Transmit-stored Kitty images (`a=t`) keyed by image id, available for a
+    /// later `a=p` display. Bounded against hostile streams.
+    kitty_store: std::collections::HashMap<u32, crate::image::DecodedImage>,
     /// DEC private mode flags toggled via `CSI ? Pm h` / `CSI ? Pm l`.
     dec_modes: DecModes,
     /// Requested cursor shape (DECSCUSR `CSI Ps SP q`).
@@ -300,6 +324,8 @@ impl Screen {
             hyperlinks: Vec::new(),
             images: Vec::new(),
             sixel_accum: None,
+            kitty_chunks: std::collections::HashMap::new(),
+            kitty_store: std::collections::HashMap::new(),
             dec_modes: DecModes::default(),
             cursor_shape: CursorShape::default(),
             cursor_shape_blink: false,
@@ -926,10 +952,171 @@ impl Perform for Screen {
     }
 }
 
+impl Screen {
+    // ------------------------------------------------------------------
+    // Kitty graphics protocol (APC `ESC _ G ... ST`). Driven by the APC
+    // pre-filter in `Terminal::advance`, which extracts complete bodies the
+    // `vte` parser silently discards (vte 0.15 has no APC `Perform` callback).
+    // ------------------------------------------------------------------
+
+    /// Caps on the transmit-store so a hostile `a=t` stream cannot exhaust
+    /// memory: at most this many stored images, and this many total bytes.
+    const KITTY_STORE_MAX_IMAGES: usize = 64;
+    const KITTY_STORE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+    /// Handle one complete Kitty graphics APC body: the bytes between `ESC _`
+    /// and the ST terminator, i.e. starting with `G`. Non-`G` APCs are the
+    /// caller's responsibility to filter out (it only routes `ESC _ G` here).
+    fn handle_kitty_apc(&mut self, body: &[u8]) {
+        // Strip the leading 'G' graphics introducer.
+        let body = match body.split_first() {
+            Some((b'G', rest)) => rest,
+            _ => return,
+        };
+        let cmd = match crate::image::parse_kitty(body) {
+            Some(c) => c,
+            None => return,
+        };
+
+        match cmd.action {
+            'd' => {
+                // Delete: clear all stored images and any in-flight chunks.
+                self.kitty_store.clear();
+                self.kitty_chunks.clear();
+            }
+            'p' => {
+                // Display a previously transmit-stored image at the cursor.
+                if let Some(img) = self.kitty_store.get(&cmd.id).cloned() {
+                    self.place_kitty_image(img);
+                }
+            }
+            't' | 'T' => {
+                // Accumulate this chunk's base64 text keyed by image id. Format
+                // + dimensions ride on the FIRST chunk only (continuation
+                // chunks resend just `m` + payload), so capture them at creation
+                // and reuse them when the m=0 boundary finalises the image.
+                let chunk = self.kitty_chunks.entry(cmd.id).or_insert_with(|| KittyChunk {
+                    payload: Vec::new(),
+                    format: cmd.format,
+                    width: cmd.width,
+                    height: cmd.height,
+                });
+                if chunk.payload.len() + cmd.payload.len() <= 8 * 1024 * 1024 {
+                    chunk.payload.extend_from_slice(&cmd.payload);
+                } else {
+                    // Oversized accumulation — drop the in-flight chunk set.
+                    self.kitty_chunks.remove(&cmd.id);
+                    return;
+                }
+                if cmd.more {
+                    // More chunks follow — wait for the m=0 boundary.
+                    return;
+                }
+                // Final (or only) chunk: decode the accumulated base64 once,
+                // then decode pixels per the FIRST chunk's declared format.
+                let chunk = match self.kitty_chunks.remove(&cmd.id) {
+                    Some(c) => c,
+                    None => return,
+                };
+                let raw = match osc::base64_decode(&chunk.payload) {
+                    Some(r) => r,
+                    None => return,
+                };
+                let decoded = match crate::image::decode_kitty(
+                    chunk.format,
+                    chunk.width,
+                    chunk.height,
+                    &raw,
+                ) {
+                    Some(d) => d,
+                    None => return,
+                };
+                if cmd.action == 't' {
+                    // Transmit-only: store by id for a later a=p display.
+                    self.store_kitty_image(cmd.id, decoded);
+                } else {
+                    // a=T: display now, and also store if an id was given.
+                    if cmd.id != 0 {
+                        self.store_kitty_image(cmd.id, decoded.clone());
+                    }
+                    self.place_kitty_image(decoded);
+                }
+            }
+            // Unknown action — ignore.
+            _ => {}
+        }
+    }
+
+    /// Anchor a decoded Kitty image at the current cursor position.
+    fn place_kitty_image(&mut self, image: crate::image::DecodedImage) {
+        self.images.push(TerminalImage {
+            image,
+            line: self.history.len() + self.row,
+            col: self.col,
+        });
+    }
+
+    /// Insert a decoded image into the transmit-store, evicting the oldest-keyed
+    /// entries when the count or total-byte caps are exceeded.
+    fn store_kitty_image(&mut self, id: u32, image: crate::image::DecodedImage) {
+        self.kitty_store.insert(id, image);
+        // Enforce the image-count cap (evict lowest ids first — deterministic).
+        while self.kitty_store.len() > Self::KITTY_STORE_MAX_IMAGES {
+            if let Some(&min_id) = self.kitty_store.keys().min() {
+                self.kitty_store.remove(&min_id);
+            } else {
+                break;
+            }
+        }
+        // Enforce the total-byte cap.
+        let mut total: usize = self.kitty_store.values().map(|i| i.rgba.len()).sum();
+        while total > Self::KITTY_STORE_MAX_BYTES && self.kitty_store.len() > 1 {
+            if let Some(&min_id) = self.kitty_store.keys().min() {
+                if let Some(removed) = self.kitty_store.remove(&min_id) {
+                    total -= removed.rgba.len();
+                }
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+/// Bound on a single accumulated APC body (mirrors the Sixel cap). A body that
+/// exceeds this is dropped — a hostile stream cannot exhaust memory.
+const KITTY_APC_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// State of the APC pre-filter that runs ahead of the `vte` parser.
+///
+/// `vte` 0.15's `Perform` trait has no APC callback, so APC strings
+/// (`ESC _ … ST`) — exactly how the Kitty graphics protocol transmits — are
+/// routed to vte's internal `SosPmApcString` state and silently discarded.
+/// This small persistent state machine extracts complete `ESC _ G … ST` bodies
+/// before vte sees them and passes every other byte through unchanged. An APC
+/// can be split across `advance()` calls (PTY reads are arbitrary chunks), so
+/// the state lives on the [`Terminal`] across calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ApcFilter {
+    /// Not inside any escape sequence.
+    Normal,
+    /// Saw a lone `ESC` in `Normal`; deciding whether it introduces an APC.
+    Esc,
+    /// Inside an APC body (`ESC _` seen); accumulating until ST.
+    /// `is_kitty` records whether the body began with `G` (Kitty graphics);
+    /// non-Kitty APCs are accumulated only so we can swallow them (match vte).
+    Apc { is_kitty: bool, seen_first: bool },
+    /// Inside an APC and just saw `ESC`; `\` completes the ST terminator.
+    ApcEsc,
+}
+
 /// A terminal: VT parser + screen state. Feed it PTY bytes; read its grid.
 pub struct Terminal {
     parser: Parser,
     screen: Screen,
+    /// Persistent APC pre-filter state (Kitty graphics extraction).
+    apc_state: ApcFilter,
+    /// Accumulated bytes of the in-progress APC body (between `ESC _` and ST).
+    apc_accum: Vec<u8>,
 }
 
 impl Terminal {
@@ -942,13 +1129,131 @@ impl Terminal {
         Terminal {
             parser: Parser::new(),
             screen: Screen::new(rows, cols, max_scrollback),
+            apc_state: ApcFilter::Normal,
+            apc_accum: Vec::new(),
         }
     }
 
     /// Feed raw PTY bytes through the VT state machine.
+    ///
+    /// An APC pre-filter runs first: it extracts complete Kitty graphics APC
+    /// bodies (`ESC _ G … ST`) that `vte` would otherwise silently discard, and
+    /// forwards every non-APC byte to the `vte` parser in its original order.
+    /// Passthrough bytes are batched in a scratch buffer and flushed to the
+    /// parser on each state transition so byte ordering is preserved exactly.
     pub fn advance(&mut self, bytes: &[u8]) {
-        // Split borrow of two distinct fields is allowed.
-        self.parser.advance(&mut self.screen, bytes);
+        // Fast path: when no escape sequence is in flight and the chunk has no
+        // ESC byte, hand it straight to vte (the overwhelmingly common case).
+        if self.apc_state == ApcFilter::Normal && !bytes.contains(&0x1b) {
+            self.parser.advance(&mut self.screen, bytes);
+            return;
+        }
+
+        let mut passthrough: Vec<u8> = Vec::new();
+        for &b in bytes {
+            match self.apc_state {
+                ApcFilter::Normal => {
+                    if b == 0x1b {
+                        // Possible escape sequence — hold the ESC until we know.
+                        self.apc_state = ApcFilter::Esc;
+                    } else {
+                        passthrough.push(b);
+                    }
+                }
+                ApcFilter::Esc => {
+                    if b == 0x5f {
+                        // `ESC _` — APC string begins. Flush pending text first.
+                        if !passthrough.is_empty() {
+                            self.parser.advance(&mut self.screen, &passthrough);
+                            passthrough.clear();
+                        }
+                        self.apc_accum.clear();
+                        self.apc_state = ApcFilter::Apc {
+                            is_kitty: false,
+                            seen_first: false,
+                        };
+                    } else if b == 0x1b {
+                        // Another ESC: emit the held ESC, stay in Esc for this one.
+                        passthrough.push(0x1b);
+                    } else {
+                        // Not an APC: re-emit the held ESC + this byte intact so
+                        // vte parses the original escape sequence unchanged.
+                        passthrough.push(0x1b);
+                        passthrough.push(b);
+                        self.apc_state = ApcFilter::Normal;
+                    }
+                }
+                ApcFilter::Apc {
+                    is_kitty,
+                    seen_first,
+                } => {
+                    if b == 0x07 {
+                        // BEL terminates the APC.
+                        self.finish_apc(is_kitty);
+                    } else if b == 0x1b {
+                        // Possible ST (`ESC \`) — wait for the next byte.
+                        self.apc_state = ApcFilter::ApcEsc;
+                    } else {
+                        let is_kitty = if !seen_first {
+                            b == b'G'
+                        } else {
+                            is_kitty
+                        };
+                        // Only accumulate Kitty bodies; bound the size.
+                        if is_kitty {
+                            if self.apc_accum.len() < KITTY_APC_MAX_BYTES {
+                                self.apc_accum.push(b);
+                            }
+                        }
+                        self.apc_state = ApcFilter::Apc {
+                            is_kitty,
+                            seen_first: true,
+                        };
+                    }
+                }
+                ApcFilter::ApcEsc => {
+                    // We are inside an APC whose previous byte was ESC.
+                    let was_kitty = self.apc_accum.first() == Some(&b'G');
+                    if b == 0x5c {
+                        // `ESC \` = ST — the APC ends here.
+                        self.finish_apc(was_kitty);
+                    } else if b == 0x07 {
+                        // ESC then BEL: BEL still terminates the APC.
+                        self.finish_apc(was_kitty);
+                    } else if b == 0x1b {
+                        // ESC ESC inside an APC — stay waiting for the terminator.
+                        // (The intervening ESC is not part of the body.)
+                    } else {
+                        // The ESC was embedded in the body, not a terminator.
+                        // Re-enter Apc and accumulate this byte (Kitty only).
+                        if was_kitty && self.apc_accum.len() < KITTY_APC_MAX_BYTES {
+                            self.apc_accum.push(b);
+                        }
+                        self.apc_state = ApcFilter::Apc {
+                            is_kitty: was_kitty,
+                            seen_first: true,
+                        };
+                    }
+                }
+            }
+        }
+
+        // Flush any trailing passthrough text. A half-finished escape/APC stays
+        // in `self.apc_state` for the next advance() call.
+        if !passthrough.is_empty() {
+            self.parser.advance(&mut self.screen, &passthrough);
+        }
+    }
+
+    /// Complete an APC body: dispatch Kitty graphics, swallow everything else
+    /// (matching vte's discard behaviour), then return to Normal.
+    fn finish_apc(&mut self, is_kitty: bool) {
+        if is_kitty {
+            let body = std::mem::take(&mut self.apc_accum);
+            self.screen.handle_kitty_apc(&body);
+        }
+        self.apc_accum.clear();
+        self.apc_state = ApcFilter::Normal;
     }
 
     pub fn grid(&self) -> &Grid {
@@ -2148,5 +2453,121 @@ mod tests {
             t.take_pty_response().is_empty(),
             "OSC 133 marks must remain capture-only (anti-CVE)"
         );
+    }
+
+    // ---- Kitty graphics protocol (APC extraction + decode + placement) ----
+
+    #[test]
+    fn kitty_apc_displays_image_and_passes_text_through() {
+        let mut t = Terminal::new(4, 20);
+        // "hi" then a Kitty APC (a defaults to T) for a 1x1 RGBA image
+        // (payload [1,2,3,4] = base64 "AQIDBA=="), ST-terminated, then "ok".
+        t.advance(b"hi\x1b_Gf=32,s=1,v=1;AQIDBA==\x1b\\ok");
+        // Exactly one image at the cursor.
+        assert_eq!(t.images().len(), 1, "one image produced");
+        let img = &t.images()[0].image;
+        assert_eq!(img.width, 1);
+        assert_eq!(img.height, 1);
+        assert_eq!(&img.rgba, &[1, 2, 3, 4]);
+        // The non-APC text reaches the grid intact ("hiok").
+        assert!(
+            t.grid().to_text().starts_with("hiok"),
+            "non-APC bytes must reach the grid: got {:?}",
+            t.grid().to_text()
+        );
+    }
+
+    #[test]
+    fn kitty_apc_split_across_two_advances() {
+        let mut t = Terminal::new(4, 20);
+        // Cut the APC mid-payload across two advance() calls.
+        t.advance(b"hi\x1b_Gf=32,s=1,v=1;AQID");
+        // Nothing finalised yet; "hi" is on the grid, no image.
+        assert_eq!(t.images().len(), 0, "APC not yet terminated");
+        t.advance(b"BA==\x1b\\ok");
+        assert_eq!(t.images().len(), 1, "one image after the second chunk");
+        assert_eq!(&t.images()[0].image.rgba, &[1, 2, 3, 4]);
+        assert!(
+            t.grid().to_text().starts_with("hiok"),
+            "no stray APC bytes leak to the grid: got {:?}",
+            t.grid().to_text()
+        );
+    }
+
+    #[test]
+    fn kitty_apc_bel_terminated() {
+        let mut t = Terminal::new(4, 20);
+        // BEL (0x07) terminates the APC instead of ST.
+        t.advance(b"x\x1b_Gf=32,s=1,v=1;AQIDBA==\x07y");
+        assert_eq!(t.images().len(), 1, "BEL-terminated APC produces an image");
+        assert_eq!(&t.images()[0].image.rgba, &[1, 2, 3, 4]);
+        assert!(t.grid().to_text().starts_with("xy"));
+    }
+
+    #[test]
+    fn kitty_chunked_transmission_m_flag() {
+        let mut t = Terminal::new(4, 20);
+        // 1x1 RGBA split into two base64 chunks via m=1 / m=0, same id.
+        // "AQID" then "BA==" together decode to [1,2,3,4].
+        t.advance(b"\x1b_Gf=32,s=1,v=1,i=9,m=1;AQID\x1b\\");
+        assert_eq!(t.images().len(), 0, "more=1 chunk does not finalise");
+        t.advance(b"\x1b_Ga=T,i=9,m=0;BA==\x1b\\");
+        assert_eq!(t.images().len(), 1, "m=0 finalises the chunked image");
+        assert_eq!(&t.images()[0].image.rgba, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn kitty_transmit_only_then_display() {
+        let mut t = Terminal::new(4, 20);
+        // a=t stores the image without displaying it.
+        t.advance(b"\x1b_Ga=t,f=32,s=1,v=1,i=5;AQIDBA==\x1b\\");
+        assert_eq!(t.images().len(), 0, "a=t must not display");
+        // a=p displays the previously-stored id.
+        t.advance(b"\x1b_Ga=p,i=5\x1b\\");
+        assert_eq!(t.images().len(), 1, "a=p displays the stored image");
+        assert_eq!(&t.images()[0].image.rgba, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn kitty_delete_clears_storage() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b_Ga=t,f=32,s=1,v=1,i=3;AQIDBA==\x1b\\");
+        // a=d clears the store; a later a=p finds nothing.
+        t.advance(b"\x1b_Ga=d\x1b\\");
+        t.advance(b"\x1b_Ga=p,i=3\x1b\\");
+        assert_eq!(t.images().len(), 0, "a=d cleared the stored image");
+    }
+
+    #[test]
+    fn kitty_f24_rgb_displayed_as_rgba() {
+        let mut t = Terminal::new(4, 20);
+        // 1x1 RGB (3 bytes [10,20,30] = base64 "ChQe"); expands to RGBA.
+        t.advance(b"\x1b_Gf=24,s=1,v=1;ChQe\x1b\\");
+        assert_eq!(t.images().len(), 1);
+        assert_eq!(&t.images()[0].image.rgba, &[10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn non_kitty_apc_is_swallowed_and_text_survives() {
+        let mut t = Terminal::new(4, 20);
+        // A non-graphics APC (no leading G) is swallowed (matching vte); the
+        // surrounding text still reaches the grid and no image is produced.
+        t.advance(b"a\x1b_Xsome-other-apc\x1b\\b");
+        assert_eq!(t.images().len(), 0);
+        assert!(
+            t.grid().to_text().starts_with("ab"),
+            "text around a non-kitty APC survives: got {:?}",
+            t.grid().to_text()
+        );
+    }
+
+    #[test]
+    fn esc_not_introducing_apc_passes_through_intact() {
+        let mut t = Terminal::new(4, 20);
+        // A plain SGR escape (ESC not followed by '_') must reach vte intact.
+        t.advance(b"\x1b[31mR");
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, 'R');
+        assert_eq!(t.grid().cell(0, 0).unwrap().fg, Color::Indexed(1));
+        assert_eq!(t.images().len(), 0);
     }
 }
