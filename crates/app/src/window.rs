@@ -199,6 +199,32 @@ fn open_path(path: &std::path::Path) {
     }
 }
 
+/// Format a dropped file path for insertion at the shell prompt. The path is
+/// double-quoted when it contains whitespace or shell-significant characters
+/// (so paths with spaces survive as a single argument), otherwise inserted raw.
+/// A trailing space separates it from whatever the user types next. The path is
+/// returned as TEXT to insert — the caller never appends a newline, so a dropped
+/// file is never executed on the user's behalf.
+fn format_dropped_path(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy();
+    let needs_quote = s.is_empty()
+        || s.chars().any(|c| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '"' | '\'' | '&' | '|' | '(' | ')' | '<' | '>' | '^' | ';' | '`' | '$' | '%' | '!'
+                )
+        });
+    if needs_quote {
+        // Embedded double quotes are illegal in Windows filenames and rare
+        // elsewhere; escape them defensively so the quoting can't be broken out of.
+        let escaped = s.replace('"', "\\\"");
+        format!("\"{escaped}\" ")
+    } else {
+        format!("{s} ")
+    }
+}
+
 /// Keyboard shortcut shown next to a command-palette action, so the palette
 /// teaches its own shortcuts (the standard discoverability bridge). Empty when
 /// the action has no global shortcut. `Ctrl` is `Cmd` on macOS.
@@ -3113,6 +3139,17 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            WindowEvent::DroppedFile(path) => {
+                // Insert the dropped file's path at the cursor (quoted when it
+                // contains spaces/shell-significant chars). Inserted as TEXT
+                // ONLY — no trailing newline is sent, so it is never executed on
+                // the user's behalf. winit delivers one event per file, so
+                // dropping several inserts each path separated by a space.
+                let text = format_dropped_path(&path);
+                if let Some(s) = self.active_session_mut() {
+                    let _ = s.write_input(text.as_bytes());
+                }
+            }
             WindowEvent::RedrawRequested => self.render(),
             _ => {}
         }
@@ -4017,6 +4054,27 @@ mod tests {
         // an overlay, but is NOT laid out — grid geometry is unchanged).
         let short = LRect::new(0, 0, 400, CELL_TABBAR_H as i32 + 2 * BORDER_PX);
         assert!(!strip_laid_out(3, short));
+    }
+
+    #[test]
+    fn dropped_path_plain_is_raw_with_trailing_space() {
+        let out = format_dropped_path(std::path::Path::new("/home/user/file.txt"));
+        assert_eq!(out, "/home/user/file.txt ");
+    }
+
+    #[test]
+    fn dropped_path_with_space_is_double_quoted() {
+        let out = format_dropped_path(std::path::Path::new(r"C:\My Files\note.txt"));
+        assert_eq!(out, "\"C:\\My Files\\note.txt\" ");
+    }
+
+    #[test]
+    fn dropped_path_never_contains_newline() {
+        // A dropped file must never be executed — no newline is ever emitted.
+        let out = format_dropped_path(std::path::Path::new("/tmp/x;rm -rf ~"));
+        assert!(!out.contains('\n') && !out.contains('\r'));
+        // Shell-significant chars force quoting so the literal can't break out.
+        assert!(out.starts_with('"') && out.ends_with("\" "));
     }
 
     #[test]
