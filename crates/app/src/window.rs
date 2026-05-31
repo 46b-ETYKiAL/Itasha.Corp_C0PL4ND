@@ -3816,6 +3816,13 @@ impl App {
         let fg = self.fg_color();
         let accent = self.accent_color();
         let bg = self.bg_color();
+        // Brand purple (ANSI 4 = #7700FF in the Itasha.Corp default) — the
+        // 'Itasha' half of the two-tone corporate wordmark; the '.Corp' half
+        // uses `accent` (brand green). Theme-driven so it adapts per theme.
+        let brand_purple = {
+            let (r, g, b) = self.theme.ansi(4);
+            GColor::rgb(r, g, b)
+        };
         // Configurable grid content padding (captured before the &mut gpu borrow
         // so the render-loop call sites match the hit-test sites above).
         let content_pad = self.config.window.padding as f32;
@@ -4131,10 +4138,19 @@ impl App {
                 Some(gpu.surface_config.width as f32),
                 Some(gpu.surface_config.height as f32),
             );
-            gpu.splash_buffer.set_text(
+            // Splash body (accent), then the two-tone corporate wordmark
+            // footer: 'Itasha' in brand purple, '.Corp' in brand green.
+            let mono = || Attrs::new().family(Family::Monospace);
+            gpu.splash_buffer.set_rich_text(
                 &mut gpu.font_system,
-                st,
-                &Attrs::new().family(Family::Monospace).color(accent),
+                [
+                    (st.as_str(), mono().color(accent)),
+                    ("\n  an ", mono().color(fg)),
+                    ("Itasha", mono().color(brand_purple)),
+                    (".Corp", mono().color(accent)),
+                    (" product", mono().color(fg)),
+                ],
+                &mono().color(accent),
                 Shaping::Advanced,
                 None,
             );
