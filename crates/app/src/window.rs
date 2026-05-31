@@ -40,6 +40,9 @@ use winit::window::{ResizeDirection, Window, WindowId};
 
 const LINE_HEIGHT: f32 = 20.0;
 const CELL_W: f32 = 9.0;
+/// Translucent wash drawn over selected cells (mouse text selection). Blue, the
+/// near-universal selection colour, at low alpha so the glyph stays readable.
+const SELECTION_RGBA: [f32; 4] = [0.26, 0.45, 0.85, 0.35];
 /// Height in physical pixels of a cell's nested-tab strip (one line). The strip
 /// is drawn only when a cell holds >=2 tabs AND the cell is tall enough to spare
 /// the line (auto-hide on short cells; reappears on hover via [`App::hover_leaf`]).
@@ -361,6 +364,32 @@ impl Gpu {
     }
 }
 
+/// An in-progress or completed mouse text selection over one leaf's visible
+/// grid. `anchor` is where the drag began, `head` is the current/last cell;
+/// both are `(row, col)` in DISPLAY-grid coordinates (visible rows, 0-based).
+/// `active` is true while the mouse button is held (drag extending).
+#[derive(Debug, Clone, Copy)]
+struct Selection {
+    leaf: LeafId,
+    anchor: (usize, usize),
+    head: (usize, usize),
+    active: bool,
+}
+
+impl Selection {
+    /// The selection's (start, end) in reading order (top-left → bottom-right),
+    /// normalising whichever of anchor/head comes first on screen. The render
+    /// highlight and text extraction both build line-oriented ranges from this
+    /// (first line start.col→EOL, middle lines full, last line BOL→end.col).
+    fn ordered(&self) -> ((usize, usize), (usize, usize)) {
+        if (self.anchor.0, self.anchor.1) <= (self.head.0, self.head.1) {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+}
+
 struct App {
     config: Config,
     theme: Theme,
@@ -425,6 +454,10 @@ struct App {
     workspace_prompt: Option<WorkspacePrompt>,
     /// Active in-app settings panel (D3). `None` when closed.
     settings: Option<SettingsPanel>,
+    /// Mouse text selection over a leaf's grid. `Some` once a left-drag begins
+    /// (in panes where the program has NOT enabled mouse reporting); cleared on
+    /// PTY-bound keypress or a new click. `active` is true while dragging.
+    selection: Option<Selection>,
 }
 
 /// A modal overlay for the Phase-6 workspace save / restore flow. Reuses the
@@ -637,6 +670,7 @@ impl App {
                 .unwrap_or(false),
             workspace_prompt: None,
             settings: None,
+            selection: None,
         }
     }
 
@@ -1052,6 +1086,71 @@ impl App {
         }
         if moved {
             self.request_redraw();
+        }
+    }
+
+    /// Map a window pixel to the `(leaf, display-row, display-col)` under it, or
+    /// `None` over chrome / a pane border / above-or-left of the text origin.
+    /// Drives mouse text selection. Row/col are clamped non-negative; callers
+    /// bound them against the actual grid when extracting text.
+    fn cell_at_pixel(&self, px: f64, py: f64) -> Option<(LeafId, usize, usize)> {
+        let leaf = self.leaf_at(px, py)?;
+        let cell = self.leaf_rect(leaf)?;
+        let border = self
+            .active_tab()
+            .map(|t| if t.layout.leaf_count() > 1 { BORDER_PX } else { 0 })
+            .unwrap_or(0);
+        let (ox, oy) = leaf_text_origin(cell, border, 8.0, 2.0);
+        if (px as f32) < ox || (py as f32) < oy {
+            return None;
+        }
+        let col = ((px as f32 - ox) / CELL_W).floor().max(0.0) as usize;
+        let row = ((py as f32 - oy) / LINE_HEIGHT).floor().max(0.0) as usize;
+        Some((leaf, row, col))
+    }
+
+    /// Extract the current selection's text from its leaf, as lines joined by
+    /// `\n` with trailing whitespace trimmed per line (the standard terminal
+    /// copy shape). `None` when there is no selection, the leaf is not in the
+    /// active tab, or the result is empty.
+    fn selection_text(&self) -> Option<String> {
+        let sel = self.selection?;
+        let s = self.active_tab()?.cells.get(&sel.leaf)?.active()?;
+        let rows = s.terminal().lock().ok()?.display_rows();
+        let width = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+        let (start, end) = sel.ordered();
+        let mut out = String::new();
+        for r in start.0..=end.0 {
+            let Some(row) = rows.get(r) else { break };
+            let lo = if r == start.0 { start.1 } else { 0 };
+            let hi = if r == end.0 {
+                end.1.min(width.saturating_sub(1))
+            } else {
+                width.saturating_sub(1)
+            };
+            let mut line = String::new();
+            for c in lo..=hi {
+                if let Some(cell) = row.get(c) {
+                    line.push(cell.c);
+                }
+            }
+            out.push_str(line.trim_end());
+            if r != end.0 {
+                out.push('\n');
+            }
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    /// Copy the current selection to the OS clipboard (write-only; reuses the
+    /// dependency-free `write_os_clipboard`). No-op when nothing is selected.
+    fn copy_selection(&mut self) {
+        if let Some(text) = self.selection_text() {
+            write_os_clipboard(&text);
         }
     }
 
@@ -2437,6 +2536,12 @@ impl App {
                     self.paste_clipboard();
                     true
                 }
+                Some('c') => {
+                    // Ctrl/Cmd+Shift+C copies the current mouse selection
+                    // (plain Ctrl+C stays SIGINT to the PTY).
+                    self.copy_selection();
+                    true
+                }
                 Some('p') => {
                     self.enter_palette();
                     true
@@ -2813,6 +2918,19 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
+                // Extend an in-progress mouse text selection (a plain left-drag;
+                // the Ctrl+Shift pane-drag below is a separate gesture).
+                if self.selection.map(|s| s.active).unwrap_or(false) {
+                    if let Some((leaf, row, col)) = self.cell_at_pixel(position.x, position.y) {
+                        if let Some(sel) = &mut self.selection {
+                            if leaf == sel.leaf {
+                                sel.head = (row, col);
+                            }
+                        }
+                        self.request_redraw();
+                    }
+                    return;
+                }
                 // Feed the drag state machine; a press becomes a drag only past
                 // the 6px threshold, so normal clicks are never eaten.
                 let was_dragging = self.drag.is_dragging();
@@ -2938,6 +3056,26 @@ impl ApplicationHandler for App {
                 {
                     return;
                 }
+                // Mouse text selection: a left-press in pane content (we only
+                // reach here when E6 above did NOT consume it, i.e. the program
+                // has mouse reporting OFF) begins a selection at that cell.
+                if hit == TitlebarHit::None {
+                    if let Some((leaf, row, col)) = self.cell_at_pixel(self.cursor.0, self.cursor.1)
+                    {
+                        self.selection = Some(Selection {
+                            leaf,
+                            anchor: (row, col),
+                            head: (row, col),
+                            active: true,
+                        });
+                        self.request_redraw();
+                        return;
+                    }
+                    // A press on empty space clears any prior selection.
+                    if self.selection.take().is_some() {
+                        self.request_redraw();
+                    }
+                }
                 // Double-click the drag area → toggle maximize (standard window
                 // behaviour). Computed before borrowing gpu to avoid a borrow clash.
                 let dbl_titlebar = if hit == TitlebarHit::Drag {
@@ -2984,6 +3122,18 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                // Finalize an in-progress mouse text selection: stop extending
+                // but keep the selection so it can be copied. A zero-area
+                // selection (a plain click, no drag) is dropped.
+                if let Some(sel) = &mut self.selection {
+                    if sel.active {
+                        sel.active = false;
+                        if sel.anchor == sel.head {
+                            self.selection = None;
+                        }
+                        self.request_redraw();
+                    }
+                }
                 // Clear any caption-button press state (drops the active-state
                 // backplate back to hover/none).
                 if self.pressed_button.take().is_some() {
@@ -3171,6 +3321,11 @@ impl ApplicationHandler for App {
                     return;
                 }
                 if let Some(bytes) = key_to_bytes(&event.logical_key, &event.text) {
+                    // Typing clears a stale mouse selection (the highlight would
+                    // otherwise linger over scrolled/overwritten content).
+                    if self.selection.take().is_some() {
+                        self.request_redraw();
+                    }
                     if let Some(s) = self.active_session_mut() {
                         if let Ok(mut term) = s.terminal().lock() {
                             term.scroll_to_bottom();
@@ -3705,6 +3860,37 @@ impl App {
                 chrome.push(ColorRect::new(x, y, cw, ch, *rgba));
             }
         }
+        // Mouse text-selection highlight (over backgrounds, behind text+cursor).
+        if let Some(sel) = self.selection {
+            if let Some((_, cell)) = cells.iter().find(|(id, _)| *id == sel.leaf) {
+                let strip_top = if laid_out_strip.contains(&sel.leaf) {
+                    CELL_TABBAR_H
+                } else {
+                    0.0
+                };
+                let (ox, oy) = leaf_text_origin(*cell, border, 8.0, 2.0 + strip_top);
+                let cw = CELL_W.ceil() as i32;
+                let ch = LINE_HEIGHT.ceil() as i32;
+                // Grid column count derived from the cell width (full-line wash
+                // for middle rows of a multi-row selection).
+                let grid_cols =
+                    (((cell.w - 2 * border) as f32 / CELL_W).floor()).max(1.0) as usize;
+                let (start, end) = sel.ordered();
+                for r in start.0..=end.0 {
+                    let lo = if r == start.0 { start.1 } else { 0 };
+                    let hi = if r == end.0 {
+                        end.1
+                    } else {
+                        grid_cols.saturating_sub(1)
+                    };
+                    for c in lo..=hi.min(grid_cols.saturating_sub(1)) {
+                        let x = (ox + c as f32 * CELL_W) as i32;
+                        let y = (oy + r as f32 * LINE_HEIGHT) as i32;
+                        chrome.push(ColorRect::new(x, y, cw, ch, SELECTION_RGBA));
+                    }
+                }
+            }
+        }
         // Terminal cursor (E5/E7), behind the text so the glyph stays readable.
         chrome.extend(cursor_quads);
         // Caption-button hover/press backplates (D1), drawn before the chrome
@@ -4094,6 +4280,16 @@ mod tests {
         // an overlay, but is NOT laid out — grid geometry is unchanged).
         let short = LRect::new(0, 0, 400, CELL_TABBAR_H as i32 + 2 * BORDER_PX);
         assert!(!strip_laid_out(3, short));
+    }
+
+    #[test]
+    fn selection_ordered_normalizes_direction() {
+        // anchor after head on screen → ordered swaps them.
+        let s = Selection { leaf: LeafId(0), anchor: (3, 5), head: (1, 2), active: false };
+        assert_eq!(s.ordered(), ((1, 2), (3, 5)));
+        // same row, head right of anchor → unchanged.
+        let s2 = Selection { leaf: LeafId(0), anchor: (1, 2), head: (1, 8), active: false };
+        assert_eq!(s2.ordered(), ((1, 2), (1, 8)));
     }
 
     #[test]
