@@ -22,6 +22,9 @@ glyphon = "0.11"
 pollster = "0.4"
 ureq = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }
+# BiDi/RTL: Unicode Bidirectional Algorithm for per-row visual reordering of
+# terminal text (right-to-left scripts). Already in the lock graph transitively.
+unicode-bidi = "0.3"
 
 # D4 (Windows-only): Win32 custom-frame Aero Snap on the frameless window.
 # Used solely by the `#[cfg(windows)]` `win_snap` module; not linked elsewhere.

@@ -2048,6 +2048,49 @@ impl App {
         out
     }
 
+    /// Reorder one terminal row's `(char, color)` cells from logical order into
+    /// visual order using the Unicode Bidirectional Algorithm (UAX #9), so
+    /// right-to-left scripts (Hebrew, Arabic) display correctly. Returns `None`
+    /// for the overwhelmingly common no-RTL row (pure-ASCII rows skip the
+    /// algorithm entirely), letting the caller keep the logical slice with zero
+    /// allocation. Per-cell background quads are NOT reordered — they stay in
+    /// logical column order, so an explicit per-cell background highlight on RTL
+    /// text is the one case where bg and fg can diverge; the common RTL line
+    /// (default background) is unaffected. The cursor/selection remain in
+    /// logical order (a documented limitation shared by most grid terminals).
+    fn bidi_visual_order(cells: &[(char, GColor)]) -> Option<Vec<(char, GColor)>> {
+        // Fast path: an all-ASCII row can never contain RTL — skip UBA entirely.
+        if cells.iter().all(|(c, _)| c.is_ascii()) {
+            return None;
+        }
+        let line: String = cells.iter().map(|(c, _)| *c).collect();
+        let info = unicode_bidi::ParagraphBidiInfo::new(&line, None);
+        if !info.has_rtl() {
+            return None;
+        }
+        // Map each char-start byte offset to its logical index so a run's byte
+        // range can recover per-char colors.
+        let mut byte_to_ci = vec![0usize; line.len() + 1];
+        for (ci, (b, _)) in line.char_indices().enumerate() {
+            byte_to_ci[b] = ci;
+        }
+        let (levels, runs) = info.visual_runs(0..line.len());
+        let mut out: Vec<(char, GColor)> = Vec::with_capacity(cells.len());
+        for run in runs {
+            // `runs` arrive in visual order; reverse chars within an RTL run.
+            let rtl = levels[run.start].is_rtl();
+            let mut seg: Vec<(char, GColor)> = line[run.clone()]
+                .char_indices()
+                .map(|(local_b, ch)| (ch, cells[byte_to_ci[run.start + local_b]].1))
+                .collect();
+            if rtl {
+                seg.reverse();
+            }
+            out.extend(seg);
+        }
+        Some(out)
+    }
+
     /// Snapshot one leaf's grid into BOTH foreground spans (for glyphon) and
     /// per-cell background paints (for the solid-quad layer). This is the single
     /// place the grid is read+damage-cleared per frame, so foreground and
@@ -2079,8 +2122,10 @@ impl App {
         let mut spans: Vec<(String, GColor)> = Vec::new();
         let mut bg_cells: Vec<(usize, usize, [f32; 4])> = Vec::new();
         for (r, row) in rows.iter().enumerate() {
-            let mut run = String::new();
-            let mut run_color: Option<GColor> = None;
+            // Logical-order (char, fg) for the row. Background paints are pushed
+            // here in logical cell columns (bidi reorders text only — see
+            // `bidi_visual_order`).
+            let mut logical: Vec<(char, GColor)> = Vec::with_capacity(row.len());
             for (c, cell) in row.iter().enumerate() {
                 let (fg_rgb, bg_rgb) = cell_render_colors(cell, &self.theme, default_fg, default_bg);
                 if let Some(bg) = bg_rgb {
@@ -2095,14 +2140,22 @@ impl App {
                         ],
                     ));
                 }
-                let gcol = GColor::rgb(fg_rgb.0, fg_rgb.1, fg_rgb.2);
-                if run_color != Some(gcol) {
+                logical.push((cell.c, GColor::rgb(fg_rgb.0, fg_rgb.1, fg_rgb.2)));
+            }
+            // BiDi: reorder to visual order for RTL rows (None ⇒ keep logical).
+            let visual = Self::bidi_visual_order(&logical);
+            let ordered: &[(char, GColor)] = visual.as_deref().unwrap_or(&logical);
+            // Group consecutive same-color chars into color runs.
+            let mut run = String::new();
+            let mut run_color: Option<GColor> = None;
+            for (ch, gcol) in ordered {
+                if run_color != Some(*gcol) {
                     if let Some(pc) = run_color {
                         spans.push((std::mem::take(&mut run), pc));
                     }
-                    run_color = Some(gcol);
+                    run_color = Some(*gcol);
                 }
-                run.push(cell.c);
+                run.push(*ch);
             }
             if let Some(pc) = run_color {
                 spans.push((run, pc));
@@ -3964,5 +4017,54 @@ mod tests {
         // an overlay, but is NOT laid out — grid geometry is unchanged).
         let short = LRect::new(0, 0, 400, CELL_TABBAR_H as i32 + 2 * BORDER_PX);
         assert!(!strip_laid_out(3, short));
+    }
+
+    #[test]
+    fn bidi_ascii_row_skips_reorder() {
+        let c = GColor::rgb(200, 200, 200);
+        let row: Vec<(char, GColor)> = "hello -> world".chars().map(|ch| (ch, c)).collect();
+        assert!(
+            App::bidi_visual_order(&row).is_none(),
+            "an all-ASCII row takes the zero-alloc fast path"
+        );
+    }
+
+    #[test]
+    fn bidi_pure_rtl_row_reverses_to_visual_order() {
+        let c = GColor::rgb(200, 200, 200);
+        // Hebrew "אבג" (alef, bet, gimel) in logical (storage) order.
+        let row: Vec<(char, GColor)> = "אבג".chars().map(|ch| (ch, c)).collect();
+        let visual = App::bidi_visual_order(&row).expect("an RTL row reorders");
+        let chars: String = visual.iter().map(|(ch, _)| *ch).collect();
+        assert_eq!(
+            chars, "גבא",
+            "RTL text displays right-to-left (visually reversed)"
+        );
+    }
+
+    #[test]
+    fn bidi_preserves_per_char_color_through_reorder() {
+        let red = GColor::rgb(255, 0, 0);
+        let blue = GColor::rgb(0, 0, 255);
+        // Logical: alef=red, bet=blue, gimel=red.
+        let row = vec![('א', red), ('ב', blue), ('ג', red)];
+        let visual = App::bidi_visual_order(&row).expect("an RTL row reorders");
+        let chars: String = visual.iter().map(|(ch, _)| *ch).collect();
+        assert_eq!(chars, "גבא");
+        assert!(
+            visual[0].1 == red && visual[1].1 == blue && visual[2].1 == red,
+            "each glyph keeps its own colour through the visual reorder"
+        );
+    }
+
+    #[test]
+    fn bidi_non_rtl_unicode_row_skips_reorder() {
+        // Accented Latin / CJK is non-ASCII but not RTL — must not reorder.
+        let c = GColor::rgb(10, 20, 30);
+        let row: Vec<(char, GColor)> = "café 日本語".chars().map(|ch| (ch, c)).collect();
+        assert!(
+            App::bidi_visual_order(&row).is_none(),
+            "non-RTL Unicode keeps logical order"
+        );
     }
 }

@@ -253,6 +253,7 @@ dependencies = [
  "pollster",
  "tracing",
  "tracing-subscriber",
+ "unicode-bidi",
  "ureq",
  "wgpu",
  "windows",
