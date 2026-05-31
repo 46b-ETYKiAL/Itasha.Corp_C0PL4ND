@@ -2195,6 +2195,80 @@ impl App {
         }
     }
 
+    /// E16: close panes (and window tabs) whose shell has exited. Walks every
+    /// window tab and every cell; a cell tab whose session is dead is closed,
+    /// an emptied leaf is collapsed out of the split tree, and an emptied
+    /// window tab is dropped. Exits the event loop when the last tab
+    /// disappears. Relayout + redraw fire only when something actually changed.
+    fn reap_dead_panes(&mut self, event_loop: &ActiveEventLoop) {
+        let content = self.content_rect();
+        let mut changed = false;
+
+        let mut tab_idx = 0;
+        while tab_idx < self.tabs.len() {
+            // Scoped borrow of the tab so the window-tab drop below can mutate
+            // `self.tabs`. Returns true when this tab has no cells left.
+            let tab_emptied = {
+                let tab = &mut self.tabs[tab_idx];
+                for leaf in tab.layout.leaves() {
+                    // Reap every dead tab within this cell, narrowest first.
+                    loop {
+                        let Some(cell) = tab.cells.get_mut(&leaf) else {
+                            break;
+                        };
+                        let Some(dead_idx) =
+                            cell.sessions.iter().position(|s| !s.is_alive())
+                        else {
+                            break;
+                        };
+                        // `sessions` and `group.tabs` are parallel arrays, so a
+                        // sessions index is a valid active index for the group.
+                        cell.group.active = dead_idx;
+                        let emptied = cell.close_active();
+                        changed = true;
+                        if emptied {
+                            tab.cells.remove(&leaf);
+                            // Collapse the now-empty leaf. The last leaf cannot
+                            // be removed — that case drops the whole tab below.
+                            if tab.layout.leaf_count() > 1 {
+                                let _ = tab.layout.remove(leaf);
+                            }
+                            break;
+                        }
+                    }
+                }
+                // Keep focus on a surviving leaf.
+                if !tab.cells.is_empty() && !tab.layout.contains(tab.layout.focused) {
+                    if let Some(first) = tab.layout.leaves().first().copied() {
+                        tab.layout.focused = first;
+                    }
+                }
+                tab.cells.is_empty()
+            };
+
+            if tab_emptied {
+                self.tabs.remove(tab_idx);
+                // The next tab shifted into this slot; do not advance.
+            } else {
+                tab_idx += 1;
+            }
+        }
+
+        if self.tabs.is_empty() {
+            event_loop.exit();
+            return;
+        }
+
+        if self.active >= self.tabs.len() {
+            self.active = self.tabs.len() - 1;
+        }
+
+        if changed {
+            self.relayout_active(content);
+            self.request_redraw();
+        }
+    }
+
     fn next_tab(&mut self) {
         if !self.tabs.is_empty() {
             self.active = (self.active + 1) % self.tabs.len();
@@ -2685,6 +2759,17 @@ impl ApplicationHandler for App {
                     return;
                 }
                 let hit = self.hit_titlebar(self.cursor.0, self.cursor.1);
+                // E9: Ctrl(without Shift)+click on a URL in pane content opens
+                // it via the OS default handler (http/https → browser, file →
+                // OS). Checked before the E6 PTY forward so the click follows
+                // the link instead of being reported. `url_at` returns None
+                // over chrome/empty space, so titlebar clicks fall through.
+                if self.modifiers.control_key() && !self.modifiers.shift_key() {
+                    if let Some(url) = self.url_at(self.cursor.0, self.cursor.1) {
+                        open_path(std::path::Path::new(&url));
+                        return;
+                    }
+                }
                 // E6: a press in pane content (not chrome) forwards to the PTY
                 // when the program enabled mouse reporting (vim/tmux/htop). The
                 // titlebar/resize paths above still win, so window controls work.
