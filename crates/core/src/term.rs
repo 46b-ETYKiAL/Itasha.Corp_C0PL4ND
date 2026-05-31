@@ -260,6 +260,15 @@ fn dec_line_draw(c: char) -> char {
     }
 }
 
+/// Default tab-stop interval (a stop every N columns), matching xterm/VT100.
+const DEFAULT_TAB_INTERVAL: usize = 8;
+
+/// Build the default per-column tab-stop bitset for a `cols`-wide screen: a stop
+/// at every multiple of [`DEFAULT_TAB_INTERVAL`] (column 0, 8, 16, …).
+fn default_tab_stops(cols: usize) -> Vec<bool> {
+    (0..cols).map(|c| c % DEFAULT_TAB_INTERVAL == 0).collect()
+}
+
 /// A mouse button (or wheel direction) for [`Terminal::encode_mouse`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseButton {
@@ -302,6 +311,11 @@ struct Screen {
     pen: Pen,
     /// Lines scrolled off the top, newest at the back. Capped at `max_scrollback`.
     history: VecDeque<Vec<Cell>>,
+    /// Parallel to `history`: `history_wrapped[i] == true` means history line `i`
+    /// soft-wrapped into the next line (no hard newline). Kept the same length as
+    /// `history` so reflow can reconstruct logical lines across the history/grid
+    /// boundary.
+    history_wrapped: VecDeque<bool>,
     max_scrollback: usize,
     /// Lines scrolled up from the live bottom (0 = following live output).
     view_offset: usize,
@@ -354,6 +368,10 @@ struct Screen {
     charset_g1: Charset,
     /// True when SO (0x0E) invoked G1 into GL; SI (0x0F) returns to G0.
     use_g1: bool,
+    /// Per-column tab-stop flags (`tab_stops[c] == true` means a stop sits at
+    /// column `c`). Length is always `grid.cols()`. Defaults to a stop every 8
+    /// columns. Set by HTS (`ESC H`), cleared by TBC (`CSI g`/`CSI 3 g`).
+    tab_stops: Vec<bool>,
     /// Last grapheme printed, for REP (`CSI b`).
     last_print: Option<char>,
     /// Pending bytes to write back to the PTY (OSC 4/10/11/12 query replies and
@@ -395,6 +413,7 @@ impl Screen {
             col: 0,
             pen: Pen::default(),
             history: VecDeque::new(),
+            history_wrapped: VecDeque::new(),
             max_scrollback,
             view_offset: 0,
             title: String::new(),
@@ -415,6 +434,7 @@ impl Screen {
             charset_g0: Charset::default(),
             charset_g1: Charset::default(),
             use_g1: false,
+            tab_stops: default_tab_stops(cols),
             last_print: None,
             pty_response: Vec::new(),
             pending_clipboard_writes: Vec::new(),
@@ -719,20 +739,306 @@ impl Screen {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Tab stops (C19): HTS (ESC H) / TBC (CSI g) / CHT (CSI I) / CBT (CSI Z)
+    // and the `\t` / 0x09 advance.
+    // ------------------------------------------------------------------
+
+    /// Resize the tab-stop bitset to the current column count, seeding any
+    /// newly-exposed columns with the default every-8 stops and preserving the
+    /// stops that still fit. Called after a grid resize.
+    fn resize_tab_stops(&mut self, cols: usize) {
+        let old = self.tab_stops.len();
+        if cols == old {
+            return;
+        }
+        self.tab_stops.resize(cols, false);
+        // Seed columns beyond the old width with the default stops so a widened
+        // screen tabs sensibly into the new region.
+        for c in old..cols {
+            self.tab_stops[c] = c % DEFAULT_TAB_INTERVAL == 0;
+        }
+    }
+
+    /// HTS (`ESC H`): set a tab stop at the current column.
+    fn set_tab_stop(&mut self) {
+        if let Some(slot) = self.tab_stops.get_mut(self.col) {
+            *slot = true;
+        }
+    }
+
+    /// TBC (`CSI g` / `CSI 0 g`): clear the stop at the cursor column.
+    /// `CSI 3 g` clears every stop.
+    fn clear_tab_stop(&mut self, mode: u16) {
+        match mode {
+            0 => {
+                if let Some(slot) = self.tab_stops.get_mut(self.col) {
+                    *slot = false;
+                }
+            }
+            3 => {
+                for slot in &mut self.tab_stops {
+                    *slot = false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// CHT (`CSI I`) / `\t`: advance the cursor forward `n` tab stops, stopping
+    /// at the last column. When no stop lies ahead the cursor lands on the last
+    /// column (matching xterm).
+    fn tab_forward(&mut self, n: usize) {
+        let last = self.grid.cols().saturating_sub(1);
+        for _ in 0..n.max(1) {
+            if self.col >= last {
+                self.col = last;
+                break;
+            }
+            let mut next = self.col + 1;
+            while next < last && !self.tab_stops.get(next).copied().unwrap_or(false) {
+                next += 1;
+            }
+            self.col = next;
+        }
+    }
+
+    /// CBT (`CSI Z`): move the cursor back `n` tab stops, stopping at column 0.
+    fn tab_back(&mut self, n: usize) {
+        for _ in 0..n.max(1) {
+            if self.col == 0 {
+                break;
+            }
+            let mut prev = self.col - 1;
+            while prev > 0 && !self.tab_stops.get(prev).copied().unwrap_or(false) {
+                prev -= 1;
+            }
+            self.col = prev;
+        }
+    }
+
+    /// C14 (focus reporting, core half): when DEC mode `?1004` is enabled, queue
+    /// the focus-event report — `ESC [ I` on focus-in, `ESC [ O` on focus-out —
+    /// into `pty_response` for the app to write to the PTY. A no-op when `?1004`
+    /// is off, so the host may call it unconditionally on every focus change.
+    fn focus_report(&mut self, focused: bool) {
+        if !self.dec_modes.focus_reporting {
+            return;
+        }
+        let seq: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+        self.pty_response.extend_from_slice(seq);
+    }
+
+    /// C16 — reflow the scrollback + visible grid to a new column width without
+    /// losing characters.
+    ///
+    /// Logical lines (runs of physical rows joined across soft-wrap boundaries)
+    /// are reconstructed from `history` + `history_wrapped` + the grid's
+    /// per-row wrap flags, then re-laid-out at `new_cols`. A hard newline is
+    /// never merged across the wrap boundary (only `wrapped == true` rows join).
+    /// Scrollback is preserved: the re-laid-out rows fill the bottom `new_rows`
+    /// into the grid and the remainder back into history. The cursor is mapped
+    /// to its logical position on a best-effort basis (exact when the cursor's
+    /// logical line is fully materialised in the visible grid).
+    fn reflow_resize(&mut self, new_rows: usize, new_cols: usize) {
+        let old_rows = self.grid.rows();
+        let old_cols = self.grid.cols();
+
+        // --- Step 1: gather every physical row (history first, then grid) with
+        // its soft-wrap flag, and remember which physical row holds the cursor.
+        struct PhysRow {
+            cells: Vec<Cell>,
+            wrapped: bool,
+        }
+        let mut phys: Vec<PhysRow> = Vec::with_capacity(self.history.len() + old_rows);
+        for (i, row) in self.history.iter().enumerate() {
+            let mut cells = row.clone();
+            cells.resize(old_cols, Cell::default());
+            phys.push(PhysRow {
+                cells,
+                wrapped: self.history_wrapped.get(i).copied().unwrap_or(false),
+            });
+        }
+        let cursor_phys = self.history.len() + self.row.min(old_rows.saturating_sub(1));
+        let cursor_col = self.col.min(old_cols);
+        for r in 0..old_rows {
+            phys.push(PhysRow {
+                cells: self.grid.row(r).to_vec(),
+                wrapped: self.grid.is_wrapped(r),
+            });
+        }
+
+        // Drop trailing fully-blank rows that sit BELOW the cursor row: they are
+        // unused screen space, not content, and would otherwise push real lines
+        // into scrollback on reflow. The cursor row itself is always retained.
+        let mut keep = phys.len();
+        while keep > cursor_phys + 1 {
+            let pr = &phys[keep - 1];
+            let blank = pr.cells.iter().all(|c| *c == Cell::default());
+            if blank && !pr.wrapped {
+                keep -= 1;
+            } else {
+                break;
+            }
+        }
+        phys.truncate(keep);
+
+        // --- Step 2: join physical rows into logical lines. Track, for the
+        // cursor, the absolute cell offset within its logical line.
+        struct LogicalLine {
+            cells: Vec<Cell>,
+        }
+        let mut logical: Vec<LogicalLine> = Vec::new();
+        let mut cur: Vec<Cell> = Vec::new();
+        let mut cursor_logical: Option<usize> = None;
+        let mut cursor_offset: usize = 0;
+
+        for (idx, pr) in phys.iter().enumerate() {
+            // If the cursor lives on this physical row, its offset is the cells
+            // accumulated so far in this logical line plus the cursor column.
+            if idx == cursor_phys {
+                cursor_logical = Some(logical.len());
+                cursor_offset = cur.len() + cursor_col;
+            }
+            cur.extend_from_slice(&pr.cells);
+            if !pr.wrapped {
+                // Hard line ending — trim trailing blank cells so padding does
+                // not get re-wrapped, but keep at least the cursor's reach.
+                let mut end = cur.len();
+                while end > 0 && cur[end - 1] == Cell::default() {
+                    end -= 1;
+                }
+                if cursor_logical == Some(logical.len()) {
+                    end = end.max(cursor_offset);
+                }
+                cur.truncate(end);
+                logical.push(LogicalLine {
+                    cells: std::mem::take(&mut cur),
+                });
+            }
+        }
+        // A trailing soft-wrapped run with no hard terminator (the live last
+        // line) still forms a logical line.
+        if !cur.is_empty() || cursor_logical == Some(logical.len()) {
+            logical.push(LogicalLine {
+                cells: std::mem::take(&mut cur),
+            });
+        }
+
+        // --- Step 3: re-lay-out each logical line into new_cols-wide rows.
+        let mut out_rows: Vec<Vec<Cell>> = Vec::new();
+        let mut out_wrapped: Vec<bool> = Vec::new();
+        // Maps (logical index, offset) -> (out_row, out_col) for the cursor.
+        let mut cursor_out: Option<(usize, usize)> = None;
+
+        for (li, line) in logical.iter().enumerate() {
+            let cells = &line.cells;
+            if cells.is_empty() {
+                // Empty logical line -> one blank row, hard ending.
+                if cursor_logical == Some(li) {
+                    cursor_out = Some((out_rows.len(), 0));
+                }
+                out_rows.push(vec![Cell::default(); new_cols]);
+                out_wrapped.push(false);
+                continue;
+            }
+            let mut start = 0usize;
+            while start < cells.len() {
+                let end = (start + new_cols).min(cells.len());
+                let mut row: Vec<Cell> = cells[start..end].to_vec();
+                let continues = end < cells.len();
+                // Cursor falls in this segment?
+                if cursor_logical == Some(li)
+                    && cursor_offset >= start
+                    && (cursor_offset < end || (!continues && cursor_offset <= cells.len()))
+                {
+                    let col = (cursor_offset - start).min(new_cols.saturating_sub(1));
+                    cursor_out = Some((out_rows.len(), col));
+                }
+                row.resize(new_cols, Cell::default());
+                out_rows.push(row);
+                out_wrapped.push(continues);
+                start = end;
+            }
+        }
+
+        if out_rows.is_empty() {
+            out_rows.push(vec![Cell::default(); new_cols]);
+            out_wrapped.push(false);
+        }
+
+        // --- Step 4: split into bottom `new_rows` (grid) + remainder (history).
+        // Keep the cursor's row visible: if the cursor maps into history, clamp
+        // the visible window down so it stays on screen.
+        let total = out_rows.len();
+        let mut grid_start = total.saturating_sub(new_rows);
+        if let Some((cr, _)) = cursor_out {
+            if cr < grid_start {
+                grid_start = cr;
+            }
+        }
+        // Rebuild history from the rows above the visible window.
+        self.history.clear();
+        self.history_wrapped.clear();
+        for i in 0..grid_start {
+            self.history.push_back(out_rows[i].clone());
+            self.history_wrapped.push_back(out_wrapped[i]);
+        }
+        while self.history.len() > self.max_scrollback {
+            self.history.pop_front();
+            self.history_wrapped.pop_front();
+        }
+
+        // Rebuild the grid from the visible window, padding to new_rows.
+        let mut new_grid = Grid::new(new_rows, new_cols);
+        for vr in 0..new_rows {
+            let src = grid_start + vr;
+            if src < total {
+                for (c, cell) in out_rows[src].iter().enumerate() {
+                    new_grid.set(vr, c, cell.clone());
+                }
+                new_grid.set_wrapped(vr, out_wrapped[src]);
+            }
+        }
+        self.grid = new_grid;
+
+        // --- Step 5: place the cursor (best-effort).
+        match cursor_out {
+            Some((cr, cc)) if cr >= grid_start => {
+                self.row = (cr - grid_start).min(new_rows - 1);
+                self.col = cc.min(new_cols - 1);
+            }
+            _ => {
+                // Cursor scrolled into history or could not be mapped: clamp to
+                // the last visible row, preserving column where possible.
+                self.row = new_rows - 1;
+                self.col = self.col.min(new_cols - 1);
+            }
+        }
+        self.view_offset = 0;
+        self.resize_tab_stops(new_cols);
+    }
+
     fn newline(&mut self) {
         // At the bottom margin: scroll the region up by one. Otherwise just
         // advance the row. When the region spans the whole screen, the dropped
         // top line feeds scrollback (unless on the alt screen).
         if self.row == self.scroll_bottom {
             if self.region_is_full() {
+                // Capture the top row's soft-wrap flag BEFORE the scroll shifts
+                // the flags up, so history records whether the dropped line
+                // continued into the next.
+                let dropped_wrapped = self.grid.is_wrapped(0);
                 let dropped = self.grid.scroll_up_returning();
                 // The alternate screen must never feed the user's scrollback — a
                 // full-screen TUI (vim, less, htop) scrolling its own buffer
                 // would otherwise flood history with transient content.
                 if self.max_scrollback > 0 && self.saved_primary.is_none() {
                     self.history.push_back(dropped);
+                    self.history_wrapped.push_back(dropped_wrapped);
                     while self.history.len() > self.max_scrollback {
                         self.history.pop_front();
+                        self.history_wrapped.pop_front();
                     }
                 }
             } else {
@@ -794,11 +1100,13 @@ impl Screen {
         self.charset_g0 = Charset::Ascii;
         self.charset_g1 = Charset::Ascii;
         self.use_g1 = false;
+        self.tab_stops = default_tab_stops(self.grid.cols());
         self.saved_cursor = None;
         self.dec_modes = DecModes::default();
         self.last_print = None;
         if hard {
             self.history.clear();
+            self.history_wrapped.clear();
             self.view_offset = 0;
             self.saved_primary = None;
         }
@@ -912,6 +1220,9 @@ impl Perform for Screen {
 
         if self.col >= cols {
             if self.dec_modes.autowrap {
+                // The current row filled to the width: mark it soft-wrapped so
+                // reflow on resize can rejoin it with the continuation row.
+                self.grid.set_wrapped(self.row, true);
                 self.col = 0;
                 self.newline();
             } else {
@@ -925,6 +1236,7 @@ impl Perform for Screen {
         // line first (the trailing cell is left blank), matching xterm.
         if width == 2 && self.col + 1 >= cols {
             if self.dec_modes.autowrap {
+                self.grid.set_wrapped(self.row, true);
                 self.col = 0;
                 self.newline();
             } else {
@@ -965,12 +1277,7 @@ impl Perform for Screen {
         match byte {
             b'\n' => self.newline(),
             b'\r' => self.col = 0,
-            b'\t' => {
-                self.col = ((self.col / 8) + 1) * 8;
-                if self.col >= self.grid.cols() {
-                    self.col = self.grid.cols() - 1;
-                }
-            }
+            b'\t' => self.tab_forward(1),
             0x08 => {
                 self.col = self.col.saturating_sub(1);
             }
@@ -1001,6 +1308,7 @@ impl Perform for Screen {
             match byte {
                 b'7' => self.save_cursor(),    // DECSC
                 b'8' => self.restore_cursor(), // DECRC
+                b'H' => self.set_tab_stop(),   // HTS — set tab stop at cursor.
                 b'D' => self.newline(),        // IND — index (down, scroll region).
                 b'M' => self.reverse_index(),  // RI — reverse index (up).
                 b'E' => {
@@ -1083,6 +1391,23 @@ impl Perform for Screen {
             'G' => {
                 // CHA — cursor horizontal absolute (1-based column).
                 self.col = (Self::first_param(params, 1) - 1).min(self.grid.cols() - 1);
+            }
+            'I' => {
+                // CHT — cursor forward tabulation (advance N tab stops).
+                self.tab_forward(Self::first_param(params, 1));
+            }
+            'Z' => {
+                // CBT — cursor backward tabulation (back N tab stops).
+                self.tab_back(Self::first_param(params, 1));
+            }
+            'g' => {
+                // TBC — tab clear. 0 = clear stop at cursor, 3 = clear all.
+                let mode = params
+                    .iter()
+                    .next()
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(0);
+                self.clear_tab_stop(mode);
             }
             'd' => {
                 // VPA — vertical position absolute (1-based row).
@@ -1240,6 +1565,7 @@ impl Perform for Screen {
                     3 => {
                         // Erase scrollback (the `clear` command's second half).
                         self.history.clear();
+                        self.history_wrapped.clear();
                         self.view_offset = 0;
                     }
                     _ => {}
@@ -1808,6 +2134,17 @@ impl Terminal {
         std::mem::take(&mut self.screen.pty_response)
     }
 
+    /// C14 — focus reporting (core half). The host calls this on every window
+    /// focus change (e.g. a winit `WindowEvent::Focused(b)`): `true` for
+    /// focus-in, `false` for focus-out. When DEC mode `?1004` is enabled, it
+    /// queues `ESC [ I` (in) / `ESC [ O` (out) into the PTY-response buffer,
+    /// which the host drains via [`Terminal::take_pty_response`]. When `?1004`
+    /// is disabled (the default) it is a no-op, so the host can call it
+    /// unconditionally without checking [`Terminal::focus_reporting`] first.
+    pub fn focus_report(&mut self, focused: bool) {
+        self.screen.focus_report(focused);
+    }
+
     /// Drains the oldest pending OSC 52 clipboard-write request, if any.
     ///
     /// The host calls this each frame to learn whether a program requested a
@@ -2115,9 +2452,25 @@ impl Terminal {
     }
 
     pub fn resize(&mut self, rows: usize, cols: usize) {
-        self.screen.grid.resize(rows, cols);
-        self.screen.row = self.screen.row.min(rows - 1);
-        self.screen.col = self.screen.col.min(cols - 1);
+        let rows = rows.max(1);
+        let cols = cols.max(1);
+        let old_cols = self.screen.grid.cols();
+
+        // C16 — reflow on resize. When the column count changes on the PRIMARY
+        // screen, re-wrap soft-wrapped logical lines to the new width instead of
+        // truncating (the lossy `Grid::resize` path). The alternate screen holds
+        // a full-screen TUI that redraws itself on SIGWINCH, so reflowing it is
+        // both unnecessary and wrong (alt content has no logical-line history) —
+        // there we fall back to the simple grid resize.
+        if cols != old_cols && self.screen.saved_primary.is_none() {
+            self.screen.reflow_resize(rows, cols);
+        } else {
+            self.screen.grid.resize(rows, cols);
+            self.screen.row = self.screen.row.min(rows - 1);
+            self.screen.col = self.screen.col.min(cols - 1);
+            self.screen.resize_tab_stops(cols);
+        }
+
         // A full-screen scroll region tracks the new height; a custom region is
         // clamped and reset if it no longer fits.
         if self.screen.scroll_bottom + 1 >= self.screen.grid.rows()
@@ -3382,5 +3735,203 @@ mod tests {
         assert_eq!(t.cursor_position(), Some((0, 4)));
         t.advance(b"\x1b[3d"); // row 3 (1-based) -> row 2
         assert_eq!(t.cursor_position(), Some((2, 4)));
+    }
+
+    // ============================================================
+    // VT correctness P1 batch (C14 / C16 / C19)
+    // ============================================================
+
+    // ---- C19: settable tab stops (HTS / TBC / CHT / CBT) ----
+
+    #[test]
+    fn tab_default_stops_every_eight() {
+        let mut t = Terminal::new(2, 30);
+        t.advance(b"\t"); // col 0 -> 8
+        assert_eq!(t.cursor_position(), Some((0, 8)));
+        t.advance(b"\t"); // 8 -> 16
+        assert_eq!(t.cursor_position(), Some((0, 16)));
+    }
+
+    #[test]
+    fn tab_from_mid_default_stop_advances_to_next_multiple() {
+        let mut t = Terminal::new(2, 30);
+        t.advance(b"abc\t"); // col 3 -> next stop at 8
+        assert_eq!(t.cursor_position(), Some((0, 8)));
+    }
+
+    #[test]
+    fn hts_sets_custom_tab_stop() {
+        let mut t = Terminal::new(2, 30);
+        // Move to col 3 (1-based 4) and set a stop there via HTS (ESC H).
+        t.advance(b"\x1b[4G"); // col 4 (1-based) = col 3 (0-based)
+        t.advance(b"\x1bH"); // HTS at col 3
+        // Home, then tab: should stop at the new custom stop (col 3), not col 8.
+        t.advance(b"\x1b[1G\t");
+        assert_eq!(t.cursor_position(), Some((0, 3)), "tab honours custom HTS stop");
+    }
+
+    #[test]
+    fn tbc_clear_all_then_tab_goes_to_last_col() {
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"\x1b[3g"); // TBC 3 — clear every stop
+        t.advance(b"\x1b[1G\t"); // home, tab with no stops -> last column (9)
+        assert_eq!(t.cursor_position(), Some((0, 9)), "no stops -> last col");
+    }
+
+    #[test]
+    fn tbc_clear_current_stop() {
+        let mut t = Terminal::new(2, 30);
+        // Clear the default stop at col 8, then tab from home jumps to col 16.
+        t.advance(b"\x1b[9G"); // col 9 (1-based) = col 8 (0-based), a default stop
+        t.advance(b"\x1b[0g"); // TBC 0 — clear stop at cursor (col 8)
+        t.advance(b"\x1b[1G\t");
+        assert_eq!(t.cursor_position(), Some((0, 16)), "cleared col-8 stop skipped");
+    }
+
+    #[test]
+    fn cht_forward_tabs_n() {
+        let mut t = Terminal::new(2, 40);
+        t.advance(b"\x1b[3I"); // CHT 3 — forward 3 tab stops from col 0 -> 8,16,24
+        assert_eq!(t.cursor_position(), Some((0, 24)));
+    }
+
+    #[test]
+    fn cbt_back_tabs_n() {
+        let mut t = Terminal::new(2, 40);
+        t.advance(b"\x1b[30G"); // col 30 (1-based) = col 29
+        t.advance(b"\x1b[2Z"); // CBT 2 — back 2 stops: 24 then 16
+        assert_eq!(t.cursor_position(), Some((0, 16)));
+    }
+
+    #[test]
+    fn cbt_stops_at_column_zero() {
+        let mut t = Terminal::new(2, 40);
+        t.advance(b"\x1b[5G"); // col 4
+        t.advance(b"\x1b[9Z"); // back far more stops than exist
+        assert_eq!(t.cursor_position(), Some((0, 0)), "CBT clamps at col 0");
+    }
+
+    #[test]
+    fn tab_stops_reset_on_ris() {
+        let mut t = Terminal::new(2, 30);
+        t.advance(b"\x1b[3g"); // clear all stops
+        t.advance(b"\x1bc"); // RIS — restores default stops
+        t.advance(b"\t");
+        assert_eq!(t.cursor_position(), Some((0, 8)), "RIS restores default stops");
+    }
+
+    // ---- C14: focus reporting emit (core half) ----
+
+    #[test]
+    fn focus_report_silent_when_mode_off() {
+        let mut t = Terminal::new(4, 20);
+        t.focus_report(true);
+        t.focus_report(false);
+        assert!(
+            t.take_pty_response().is_empty(),
+            "no focus reports unless ?1004 is enabled"
+        );
+    }
+
+    #[test]
+    fn focus_report_emits_when_mode_on() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[?1004h"); // enable focus reporting
+        assert!(t.focus_reporting());
+        t.focus_report(true);
+        assert_eq!(t.take_pty_response().as_slice(), b"\x1b[I", "focus-in emits CSI I");
+        t.focus_report(false);
+        assert_eq!(t.take_pty_response().as_slice(), b"\x1b[O", "focus-out emits CSI O");
+    }
+
+    #[test]
+    fn focus_report_stops_after_mode_reset() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[?1004h");
+        t.focus_report(true);
+        let _ = t.take_pty_response();
+        t.advance(b"\x1b[?1004l"); // disable again
+        t.focus_report(true);
+        assert!(t.take_pty_response().is_empty(), "disabling ?1004 silences reports");
+    }
+
+    // ---- C16: reflow / rewrap on resize ----
+
+    #[test]
+    fn reflow_narrowing_rewraps_without_losing_chars() {
+        // A 12-char logical line on a 20-col grid (one physical row) re-wraps
+        // onto a 10-col grid (two physical rows) without losing characters.
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"abcdefghijkl"); // 12 chars, no wrap at 20 cols
+        t.resize(4, 10);
+        // Row 0 holds "abcdefghij", row 1 holds "kl".
+        let row0: String = (0..10).map(|c| t.grid().cell(0, c).unwrap().c).collect();
+        let row1: String = (0..2).map(|c| t.grid().cell(1, c).unwrap().c).collect();
+        assert_eq!(row0, "abcdefghij");
+        assert_eq!(row1, "kl");
+    }
+
+    #[test]
+    fn reflow_widening_rejoins_a_wrapped_line() {
+        // Print 12 chars into a 5-col grid: it soft-wraps across rows. Widening
+        // to 20 cols must rejoin the whole logical line onto one row.
+        let mut t = Terminal::new(6, 5);
+        t.advance(b"abcdefghijkl"); // wraps: abcde/fghij/kl
+        t.resize(6, 20);
+        let joined: String = (0..12).map(|c| t.grid().cell(0, c).unwrap().c).collect();
+        assert_eq!(joined, "abcdefghijkl", "wrapped line rejoined on widen");
+    }
+
+    #[test]
+    fn reflow_never_merges_across_hard_newline() {
+        // Two separate hard lines must stay separate across a reflow, even when
+        // each is short enough that a naive join would merge them.
+        let mut t = Terminal::new(6, 20);
+        t.advance(b"foo\r\nbar");
+        t.resize(6, 8);
+        let row0: String = (0..3).map(|c| t.grid().cell(0, c).unwrap().c).collect();
+        let row1: String = (0..3).map(|c| t.grid().cell(1, c).unwrap().c).collect();
+        assert_eq!(row0, "foo");
+        assert_eq!(row1, "bar", "hard newline preserved — not merged into foo");
+    }
+
+    #[test]
+    fn reflow_roundtrip_preserves_text() {
+        // Narrow then widen back: the text content must survive intact.
+        let mut t = Terminal::new(6, 20);
+        t.advance(b"the quick brown fox"); // 19 chars, fits one row at 20
+        t.resize(6, 7); // narrow — forces wrap
+        t.resize(6, 20); // widen back
+        let joined: String = (0..19).map(|c| t.grid().cell(0, c).unwrap().c).collect();
+        assert_eq!(joined, "the quick brown fox", "narrow→widen round-trips");
+    }
+
+    #[test]
+    fn reflow_preserves_scrollback_lines() {
+        // Lines pushed to scrollback survive a reflow (non-lossy preservation).
+        let mut t = Terminal::with_scrollback(2, 8, 100);
+        t.advance(b"L0\r\nL1\r\nL2\r\nL3"); // L0/L1 scroll into history
+        let before = t.all_lines();
+        assert!(before.iter().any(|l| l.starts_with("L0")));
+        t.resize(2, 12);
+        let after = t.all_lines();
+        assert!(
+            after.iter().any(|l| l.starts_with("L0")),
+            "scrollback line L0 survives reflow"
+        );
+        assert!(after.iter().any(|l| l.starts_with("L3")));
+    }
+
+    #[test]
+    fn reflow_alt_screen_uses_plain_resize() {
+        // On the alt screen, resize must NOT reflow (the TUI redraws itself);
+        // it must remain a no-panic plain resize.
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[?1049h");
+        t.advance(b"ALT");
+        t.resize(6, 10);
+        assert!(t.alt_screen_active());
+        assert_eq!(t.grid().rows(), 6);
+        assert_eq!(t.grid().cols(), 10);
     }
 }
