@@ -3370,7 +3370,15 @@ impl ApplicationHandler for App {
                 if alt_only && self.handle_alt_combo(&event.logical_key) {
                     return;
                 }
-                if let Some(bytes) = key_to_bytes(&event.logical_key, &event.text) {
+                // DECCKM (application-cursor-keys) state, read before the mutable
+                // session borrow so arrow/Home/End encode SS3 vs CSI correctly.
+                let app_cursor = self
+                    .active_session()
+                    .and_then(|s| s.terminal().lock().ok().map(|t| t.application_cursor_keys()))
+                    .unwrap_or(false);
+                if let Some(bytes) =
+                    key_to_bytes(&event.logical_key, &event.text, app_cursor, self.modifiers)
+                {
                     // Typing clears a stale mouse selection (the highlight would
                     // otherwise linger over scrolled/overwritten content).
                     if self.selection.take().is_some() {
@@ -4274,18 +4282,77 @@ fn srgb_to_linear(c: u8) -> f64 {
 }
 
 /// Map a key press to the bytes to send to the PTY.
-fn key_to_bytes(key: &Key, text: &Option<winit::keyboard::SmolStr>) -> Option<Vec<u8>> {
-    match key {
+/// Encode a key press into the bytes a terminal program expects on the PTY.
+///
+/// Honours DECCKM (`app_cursor`): in application-cursor mode the arrow and
+/// Home/End keys use SS3 (`ESC O x`) instead of CSI (`ESC [ x`), which is what
+/// readline/vim expect. Encodes the function keys (F1–F12) and editing keys
+/// (Home/End/Insert/Delete/PageUp/PageDown). Alt acts as Meta: an `Alt`-modified
+/// text key is prefixed with `ESC` (the xterm convention behind Alt+B / Alt+F
+/// word motion in bash).
+fn key_to_bytes(
+    key: &Key,
+    text: &Option<winit::keyboard::SmolStr>,
+    app_cursor: bool,
+    mods: ModifiersState,
+) -> Option<Vec<u8>> {
+    // Arrow / Home / End: SS3 in application-cursor mode, else CSI.
+    let cursor = |c: u8| -> Vec<u8> {
+        if app_cursor {
+            vec![0x1b, b'O', c]
+        } else {
+            vec![0x1b, b'[', c]
+        }
+    };
+    // `ESC [ <n> ~` editing/function-key form.
+    let tilde = |n: &[u8]| -> Vec<u8> {
+        let mut v = Vec::with_capacity(n.len() + 3);
+        v.extend_from_slice(b"\x1b[");
+        v.extend_from_slice(n);
+        v.push(b'~');
+        v
+    };
+    let base: Option<Vec<u8>> = match key {
         Key::Named(NamedKey::Enter) => Some(vec![b'\r']),
         Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
         Key::Named(NamedKey::Tab) => Some(vec![b'\t']),
         Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
         Key::Named(NamedKey::Space) => Some(vec![b' ']),
-        Key::Named(NamedKey::ArrowUp) => Some(b"\x1b[A".to_vec()),
-        Key::Named(NamedKey::ArrowDown) => Some(b"\x1b[B".to_vec()),
-        Key::Named(NamedKey::ArrowRight) => Some(b"\x1b[C".to_vec()),
-        Key::Named(NamedKey::ArrowLeft) => Some(b"\x1b[D".to_vec()),
+        Key::Named(NamedKey::ArrowUp) => Some(cursor(b'A')),
+        Key::Named(NamedKey::ArrowDown) => Some(cursor(b'B')),
+        Key::Named(NamedKey::ArrowRight) => Some(cursor(b'C')),
+        Key::Named(NamedKey::ArrowLeft) => Some(cursor(b'D')),
+        Key::Named(NamedKey::Home) => Some(cursor(b'H')),
+        Key::Named(NamedKey::End) => Some(cursor(b'F')),
+        Key::Named(NamedKey::Insert) => Some(tilde(b"2")),
+        Key::Named(NamedKey::Delete) => Some(tilde(b"3")),
+        Key::Named(NamedKey::PageUp) => Some(tilde(b"5")),
+        Key::Named(NamedKey::PageDown) => Some(tilde(b"6")),
+        // F1–F4 use SS3 (the VT100 PF-key form); F5–F12 use CSI tilde.
+        Key::Named(NamedKey::F1) => Some(vec![0x1b, b'O', b'P']),
+        Key::Named(NamedKey::F2) => Some(vec![0x1b, b'O', b'Q']),
+        Key::Named(NamedKey::F3) => Some(vec![0x1b, b'O', b'R']),
+        Key::Named(NamedKey::F4) => Some(vec![0x1b, b'O', b'S']),
+        Key::Named(NamedKey::F5) => Some(tilde(b"15")),
+        Key::Named(NamedKey::F6) => Some(tilde(b"17")),
+        Key::Named(NamedKey::F7) => Some(tilde(b"18")),
+        Key::Named(NamedKey::F8) => Some(tilde(b"19")),
+        Key::Named(NamedKey::F9) => Some(tilde(b"20")),
+        Key::Named(NamedKey::F10) => Some(tilde(b"21")),
+        Key::Named(NamedKey::F11) => Some(tilde(b"23")),
+        Key::Named(NamedKey::F12) => Some(tilde(b"24")),
         _ => text.as_ref().map(|s| s.as_bytes().to_vec()),
+    };
+    // Alt = Meta: prefix ESC for a text-producing key (never double-prefix a
+    // sequence that already starts with ESC, e.g. the arrows above).
+    match base {
+        Some(bytes) if mods.alt_key() && bytes.first() != Some(&0x1b) => {
+            let mut v = Vec::with_capacity(bytes.len() + 1);
+            v.push(0x1b);
+            v.extend_from_slice(&bytes);
+            Some(v)
+        }
+        other => other,
     }
 }
 
@@ -4343,6 +4410,58 @@ mod tests {
         // an overlay, but is NOT laid out — grid geometry is unchanged).
         let short = LRect::new(0, 0, 400, CELL_TABBAR_H as i32 + 2 * BORDER_PX);
         assert!(!strip_laid_out(3, short));
+    }
+
+    #[test]
+    fn key_encodes_function_and_edit_keys() {
+        let none = ModifiersState::empty();
+        assert_eq!(
+            key_to_bytes(&Key::Named(NamedKey::F1), &None, false, none),
+            Some(b"\x1bOP".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Named(NamedKey::F5), &None, false, none),
+            Some(b"\x1b[15~".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Named(NamedKey::Delete), &None, false, none),
+            Some(b"\x1b[3~".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Named(NamedKey::PageUp), &None, false, none),
+            Some(b"\x1b[5~".to_vec())
+        );
+    }
+
+    #[test]
+    fn key_arrows_honour_decckm() {
+        let none = ModifiersState::empty();
+        // Normal mode → CSI.
+        assert_eq!(
+            key_to_bytes(&Key::Named(NamedKey::ArrowUp), &None, false, none),
+            Some(b"\x1b[A".to_vec())
+        );
+        // Application-cursor mode (DECCKM) → SS3.
+        assert_eq!(
+            key_to_bytes(&Key::Named(NamedKey::ArrowUp), &None, true, none),
+            Some(b"\x1bOA".to_vec())
+        );
+    }
+
+    #[test]
+    fn key_alt_is_meta_prefix() {
+        let alt = ModifiersState::ALT;
+        // Alt+b → ESC b (Meta) via the text fallback.
+        let text = Some(winit::keyboard::SmolStr::new("b"));
+        assert_eq!(
+            key_to_bytes(&Key::Character("b".into()), &text, false, alt),
+            Some(b"\x1bb".to_vec())
+        );
+        // Alt+Up must NOT double-prefix ESC (the arrow already starts with ESC).
+        assert_eq!(
+            key_to_bytes(&Key::Named(NamedKey::ArrowUp), &None, false, alt),
+            Some(b"\x1b[A".to_vec())
+        );
     }
 
     #[test]
