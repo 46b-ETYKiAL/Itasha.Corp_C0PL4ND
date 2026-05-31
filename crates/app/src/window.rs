@@ -374,6 +374,11 @@ struct Gpu {
     /// strip (>=2 tabs, or a short cell under the cursor). Keyed by `LeafId`.
     tabbar_buffers: HashMap<LeafId, Buffer>,
     chrome_buffer: Buffer,
+    /// The min/max/close caption glyphs, in their OWN buffer drawn at the
+    /// absolute `buttons_left_px` so the rendered glyphs line up exactly with
+    /// the click/hit zones (and the native win_snap caption region) at any
+    /// window width — instead of drifting via accumulated space-padding.
+    button_buffer: Buffer,
     palette_buffer: Buffer,
     splash_buffer: Buffer,
     image_renderer: crate::image_render::ImageRenderer,
@@ -3621,6 +3626,33 @@ impl ApplicationHandler for App {
                     self.handle_search_key(&event.logical_key);
                     return;
                 }
+                // Font zoom — Ctrl with +/=/−/_/0, TOLERANT of Shift so that
+                // BOTH Ctrl++ (which is physically Ctrl+Shift+= on a US layout)
+                // and Ctrl+= zoom in, matching standard browser/editor UX. Placed
+                // before the Ctrl[+Shift] chord families so the zoom keys are
+                // never eaten by a tab combo. zoom_font/reset request their own
+                // redraw via set_font_scale.
+                let ctrl_zoom = (self.modifiers.control_key() || self.modifiers.super_key())
+                    && !self.modifiers.alt_key();
+                if ctrl_zoom {
+                    if let Key::Character(c) = &event.logical_key {
+                        match c.as_str() {
+                            "+" | "=" => {
+                                self.zoom_font(0.1);
+                                return;
+                            }
+                            "-" | "_" => {
+                                self.zoom_font(-0.1);
+                                return;
+                            }
+                            "0" | ")" => {
+                                self.reset_font_scale();
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 // Nested-cell-tab combos on Ctrl WITHOUT Shift (distinct from the
                 // window-level Ctrl+Shift+… family and the Alt cell-focus family,
                 // so the three tab/focus levels never collide — pre-mortem #4):
@@ -3635,7 +3667,11 @@ impl ApplicationHandler for App {
                     if let Key::Character(c) = &event.logical_key {
                         match c.as_str() {
                             "," => {
-                                self.open_config_file();
+                                // Ctrl+, opens the in-app settings OVERLAY (the
+                                // discoverable preferences UI). The raw config
+                                // file remains available via the palette's
+                                // "Open Config File" action.
+                                self.open_settings_panel();
                                 return;
                             }
                             d if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() && d != "0" => {
@@ -4041,33 +4077,40 @@ impl App {
         } else {
             format!(" {} ", c0pl4nd_core::PRODUCT_NAME)
         };
-        // Pad/truncate the title to the button column so each 3-cell button
-        // glyph lands exactly on its BUTTON_CELLS-wide hit zone.
-        let mut chrome: String = title.chars().take(pad_cols).collect();
-        while chrome.chars().count() < pad_cols {
-            chrome.push(' ');
-        }
-        // Each button is exactly BUTTON_CELLS (5) monospace cells: the glyph is
-        // centred with padding so the click target is a comfortable size.
-        let chrome_spans = [
-            (chrome, accent),
-            ("  \u{2014}  ".to_string(), fg),         // minimize  —
-            ("  \u{25a1}  ".to_string(), fg),         // maximize  □
-            ("  \u{2715}  ".to_string(), signal_red), // close     ✕
-        ];
+        // Title: left-aligned, truncated to the button column so it never runs
+        // under the caption buttons. It is drawn in `chrome_buffer` at the left.
+        let chrome: String = title.chars().take(pad_cols).collect();
         gpu.chrome_buffer.set_rich_text(
             &mut gpu.font_system,
-            chrome_spans.iter().map(|(s, col)| {
-                (
-                    s.as_str(),
-                    Attrs::new().family(Family::Monospace).color(*col),
-                )
-            }),
+            [(
+                chrome.as_str(),
+                Attrs::new().family(Family::Monospace).color(accent),
+            )],
             &Attrs::new().family(Family::Monospace).color(fg),
             Shaping::Advanced,
             None,
         );
         gpu.chrome_buffer
+            .shape_until_scroll(&mut gpu.font_system, false);
+        // Caption buttons: rendered in their OWN buffer, drawn at the absolute
+        // `buttons_left` pixel (see the button_buffer TextArea below) so the
+        // glyphs align exactly with the click/hit zones at ANY width — no more
+        // space-padding drift. Each button is BUTTON_CELLS (5) cells wide.
+        let button_spans = [
+            ("  \u{2014}  ", fg),         // minimize  —
+            ("  \u{25a1}  ", fg),         // maximize  □
+            ("  \u{2715}  ", signal_red), // close     ✕
+        ];
+        gpu.button_buffer.set_rich_text(
+            &mut gpu.font_system,
+            button_spans
+                .iter()
+                .map(|(s, col)| (*s, Attrs::new().family(Family::Monospace).color(*col))),
+            &Attrs::new().family(Family::Monospace).color(fg),
+            Shaping::Advanced,
+            None,
+        );
+        gpu.button_buffer
             .shape_until_scroll(&mut gpu.font_system, false);
 
         if let Some(pt) = palette_text.as_ref().or(settings_text.as_ref()) {
@@ -4122,10 +4165,26 @@ impl App {
         let w = gpu.surface_config.width as i32;
         let h = gpu.surface_config.height as i32;
         let mut areas = vec![
-            // Title bar chrome.
+            // Title bar chrome (wordmark / tab counter), left-aligned.
             TextArea {
                 buffer: &gpu.chrome_buffer,
                 left: 6.0,
+                top: 6.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: w,
+                    bottom: TITLEBAR_H as i32,
+                },
+                default_color: fg,
+                custom_glyphs: &[],
+            },
+            // Caption buttons (min / max / close), pinned at the ABSOLUTE
+            // `buttons_left` pixel so the glyphs match their click/hit zones.
+            TextArea {
+                buffer: &gpu.button_buffer,
+                left: buttons_left,
                 top: 6.0,
                 scale: 1.0,
                 bounds: TextBounds {
@@ -4497,6 +4556,12 @@ impl Gpu {
         let metrics = Metrics::new(font_size.max(8.0), LINE_HEIGHT.max(font_size + 2.0));
         let mut chrome_buffer = Buffer::new(&mut font_system, metrics);
         chrome_buffer.set_size(&mut font_system, Some(size.width as f32), Some(TITLEBAR_H));
+        let mut button_buffer = Buffer::new(&mut font_system, metrics);
+        button_buffer.set_size(
+            &mut font_system,
+            Some(BUTTONS_CELLS * CELL_W + BTN_RIGHT_MARGIN + CELL_W),
+            Some(TITLEBAR_H),
+        );
         let mut palette_buffer = Buffer::new(&mut font_system, metrics);
         palette_buffer.set_size(
             &mut font_system,
@@ -4528,6 +4593,7 @@ impl Gpu {
             leaf_buffers: HashMap::new(),
             tabbar_buffers: HashMap::new(),
             chrome_buffer,
+            button_buffer,
             palette_buffer,
             splash_buffer,
             image_renderer,
