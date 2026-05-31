@@ -39,11 +39,22 @@ fn all_bundled_themes_load_and_validate() {
 }
 
 #[test]
-fn flagship_theme_is_brand_void_black() {
-    let theme = Theme::load_from(&themes_dir().join("itasha-void.toml")).expect("load itasha-void");
-    // VOID BLACK background is the brand signature.
+fn flagship_theme_is_wired_noir() {
+    // Wired Noir is the brand-canon flagship (DECISION-2026-005), shared with
+    // the SCR1B3 editor: cool near-black void hull + one teal accent.
+    let theme = Theme::load_from(&themes_dir().join("wired-noir.toml")).expect("load wired-noir");
     assert_eq!(
         c0pl4nd_core::theme::parse_hex(&theme.background).unwrap(),
+        (0x07, 0x0a, 0x0c), // void near-black
+    );
+    assert_eq!(
+        c0pl4nd_core::theme::parse_hex(&theme.cursor).unwrap(),
+        (0x34, 0xe0, 0xd0), // teal — the system voice
+    );
+    // The prior itasha-void theme remains bundled as a non-default alternative.
+    let void = Theme::load_from(&themes_dir().join("itasha-void.toml")).expect("load itasha-void");
+    assert_eq!(
+        c0pl4nd_core::theme::parse_hex(&void.background).unwrap(),
         (8, 6, 13)
     );
 }

@@ -1,0 +1,36 @@
+# Wired Noir — flagship default, shared with the SCR1B3 editor for a cohesive
+# Itasha.Corp product family (canon DECISION-2026-005: supersedes itasha-void).
+# A calm, legible surface over an implied machine substrate: cool near-black
+# layers, off-white text, ONE teal accent (the system's voice), Akira-red
+# reserved for alarms, restrained amber for warnings, cool low-chroma rest.
+# WCAG contrast (foreground #c8d6dc on background #070a0c): ~16:1 (AAA).
+name = "Wired Noir"
+author = "Itasha.Corp"
+
+# base UI colors — void hull, off-white text, teal system-voice cursor/accent
+background = "#070a0c"
+foreground = "#c8d6dc"
+cursor = "#34e0d0"
+cursor_text = "#070a0c"
+selection_background = "#163a40"
+selection_foreground = "#c8d6dc"
+
+[normal]
+black = "#0e1417"
+red = "#ff3b30"
+green = "#6fb89a"
+yellow = "#f2b33d"
+blue = "#79a0b0"
+magenta = "#9d8bbf"
+cyan = "#34e0d0"
+white = "#c8d6dc"
+
+[bright]
+black = "#5a6b73"
+red = "#ff5c52"
+green = "#8da88c"
+yellow = "#c9a86a"
+blue = "#a9c2cc"
+magenta = "#b8a6d4"
+cyan = "#5cebdb"
+white = "#e6eef2"
