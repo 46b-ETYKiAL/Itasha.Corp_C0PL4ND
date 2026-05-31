@@ -1024,6 +1024,37 @@ impl App {
         }
     }
 
+    /// Scroll the active terminal to the previous (`forward = false`) or next
+    /// (`forward = true`) shell-prompt mark (OSC 133 ; A), relative to the line
+    /// currently at the top of the viewport. No-op when no marks exist or none
+    /// lie in the requested direction. Marks are captured for free by the
+    /// existing OSC-133 handler; this is the consumer (Ctrl+Shift+PageUp/Down).
+    fn jump_to_prompt(&mut self, forward: bool) {
+        let mut moved = false;
+        if let Some(s) = self.active_session() {
+            if let Ok(mut t) = s.terminal().lock() {
+                let scrollback = t.scrollback_len();
+                // Absolute line currently at the top of the visible window.
+                let top = scrollback.saturating_sub(t.view_offset());
+                let target = {
+                    let marks = t.prompt_marks();
+                    if forward {
+                        marks.iter().copied().filter(|&m| m > top).min()
+                    } else {
+                        marks.iter().copied().filter(|&m| m < top).max()
+                    }
+                };
+                if let Some(line) = target {
+                    t.set_view_offset(scrollback.saturating_sub(line));
+                    moved = true;
+                }
+            }
+        }
+        if moved {
+            self.request_redraw();
+        }
+    }
+
     fn handle_search_key(&mut self, key: &Key) {
         match key {
             Key::Named(NamedKey::Escape) => self.exit_search(),
@@ -2436,6 +2467,15 @@ impl App {
             },
             Key::Named(NamedKey::Tab) => {
                 self.next_tab();
+                true
+            }
+            // Jump to previous/next shell prompt (OSC 133 marks).
+            Key::Named(NamedKey::PageUp) => {
+                self.jump_to_prompt(false);
+                true
+            }
+            Key::Named(NamedKey::PageDown) => {
+                self.jump_to_prompt(true);
                 true
             }
             // Directional focus across the split-tree (Ctrl/Cmd+Shift+Arrow).
