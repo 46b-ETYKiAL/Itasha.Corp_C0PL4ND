@@ -27,6 +27,18 @@ impl Session {
         Self::from_pty(pty, rows, cols)
     }
 
+    /// Spawn the shell in an explicit working directory (session restore). A
+    /// `cwd` that no longer exists falls back to home (never wedges the launch).
+    pub fn spawn_shell_in(
+        shell: Option<&str>,
+        rows: u16,
+        cols: u16,
+        cwd: Option<&str>,
+    ) -> Result<Self> {
+        let pty = PtyProcess::spawn_shell_in(shell, rows, cols, cwd)?;
+        Self::from_pty(pty, rows, cols)
+    }
+
     /// Spawn an explicit program (used by tests for deterministic behaviour).
     pub fn spawn_program(program: &str, args: &[&str], rows: u16, cols: u16) -> Result<Self> {
         let pty = PtyProcess::spawn_program(program, args, rows, cols)?;
