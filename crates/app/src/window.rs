@@ -1825,29 +1825,38 @@ impl App {
         Self::workspaces_dir().map(|d| d.join(format!("{safe}.layout.json")))
     }
 
-    /// Capture the active tab's layout as a persistence snapshot. Each leaf's
-    /// metadata records its tab count, active tab, and the configured shell as
-    /// the profile (the app does not track a per-pane cwd, so `cwd` is `None`
-    /// and fresh shells launch in the process working directory on restore).
-    fn capture_snapshot(&self) -> Option<LayoutSnapshot> {
-        let tab = self.active_tab()?;
+    /// Capture one tab's layout as a persistence snapshot, recording each pane's
+    /// tab count, active tab, shell profile, and current working directory
+    /// (OSC-7) so a restored shell relaunches where the user left it.
+    fn capture_tab_snapshot(&self, tab: &Tab) -> LayoutSnapshot {
         let profile = self.config.shell.clone();
-        Some(LayoutSnapshot::capture(&tab.layout, |id| {
-            match tab.cells.get(&id) {
-                Some(c) => {
-                    // Capture the pane's current working directory (OSC-7) so a
-                    // restored shell relaunches where the user left it.
-                    let cwd = c.active().and_then(|s| {
-                        s.terminal()
-                            .lock()
-                            .ok()
-                            .and_then(|t| t.cwd().map(String::from))
-                    });
-                    layout_persist::leaf_view_for(&c.group, cwd, profile.clone())
-                }
-                None => LeafView::single(),
+        LayoutSnapshot::capture(&tab.layout, |id| match tab.cells.get(&id) {
+            Some(c) => {
+                let cwd = c.active().and_then(|s| {
+                    s.terminal()
+                        .lock()
+                        .ok()
+                        .and_then(|t| t.cwd().map(String::from))
+                });
+                layout_persist::leaf_view_for(&c.group, cwd, profile.clone())
             }
-        }))
+            None => LeafView::single(),
+        })
+    }
+
+    /// Capture the active tab's layout (single-tab "Save Layout As…").
+    fn capture_snapshot(&self) -> Option<LayoutSnapshot> {
+        Some(self.capture_tab_snapshot(self.active_tab()?))
+    }
+
+    /// Capture ALL window tabs as a multi-tab workspace snapshot.
+    fn capture_workspace(&self) -> layout_persist::WorkspaceSnapshot {
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|t| self.capture_tab_snapshot(t))
+            .collect();
+        layout_persist::WorkspaceSnapshot::from_tabs(tabs, self.active)
     }
 
     /// Save the active tab's layout to the named workspace file. `"default"` is
@@ -1881,16 +1890,14 @@ impl App {
         self.materialize_restored(restored);
     }
 
-    /// Turn a [`layout_persist::RestoredLayout`] into a live active tab: one
-    /// fresh shell per leaf, sized to its cell, focus on the restored leaf.
-    fn materialize_restored(&mut self, restored: layout_persist::RestoredLayout) {
-        let content = self.content_rect();
+    /// Build a live [`Tab`] from a restored layout: one fresh shell per leaf at
+    /// its saved cwd, sized to `content`, dropping any leaf whose shell could
+    /// not spawn. Returns `None` when nothing could be spawned. Live process
+    /// state is not restored — by design.
+    fn build_tab(&self, restored: layout_persist::RestoredLayout, content: LRect) -> Option<Tab> {
         let (rows, cols) = self.preset_cell_dims(content, &restored.layout);
         let mut cells: HashMap<LeafId, Cell> = HashMap::new();
         for (id, view) in &restored.leaves {
-            // Spawn the active tab's shell at the restored working directory;
-            // additional cell tabs in this leaf are spawned lazily by the user
-            // (live process state is not restored — by design).
             match Session::spawn_shell_in(
                 self.config.shell.as_deref(),
                 rows,
@@ -1906,8 +1913,7 @@ impl App {
             }
         }
         if cells.is_empty() {
-            // Could not spawn anything — keep whatever we have rather than wedge.
-            return;
+            return None;
         }
         let mut layout = restored.layout;
         let missing: Vec<LeafId> = layout
@@ -1923,13 +1929,41 @@ impl App {
                 layout.focused = first;
             }
         }
+        Some(Tab { layout, cells })
+    }
+
+    /// Turn a [`layout_persist::RestoredLayout`] into the live active tab.
+    fn materialize_restored(&mut self, restored: layout_persist::RestoredLayout) {
+        let content = self.content_rect();
+        let Some(tab) = self.build_tab(restored, content) else {
+            return;
+        };
         if let Some(active) = self.tabs.get_mut(self.active) {
-            active.layout = layout;
-            active.cells = cells;
+            *active = tab;
         } else {
-            self.tabs.push(Tab { layout, cells });
+            self.tabs.push(tab);
             self.active = self.tabs.len() - 1;
         }
+        self.relayout_active(content);
+        self.request_redraw();
+    }
+
+    /// Rebuild ALL window tabs from a restored multi-tab workspace (fresh shells
+    /// per pane at their saved cwds). Replaces the current tab set; restores the
+    /// previously-active tab index. Tabs that spawn nothing are skipped.
+    fn materialize_workspace(&mut self, restored: layout_persist::RestoredWorkspace) {
+        let content = self.content_rect();
+        let active = restored.active;
+        let tabs: Vec<Tab> = restored
+            .tabs
+            .into_iter()
+            .filter_map(|rl| self.build_tab(rl, content))
+            .collect();
+        if tabs.is_empty() {
+            return;
+        }
+        self.active = active.min(tabs.len() - 1);
+        self.tabs = tabs;
         self.relayout_active(content);
         self.request_redraw();
     }
@@ -1943,13 +1977,21 @@ impl App {
         if !path.exists() {
             return;
         }
-        let restored = layout_persist::load(&path);
-        // Restore a real multi-pane layout, OR a single pane that carries a
-        // saved working directory (otherwise a single-pane default is identical
-        // to the fresh tab we already have, so there's nothing to restore).
-        let has_cwd = restored.leaves.iter().any(|(_, v)| v.cwd.is_some());
-        if restored.layout.leaf_count() > 1 || has_cwd {
-            self.materialize_restored(restored);
+        // Load the multi-tab workspace (a v1 single-layout file migrates to a
+        // 1-tab workspace; a corrupt file falls back to a single default tab).
+        let ws = layout_persist::WorkspaceSnapshot::load(&path);
+        let Ok(restored) = ws.restore_all() else {
+            return;
+        };
+        // Restore when there's something to restore: more than one window tab,
+        // any multi-pane tab, or any saved working directory. A lone single-pane
+        // tab with no cwd is identical to the fresh tab we already have.
+        let interesting = restored.tabs.len() > 1
+            || restored.tabs.iter().any(|t| {
+                t.layout.leaf_count() > 1 || t.leaves.iter().any(|(_, v)| v.cwd.is_some())
+            });
+        if interesting {
+            self.materialize_workspace(restored);
         }
     }
 
@@ -3034,10 +3076,15 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => {
                 // D2: persist final geometry before we tear down.
                 self.save_window_geometry();
-                // Session restore: auto-save the active layout (+ per-pane cwd)
-                // as the "default" workspace, which `restore_default_workspace_on_startup`
-                // relaunches on the next run. Fresh shells, restored working dirs.
-                self.save_workspace("default");
+                // Session restore: auto-save ALL window tabs (+ per-pane cwd) as
+                // the "default" workspace via a crash-safe atomic write, which
+                // `restore_default_workspace_on_startup` relaunches on the next
+                // run. Fresh shells, restored working dirs.
+                if let Some(path) = Self::workspace_path("default") {
+                    if let Err(e) = self.capture_workspace().save_atomic(&path) {
+                        tracing::error!("failed to save default workspace: {e}");
+                    }
+                }
                 event_loop.exit();
             }
             WindowEvent::CursorMoved { position, .. } => {
