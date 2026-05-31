@@ -136,8 +136,7 @@ pub struct CommandMark {
 // base64 (RFC 4648, standard alphabet)
 // ============================================================================
 
-const B64_ALPHA: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const B64_ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Encodes raw bytes as standard-alphabet RFC 4648 base64 with padding.
 ///
