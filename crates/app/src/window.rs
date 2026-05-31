@@ -2308,7 +2308,11 @@ impl App {
         &self,
         leaf: LeafId,
         fg: GColor,
-    ) -> Option<(Vec<(String, GColor)>, Vec<(usize, usize, [f32; 4])>)> {
+    ) -> Option<(
+        Vec<(String, GColor)>,
+        Vec<(usize, usize, [f32; 4])>,
+        Vec<(usize, usize, c0pl4nd_core::grid::UnderlineStyle, bool, [f32; 4])>,
+    )> {
         let tab = self.active_tab()?;
         let s = tab.cells.get(&leaf).and_then(Cell::active)?;
         let default_fg = parse_hex(&self.theme.foreground).unwrap_or((240, 238, 245));
@@ -2326,6 +2330,10 @@ impl App {
         };
         let mut spans: Vec<(String, GColor)> = Vec::new();
         let mut bg_cells: Vec<(usize, usize, [f32; 4])> = Vec::new();
+        // Per-cell text decorations (C20/C24): styled underline + strikeout, in
+        // logical cell columns (drawn as lines by the renderer, not by glyphon).
+        let mut decos: Vec<(usize, usize, c0pl4nd_core::grid::UnderlineStyle, bool, [f32; 4])> =
+            Vec::new();
         for (r, row) in rows.iter().enumerate() {
             // Logical-order (char, fg) for the row. Background paints are pushed
             // here in logical cell columns (bidi reorders text only — see
@@ -2343,6 +2351,24 @@ impl App {
                             bg.2 as f32 / 255.0,
                             1.0,
                         ],
+                    ));
+                }
+                // Capture underline / strikeout for this cell (drawn as lines).
+                // The underline inherits the cell's foreground unless an explicit
+                // underline colour (SGR 58) was set.
+                if cell.flags.underline_style != c0pl4nd_core::grid::UnderlineStyle::None
+                    || cell.flags.strikeout
+                {
+                    let uc = cell
+                        .underline_color
+                        .map(|c| resolve_fg(c, &self.theme, default_fg))
+                        .unwrap_or(fg_rgb);
+                    decos.push((
+                        r,
+                        c,
+                        cell.flags.underline_style,
+                        cell.flags.strikeout,
+                        [uc.0 as f32 / 255.0, uc.1 as f32 / 255.0, uc.2 as f32 / 255.0, 1.0],
                     ));
                 }
                 logical.push((cell.c, GColor::rgb(fg_rgb.0, fg_rgb.1, fg_rgb.2)));
@@ -2367,7 +2393,7 @@ impl App {
             }
             spans.push(("\n".to_string(), fg));
         }
-        Some((spans, bg_cells))
+        Some((spans, bg_cells, decos))
     }
 
     fn request_redraw(&self) {
@@ -3526,12 +3552,21 @@ impl App {
         // E1: per-cell background paints per leaf, as (row, col, rgba). Turned
         // into ColorRects below (before the gpu borrow) and drawn behind text.
         let mut leaf_bgs: Vec<(LeafId, LRect, Vec<(usize, usize, [f32; 4])>)> = Vec::new();
+        #[allow(clippy::type_complexity)]
+        let mut leaf_decos: Vec<(
+            LeafId,
+            LRect,
+            Vec<(usize, usize, c0pl4nd_core::grid::UnderlineStyle, bool, [f32; 4])>,
+        )> = Vec::new();
         let mut image_quads: Vec<(LeafId, crate::image_render::ImageQuad)> = Vec::new();
         for (leaf, cell) in &cells {
-            if let Some((spans, bgs)) = self.leaf_render(*leaf, fg) {
+            if let Some((spans, bgs, decos)) = self.leaf_render(*leaf, fg) {
                 leaf_spans.push((*leaf, *cell, spans));
                 if !bgs.is_empty() {
                     leaf_bgs.push((*leaf, *cell, bgs));
+                }
+                if !decos.is_empty() {
+                    leaf_decos.push((*leaf, *cell, decos));
                 }
             }
             for q in self.collect_leaf_image_quads(*leaf, *cell) {
@@ -3950,6 +3985,51 @@ impl App {
                 let x = (ox + *c as f32 * CELL_W) as i32;
                 let y = (oy + *r as f32 * LINE_HEIGHT) as i32;
                 chrome.push(ColorRect::new(x, y, cw, ch, *rgba));
+            }
+        }
+        // Styled underlines + strikeout (C20/C24), drawn as lines in the cell.
+        // Curly is approximated as a single line; a true undercurl is a future
+        // refinement. Underlines sit at the cell bottom; strikeout at mid-height.
+        for (leaf, cell, decos) in &leaf_decos {
+            let strip_top = if laid_out_strip.contains(leaf) {
+                CELL_TABBAR_H
+            } else {
+                0.0
+            };
+            let (ox, oy) = leaf_text_origin(*cell, border, 8.0, 2.0 + strip_top);
+            let cw = CELL_W.ceil() as i32;
+            let ch = LINE_HEIGHT.ceil() as i32;
+            for (r, c, style, strikeout, rgba) in decos {
+                use c0pl4nd_core::grid::UnderlineStyle as U;
+                let x = (ox + *c as f32 * CELL_W) as i32;
+                let y = (oy + *r as f32 * LINE_HEIGHT) as i32;
+                let uy = y + ch - 2;
+                match style {
+                    U::None => {}
+                    U::Single | U::Curly => chrome.push(ColorRect::new(x, uy, cw, 1, *rgba)),
+                    U::Double => {
+                        chrome.push(ColorRect::new(x, y + ch - 3, cw, 1, *rgba));
+                        chrome.push(ColorRect::new(x, y + ch - 1, cw, 1, *rgba));
+                    }
+                    U::Dotted => {
+                        let mut dx = 0;
+                        while dx < cw {
+                            chrome.push(ColorRect::new(x + dx, uy, 1, 1, *rgba));
+                            dx += 2;
+                        }
+                    }
+                    U::Dashed => {
+                        let mut dx = 0;
+                        while dx < cw {
+                            let w = 3.min(cw - dx);
+                            chrome.push(ColorRect::new(x + dx, uy, w, 1, *rgba));
+                            dx += 5;
+                        }
+                    }
+                }
+                if *strikeout {
+                    chrome.push(ColorRect::new(x, y + ch / 2, cw, 1, *rgba));
+                }
             }
         }
         // Mouse text-selection highlight (over backgrounds, behind text+cursor).
