@@ -70,6 +70,11 @@ pub struct Grid {
     /// True when content changed since the last `clear_damage` — drives
     /// render-on-input so an idle terminal issues zero redraws.
     damaged: bool,
+    /// Per-row soft-wrap flags (`wrapped[r] == true` means row `r` filled the
+    /// width and the logical line continues on row `r + 1`, i.e. there was NO
+    /// hard newline between them). Drives non-lossy reflow on resize. Length is
+    /// always `rows`.
+    wrapped: Vec<bool>,
 }
 
 impl Grid {
@@ -81,6 +86,7 @@ impl Grid {
             cols,
             cells: vec![Cell::default(); rows * cols],
             damaged: true,
+            wrapped: vec![false; rows],
         }
     }
 
@@ -103,6 +109,18 @@ impl Grid {
     /// Force the next frame to redraw (e.g. after a scroll-view change).
     pub fn touch(&mut self) {
         self.damaged = true;
+    }
+
+    /// Whether row `r` soft-wrapped into the next row (no hard newline between).
+    pub fn is_wrapped(&self, r: usize) -> bool {
+        self.wrapped.get(r).copied().unwrap_or(false)
+    }
+
+    /// Record (or clear) the soft-wrap flag for row `r`.
+    pub fn set_wrapped(&mut self, r: usize, wrapped: bool) {
+        if let Some(slot) = self.wrapped.get_mut(r) {
+            *slot = wrapped;
+        }
     }
 
     fn idx(&self, row: usize, col: usize) -> usize {
@@ -132,6 +150,9 @@ impl Grid {
         for c in &mut self.cells {
             *c = Cell::default();
         }
+        for w in &mut self.wrapped {
+            *w = false;
+        }
         self.damaged = true;
     }
 
@@ -145,9 +166,21 @@ impl Grid {
                 next[r * cols + c] = self.cells[self.idx(r, c)].clone();
             }
         }
+        let mut next_wrapped = vec![false; rows];
+        // A row only stays "wrapped" if the width is unchanged; a width change
+        // invalidates the flag (the proper fix is Terminal-level reflow, which
+        // rebuilds these flags from logical lines).
+        for (slot, &old) in next_wrapped
+            .iter_mut()
+            .zip(self.wrapped.iter())
+            .take(rows.min(self.rows))
+        {
+            *slot = old && cols == self.cols;
+        }
         self.rows = rows;
         self.cols = cols;
         self.cells = next;
+        self.wrapped = next_wrapped;
         self.damaged = true;
     }
 
@@ -161,6 +194,11 @@ impl Grid {
         let dropped: Vec<Cell> = self.cells.drain(0..self.cols).collect();
         self.cells
             .extend(std::iter::repeat_n(Cell::default(), self.cols));
+        // Shift wrap flags up by one; the new bottom row starts unwrapped.
+        if !self.wrapped.is_empty() {
+            self.wrapped.remove(0);
+            self.wrapped.push(false);
+        }
         self.damaged = true;
         dropped
     }
@@ -193,6 +231,7 @@ impl Grid {
                 };
                 self.cells[dst] = cell;
             }
+            self.wrapped[r] = if src <= bottom { self.wrapped[src] } else { false };
         }
         self.damaged = true;
         dropped
@@ -220,6 +259,7 @@ impl Grid {
                 };
                 self.cells[dst] = cell;
             }
+            self.wrapped[r] = if r >= top + n { self.wrapped[r - n] } else { false };
         }
         self.damaged = true;
     }
