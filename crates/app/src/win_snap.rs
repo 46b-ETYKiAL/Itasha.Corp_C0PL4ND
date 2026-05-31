@@ -123,6 +123,27 @@ pub unsafe fn uninstall(hwnd: isize) {
     let _ = RemoveWindowSubclass(hwnd, Some(snap_wndproc), SUBCLASS_ID);
 }
 
+/// Flash the taskbar button until the window is next brought to the foreground
+/// (`FLASHW_TRAY | FLASHW_TIMERNOFG`). Used to surface an OSC 9/777 desktop
+/// notification that arrived while the window was unfocused.
+///
+/// # Safety
+/// `hwnd` must be a live top-level window handle for the current process.
+pub unsafe fn flash_taskbar(hwnd: isize) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FlashWindowEx, FLASHWINFO, FLASHW_TIMERNOFG, FLASHW_TRAY,
+    };
+    let hwnd = HWND(hwnd as *mut core::ffi::c_void);
+    let info = FLASHWINFO {
+        cbSize: core::mem::size_of::<FLASHWINFO>() as u32,
+        hwnd,
+        dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+        uCount: 0,
+        dwTimeout: 0,
+    };
+    let _ = FlashWindowEx(&info);
+}
+
 /// The subclass wndproc. Intercepts the three frame messages and forwards
 /// everything else down the chain (ultimately winit's wndproc) via
 /// `DefSubclassProc`.

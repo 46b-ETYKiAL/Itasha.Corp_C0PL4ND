@@ -461,6 +461,10 @@ struct App {
     /// Clipboard text awaiting paste confirmation (paste-safety). `Some` while
     /// the multi-line-paste warning overlay is up; Enter commits, Esc cancels.
     pending_paste: Option<String>,
+    /// Whether the window currently has OS keyboard focus. Drives focus
+    /// reporting (DEC `?1004` → `ESC[I`/`ESC[O`) and the unfocused-notification
+    /// taskbar flash. Starts `true` (a fresh window is focused).
+    focused: bool,
 }
 
 /// A modal overlay for the Phase-6 workspace save / restore flow. Reuses the
@@ -675,6 +679,7 @@ impl App {
             settings: None,
             selection: None,
             pending_paste: None,
+            focused: true,
         }
     }
 
@@ -2047,6 +2052,7 @@ impl App {
         let mut clipboard: Vec<String> = Vec::new();
         let mut colors: Vec<ColorSet> = Vec::new();
         let mut redraw = false;
+        let mut notified = false;
         for (ti, tab) in self.tabs.iter().enumerate() {
             for (leaf, cell) in tab.cells.iter() {
                 for (slot, sess) in cell.sessions.iter().enumerate() {
@@ -2072,9 +2078,16 @@ impl App {
                         } else {
                             tracing::info!("notification: {} — {}", n.title, n.body);
                         }
+                        notified = true;
                     }
                 }
             }
+        }
+        // OSC 9/777 desktop notification while the window is unfocused → flash
+        // the taskbar to draw attention (it stops on next focus). No-op when
+        // focused or off Windows.
+        if notified && !self.focused {
+            self.flash_taskbar();
         }
         // PTY query replies: write to the exact originating session.
         for (ti, leaf, slot, bytes) in responses {
@@ -2808,6 +2821,30 @@ impl App {
         }
     }
 
+    /// Flash the taskbar button to signal an OSC 9/777 desktop notification that
+    /// arrived while the window was unfocused (it stops on the next focus). The
+    /// lean, no-toast-infrastructure form of a notification. No-op off Windows.
+    #[cfg(windows)]
+    fn flash_taskbar(&self) {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        let Ok(handle) = gpu.window.window_handle() else {
+            return;
+        };
+        if let RawWindowHandle::Win32(h) = handle.as_raw() {
+            // SAFETY: hwnd is the live top-level window handle.
+            unsafe {
+                crate::win_snap::flash_taskbar(h.hwnd.get());
+            }
+        }
+    }
+
+    /// Non-Windows: no taskbar flash.
+    #[cfg(not(windows))]
+    fn flash_taskbar(&self) {}
+
     /// Non-Windows: no custom frame to install.
     #[cfg(not(windows))]
     fn install_snap(&self, _window: &Window) {}
@@ -3275,6 +3312,23 @@ impl ApplicationHandler for App {
             WindowEvent::Moved(_) => {
                 // D2: window dragged to a new position — remember it (debounced).
                 self.geom_dirty = true;
+            }
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                // C14: report focus in/out to every session whose program armed
+                // DEC ?1004 (ESC[I on focus-in, ESC[O on focus-out). focus_report
+                // is a no-op when ?1004 is off, so call it unconditionally.
+                for tab in &self.tabs {
+                    for cell in tab.cells.values() {
+                        for sess in &cell.sessions {
+                            if let Ok(mut t) = sess.terminal().lock() {
+                                t.focus_report(focused);
+                            }
+                        }
+                    }
+                }
+                // Drain the queued focus replies to the PTYs immediately.
+                self.pump_terminal_io();
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (up, lines) = match delta {
