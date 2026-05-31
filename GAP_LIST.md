@@ -74,6 +74,47 @@ Rationale: a terminal that renders background colors wrong and can't run vim is 
 
 ---
 
+## Major correctness + UX cycle (2026-05-31)
+
+A large cycle landed terminal-emulation correctness, the keystone convenience
+features, session restore, and a full test suite. **Shipped & merged:**
+
+**VT/ANSI correctness (apps that were broken now work — vim/htop/less/nano/mc):**
+- **P0** — DA1/DA2 device attributes, DSR/CPR, IL/DL/ICH/DCH/ECH, save/restore
+  cursor (`esc_dispatch`), DECSTBM scroll region, DEC line-drawing charset,
+  East-Asian **wide-cell width** (`unicode-width`), ED/EL submodes.
+- **P1** — **reflow/rewrap on resize** (history + grid), settable tab stops,
+  focus-report core; bonus RI/IND/NEL, RIS/DECSTR, CHA/VPA/CNL/CPL, SU/SD, REP.
+- **P2/P3** — styled underlines + colour (SGR 4:x / 58), IRM/DECOM/DECSCNM,
+  OSC 9;4 progress, combining marks + VS15/16, OSC 133 C/D, XTGETTCAP, DECRQM.
+- **Keyboard encoder** — F1–F12, Home/End/Ins/Del/PgUp/PgDn, DECCKM-aware
+  arrows (SS3 vs CSI), Alt-as-Meta. **Focus reporting** wired app-side (`?1004`).
+- **Renderer** — draws styled underlines + strikeout; DECSCNM reverse-screen.
+
+**Convenience/UX:** mouse **text selection + copy** (was entirely absent),
+copy-on-select (opt-in), **paste-safety** confirm (multi-line), drag-and-drop
+file path (quoted, never executed), jump-to-prompt (Ctrl+Shift+PgUp/Dn),
+**OSC 9/777 notification** taskbar flash.
+
+**Session restore:** `WorkspaceSnapshot` v2 + crash-safe atomic writes (core);
+per-pane **cwd capture + restore** + auto-save-on-close (app). Reopen → same
+panes in the same directories (fresh shells; live processes not preserved —
+that needs a tmux-style daemon, an explicit non-goal).
+
+**Quality:** E2E + performance + security/fuzz test suites + `SECURITY_AUDIT.md`;
+sixel decoder pixel-count ceiling added (audit finding).
+
+### ❌ Remaining (honest — deferred with reason)
+- **Live font zoom (Ctrl +/−/0, Ctrl+scroll)** — `CELL_W`/`LINE_HEIGHT` are
+  compile-time constants used across layout/hit-test/render; live zoom needs
+  them converted to runtime values threaded through ~dozens of sites — a focused
+  refactor, not a quick win. Font size still applies on next launch.
+- **Configurable content padding** — 9 `leaf_text_origin` call sites must stay
+  in lockstep (hit-test ↔ render); deferred as low-value P3 (fixed 8 px is fine).
+- **True curly undercurl** — currently approximated as a straight underline.
+- **Multi-window-tab persistence** — only the active tab's layout persists
+  (the core `WorkspaceSnapshot` supports multi-tab; the app wiring is single-tab).
+
 ## Shipped Status (final update — master 2026-05-30)
 
 This section is the authoritative as-shipped ledger; earlier rows above are the original audit.

@@ -2328,9 +2328,9 @@ impl App {
     )> {
         let tab = self.active_tab()?;
         let s = tab.cells.get(&leaf).and_then(Cell::active)?;
-        let default_fg = parse_hex(&self.theme.foreground).unwrap_or((240, 238, 245));
-        let default_bg = parse_hex(&self.theme.background).unwrap_or((8, 6, 13));
-        let rows = {
+        let theme_fg = parse_hex(&self.theme.foreground).unwrap_or((240, 238, 245));
+        let theme_bg = parse_hex(&self.theme.background).unwrap_or((8, 6, 13));
+        let (rows, reverse_screen) = {
             // Bind the Arc<Mutex<…>> to a local so the guard does not outlive a
             // temporary (the `if let Ok(t) = s.terminal().lock()` form in
             // `collect_leaf_image_quads` extends the temporary; this `let` form
@@ -2338,8 +2338,16 @@ impl App {
             let term = s.terminal();
             let mut t = term.lock().ok()?;
             let rows = t.display_rows();
+            let reverse = t.reverse_screen();
             t.grid_mut().clear_damage();
-            rows
+            (rows, reverse)
+        };
+        // DECSCNM (`?5`): reverse-video screen swaps the default fg/bg so cells
+        // using the default colours render inverted.
+        let (default_fg, default_bg) = if reverse_screen {
+            (theme_bg, theme_fg)
+        } else {
+            (theme_fg, theme_bg)
         };
         let mut spans: Vec<(String, GColor)> = Vec::new();
         let mut bg_cells: Vec<(usize, usize, [f32; 4])> = Vec::new();
