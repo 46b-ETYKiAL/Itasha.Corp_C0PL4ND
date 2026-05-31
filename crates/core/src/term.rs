@@ -198,6 +198,68 @@ struct SavedScreen {
     pen: Pen,
 }
 
+/// Saved cursor state for DECSC (`ESC 7`) / DECRC (`ESC 8`) and the ANSI.SYS
+/// `CSI s` / `CSI u` aliases. Captures position, pen, and the active charset
+/// selection so a restore round-trips the full drawing context.
+#[derive(Debug, Clone)]
+struct SavedCursor {
+    row: usize,
+    col: usize,
+    pen: Pen,
+    charset_g0: Charset,
+}
+
+/// A G0/G1 charset designation. Only the two sets a real shell exercises are
+/// modelled: plain ASCII and the DEC Special Graphics (line-drawing) set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Charset {
+    /// US-ASCII (`ESC ( B`) — the default.
+    #[default]
+    Ascii,
+    /// DEC Special Graphics / line drawing (`ESC ( 0`).
+    DecLineDrawing,
+}
+
+/// Map a printable byte (`0x60..=0x7e`) from the DEC Special Graphics set to its
+/// Unicode box-drawing equivalent. Characters outside that range pass through
+/// unchanged. This is the canonical VT100 line-drawing table.
+fn dec_line_draw(c: char) -> char {
+    match c {
+        '`' => '\u{25c6}', // ◆ diamond
+        'a' => '\u{2592}', // ▒ checkerboard
+        'b' => '\u{2409}', // ␉ HT
+        'c' => '\u{240c}', // ␌ FF
+        'd' => '\u{240d}', // ␍ CR
+        'e' => '\u{240a}', // ␊ LF
+        'f' => '\u{00b0}', // ° degree
+        'g' => '\u{00b1}', // ± plus/minus
+        'h' => '\u{2424}', // ␤ NL
+        'i' => '\u{240b}', // ␋ VT
+        'j' => '\u{2518}', // ┘ lower-right corner
+        'k' => '\u{2510}', // ┐ upper-right corner
+        'l' => '\u{250c}', // ┌ upper-left corner
+        'm' => '\u{2514}', // └ lower-left corner
+        'n' => '\u{253c}', // ┼ crossing
+        'o' => '\u{23ba}', // ⎺ scan line 1
+        'p' => '\u{23bb}', // ⎻ scan line 3
+        'q' => '\u{2500}', // ─ horizontal line
+        'r' => '\u{23bc}', // ⎼ scan line 7
+        's' => '\u{23bd}', // ⎽ scan line 9
+        't' => '\u{251c}', // ├ left tee
+        'u' => '\u{2524}', // ┤ right tee
+        'v' => '\u{2534}', // ┴ bottom tee
+        'w' => '\u{252c}', // ┬ top tee
+        'x' => '\u{2502}', // │ vertical line
+        'y' => '\u{2264}', // ≤ less-than-or-equal
+        'z' => '\u{2265}', // ≥ greater-than-or-equal
+        '{' => '\u{03c0}', // π pi
+        '|' => '\u{2260}', // ≠ not-equal
+        '}' => '\u{00a3}', // £ pound
+        '~' => '\u{00b7}', // · centre dot
+        other => other,
+    }
+}
+
 /// A mouse button (or wheel direction) for [`Terminal::encode_mouse`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseButton {
@@ -277,6 +339,23 @@ struct Screen {
     /// touched while the alt screen is active, so full-screen TUIs never
     /// pollute the user's scrollback.
     saved_primary: Option<SavedScreen>,
+    /// Saved cursor for DECSC/DECRC (`ESC 7`/`ESC 8`) + ANSI.SYS `CSI s`/`CSI u`.
+    saved_cursor: Option<SavedCursor>,
+    /// Top margin of the scroll region (DECSTBM), 0-based inclusive. Defaults
+    /// to row 0 (full screen).
+    scroll_top: usize,
+    /// Bottom margin of the scroll region (DECSTBM), 0-based inclusive. Defaults
+    /// to the last row (full screen).
+    scroll_bottom: usize,
+    /// Active G0 charset designation (`ESC ( 0` / `ESC ( B`). Shift-In (SI) /
+    /// Shift-Out (SO) toggle between this and `charset_g1`.
+    charset_g0: Charset,
+    /// Active G1 charset designation (`ESC ) 0` / `ESC ) B`).
+    charset_g1: Charset,
+    /// True when SO (0x0E) invoked G1 into GL; SI (0x0F) returns to G0.
+    use_g1: bool,
+    /// Last grapheme printed, for REP (`CSI b`).
+    last_print: Option<char>,
     /// Pending bytes to write back to the PTY (OSC 4/10/11/12 query replies and
     /// OSC 52 read replies). Drained by [`Terminal::take_pty_response`]. The
     /// terminal NEVER queues a reply for OSC 133 marks (anti-CVE, capture-only).
@@ -330,6 +409,13 @@ impl Screen {
             cursor_shape: CursorShape::default(),
             cursor_shape_blink: false,
             saved_primary: None,
+            saved_cursor: None,
+            scroll_top: 0,
+            scroll_bottom: rows.saturating_sub(1),
+            charset_g0: Charset::default(),
+            charset_g1: Charset::default(),
+            use_g1: false,
+            last_print: None,
             pty_response: Vec::new(),
             pending_clipboard_writes: Vec::new(),
             clipboard_read_enabled: false,
@@ -615,21 +701,111 @@ impl Screen {
         self.cursor_shape_blink = blink;
     }
 
+    /// True when a scroll region narrower than the full screen is active.
+    fn region_is_full(&self) -> bool {
+        self.scroll_top == 0 && self.scroll_bottom + 1 >= self.grid.rows()
+    }
+
+    /// Clamp the scroll region to the current grid bounds (called after resize
+    /// and at DECSTBM-set time). A region that became invalid resets to full.
+    fn clamp_scroll_region(&mut self) {
+        let last = self.grid.rows().saturating_sub(1);
+        if self.scroll_bottom > last {
+            self.scroll_bottom = last;
+        }
+        if self.scroll_top > self.scroll_bottom {
+            self.scroll_top = 0;
+            self.scroll_bottom = last;
+        }
+    }
+
     fn newline(&mut self) {
-        if self.row + 1 >= self.grid.rows() {
-            let dropped = self.grid.scroll_up_returning();
-            // The alternate screen must never feed the user's scrollback — a
-            // full-screen TUI (vim, less, htop) scrolling its own buffer would
-            // otherwise flood history with transient content.
-            if self.max_scrollback > 0 && self.saved_primary.is_none() {
-                self.history.push_back(dropped);
-                while self.history.len() > self.max_scrollback {
-                    self.history.pop_front();
+        // At the bottom margin: scroll the region up by one. Otherwise just
+        // advance the row. When the region spans the whole screen, the dropped
+        // top line feeds scrollback (unless on the alt screen).
+        if self.row == self.scroll_bottom {
+            if self.region_is_full() {
+                let dropped = self.grid.scroll_up_returning();
+                // The alternate screen must never feed the user's scrollback — a
+                // full-screen TUI (vim, less, htop) scrolling its own buffer
+                // would otherwise flood history with transient content.
+                if self.max_scrollback > 0 && self.saved_primary.is_none() {
+                    self.history.push_back(dropped);
+                    while self.history.len() > self.max_scrollback {
+                        self.history.pop_front();
+                    }
                 }
+            } else {
+                // Region scroll: top line is discarded (not scrollback).
+                self.grid
+                    .scroll_region_up(self.scroll_top, self.scroll_bottom, 1);
             }
-        } else {
+        } else if self.row + 1 < self.grid.rows() {
             self.row += 1;
         }
+    }
+
+    /// Reverse index (`ESC M`): move up one line within the scroll region,
+    /// scrolling the region down when already at the top margin.
+    fn reverse_index(&mut self) {
+        if self.row == self.scroll_top {
+            self.grid
+                .scroll_region_down(self.scroll_top, self.scroll_bottom, 1);
+        } else if self.row > 0 {
+            self.row -= 1;
+        }
+    }
+
+    /// DECSC (`ESC 7`) / `CSI s`: stash cursor position, pen, and charset.
+    fn save_cursor(&mut self) {
+        self.saved_cursor = Some(SavedCursor {
+            row: self.row,
+            col: self.col,
+            pen: self.pen.clone(),
+            charset_g0: self.charset_g0,
+        });
+    }
+
+    /// DECRC (`ESC 8`) / `CSI u`: restore a previously-saved cursor. When none
+    /// was saved, home the cursor (xterm behaviour for a bare restore).
+    fn restore_cursor(&mut self) {
+        if let Some(s) = self.saved_cursor.clone() {
+            self.row = s.row.min(self.grid.rows().saturating_sub(1));
+            self.col = s.col.min(self.grid.cols().saturating_sub(1));
+            self.pen = s.pen;
+            self.charset_g0 = s.charset_g0;
+        } else {
+            self.row = 0;
+            self.col = 0;
+        }
+    }
+
+    /// RIS (`ESC c`) hard reset and DECSTR (`CSI ! p`) soft reset share the
+    /// recovery surface a garbled terminal needs: clear the screen, home the
+    /// cursor, reset the pen, scroll region, charsets, and saved cursor. RIS
+    /// additionally drops scrollback; the `hard` flag selects that.
+    fn reset_state(&mut self, hard: bool) {
+        self.grid.clear();
+        self.row = 0;
+        self.col = 0;
+        self.pen = Pen::default();
+        self.scroll_top = 0;
+        self.scroll_bottom = self.grid.rows().saturating_sub(1);
+        self.charset_g0 = Charset::Ascii;
+        self.charset_g1 = Charset::Ascii;
+        self.use_g1 = false;
+        self.saved_cursor = None;
+        self.dec_modes = DecModes::default();
+        self.last_print = None;
+        if hard {
+            self.history.clear();
+            self.view_offset = 0;
+            self.saved_primary = None;
+        }
+    }
+
+    fn full_reset(&mut self) {
+        self.reset_state(true);
     }
 
     fn sgr(&mut self, params: &Params) {
@@ -713,16 +889,50 @@ impl Screen {
 
 impl Perform for Screen {
     fn print(&mut self, c: char) {
-        if self.col >= self.grid.cols() {
+        use unicode_width::UnicodeWidthChar;
+
+        // Apply the active charset (DEC line-drawing maps 0x60..0x7e).
+        let active = if self.use_g1 {
+            self.charset_g1
+        } else {
+            self.charset_g0
+        };
+        let c = if active == Charset::DecLineDrawing {
+            dec_line_draw(c)
+        } else {
+            c
+        };
+        self.last_print = Some(c);
+
+        // East-Asian width: a wide glyph occupies two columns. Zero-width
+        // (combining) chars are given width 1 so they at least land in a cell
+        // rather than vanishing — full combining-mark stacking is out of scope.
+        let width = UnicodeWidthChar::width(c).unwrap_or(0).max(1);
+        let cols = self.grid.cols();
+
+        if self.col >= cols {
             if self.dec_modes.autowrap {
                 self.col = 0;
                 self.newline();
             } else {
                 // DECAWM off (`?7l`): clamp to the last column and overwrite it
                 // in place rather than wrapping to the next line.
-                self.col = self.grid.cols() - 1;
+                self.col = cols - 1;
             }
         }
+
+        // A width-2 glyph that would straddle the right edge wraps to the next
+        // line first (the trailing cell is left blank), matching xterm.
+        if width == 2 && self.col + 1 >= cols {
+            if self.dec_modes.autowrap {
+                self.col = 0;
+                self.newline();
+            } else {
+                // No room and no wrap: drop the wide glyph rather than corrupt.
+                return;
+            }
+        }
+
         self.grid.set(
             self.row,
             self.col,
@@ -734,6 +944,21 @@ impl Perform for Screen {
             },
         );
         self.col += 1;
+        if width == 2 {
+            // Continuation cell: a blank spacer that the renderer skips. Keeping
+            // it as a space keeps grid->text extraction sane (one visible glyph).
+            self.grid.set(
+                self.row,
+                self.col,
+                Cell {
+                    c: ' ',
+                    fg: self.pen.fg,
+                    bg: self.pen.bg,
+                    flags: self.pen.flags,
+                },
+            );
+            self.col += 1;
+        }
     }
 
     fn execute(&mut self, byte: u8) {
@@ -749,7 +974,43 @@ impl Perform for Screen {
             0x08 => {
                 self.col = self.col.saturating_sub(1);
             }
+            0x0e => self.use_g1 = true,  // SO — invoke G1 into GL.
+            0x0f => self.use_g1 = false, // SI — return to G0.
             _ => {}
+        }
+    }
+
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        // Charset designation: `ESC ( <set>` for G0, `ESC ) <set>` for G1.
+        if intermediates == [b'('] || intermediates == [b')'] {
+            let cs = match byte {
+                b'0' => Charset::DecLineDrawing,
+                // B = US-ASCII; 'A'/'1'/'2' are other 8-bit-ish sets we treat as
+                // ASCII (we don't draw their glyph variants).
+                _ => Charset::Ascii,
+            };
+            if intermediates == [b'('] {
+                self.charset_g0 = cs;
+            } else {
+                self.charset_g1 = cs;
+            }
+            return;
+        }
+        // Non-intermediate single-byte escapes.
+        if intermediates.is_empty() {
+            match byte {
+                b'7' => self.save_cursor(),    // DECSC
+                b'8' => self.restore_cursor(), // DECRC
+                b'D' => self.newline(),        // IND — index (down, scroll region).
+                b'M' => self.reverse_index(),  // RI — reverse index (up).
+                b'E' => {
+                    // NEL — next line: CR + LF.
+                    self.col = 0;
+                    self.newline();
+                }
+                b'c' => self.full_reset(), // RIS — reset to initial state.
+                _ => {}
+            }
         }
     }
 
@@ -782,6 +1043,11 @@ impl Perform for Screen {
             self.set_cursor_shape(ps);
             return;
         }
+        // DECSTR soft reset: `CSI ! p` — the `!` is the intermediate.
+        if action == 'p' && intermediates.contains(&b'!') {
+            self.reset_state(false);
+            return;
+        }
         match action {
             'm' => self.sgr(params),
             'H' | 'f' => {
@@ -804,23 +1070,206 @@ impl Perform for Screen {
             'B' => self.row = (self.row + Self::first_param(params, 1)).min(self.grid.rows() - 1),
             'C' => self.col = (self.col + Self::first_param(params, 1)).min(self.grid.cols() - 1),
             'D' => self.col = self.col.saturating_sub(Self::first_param(params, 1)),
+            'E' => {
+                // CNL — cursor next line: down N, column 1.
+                self.row = (self.row + Self::first_param(params, 1)).min(self.grid.rows() - 1);
+                self.col = 0;
+            }
+            'F' => {
+                // CPL — cursor previous line: up N, column 1.
+                self.row = self.row.saturating_sub(Self::first_param(params, 1));
+                self.col = 0;
+            }
+            'G' => {
+                // CHA — cursor horizontal absolute (1-based column).
+                self.col = (Self::first_param(params, 1) - 1).min(self.grid.cols() - 1);
+            }
+            'd' => {
+                // VPA — vertical position absolute (1-based row).
+                self.row = (Self::first_param(params, 1) - 1).min(self.grid.rows() - 1);
+            }
+            'r' => {
+                // DECSTBM — set top/bottom scroll margins (1-based). No params
+                // (or both default) resets to the full screen.
+                let mut it = params.iter();
+                let top = it.next().and_then(|p| p.first().copied()).unwrap_or(0) as usize;
+                let bot = it.next().and_then(|p| p.first().copied()).unwrap_or(0) as usize;
+                let last = self.grid.rows() - 1;
+                let top = if top == 0 { 0 } else { top - 1 };
+                let bottom = if bot == 0 { last } else { (bot - 1).min(last) };
+                // A valid region needs top < bottom; otherwise reset to full.
+                if top < bottom {
+                    self.scroll_top = top;
+                    self.scroll_bottom = bottom;
+                } else {
+                    self.scroll_top = 0;
+                    self.scroll_bottom = last;
+                }
+                // DECSTBM homes the cursor (to origin / top-left).
+                self.row = self.scroll_top;
+                self.col = 0;
+            }
+            'L' => {
+                // IL — insert N blank lines at the cursor row, within the scroll
+                // region. Lines below shift down; lines past the bottom are lost.
+                if self.row >= self.scroll_top && self.row <= self.scroll_bottom {
+                    let n = Self::first_param(params, 1);
+                    self.grid
+                        .scroll_region_down(self.row, self.scroll_bottom, n);
+                    self.col = 0;
+                }
+            }
+            'M' => {
+                // DL — delete N lines at the cursor row, within the scroll
+                // region. Lines below shift up; blanks fill at the bottom.
+                if self.row >= self.scroll_top && self.row <= self.scroll_bottom {
+                    let n = Self::first_param(params, 1);
+                    self.grid.scroll_region_up(self.row, self.scroll_bottom, n);
+                    self.col = 0;
+                }
+            }
+            'S' => {
+                // SU — scroll the scroll region up N lines.
+                let n = Self::first_param(params, 1);
+                self.grid
+                    .scroll_region_up(self.scroll_top, self.scroll_bottom, n);
+            }
+            'T' => {
+                // SD — scroll the scroll region down N lines.
+                let n = Self::first_param(params, 1);
+                self.grid
+                    .scroll_region_down(self.scroll_top, self.scroll_bottom, n);
+            }
+            '@' => {
+                // ICH — insert N blank characters at the cursor (shift right).
+                let n = Self::first_param(params, 1);
+                self.grid.insert_blanks(self.row, self.col, n);
+            }
+            'P' => {
+                // DCH — delete N characters at the cursor (shift left).
+                let n = Self::first_param(params, 1);
+                self.grid.delete_chars(self.row, self.col, n);
+            }
+            'X' => {
+                // ECH — erase N characters at the cursor (blank, no shift).
+                let n = Self::first_param(params, 1);
+                self.grid.erase_chars(self.row, self.col, n);
+            }
+            'b' => {
+                // REP — repeat the last printed grapheme N times.
+                if let Some(c) = self.last_print {
+                    let n = Self::first_param(params, 1);
+                    for _ in 0..n {
+                        self.print(c);
+                    }
+                }
+            }
+            's' => self.save_cursor(),    // SCOSC — ANSI.SYS save cursor.
+            'u' => self.restore_cursor(), // SCORC — ANSI.SYS restore cursor.
+            'c' => {
+                // DA — device attributes. Primary (`CSI c` / `CSI 0 c`) reports
+                // a VT220-class terminal with 132-column + selective-erase. The
+                // `>` intermediate selects secondary DA (terminal id + version).
+                if intermediates.contains(&b'>') {
+                    // Secondary DA: CSI > 0 ; 0 ; 0 c  (VT100-family, no firmware).
+                    self.pty_response.extend_from_slice(b"\x1b[>0;0;0c");
+                } else {
+                    // Primary DA: VT220 with 132-col (1), selective erase (6),
+                    // ANSI color (22). Capability-probing apps need a reply or
+                    // they hang.
+                    self.pty_response.extend_from_slice(b"\x1b[?62;1;6;22c");
+                }
+            }
+            'n' => {
+                // DSR — device status report. `5n` → terminal OK; `6n` (and the
+                // DECXCPR `?6n` form) → cursor position report.
+                let ps = params
+                    .iter()
+                    .next()
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(0);
+                match ps {
+                    5 => self.pty_response.extend_from_slice(b"\x1b[0n"),
+                    6 => {
+                        // CPR: 1-based row;col. The DEC private form (`?6n`) uses
+                        // the same body here.
+                        let resp = format!("\x1b[{};{}R", self.row + 1, self.col + 1);
+                        self.pty_response.extend_from_slice(resp.as_bytes());
+                    }
+                    _ => {}
+                }
+            }
             'J' => {
-                // Erase in display: 2 = whole screen.
+                // Erase in display. 0 = cursor→end, 1 = start→cursor, 2 = all,
+                // 3 = all + scrollback.
                 let mode = params
                     .iter()
                     .next()
                     .and_then(|p| p.first().copied())
                     .unwrap_or(0);
-                if mode == 2 {
-                    self.grid.clear();
-                    self.row = 0;
-                    self.col = 0;
+                let cols = self.grid.cols();
+                let rows = self.grid.rows();
+                match mode {
+                    0 => {
+                        // Cursor to end of screen.
+                        for c in self.col..cols {
+                            self.grid.set(self.row, c, Cell::default());
+                        }
+                        for r in (self.row + 1)..rows {
+                            for c in 0..cols {
+                                self.grid.set(r, c, Cell::default());
+                            }
+                        }
+                    }
+                    1 => {
+                        // Start of screen to cursor (inclusive).
+                        for r in 0..self.row {
+                            for c in 0..cols {
+                                self.grid.set(r, c, Cell::default());
+                            }
+                        }
+                        for c in 0..=self.col.min(cols - 1) {
+                            self.grid.set(self.row, c, Cell::default());
+                        }
+                    }
+                    2 => {
+                        self.grid.clear();
+                        self.row = 0;
+                        self.col = 0;
+                    }
+                    3 => {
+                        // Erase scrollback (the `clear` command's second half).
+                        self.history.clear();
+                        self.view_offset = 0;
+                    }
+                    _ => {}
                 }
             }
             'K' => {
-                // Erase in line from cursor to end.
-                for c in self.col..self.grid.cols() {
-                    self.grid.set(self.row, c, Cell::default());
+                // Erase in line. 0 = cursor→EOL, 1 = BOL→cursor, 2 = whole line.
+                let mode = params
+                    .iter()
+                    .next()
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(0);
+                let cols = self.grid.cols();
+                match mode {
+                    0 => {
+                        for c in self.col..cols {
+                            self.grid.set(self.row, c, Cell::default());
+                        }
+                    }
+                    1 => {
+                        for c in 0..=self.col.min(cols - 1) {
+                            self.grid.set(self.row, c, Cell::default());
+                        }
+                    }
+                    2 => {
+                        for c in 0..cols {
+                            self.grid.set(self.row, c, Cell::default());
+                        }
+                    }
+                    _ => {}
                 }
             }
             't' => {
@@ -1669,6 +2118,16 @@ impl Terminal {
         self.screen.grid.resize(rows, cols);
         self.screen.row = self.screen.row.min(rows - 1);
         self.screen.col = self.screen.col.min(cols - 1);
+        // A full-screen scroll region tracks the new height; a custom region is
+        // clamped and reset if it no longer fits.
+        if self.screen.scroll_bottom + 1 >= self.screen.grid.rows()
+            || self.screen.scroll_bottom == 0
+        {
+            self.screen.scroll_top = 0;
+            self.screen.scroll_bottom = rows - 1;
+        } else {
+            self.screen.clamp_scroll_region();
+        }
     }
 }
 
@@ -2569,5 +3028,359 @@ mod tests {
         assert_eq!(t.grid().cell(0, 0).unwrap().c, 'R');
         assert_eq!(t.grid().cell(0, 0).unwrap().fg, Color::Indexed(1));
         assert_eq!(t.images().len(), 0);
+    }
+
+    // ============================================================
+    // VT correctness P0 batch (C1-C8)
+    // ============================================================
+
+    // ---- C1: DA1 / DA2 device attributes ----
+
+    #[test]
+    fn da1_primary_device_attributes_reply() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[c");
+        assert_eq!(t.take_pty_response().as_slice(), b"\x1b[?62;1;6;22c");
+    }
+
+    #[test]
+    fn da1_with_explicit_zero_param_replies() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[0c");
+        assert_eq!(t.take_pty_response().as_slice(), b"\x1b[?62;1;6;22c");
+    }
+
+    #[test]
+    fn da2_secondary_device_attributes_reply() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[>c");
+        assert_eq!(t.take_pty_response().as_slice(), b"\x1b[>0;0;0c");
+    }
+
+    // ---- C2: DSR / CPR ----
+
+    #[test]
+    fn dsr_status_report_ok() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[5n");
+        assert_eq!(t.take_pty_response().as_slice(), b"\x1b[0n");
+    }
+
+    #[test]
+    fn cpr_reports_one_based_cursor_position() {
+        let mut t = Terminal::new(10, 40);
+        // Move cursor to row 3, col 7 (0-based 2,6) then request CPR.
+        t.advance(b"\x1b[3;7H\x1b[6n");
+        assert_eq!(t.take_pty_response().as_slice(), b"\x1b[3;7R");
+    }
+
+    #[test]
+    fn cpr_after_printing_text() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"hello\x1b[6n"); // cursor at row1 col6 (1-based)
+        assert_eq!(t.take_pty_response().as_slice(), b"\x1b[1;6R");
+    }
+
+    // ---- C3: IL / DL / ICH / DCH / ECH ----
+
+    #[test]
+    fn ich_inserts_blanks_shifting_right() {
+        let mut t = Terminal::new(2, 6);
+        t.advance(b"abcdef\x1b[H"); // fill row 0, home
+        t.advance(b"\x1b[3G"); // move to col 3 (1-based) = 0-based 2 ('c')
+        t.advance(b"\x1b[2@"); // insert 2 blanks
+        let line: String = (0..6).map(|c| t.grid().cell(0, c).unwrap().c).collect();
+        assert_eq!(line, "ab  cd");
+    }
+
+    #[test]
+    fn dch_deletes_chars_shifting_left() {
+        let mut t = Terminal::new(2, 6);
+        t.advance(b"abcdef\x1b[H");
+        t.advance(b"\x1b[3G\x1b[2P"); // at col 3, delete 2 chars
+        let line: String = (0..6).map(|c| t.grid().cell(0, c).unwrap().c).collect();
+        assert_eq!(line, "abef  ");
+    }
+
+    #[test]
+    fn ech_erases_chars_without_shift() {
+        let mut t = Terminal::new(2, 6);
+        t.advance(b"abcdef\x1b[H");
+        t.advance(b"\x1b[3G\x1b[2X"); // at col 3, erase 2
+        let line: String = (0..6).map(|c| t.grid().cell(0, c).unwrap().c).collect();
+        assert_eq!(line, "ab  ef");
+    }
+
+    #[test]
+    fn il_inserts_lines_within_scroll_region() {
+        let mut t = Terminal::new(4, 3);
+        t.advance(b"aaa\r\nbbb\r\nccc\r\nddd");
+        // Cursor to row 2 (1-based), insert 1 line.
+        t.advance(b"\x1b[2;1H\x1b[L");
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, 'a');
+        assert_eq!(t.grid().cell(1, 0).unwrap().c, ' ', "blank inserted at row 2");
+        assert_eq!(t.grid().cell(2, 0).unwrap().c, 'b', "bbb shifted down");
+        assert_eq!(t.grid().cell(3, 0).unwrap().c, 'c', "ccc shifted down; ddd lost");
+    }
+
+    #[test]
+    fn dl_deletes_lines_within_scroll_region() {
+        let mut t = Terminal::new(4, 3);
+        t.advance(b"aaa\r\nbbb\r\nccc\r\nddd");
+        // Cursor to row 2, delete 1 line.
+        t.advance(b"\x1b[2;1H\x1b[M");
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, 'a');
+        assert_eq!(t.grid().cell(1, 0).unwrap().c, 'c', "ccc shifted up");
+        assert_eq!(t.grid().cell(2, 0).unwrap().c, 'd', "ddd shifted up");
+        assert_eq!(t.grid().cell(3, 0).unwrap().c, ' ', "blank at bottom");
+    }
+
+    #[test]
+    fn il_dl_respect_custom_scroll_region() {
+        let mut t = Terminal::new(5, 3);
+        t.advance(b"r0\r\nr1\r\nr2\r\nr3\r\nr4");
+        // Region rows 2..4 (1-based), i.e. 0-based 1..3.
+        t.advance(b"\x1b[2;4r");
+        // After DECSTBM the cursor is homed to the top margin (row 1, 0-based).
+        // Delete 1 line at the top of the region.
+        t.advance(b"\x1b[M");
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, 'r', "row 0 untouched");
+        assert_eq!(t.grid().cell(0, 1).unwrap().c, '0');
+        assert_eq!(t.grid().cell(1, 1).unwrap().c, '2', "r2 shifted up into region top");
+        assert_eq!(t.grid().cell(3, 1).unwrap().c, ' ', "blank at region bottom");
+        assert_eq!(t.grid().cell(4, 1).unwrap().c, '4', "row 4 below region untouched");
+    }
+
+    // ---- C4: DECSC / DECRC + SCOSC / SCORC ----
+
+    #[test]
+    fn decsc_decrc_round_trips_cursor() {
+        let mut t = Terminal::new(6, 20);
+        t.advance(b"\x1b[3;5H"); // row 3 col 5 (1-based)
+        t.advance(b"\x1b7"); // DECSC save
+        t.advance(b"\x1b[1;1H"); // home
+        assert_eq!(t.cursor_position(), Some((0, 0)));
+        t.advance(b"\x1b8"); // DECRC restore
+        assert_eq!(t.cursor_position(), Some((2, 4)), "restored to row3,col5");
+    }
+
+    #[test]
+    fn scosc_scorc_aliases_save_restore() {
+        let mut t = Terminal::new(6, 20);
+        t.advance(b"\x1b[4;3H\x1b[s"); // CSI s save
+        t.advance(b"\x1b[1;1H\x1b[u"); // home then CSI u restore
+        assert_eq!(t.cursor_position(), Some((3, 2)));
+    }
+
+    #[test]
+    fn decsc_saves_pen() {
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"\x1b[31m\x1b7"); // red pen, save
+        t.advance(b"\x1b[0m"); // reset pen
+        t.advance(b"\x1b8X"); // restore -> prints red X
+        assert_eq!(t.grid().cell(0, 0).unwrap().fg, Color::Indexed(1));
+    }
+
+    // ---- C5: DECSTBM scroll region ----
+
+    #[test]
+    fn decstbm_constrains_scrolling() {
+        let mut t = Terminal::new(4, 3);
+        // Region = rows 1..2 (1-based) = 0-based 0..1.
+        t.advance(b"\x1b[1;2r");
+        // Fill the region and force a scroll: rows below the region stay put.
+        t.advance(b"x3\r\n"); // row3 marker first
+        // Reset region to write a fixed bottom line, then re-set region.
+        t.advance(b"\x1b[1;4r\x1b[4;1Hbot\x1b[1;2r\x1b[1;1H");
+        // Now scroll within region 0..1 by printing 3 lines.
+        t.advance(b"AA\r\nBB\r\nCC");
+        // Region top should now hold BB (AA scrolled out of the 2-row region).
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, 'B');
+        assert_eq!(t.grid().cell(1, 0).unwrap().c, 'C');
+        // The fixed bottom line outside the region is preserved.
+        let bottom: String = (0..3).map(|c| t.grid().cell(3, c).unwrap().c).collect();
+        assert_eq!(bottom, "bot");
+    }
+
+    #[test]
+    fn decstbm_no_params_resets_full_screen() {
+        let mut t = Terminal::new(3, 3);
+        t.advance(b"\x1b[1;2r"); // custom region
+        t.advance(b"\x1b[r"); // reset
+        // Full-screen scroll feeds scrollback again.
+        let mut t2 = Terminal::with_scrollback(3, 3, 100);
+        t2.advance(b"\x1b[1;2r\x1b[r");
+        t2.advance(b"a\r\nb\r\nc\r\nd");
+        assert!(t2.scrollback_len() >= 1, "full region feeds scrollback after reset");
+        let _ = t;
+    }
+
+    // ---- C6: DEC line-drawing charset ----
+
+    #[test]
+    fn dec_line_drawing_maps_box_chars() {
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"\x1b(0"); // select DEC special graphics into G0
+        t.advance(b"lqk"); // upper-left, horiz, upper-right
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, '\u{250c}'); // ┌
+        assert_eq!(t.grid().cell(0, 1).unwrap().c, '\u{2500}'); // ─
+        assert_eq!(t.grid().cell(0, 2).unwrap().c, '\u{2510}'); // ┐
+    }
+
+    #[test]
+    fn esc_paren_b_returns_to_ascii() {
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"\x1b(0q\x1b(Bq"); // graphics q (─) then ASCII q
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, '\u{2500}');
+        assert_eq!(t.grid().cell(0, 1).unwrap().c, 'q', "ASCII restored");
+    }
+
+    #[test]
+    fn si_so_switch_g0_g1() {
+        let mut t = Terminal::new(2, 10);
+        // G0 = ASCII (default), G1 = line-drawing.
+        t.advance(b"\x1b)0"); // designate G1 = graphics
+        t.advance(b"q"); // GL=G0=ASCII -> 'q'
+        t.advance(b"\x0eq"); // SO -> GL=G1=graphics -> ─
+        t.advance(b"\x0fq"); // SI -> back to G0 ASCII -> 'q'
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, 'q');
+        assert_eq!(t.grid().cell(0, 1).unwrap().c, '\u{2500}');
+        assert_eq!(t.grid().cell(0, 2).unwrap().c, 'q');
+    }
+
+    // ---- C7: wide-cell width ----
+
+    #[test]
+    fn wide_char_advances_two_columns() {
+        let mut t = Terminal::new(2, 10);
+        t.advance("世".as_bytes()); // East-Asian wide
+        // Occupies cols 0 + 1 (continuation spacer); cursor now at col 2.
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, '世');
+        assert_eq!(t.grid().cell(0, 1).unwrap().c, ' ', "continuation spacer");
+        assert_eq!(t.cursor_position(), Some((0, 2)));
+    }
+
+    #[test]
+    fn wide_char_then_narrow() {
+        let mut t = Terminal::new(2, 10);
+        t.advance("世a".as_bytes());
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, '世');
+        assert_eq!(t.grid().cell(0, 2).unwrap().c, 'a', "narrow lands at col 2");
+    }
+
+    #[test]
+    fn wide_char_wraps_at_last_column() {
+        let mut t = Terminal::new(2, 3); // 3 cols
+        t.advance(b"ab"); // cols 0,1 filled; cursor at col 2 (last)
+        t.advance("世".as_bytes()); // can't fit width-2 at col 2 -> wraps to row 1
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, 'a');
+        assert_eq!(t.grid().cell(0, 1).unwrap().c, 'b');
+        assert_eq!(t.grid().cell(1, 0).unwrap().c, '世', "wide char wrapped to next row");
+        assert_eq!(t.grid().cell(1, 1).unwrap().c, ' ');
+    }
+
+    // ---- C8: ED / EL sub-modes ----
+
+    #[test]
+    fn ed_mode0_erases_cursor_to_end() {
+        let mut t = Terminal::new(2, 4);
+        t.advance(b"abcd\r\nefgh");
+        t.advance(b"\x1b[1;3H\x1b[0J"); // row1 col3, erase to end
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, 'a');
+        assert_eq!(t.grid().cell(0, 1).unwrap().c, 'b');
+        assert_eq!(t.grid().cell(0, 2).unwrap().c, ' ', "from cursor erased");
+        assert_eq!(t.grid().cell(1, 0).unwrap().c, ' ', "rows below erased");
+    }
+
+    #[test]
+    fn ed_mode1_erases_start_to_cursor() {
+        let mut t = Terminal::new(2, 4);
+        t.advance(b"abcd\r\nefgh");
+        t.advance(b"\x1b[2;2H\x1b[1J"); // row2 col2, erase start->cursor
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, ' ', "row above erased");
+        assert_eq!(t.grid().cell(1, 0).unwrap().c, ' ');
+        assert_eq!(t.grid().cell(1, 1).unwrap().c, ' ', "cursor cell inclusive");
+        assert_eq!(t.grid().cell(1, 2).unwrap().c, 'g', "after cursor kept");
+    }
+
+    #[test]
+    fn ed_mode3_clears_scrollback() {
+        let mut t = Terminal::with_scrollback(2, 4, 100);
+        t.advance(b"L0\r\nL1\r\nL2\r\nL3");
+        assert!(t.scrollback_len() > 0);
+        t.advance(b"\x1b[3J");
+        assert_eq!(t.scrollback_len(), 0, "ESC[3J clears scrollback");
+    }
+
+    #[test]
+    fn el_mode1_erases_bol_to_cursor() {
+        let mut t = Terminal::new(2, 5);
+        t.advance(b"abcde");
+        t.advance(b"\x1b[1;3H\x1b[1K"); // col3, erase BOL->cursor
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, ' ');
+        assert_eq!(t.grid().cell(0, 1).unwrap().c, ' ');
+        assert_eq!(t.grid().cell(0, 2).unwrap().c, ' ', "cursor inclusive");
+        assert_eq!(t.grid().cell(0, 3).unwrap().c, 'd', "after cursor kept");
+    }
+
+    #[test]
+    fn el_mode2_erases_whole_line() {
+        let mut t = Terminal::new(2, 5);
+        t.advance(b"abcde\x1b[1;3H\x1b[2K");
+        for c in 0..5 {
+            assert_eq!(t.grid().cell(0, c).unwrap().c, ' ');
+        }
+    }
+
+    // ---- C9/C10 bonus: ESC M reverse index, RIS, DECSTR ----
+
+    #[test]
+    fn reverse_index_scrolls_region_down_at_top() {
+        let mut t = Terminal::new(3, 3);
+        t.advance(b"aaa\r\nbbb\r\nccc");
+        t.advance(b"\x1b[1;1H\x1bM"); // home then RI -> scroll down
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, ' ', "blank scrolled in at top");
+        assert_eq!(t.grid().cell(1, 0).unwrap().c, 'a', "aaa pushed down");
+    }
+
+    #[test]
+    fn ris_resets_terminal() {
+        let mut t = Terminal::with_scrollback(2, 4, 100);
+        t.advance(b"junk\r\nmore\r\noverflow\x1b[31m");
+        t.advance(b"\x1bc"); // RIS
+        assert_eq!(t.grid().cell(0, 0).unwrap().c, ' ', "screen cleared");
+        assert_eq!(t.scrollback_len(), 0, "scrollback cleared");
+        assert_eq!(t.cursor_position(), Some((0, 0)));
+        t.advance(b"x"); // pen reset -> default fg
+        assert_eq!(t.grid().cell(0, 0).unwrap().fg, Color::Default);
+    }
+
+    #[test]
+    fn decstr_soft_reset_keeps_scrollback() {
+        let mut t = Terminal::with_scrollback(2, 4, 100);
+        t.advance(b"L0\r\nL1\r\nL2");
+        let hist = t.scrollback_len();
+        t.advance(b"\x1b[!p"); // DECSTR soft reset
+        assert_eq!(t.scrollback_len(), hist, "soft reset preserves scrollback");
+        assert_eq!(t.cursor_position(), Some((0, 0)));
+    }
+
+    // ---- Bonus: REP, CHA/VPA absolute moves ----
+
+    #[test]
+    fn rep_repeats_last_char() {
+        let mut t = Terminal::new(2, 10);
+        t.advance(b"x\x1b[3b"); // print x, repeat 3 more
+        let line: String = (0..4).map(|c| t.grid().cell(0, c).unwrap().c).collect();
+        assert_eq!(line, "xxxx");
+    }
+
+    #[test]
+    fn cha_vpa_absolute_moves() {
+        let mut t = Terminal::new(5, 10);
+        t.advance(b"\x1b[5G"); // column 5 (1-based) -> col 4
+        assert_eq!(t.cursor_position(), Some((0, 4)));
+        t.advance(b"\x1b[3d"); // row 3 (1-based) -> row 2
+        assert_eq!(t.cursor_position(), Some((2, 4)));
     }
 }

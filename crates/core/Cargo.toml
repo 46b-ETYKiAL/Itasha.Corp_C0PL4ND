@@ -16,6 +16,10 @@ toml.workspace = true
 vte = "0.15"
 portable-pty = "0.8"
 regex = "1"
+# East-Asian / wide-character width lookup (wcwidth). Pure data table, no
+# transitive deps — used by every serious terminal to advance the cursor by
+# 1 or 2 columns per printed grapheme.
+unicode-width = "0.2"
 sysinfo = "0.39"
 # PNG decoding for the Kitty graphics protocol (f=100). Default features are
 # disabled and only the `png` codec is enabled to keep the dependency surface

@@ -165,6 +165,117 @@ impl Grid {
         dropped
     }
 
+    /// Scroll lines `[top, bottom]` (inclusive, 0-based) up by `n`, returning the
+    /// `n` rows dropped off `top` (oldest first) so the caller can route them to
+    /// scrollback. Rows below the bottom margin are untouched. New blank rows
+    /// appear at the bottom of the region. `top`/`bottom` are clamped to the
+    /// grid; `n` is clamped to the region height.
+    pub fn scroll_region_up(&mut self, top: usize, bottom: usize, n: usize) -> Vec<Vec<Cell>> {
+        let bottom = bottom.min(self.rows.saturating_sub(1));
+        if top > bottom {
+            return Vec::new();
+        }
+        let height = bottom - top + 1;
+        let n = n.min(height);
+        let mut dropped: Vec<Vec<Cell>> = Vec::with_capacity(n);
+        for r in top..top + n {
+            dropped.push(self.row(r).to_vec());
+        }
+        // Shift surviving rows up by n within the region.
+        for r in top..=bottom {
+            let src = r + n;
+            for c in 0..self.cols {
+                let dst = self.idx(r, c);
+                let cell = if src <= bottom {
+                    self.cells[self.idx(src, c)].clone()
+                } else {
+                    Cell::default()
+                };
+                self.cells[dst] = cell;
+            }
+        }
+        self.damaged = true;
+        dropped
+    }
+
+    /// Scroll lines `[top, bottom]` (inclusive, 0-based) down by `n`. New blank
+    /// rows appear at `top`; rows scrolled past `bottom` are discarded. Used by
+    /// reverse-index and DL/IL.
+    pub fn scroll_region_down(&mut self, top: usize, bottom: usize, n: usize) {
+        let bottom = bottom.min(self.rows.saturating_sub(1));
+        if top > bottom {
+            return;
+        }
+        let height = bottom - top + 1;
+        let n = n.min(height);
+        // Shift surviving rows down by n within the region (iterate top→bottom
+        // from the bottom so we don't overwrite sources before reading them).
+        for r in (top..=bottom).rev() {
+            for c in 0..self.cols {
+                let dst = self.idx(r, c);
+                let cell = if r >= top + n {
+                    self.cells[self.idx(r - n, c)].clone()
+                } else {
+                    Cell::default()
+                };
+                self.cells[dst] = cell;
+            }
+        }
+        self.damaged = true;
+    }
+
+    /// Insert `count` blank cells at `(row, col)`, shifting the rest of the line
+    /// right (ICH). Cells pushed past the right edge are lost.
+    pub fn insert_blanks(&mut self, row: usize, col: usize, count: usize) {
+        if row >= self.rows || col >= self.cols {
+            return;
+        }
+        let count = count.min(self.cols - col);
+        // Shift right: walk from the right edge inward.
+        for c in (col..self.cols).rev() {
+            let dst = self.idx(row, c);
+            let cell = if c >= col + count {
+                self.cells[self.idx(row, c - count)].clone()
+            } else {
+                Cell::default()
+            };
+            self.cells[dst] = cell;
+        }
+        self.damaged = true;
+    }
+
+    /// Delete `count` cells at `(row, col)`, shifting the rest of the line left
+    /// (DCH). Blank cells fill in at the right edge.
+    pub fn delete_chars(&mut self, row: usize, col: usize, count: usize) {
+        if row >= self.rows || col >= self.cols {
+            return;
+        }
+        let count = count.min(self.cols - col);
+        for c in col..self.cols {
+            let dst = self.idx(row, c);
+            let cell = if c + count < self.cols {
+                self.cells[self.idx(row, c + count)].clone()
+            } else {
+                Cell::default()
+            };
+            self.cells[dst] = cell;
+        }
+        self.damaged = true;
+    }
+
+    /// Erase `count` cells at `(row, col)` to blank without shifting (ECH).
+    pub fn erase_chars(&mut self, row: usize, col: usize, count: usize) {
+        if row >= self.rows || col >= self.cols {
+            return;
+        }
+        let end = (col + count).min(self.cols);
+        for c in col..end {
+            let dst = self.idx(row, c);
+            self.cells[dst] = Cell::default();
+        }
+        self.damaged = true;
+    }
+
     /// Borrow one row's cells as a slice.
     pub fn row(&self, r: usize) -> &[Cell] {
         let start = r * self.cols;
@@ -265,5 +376,88 @@ mod tests {
         g.resize(4, 4);
         assert_eq!(g.cell(0, 0).unwrap().c, 'q');
         assert_eq!(g.rows(), 4);
+    }
+
+    fn put(g: &mut Grid, r: usize, c: usize, ch: char) {
+        g.set(
+            r,
+            c,
+            Cell {
+                c: ch,
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    fn insert_blanks_shifts_right() {
+        let mut g = Grid::new(1, 5);
+        for (i, ch) in "abcde".chars().enumerate() {
+            put(&mut g, 0, i, ch);
+        }
+        g.insert_blanks(0, 1, 2); // a__bc (de pushed off)
+        assert_eq!(g.cell(0, 0).unwrap().c, 'a');
+        assert_eq!(g.cell(0, 1).unwrap().c, ' ');
+        assert_eq!(g.cell(0, 2).unwrap().c, ' ');
+        assert_eq!(g.cell(0, 3).unwrap().c, 'b');
+        assert_eq!(g.cell(0, 4).unwrap().c, 'c');
+    }
+
+    #[test]
+    fn delete_chars_shifts_left() {
+        let mut g = Grid::new(1, 5);
+        for (i, ch) in "abcde".chars().enumerate() {
+            put(&mut g, 0, i, ch);
+        }
+        g.delete_chars(0, 1, 2); // ade__ (b,c removed)
+        assert_eq!(g.cell(0, 0).unwrap().c, 'a');
+        assert_eq!(g.cell(0, 1).unwrap().c, 'd');
+        assert_eq!(g.cell(0, 2).unwrap().c, 'e');
+        assert_eq!(g.cell(0, 3).unwrap().c, ' ');
+        assert_eq!(g.cell(0, 4).unwrap().c, ' ');
+    }
+
+    #[test]
+    fn erase_chars_blanks_without_shift() {
+        let mut g = Grid::new(1, 5);
+        for (i, ch) in "abcde".chars().enumerate() {
+            put(&mut g, 0, i, ch);
+        }
+        g.erase_chars(0, 1, 2); // a__de
+        assert_eq!(g.cell(0, 0).unwrap().c, 'a');
+        assert_eq!(g.cell(0, 1).unwrap().c, ' ');
+        assert_eq!(g.cell(0, 2).unwrap().c, ' ');
+        assert_eq!(g.cell(0, 3).unwrap().c, 'd');
+        assert_eq!(g.cell(0, 4).unwrap().c, 'e');
+    }
+
+    #[test]
+    fn scroll_region_up_within_margins() {
+        let mut g = Grid::new(4, 1);
+        for (r, ch) in "abcd".chars().enumerate() {
+            put(&mut g, r, 0, ch);
+        }
+        // Scroll rows 1..=2 up by 1: row0 'a' fixed, row3 'd' fixed.
+        let dropped = g.scroll_region_up(1, 2, 1);
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0][0].c, 'b');
+        assert_eq!(g.cell(0, 0).unwrap().c, 'a');
+        assert_eq!(g.cell(1, 0).unwrap().c, 'c');
+        assert_eq!(g.cell(2, 0).unwrap().c, ' ');
+        assert_eq!(g.cell(3, 0).unwrap().c, 'd');
+    }
+
+    #[test]
+    fn scroll_region_down_within_margins() {
+        let mut g = Grid::new(4, 1);
+        for (r, ch) in "abcd".chars().enumerate() {
+            put(&mut g, r, 0, ch);
+        }
+        // Scroll rows 1..=2 down by 1: blank at row1, c shifts to row2.
+        g.scroll_region_down(1, 2, 1);
+        assert_eq!(g.cell(0, 0).unwrap().c, 'a');
+        assert_eq!(g.cell(1, 0).unwrap().c, ' ');
+        assert_eq!(g.cell(2, 0).unwrap().c, 'b');
+        assert_eq!(g.cell(3, 0).unwrap().c, 'd');
     }
 }
