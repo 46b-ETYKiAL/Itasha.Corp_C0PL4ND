@@ -255,6 +255,7 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "wgpu",
+ "windows",
  "winit",
 ]
 
