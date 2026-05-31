@@ -50,6 +50,21 @@ const CELL_TABBAR_H: f32 = LINE_HEIGHT;
 /// A cell shorter than this (after borders) hides its tab strip to keep the
 /// terminal grid usable; the strip reappears when the cursor hovers the cell.
 const CELL_STRIP_MIN_H: i32 = (CELL_TABBAR_H as i32) + 3 * LINE_HEIGHT as i32;
+/// Font-zoom clamp range (multiplier on the base grid cell size).
+const FONT_SCALE_MIN: f32 = 0.5;
+const FONT_SCALE_MAX: f32 = 3.0;
+
+/// Grid cell width at a given font-zoom `scale`. Single source of truth so the
+/// cols/rows, glyph positioning, and hit-testing all agree at any zoom.
+#[inline]
+fn scaled_cell_w(scale: f32) -> f32 {
+    CELL_W * scale
+}
+/// Grid cell height at a given font-zoom `scale`.
+#[inline]
+fn scaled_cell_h(scale: f32) -> f32 {
+    LINE_HEIGHT * scale
+}
 /// Height of the custom (frameless) title bar, in physical pixels.
 const TITLEBAR_H: f32 = 30.0;
 /// Each title-bar button occupies this many monospace cells. The button glyphs
@@ -465,6 +480,10 @@ struct App {
     /// reporting (DEC `?1004` → `ESC[I`/`ESC[O`) and the unfocused-notification
     /// taskbar flash. Starts `true` (a fresh window is focused).
     focused: bool,
+    /// Live font-zoom factor. The grid cell size (`cell_w`/`cell_h`) and the
+    /// grid glyph metrics both scale by this; chrome (titlebar) stays fixed.
+    /// `1.0` = the configured font size. Changed by Ctrl +/−/0 and Ctrl+wheel.
+    font_scale: f32,
 }
 
 /// A modal overlay for the Phase-6 workspace save / restore flow. Reuses the
@@ -680,6 +699,7 @@ impl App {
             selection: None,
             pending_paste: None,
             focused: true,
+            font_scale: 1.0,
         }
     }
 
@@ -1141,8 +1161,8 @@ impl App {
         if (px as f32) < ox || (py as f32) < oy {
             return None;
         }
-        let col = ((px as f32 - ox) / CELL_W).floor().max(0.0) as usize;
-        let row = ((py as f32 - oy) / LINE_HEIGHT).floor().max(0.0) as usize;
+        let col = ((px as f32 - ox) / self.cell_w()).floor().max(0.0) as usize;
+        let row = ((py as f32 - oy) / self.cell_h()).floor().max(0.0) as usize;
         Some((leaf, row, col))
     }
 
@@ -1223,6 +1243,45 @@ impl App {
     }
 
     /// The window's content area below the title bar, in physical pixels.
+    /// Current grid cell width (base × font-zoom). `font_scale == 1.0` returns
+    /// exactly `CELL_W`, so the un-zoomed layout is byte-identical to before.
+    fn cell_w(&self) -> f32 {
+        scaled_cell_w(self.font_scale)
+    }
+    /// Current grid cell height (base × font-zoom).
+    fn cell_h(&self) -> f32 {
+        scaled_cell_h(self.font_scale)
+    }
+
+    /// Set the live font-zoom factor (clamped to [`FONT_SCALE_MIN`,
+    /// [`FONT_SCALE_MAX`]). Drops the grid text buffers so they rebuild at the
+    /// new metrics, then recomputes the active tab's cols/rows and resizes its
+    /// PTYs for the new cell size.
+    fn set_font_scale(&mut self, scale: f32) {
+        let scale = scale.clamp(FONT_SCALE_MIN, FONT_SCALE_MAX);
+        if (scale - self.font_scale).abs() < f32::EPSILON {
+            return;
+        }
+        self.font_scale = scale;
+        if let Some(gpu) = &mut self.gpu {
+            gpu.leaf_buffers.clear();
+            gpu.tabbar_buffers.clear();
+        }
+        let content = self.content_rect();
+        self.relayout_active(content);
+        self.request_redraw();
+    }
+
+    /// Zoom the grid font in/out by `delta` (Ctrl +/− and Ctrl+wheel).
+    fn zoom_font(&mut self, delta: f32) {
+        self.set_font_scale(self.font_scale + delta);
+    }
+
+    /// Reset the grid font zoom to 1.0 (Ctrl+0).
+    fn reset_font_scale(&mut self) {
+        self.set_font_scale(1.0);
+    }
+
     fn content_rect(&self) -> LRect {
         match &self.gpu {
             Some(g) => {
@@ -1282,8 +1341,8 @@ impl App {
             .unwrap_or(0);
         let (ox, oy) = leaf_text_origin(cell, border, self.config.window.padding as f32, 2.0);
         // 1-based cell coordinates, clamped to the cell's grid extent.
-        let col = (((px as f32 - ox) / CELL_W).floor() as i64).max(0) as usize + 1;
-        let row = (((py as f32 - oy) / LINE_HEIGHT).floor() as i64).max(0) as usize + 1;
+        let col = (((px as f32 - ox) / self.cell_w()).floor() as i64).max(0) as usize + 1;
+        let row = (((py as f32 - oy) / self.cell_h()).floor() as i64).max(0) as usize + 1;
         let mods = MouseModifiers {
             shift: self.modifiers.shift_key(),
             alt: self.modifiers.alt_key(),
@@ -1327,8 +1386,8 @@ impl App {
         if (px as f32) < ox || (py as f32) < oy {
             return None;
         }
-        let col = ((px as f32 - ox) / CELL_W).floor() as usize;
-        let row = ((py as f32 - oy) / LINE_HEIGHT).floor() as usize;
+        let col = ((px as f32 - ox) / self.cell_w()).floor() as usize;
+        let row = ((py as f32 - oy) / self.cell_h()).floor() as usize;
         let sess = self.active_tab()?.cells.get(&leaf)?.active()?;
         let term_arc = sess.terminal();
         let rows = term_arc.lock().ok()?.display_rows();
@@ -1385,11 +1444,12 @@ impl App {
         } else {
             0.0
         };
-        let (ox, oy) = leaf_text_origin(cell, border, self.config.window.padding as f32, 2.0 + strip_top);
-        let x = (ox + col as f32 * CELL_W) as i32;
-        let y = (oy + row as f32 * LINE_HEIGHT) as i32;
-        let cw = CELL_W.ceil() as i32;
-        let ch = LINE_HEIGHT.ceil() as i32;
+        let (ox, oy) =
+            leaf_text_origin(cell, border, self.config.window.padding as f32, 2.0 + strip_top);
+        let x = (ox + col as f32 * self.cell_w()) as i32;
+        let y = (oy + row as f32 * self.cell_h()) as i32;
+        let cw = self.cell_w().ceil() as i32;
+        let ch = self.cell_h().ceil() as i32;
         let a = accent;
         let (ar, ag, ab) = (a.r() as f32 / 255.0, a.g() as f32 / 255.0, a.b() as f32 / 255.0);
         let rect = match shape {
@@ -1625,8 +1685,8 @@ impl App {
             if leaf != f {
                 continue;
             }
-            let iw = (rect.w - 2 * BORDER_PX).max(CELL_W as i32);
-            let ih = (rect.h - 2 * BORDER_PX).max(LINE_HEIGHT as i32);
+            let iw = (rect.w - 2 * BORDER_PX).max(self.cell_w() as i32);
+            let ih = (rect.h - 2 * BORDER_PX).max(self.cell_h() as i32);
             // A 2nd tab will make the strip appear once tab_count >= 2; reserve
             // its line up-front so the new shell starts at the right height.
             let strip = if (rect.h - 2 * BORDER_PX) >= CELL_STRIP_MIN_H {
@@ -1634,8 +1694,8 @@ impl App {
             } else {
                 0
             };
-            let cols = (iw as f32 / CELL_W).floor().max(1.0) as u16;
-            let rows = ((ih - strip) as f32 / LINE_HEIGHT).floor().max(1.0) as u16;
+            let cols = (iw as f32 / self.cell_w()).floor().max(1.0) as u16;
+            let rows = ((ih - strip) as f32 / self.cell_h()).floor().max(1.0) as u16;
             return (rows, cols);
         }
         (24, 80)
@@ -1804,10 +1864,10 @@ impl App {
             .map(|(_, r)| (r.w, r.h))
             .min_by_key(|(w, h)| (*w as i64) * (*h as i64))
             .unwrap_or((content.w, content.h));
-        let iw = (w - 2 * BORDER_PX).max(CELL_W as i32);
-        let ih = (h - 2 * BORDER_PX).max(LINE_HEIGHT as i32);
-        let cols = (iw as f32 / CELL_W).floor().max(1.0) as u16;
-        let rows = (ih as f32 / LINE_HEIGHT).floor().max(1.0) as u16;
+        let iw = (w - 2 * BORDER_PX).max(self.cell_w() as i32);
+        let ih = (h - 2 * BORDER_PX).max(self.cell_h() as i32);
+        let cols = (iw as f32 / self.cell_w()).floor().max(1.0) as u16;
+        let rows = (ih as f32 / self.cell_h()).floor().max(1.0) as u16;
         (rows, cols)
     }
 
@@ -2194,9 +2254,10 @@ impl App {
     /// Resize every visible leaf's PTY to its cell's cols/rows for the current
     /// cascade over `content`.
     fn relayout_active(&mut self, content: LRect) {
+        let (cw, ch) = (self.cell_w(), self.cell_h());
         if let Some(tab) = self.tabs.get_mut(self.active) {
             for (leaf, cell) in tab.layout.cascade(content) {
-                let inner_h = (cell.h - 2 * BORDER_PX).max(LINE_HEIGHT as i32);
+                let inner_h = (cell.h - 2 * BORDER_PX).max(ch as i32);
                 // The cell tab strip (when the cell has >=2 tabs and is tall
                 // enough) steals one line from the terminal grid; account for it
                 // so the visible shell's rows match its drawable area.
@@ -2209,9 +2270,9 @@ impl App {
                 } else {
                     0
                 };
-                let inner_w = (cell.w - 2 * BORDER_PX).max(CELL_W as i32);
-                let cols = (inner_w as f32 / CELL_W).floor().max(1.0) as u16;
-                let rows = ((inner_h - strip) as f32 / LINE_HEIGHT).floor().max(1.0) as u16;
+                let inner_w = (cell.w - 2 * BORDER_PX).max(cw as i32);
+                let cols = (inner_w as f32 / cw).floor().max(1.0) as u16;
+                let rows = ((inner_h - strip) as f32 / ch).floor().max(1.0) as u16;
                 if let Some(s) = tab.cells.get_mut(&leaf).and_then(Cell::active_mut) {
                     let _ = s.resize(rows, cols);
                 }
@@ -2229,13 +2290,14 @@ impl App {
             w as i32,
             (h as i32 - TITLEBAR_H as i32).max(1),
         );
+        let (cw, ch) = (self.cell_w(), self.cell_h());
         for ti in 0..self.tabs.len() {
             let cascade: Vec<(LeafId, LRect)> = self.tabs[ti].layout.cascade(content);
             let edits: Vec<(LeafId, u16, u16)> = cascade
                 .into_iter()
                 .map(|(leaf, cell)| {
-                    let iw = (cell.w - 2 * BORDER_PX).max(CELL_W as i32);
-                    let ih = (cell.h - 2 * BORDER_PX).max(LINE_HEIGHT as i32);
+                    let iw = (cell.w - 2 * BORDER_PX).max(cw as i32);
+                    let ih = (cell.h - 2 * BORDER_PX).max(ch as i32);
                     let strip = if self.tabs[ti]
                         .cells
                         .get(&leaf)
@@ -2245,8 +2307,8 @@ impl App {
                     } else {
                         0
                     };
-                    let cols = (iw as f32 / CELL_W).floor().max(1.0) as u16;
-                    let rows = ((ih - strip) as f32 / LINE_HEIGHT).floor().max(1.0) as u16;
+                    let cols = (iw as f32 / cw).floor().max(1.0) as u16;
+                    let rows = ((ih - strip) as f32 / ch).floor().max(1.0) as u16;
                     (leaf, rows, cols)
                 })
                 .collect();
@@ -2300,8 +2362,8 @@ impl App {
                     rgba: img.image.rgba.clone(),
                     width: img.image.width as u32,
                     height: img.image.height as u32,
-                    x: ox + img.col as f32 * CELL_W,
-                    y: oy + vrow as f32 * LINE_HEIGHT,
+                    x: ox + img.col as f32 * self.cell_w(),
+                    y: oy + vrow as f32 * self.cell_h(),
                 });
             }
         }
@@ -2469,9 +2531,9 @@ impl App {
     fn grid_dims(&self) -> (u16, u16) {
         match &self.gpu {
             Some(g) => {
-                let cols = (g.surface_config.width as f32 / CELL_W).floor().max(1.0) as u16;
-                let usable = (g.surface_config.height as f32 - TITLEBAR_H).max(LINE_HEIGHT);
-                let rows = (usable / LINE_HEIGHT).floor().max(1.0) as u16;
+                let cols = (g.surface_config.width as f32 / self.cell_w()).floor().max(1.0) as u16;
+                let usable = (g.surface_config.height as f32 - TITLEBAR_H).max(self.cell_h());
+                let rows = (usable / self.cell_h()).floor().max(1.0) as u16;
                 (cols, rows)
             }
             None => (self.config.window.cols, self.config.window.rows),
@@ -2786,6 +2848,21 @@ impl App {
             }
             Key::Character(s) if s.chars().next().map(|c| c.to_ascii_lowercase()) == Some('t') => {
                 self.spawn_cell_tab();
+                true
+            }
+            // Live font zoom: Ctrl + / = zoom in, Ctrl - / _ zoom out, Ctrl 0 reset.
+            Key::Character(s)
+                if matches!(s.chars().next(), Some('=') | Some('+')) =>
+            {
+                self.zoom_font(0.1);
+                true
+            }
+            Key::Character(s) if matches!(s.chars().next(), Some('-') | Some('_')) => {
+                self.zoom_font(-0.1);
+                true
+            }
+            Key::Character(s) if s.chars().next() == Some('0') => {
+                self.reset_font_scale();
                 true
             }
             _ => false,
@@ -3395,6 +3472,11 @@ impl ApplicationHandler for App {
                         ((p.y.abs() / LINE_HEIGHT as f64).ceil() as usize).max(1),
                     ),
                 };
+                // Ctrl+wheel zooms the grid font instead of scrolling.
+                if self.modifiers.control_key() || self.modifiers.super_key() {
+                    self.zoom_font(if up { 0.1 } else { -0.1 });
+                    return;
+                }
                 // E6: when the program enabled mouse reporting, the wheel is sent
                 // to the PTY (one report per line) instead of scrolling the local
                 // scrollback view — alt-screen apps (less/vim) drive their own.
@@ -3636,6 +3718,12 @@ impl App {
         // Configurable grid content padding (captured before the &mut gpu borrow
         // so the render-loop call sites match the hit-test sites above).
         let content_pad = self.config.window.padding as f32;
+        // Font-zoom: grid cell dims + scale captured before the &mut gpu borrow
+        // so the render-loop call sites (after the borrow) match the hit-test
+        // sites. At scale 1.0 these equal CELL_W / LINE_HEIGHT exactly.
+        let grid_cw = self.cell_w();
+        let grid_ch = self.cell_h();
+        let grid_scale = self.font_scale;
         let signal_red = GColor::rgb(255, 0, 64);
         let to_rgba = |c: GColor| {
             [
@@ -3703,7 +3791,7 @@ impl App {
                     let show = c.tab_count() > 1 && (tall_enough || hovered);
                     if show {
                         let max_cols =
-                            (((cell.w - 2 * BORDER_PX) as f32 / CELL_W).floor()).max(0.0) as usize;
+                            (((cell.w - 2 * BORDER_PX) as f32 / grid_cw).floor()).max(0.0) as usize;
                         let text = cell_tabbar_text(c.tab_count(), c.group.active, max_cols);
                         if !text.is_empty() {
                             strips.push((*leaf, *cell, text, tall_enough));
@@ -3803,7 +3891,13 @@ impl App {
         // `Gpu::leaf_buffer` so `font_system` stays a disjoint field borrow
         // alongside the `leaf_buffers` entry.)
         gpu.retain_leaf_buffers(&live_leaves);
-        let metrics = gpu.metrics;
+        // Grid glyph metrics scale with font-zoom; the base `gpu.metrics` (used
+        // by the fixed-size chrome) is left untouched. At scale 1.0 this is the
+        // base metrics unchanged.
+        let metrics = Metrics::new(
+            gpu.metrics.font_size * grid_scale,
+            gpu.metrics.line_height * grid_scale,
+        );
         let default_attrs = Attrs::new().family(Family::Monospace).color(fg);
         for (leaf, cell, spans) in &leaf_spans {
             // A laid-out strip steals one line from the grid's drawable height.
@@ -4091,11 +4185,11 @@ impl App {
                 0.0
             };
             let (ox, oy) = leaf_text_origin(*cell, border, content_pad, 2.0 + strip_top);
-            let cw = CELL_W.ceil() as i32;
-            let ch = LINE_HEIGHT.ceil() as i32;
+            let cw = grid_cw.ceil() as i32;
+            let ch = grid_ch.ceil() as i32;
             for (r, c, rgba) in bgs {
-                let x = (ox + *c as f32 * CELL_W) as i32;
-                let y = (oy + *r as f32 * LINE_HEIGHT) as i32;
+                let x = (ox + *c as f32 * grid_cw) as i32;
+                let y = (oy + *r as f32 * grid_ch) as i32;
                 chrome.push(ColorRect::new(x, y, cw, ch, *rgba));
             }
         }
@@ -4109,12 +4203,12 @@ impl App {
                 0.0
             };
             let (ox, oy) = leaf_text_origin(*cell, border, content_pad, 2.0 + strip_top);
-            let cw = CELL_W.ceil() as i32;
-            let ch = LINE_HEIGHT.ceil() as i32;
+            let cw = grid_cw.ceil() as i32;
+            let ch = grid_ch.ceil() as i32;
             for (r, c, style, strikeout, rgba) in decos {
                 use c0pl4nd_core::grid::UnderlineStyle as U;
-                let x = (ox + *c as f32 * CELL_W) as i32;
-                let y = (oy + *r as f32 * LINE_HEIGHT) as i32;
+                let x = (ox + *c as f32 * grid_cw) as i32;
+                let y = (oy + *r as f32 * grid_ch) as i32;
                 let uy = y + ch - 2;
                 match style {
                     U::None => {}
@@ -4164,12 +4258,12 @@ impl App {
                     0.0
                 };
                 let (ox, oy) = leaf_text_origin(*cell, border, content_pad, 2.0 + strip_top);
-                let cw = CELL_W.ceil() as i32;
-                let ch = LINE_HEIGHT.ceil() as i32;
+                let cw = grid_cw.ceil() as i32;
+                let ch = grid_ch.ceil() as i32;
                 // Grid column count derived from the cell width (full-line wash
                 // for middle rows of a multi-row selection).
                 let grid_cols =
-                    (((cell.w - 2 * border) as f32 / CELL_W).floor()).max(1.0) as usize;
+                    (((cell.w - 2 * border) as f32 / grid_cw).floor()).max(1.0) as usize;
                 let (start, end) = sel.ordered();
                 for r in start.0..=end.0 {
                     let lo = if r == start.0 { start.1 } else { 0 };
@@ -4179,8 +4273,8 @@ impl App {
                         grid_cols.saturating_sub(1)
                     };
                     for c in lo..=hi.min(grid_cols.saturating_sub(1)) {
-                        let x = (ox + c as f32 * CELL_W) as i32;
-                        let y = (oy + r as f32 * LINE_HEIGHT) as i32;
+                        let x = (ox + c as f32 * grid_cw) as i32;
+                        let y = (oy + r as f32 * grid_ch) as i32;
                         chrome.push(ColorRect::new(x, y, cw, ch, SELECTION_RGBA));
                     }
                 }
@@ -4634,6 +4728,25 @@ mod tests {
         // an overlay, but is NOT laid out — grid geometry is unchanged).
         let short = LRect::new(0, 0, 400, CELL_TABBAR_H as i32 + 2 * BORDER_PX);
         assert!(!strip_laid_out(3, short));
+    }
+
+    #[test]
+    fn font_scale_cell_dims_are_consistent() {
+        // Scale 1.0 is a no-op: the un-zoomed layout is byte-identical to before.
+        assert_eq!(scaled_cell_w(1.0), CELL_W);
+        assert_eq!(scaled_cell_h(1.0), LINE_HEIGHT);
+        assert_eq!(scaled_cell_w(2.0), CELL_W * 2.0);
+        // The load-bearing property: render (col → pixel) and hit-test
+        // (pixel → col) use the SAME scaled cell width, so a round-trip is
+        // stable at every zoom — clicks always land on the rendered glyph.
+        for scale in [0.5f32, 1.0, 1.5, 2.0, 3.0] {
+            let cw = scaled_cell_w(scale);
+            for col in [0usize, 1, 7, 42, 199] {
+                let px = col as f32 * cw; // render
+                let back = (px / cw).floor() as usize; // hit-test
+                assert_eq!(back, col, "round-trip broke at scale {scale}, col {col}");
+            }
+        }
     }
 
     #[test]
