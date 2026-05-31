@@ -53,7 +53,7 @@ Legend: **P0** = expected-everywhere / correctness or breaks real apps · **P1**
 - ✅ D1 hover backplates (f9efb7a + borrow fix 2334b74)
 - ✅ D2 window geometry persistence (652c44b config + c424634 window)
 - ✅ D3 in-app settings panel (613cee7 + import fix 7d3f9c2)
-- 🔄 D4 Win+arrow snap (delegated to app-correctness agent)
+- ✅ D4 Win+arrow Aero snap (Win32 custom-frame subclass; PR #34)
 
 ## VT-core (merged 21e3b70) — provides API for E-integration
 - ✅ DEC private-mode framework, alt screen, DECSCUSR cursor shape, bracketed-paste/cursor-visibility getters, encode_mouse() (818542e; 177 core tests pass)
@@ -91,12 +91,22 @@ This section is the authoritative as-shipped ledger; earlier rows above are the 
 - **OSC suite (core)**: OSC 52 (write; read default-off), OSC 4/10/11/12 query+set, OSC 104 reset, OSC 9/777 notifications, title stack (CSI 22/23 t), `.itermcolors` import, ligatures config flag, PTY-response channel
 - **OSC app-wiring (E10/E11)**: `pump_terminal_io()` drains query replies → PTY, clipboard writes → OS clipboard (`write_os_clipboard`), color sets → live theme, notifications → log
 - **E16** graceful PTY exit (close pane on shell exit; exit app when last pane closes)
+- **E9** URL detection + Ctrl-click to open (heuristic row-scan for `http(s)://`|`file://` under the cursor → `open_path`, wired into the mouse-press handler) — PR #33
+- **D4** Win+Arrow Aero Snap — Win32 custom-frame subclass on the frameless window (`WS_THICKFRAME`/`WS_CAPTION` + `WM_NCCALCSIZE`/`NCHITTEST`/`GETMINMAXINFO`), `windows` crate target-gated to `cfg(windows)` — PR #34
+- **Programming ligatures** — the `ligatures` config flag is now functional: grid shaping gates `Shaping::Advanced` (ligatures, opt-in) vs `Shaping::Basic` (strict monospace, default) — PR #35
+- **BiDi/RTL** — per-row visual reordering via the Unicode Bidirectional Algorithm (`unicode-bidi`), ASCII fast-path, per-glyph colour preserved through the permutation — PR #36
+- **Full Kitty graphics protocol** — APC pre-filter ahead of `vte` (which silently discards APC), decode f=32 RGBA / f=24 RGB / f=100 PNG, actions transmit/display/store/delete, chunked `m=1`…`m=0` transfers — PR #37
 
-### ⏳ Remaining (not yet implemented)
-- **E9** URL detection + Ctrl-click to open — designed (heuristic row-scan for http(s)://|file:// under the cursor → `open_path`); not yet wired into the mouse-press handler.
+### ✅ Previously "deferred (offline-blocked)" — now shipped (2026-05-31)
 
-### ❌ Deferred — with reasons
-- **D4 Win+Arrow Aero snap** — BLOCKED by the offline build environment: requires the `windows` crate, which cannot be fetched (no crates.io access). Environmental constraint, not a scoping choice. Full Win32 subclass recipe (WS_THICKFRAME + WM_NCCALCSIZE/NCHITTEST/GETMINMAXINFO) is recorded for when deps are available.
-- **BiDi/RTL** — needs the `unicode-bidi` crate (offline-blocked) plus visual reordering in the shaper.
-- **Programming ligatures** — core `ligatures` flag shipped; the renderer-side cosmic-text shaping change is deferred.
-- **Full kitty graphics protocol** — Sixel already covers inline images; full kitty-graphics is lower-value.
+D4, BiDi/RTL, programming ligatures, and full Kitty graphics were previously
+marked deferred with the reason "requires a crate that cannot be fetched (no
+crates.io access)". On re-check, crates.io **was** reachable and the required
+crates (`windows`, `unicode-bidi`) were already present in the lock graph, so
+all four were implemented and merged (PRs #34–#37 above). The environmental
+deferral reason is resolved.
+
+### ❌ Remaining honest limitations (shipped features, documented gaps)
+- **BiDi cursor/selection stay logical-order**, and per-cell background quads are not reordered — only the displayed text run is reordered. The common RTL line (default background) is correct; an explicit per-cell background highlight on RTL text is the one divergence. Most grid terminals (Ghostty/Alacritty) omit BiDi entirely, so this is strictly ahead.
+- **Ligatures default OFF** (`Shaping::Basic`) to preserve strict monospace cell fidelity; opt-in via `ligatures = true`. This is intended behaviour, not a gap.
+- **Kitty formats** beyond f=24/32/100 are unsupported (return `None`); placement is at the cursor cell (no z-index/relative-placement extensions). Sixel remains the dependency-free fallback.
