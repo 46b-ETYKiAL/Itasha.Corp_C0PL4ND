@@ -26,7 +26,10 @@ impl Lcg {
     }
     fn next_u32(&mut self) -> u32 {
         // x = x * 1664525 + 1013904223 (mod 2^32), advanced in 64-bit space.
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.0 >> 33) as u32
     }
     fn next_byte(&mut self) -> u8 {
@@ -41,7 +44,7 @@ fn random_and_malformed_input_never_panics() {
     // 1 MB of deterministic pseudo-random bytes, fed in irregular chunks so
     // escape sequences straddle advance() boundaries (the realistic PTY-read
     // split). Chunk sizes themselves come from the LCG.
-    let mut rng = Lcg::new(0xC0FFEE_1337_5EEDu64);
+    let mut rng = Lcg::new(0x00C0_FFEE_1337_5EEDu64);
     let mut t = Terminal::with_scrollback(24, 80, 1_000);
     let mut produced = 0usize;
     while produced < 1_000_000 {
@@ -59,19 +62,19 @@ fn random_and_malformed_input_never_panics() {
     // one chunk and byte-by-byte.
     let hostile: &[&[u8]] = &[
         b"\x1b[999999999999999999999999999999999m", // CSI param overflow
-        b"\x1b[-1;-1H",                              // "negative" params (parsed as 0)
+        b"\x1b[-1;-1H",                             // "negative" params (parsed as 0)
         b"\x1b[;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;m", // many empty params
-        b"\x1b[38;2;",                               // truncated truecolor SGR
-        b"\x1b]0;unterminated title forever",        // OSC, no terminator
-        b"\x1b]8;;http://evil",                       // OSC 8 hyperlink, truncated
-        b"\x1bP",                                    // bare DCS introducer
-        b"\x1bPq#0;2;100;0;0",                        // Sixel DCS, no ST
-        b"\x1b_Gf=32,s=1,v=1;",                       // Kitty APC, no payload, no ST
-        b"\x1b_G",                                    // bare APC G, no body
-        b"\x1b\x1b\x1b\x1b\x1b\x1b\x1b\x1b",         // ESC storm
+        b"\x1b[38;2;",                              // truncated truecolor SGR
+        b"\x1b]0;unterminated title forever",       // OSC, no terminator
+        b"\x1b]8;;http://evil",                     // OSC 8 hyperlink, truncated
+        b"\x1bP",                                   // bare DCS introducer
+        b"\x1bPq#0;2;100;0;0",                      // Sixel DCS, no ST
+        b"\x1b_Gf=32,s=1,v=1;",                     // Kitty APC, no payload, no ST
+        b"\x1b_G",                                  // bare APC G, no body
+        b"\x1b\x1b\x1b\x1b\x1b\x1b\x1b\x1b",        // ESC storm
         b"\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;17;18;19;20m", // deep param list
-        b"\x90\x9d\x9e\x9f",                          // raw C1 control bytes
-        b"\x1b[6n\x1b[5n\x1b[c\x1b[>c",               // back-to-back query storm
+        b"\x90\x9d\x9e\x9f",                        // raw C1 control bytes
+        b"\x1b[6n\x1b[5n\x1b[c\x1b[>c",             // back-to-back query storm
     ];
     for seq in hostile {
         // Whole-chunk.
@@ -97,10 +100,10 @@ fn image_and_base64_decoders_are_bounded_on_hostile_input() {
     assert!(base64_decode(b"!!!!not base64").is_none());
     assert!(base64_decode(b"aGVsbG8==").is_none()); // over-padded
     assert!(base64_decode(b"aGV").is_none()); // bad length
-    // A huge but well-formed base64 string decodes to a bounded buffer. Build
-    // it from a real 600 KiB byte buffer so the padding (if any) lands only at
-    // the very end — `"...".repeat()` would embed mid-string `==` and be
-    // (correctly) rejected as malformed.
+                                              // A huge but well-formed base64 string decodes to a bounded buffer. Build
+                                              // it from a real 600 KiB byte buffer so the padding (if any) lands only at
+                                              // the very end — `"...".repeat()` would embed mid-string `==` and be
+                                              // (correctly) rejected as malformed.
     let raw: Vec<u8> = (0..600_000u32).map(|i| (i & 0xff) as u8).collect();
     let big_b64 = c0pl4nd_core::term::osc::base64_encode(&raw);
     let decoded = base64_decode(big_b64.as_bytes());
@@ -115,8 +118,8 @@ fn image_and_base64_decoders_are_bounded_on_hostile_input() {
     t.advance(b"\x1bPq\x1b\\"); // empty sixel body
     t.advance(b"\x1bPq#####!!!!----$$$$\x1b\\"); // garbage control chars only
     t.advance(b"\x1bPq#0;2;999;999;999~\x1b\\"); // out-of-range colour components
-    // No drawable pixels in the garbage cases ⇒ no image; the valid one draws.
-    // (We assert only that we got here without panicking.)
+                                                 // No drawable pixels in the garbage cases ⇒ no image; the valid one draws.
+                                                 // (We assert only that we got here without panicking.)
     let _ = t.images();
 
     // --- APC size cap: a >8 MiB Kitty APC body must be DROPPED, not buffered ---
@@ -202,9 +205,15 @@ fn workspace_load_on_corrupt_file_falls_back_never_panics() {
 
         // The safe loader must degrade to a single default tab — never panic.
         let ws = WorkspaceSnapshot::load(&path);
-        assert_eq!(ws.tabs.len(), 1, "corrupt file {i} must fall back to one tab");
+        assert_eq!(
+            ws.tabs.len(),
+            1,
+            "corrupt file {i} must fall back to one tab"
+        );
         assert_eq!(ws.active, 0, "fallback active index must be 0 for file {i}");
-        let restored = ws.restore_all().expect("fallback workspace always restores");
+        let restored = ws
+            .restore_all()
+            .expect("fallback workspace always restores");
         assert_eq!(restored.tabs.len(), 1);
         assert_eq!(restored.tabs[0].layout.leaf_count(), 1);
 
@@ -288,7 +297,7 @@ fn every_byte_value_is_survivable() {
         for b in 0u16..=255 {
             t.advance(&[b as u8]);
             // Interleave an ESC every so often to keep the parser state churning.
-            if (b as usize + round) % 17 == 0 {
+            if (b as usize + round).is_multiple_of(17) {
                 t.advance(b"\x1b");
             }
         }

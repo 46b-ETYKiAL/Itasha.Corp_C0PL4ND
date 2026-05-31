@@ -56,8 +56,8 @@ fn parse_color_dict(body: &str) -> ColorDict {
     let mut pos = 0;
     while let Some((key, after_key)) = next_tag(body, "key", pos) {
         // The value following a key is the next <real> (or <integer>) token.
-        let value = next_tag(body, "real", after_key)
-            .or_else(|| next_tag(body, "integer", after_key));
+        let value =
+            next_tag(body, "real", after_key).or_else(|| next_tag(body, "integer", after_key));
         let Some((val_str, after_val)) = value else {
             break;
         };

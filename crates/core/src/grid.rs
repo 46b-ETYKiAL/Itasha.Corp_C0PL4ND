@@ -358,7 +358,11 @@ impl Grid {
                 };
                 self.cells[dst] = cell;
             }
-            self.wrapped[r] = if src <= bottom { self.wrapped[src] } else { false };
+            self.wrapped[r] = if src <= bottom {
+                self.wrapped[src]
+            } else {
+                false
+            };
         }
         self.damaged = true;
         dropped
@@ -386,7 +390,11 @@ impl Grid {
                 };
                 self.cells[dst] = cell;
             }
-            self.wrapped[r] = if r >= top + n { self.wrapped[r - n] } else { false };
+            self.wrapped[r] = if r >= top + n {
+                self.wrapped[r - n]
+            } else {
+                false
+            };
         }
         self.damaged = true;
     }

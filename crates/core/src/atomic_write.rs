@@ -124,7 +124,10 @@ mod tests {
 
         // No sibling .tmp left behind on success.
         let tmp = tmp_path_for(&p);
-        assert!(!tmp.exists(), "temp file {tmp:?} must not remain after success");
+        assert!(
+            !tmp.exists(),
+            "temp file {tmp:?} must not remain after success"
+        );
 
         let _ = fs::remove_file(&p);
     }

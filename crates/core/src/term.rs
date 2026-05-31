@@ -12,11 +12,11 @@ use vte::{Params, Parser, Perform};
 
 pub mod osc;
 
+use osc::{base64_decode, base64_encode, format_color_reply, parse_color_spec, Rgb};
 pub use osc::{
     ClipboardSelection, ClipboardWrite, ColorSet, CommandMark, CommandMarkKind, DynamicColor,
     Notification, Progress, ProgressState,
 };
-use osc::{base64_decode, base64_encode, format_color_reply, parse_color_spec, Rgb};
 
 /// Default scrollback line cap when not configured.
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
@@ -739,14 +739,25 @@ impl Screen {
             // Alternate screen — 1049 saves/clears, 47/1047 are the older forms.
             47 | 1047 | 1049 => self.set_alt_screen(mode, set),
             1000 => {
-                self.dec_modes.mouse_mode = if set { MouseMode::Normal } else { MouseMode::Off };
+                self.dec_modes.mouse_mode = if set {
+                    MouseMode::Normal
+                } else {
+                    MouseMode::Off
+                };
             }
             1002 => {
-                self.dec_modes.mouse_mode =
-                    if set { MouseMode::ButtonEvent } else { MouseMode::Off };
+                self.dec_modes.mouse_mode = if set {
+                    MouseMode::ButtonEvent
+                } else {
+                    MouseMode::Off
+                };
             }
             1003 => {
-                self.dec_modes.mouse_mode = if set { MouseMode::AnyEvent } else { MouseMode::Off };
+                self.dec_modes.mouse_mode = if set {
+                    MouseMode::AnyEvent
+                } else {
+                    MouseMode::Off
+                };
             }
             1006 => {
                 self.dec_modes.mouse_encoding = if set {
@@ -1312,12 +1323,7 @@ impl Screen {
     /// `38:5:n`) and the legacy semicolon form (spread across the following
     /// top-level `codes`, consumed by advancing `i`). Returns the parsed color,
     /// or `None` when the operand is malformed/truncated.
-    fn parse_extended_color(
-        &self,
-        group: &[u16],
-        codes: &[u16],
-        i: &mut usize,
-    ) -> Option<Color> {
+    fn parse_extended_color(&self, group: &[u16], codes: &[u16], i: &mut usize) -> Option<Color> {
         // Colon sub-parameter form: the kind + channels live inside `group`.
         if group.len() >= 2 {
             let kind = group[1];
@@ -1610,13 +1616,7 @@ impl Perform for Screen {
         }
     }
 
-    fn csi_dispatch(
-        &mut self,
-        params: &Params,
-        intermediates: &[u8],
-        _ignore: bool,
-        action: char,
-    ) {
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         // DECRQM — request mode (C33): `CSI ? Ps $ p` (private) or
         // `CSI Ps $ p` (ANSI). Reply `CSI [?] Ps ; Pv $ y` where Pv is the
         // mode value (0 = unrecognised, 1 = set, 2 = reset). Apps that probe
@@ -1747,25 +1747,23 @@ impl Perform for Screen {
                 self.row = self.scroll_top;
                 self.col = 0;
             }
-            'L' => {
+            'L'
                 // IL — insert N blank lines at the cursor row, within the scroll
                 // region. Lines below shift down; lines past the bottom are lost.
-                if self.row >= self.scroll_top && self.row <= self.scroll_bottom {
+                if self.row >= self.scroll_top && self.row <= self.scroll_bottom => {
                     let n = Self::first_param(params, 1);
                     self.grid
                         .scroll_region_down(self.row, self.scroll_bottom, n);
                     self.col = 0;
                 }
-            }
-            'M' => {
+            'M'
                 // DL — delete N lines at the cursor row, within the scroll
                 // region. Lines below shift up; blanks fill at the bottom.
-                if self.row >= self.scroll_top && self.row <= self.scroll_bottom {
+                if self.row >= self.scroll_top && self.row <= self.scroll_bottom => {
                     let n = Self::first_param(params, 1);
                     self.grid.scroll_region_up(self.row, self.scroll_bottom, n);
                     self.col = 0;
                 }
-            }
             'S' => {
                 // SU — scroll the scroll region up N lines.
                 let n = Self::first_param(params, 1);
@@ -1965,9 +1963,7 @@ impl Perform for Screen {
                 let kind = params.get(1).copied();
                 let abs = self.history.len() + self.row;
                 match kind {
-                    Some(b"A") | Some(b"B")
-                        if self.prompt_marks.last() != Some(&abs) =>
-                    {
+                    Some(b"A") | Some(b"B") if self.prompt_marks.last() != Some(&abs) => {
                         self.prompt_marks.push(abs);
                     }
                     Some(b"A") | Some(b"B") => {}
@@ -2035,7 +2031,8 @@ impl Perform for Screen {
                     .unwrap_or("")
                     .to_string();
                 if !title.is_empty() || !body.is_empty() {
-                    self.pending_notifications.push(Notification { title, body });
+                    self.pending_notifications
+                        .push(Notification { title, body });
                 }
             }
             _ => {}
@@ -2125,12 +2122,15 @@ impl Screen {
                 // + dimensions ride on the FIRST chunk only (continuation
                 // chunks resend just `m` + payload), so capture them at creation
                 // and reuse them when the m=0 boundary finalises the image.
-                let chunk = self.kitty_chunks.entry(cmd.id).or_insert_with(|| KittyChunk {
-                    payload: Vec::new(),
-                    format: cmd.format,
-                    width: cmd.width,
-                    height: cmd.height,
-                });
+                let chunk = self
+                    .kitty_chunks
+                    .entry(cmd.id)
+                    .or_insert_with(|| KittyChunk {
+                        payload: Vec::new(),
+                        format: cmd.format,
+                        width: cmd.width,
+                        height: cmd.height,
+                    });
                 if chunk.payload.len() + cmd.payload.len() <= 8 * 1024 * 1024 {
                     chunk.payload.extend_from_slice(&cmd.payload);
                 } else {
@@ -2152,15 +2152,12 @@ impl Screen {
                     Some(r) => r,
                     None => return,
                 };
-                let decoded = match crate::image::decode_kitty(
-                    chunk.format,
-                    chunk.width,
-                    chunk.height,
-                    &raw,
-                ) {
-                    Some(d) => d,
-                    None => return,
-                };
+                let decoded =
+                    match crate::image::decode_kitty(chunk.format, chunk.width, chunk.height, &raw)
+                    {
+                        Some(d) => d,
+                        None => return,
+                    };
                 if cmd.action == 't' {
                     // Transmit-only: store by id for a later a=p display.
                     self.store_kitty_image(cmd.id, decoded);
@@ -2324,16 +2321,10 @@ impl Terminal {
                         // Possible ST (`ESC \`) — wait for the next byte.
                         self.apc_state = ApcFilter::ApcEsc;
                     } else {
-                        let is_kitty = if !seen_first {
-                            b == b'G'
-                        } else {
-                            is_kitty
-                        };
+                        let is_kitty = if !seen_first { b == b'G' } else { is_kitty };
                         // Only accumulate Kitty bodies; bound the size.
-                        if is_kitty {
-                            if self.apc_accum.len() < KITTY_APC_MAX_BYTES {
-                                self.apc_accum.push(b);
-                            }
+                        if is_kitty && self.apc_accum.len() < KITTY_APC_MAX_BYTES {
+                            self.apc_accum.push(b);
                         }
                         self.apc_state = ApcFilter::Apc {
                             is_kitty,
@@ -2651,7 +2642,10 @@ impl Terminal {
             return None;
         }
         let cols = self.screen.grid.cols();
-        let row = self.screen.row.min(self.screen.grid.rows().saturating_sub(1));
+        let row = self
+            .screen
+            .row
+            .min(self.screen.grid.rows().saturating_sub(1));
         let col = self.screen.col.min(cols.saturating_sub(1));
         Some((row, col))
     }
@@ -3547,7 +3541,10 @@ mod tests {
     fn osc10_foreground_set() {
         let mut t = Terminal::new(4, 20);
         t.advance(b"\x1b]10;rgb:12/34/56\x07");
-        assert_eq!(t.dynamic_color(DynamicColor::Foreground), (0x12, 0x34, 0x56));
+        assert_eq!(
+            t.dynamic_color(DynamicColor::Foreground),
+            (0x12, 0x34, 0x56)
+        );
         assert_eq!(
             t.take_color_sets(),
             vec![ColorSet::Dynamic {
@@ -3584,7 +3581,11 @@ mod tests {
         let _ = t.take_color_sets();
         t.advance(b"\x1b]104\x07");
         assert_ne!(t.palette_color(5), (255, 0, 0));
-        assert_eq!(t.take_color_sets().len(), 256, "every entry reset is surfaced");
+        assert_eq!(
+            t.take_color_sets().len(),
+            256,
+            "every entry reset is surfaced"
+        );
     }
 
     #[test]
@@ -3857,9 +3858,17 @@ mod tests {
         // Cursor to row 2 (1-based), insert 1 line.
         t.advance(b"\x1b[2;1H\x1b[L");
         assert_eq!(t.grid().cell(0, 0).unwrap().c, 'a');
-        assert_eq!(t.grid().cell(1, 0).unwrap().c, ' ', "blank inserted at row 2");
+        assert_eq!(
+            t.grid().cell(1, 0).unwrap().c,
+            ' ',
+            "blank inserted at row 2"
+        );
         assert_eq!(t.grid().cell(2, 0).unwrap().c, 'b', "bbb shifted down");
-        assert_eq!(t.grid().cell(3, 0).unwrap().c, 'c', "ccc shifted down; ddd lost");
+        assert_eq!(
+            t.grid().cell(3, 0).unwrap().c,
+            'c',
+            "ccc shifted down; ddd lost"
+        );
     }
 
     #[test]
@@ -3885,9 +3894,21 @@ mod tests {
         t.advance(b"\x1b[M");
         assert_eq!(t.grid().cell(0, 0).unwrap().c, 'r', "row 0 untouched");
         assert_eq!(t.grid().cell(0, 1).unwrap().c, '0');
-        assert_eq!(t.grid().cell(1, 1).unwrap().c, '2', "r2 shifted up into region top");
-        assert_eq!(t.grid().cell(3, 1).unwrap().c, ' ', "blank at region bottom");
-        assert_eq!(t.grid().cell(4, 1).unwrap().c, '4', "row 4 below region untouched");
+        assert_eq!(
+            t.grid().cell(1, 1).unwrap().c,
+            '2',
+            "r2 shifted up into region top"
+        );
+        assert_eq!(
+            t.grid().cell(3, 1).unwrap().c,
+            ' ',
+            "blank at region bottom"
+        );
+        assert_eq!(
+            t.grid().cell(4, 1).unwrap().c,
+            '4',
+            "row 4 below region untouched"
+        );
     }
 
     // ---- C4: DECSC / DECRC + SCOSC / SCORC ----
@@ -3929,7 +3950,7 @@ mod tests {
         t.advance(b"\x1b[1;2r");
         // Fill the region and force a scroll: rows below the region stay put.
         t.advance(b"x3\r\n"); // row3 marker first
-        // Reset region to write a fixed bottom line, then re-set region.
+                              // Reset region to write a fixed bottom line, then re-set region.
         t.advance(b"\x1b[1;4r\x1b[4;1Hbot\x1b[1;2r\x1b[1;1H");
         // Now scroll within region 0..1 by printing 3 lines.
         t.advance(b"AA\r\nBB\r\nCC");
@@ -3946,11 +3967,14 @@ mod tests {
         let mut t = Terminal::new(3, 3);
         t.advance(b"\x1b[1;2r"); // custom region
         t.advance(b"\x1b[r"); // reset
-        // Full-screen scroll feeds scrollback again.
+                              // Full-screen scroll feeds scrollback again.
         let mut t2 = Terminal::with_scrollback(3, 3, 100);
         t2.advance(b"\x1b[1;2r\x1b[r");
         t2.advance(b"a\r\nb\r\nc\r\nd");
-        assert!(t2.scrollback_len() >= 1, "full region feeds scrollback after reset");
+        assert!(
+            t2.scrollback_len() >= 1,
+            "full region feeds scrollback after reset"
+        );
         let _ = t;
     }
 
@@ -3993,7 +4017,7 @@ mod tests {
     fn wide_char_advances_two_columns() {
         let mut t = Terminal::new(2, 10);
         t.advance("世".as_bytes()); // East-Asian wide
-        // Occupies cols 0 + 1 (continuation spacer); cursor now at col 2.
+                                    // Occupies cols 0 + 1 (continuation spacer); cursor now at col 2.
         assert_eq!(t.grid().cell(0, 0).unwrap().c, '世');
         assert_eq!(t.grid().cell(0, 1).unwrap().c, ' ', "continuation spacer");
         assert_eq!(t.cursor_position(), Some((0, 2)));
@@ -4014,7 +4038,11 @@ mod tests {
         t.advance("世".as_bytes()); // can't fit width-2 at col 2 -> wraps to row 1
         assert_eq!(t.grid().cell(0, 0).unwrap().c, 'a');
         assert_eq!(t.grid().cell(0, 1).unwrap().c, 'b');
-        assert_eq!(t.grid().cell(1, 0).unwrap().c, '世', "wide char wrapped to next row");
+        assert_eq!(
+            t.grid().cell(1, 0).unwrap().c,
+            '世',
+            "wide char wrapped to next row"
+        );
         assert_eq!(t.grid().cell(1, 1).unwrap().c, ' ');
     }
 
@@ -4078,7 +4106,11 @@ mod tests {
         let mut t = Terminal::new(3, 3);
         t.advance(b"aaa\r\nbbb\r\nccc");
         t.advance(b"\x1b[1;1H\x1bM"); // home then RI -> scroll down
-        assert_eq!(t.grid().cell(0, 0).unwrap().c, ' ', "blank scrolled in at top");
+        assert_eq!(
+            t.grid().cell(0, 0).unwrap().c,
+            ' ',
+            "blank scrolled in at top"
+        );
         assert_eq!(t.grid().cell(1, 0).unwrap().c, 'a', "aaa pushed down");
     }
 
@@ -4151,9 +4183,13 @@ mod tests {
         // Move to col 3 (1-based 4) and set a stop there via HTS (ESC H).
         t.advance(b"\x1b[4G"); // col 4 (1-based) = col 3 (0-based)
         t.advance(b"\x1bH"); // HTS at col 3
-        // Home, then tab: should stop at the new custom stop (col 3), not col 8.
+                             // Home, then tab: should stop at the new custom stop (col 3), not col 8.
         t.advance(b"\x1b[1G\t");
-        assert_eq!(t.cursor_position(), Some((0, 3)), "tab honours custom HTS stop");
+        assert_eq!(
+            t.cursor_position(),
+            Some((0, 3)),
+            "tab honours custom HTS stop"
+        );
     }
 
     #[test]
@@ -4171,7 +4207,11 @@ mod tests {
         t.advance(b"\x1b[9G"); // col 9 (1-based) = col 8 (0-based), a default stop
         t.advance(b"\x1b[0g"); // TBC 0 — clear stop at cursor (col 8)
         t.advance(b"\x1b[1G\t");
-        assert_eq!(t.cursor_position(), Some((0, 16)), "cleared col-8 stop skipped");
+        assert_eq!(
+            t.cursor_position(),
+            Some((0, 16)),
+            "cleared col-8 stop skipped"
+        );
     }
 
     #[test]
@@ -4203,7 +4243,11 @@ mod tests {
         t.advance(b"\x1b[3g"); // clear all stops
         t.advance(b"\x1bc"); // RIS — restores default stops
         t.advance(b"\t");
-        assert_eq!(t.cursor_position(), Some((0, 8)), "RIS restores default stops");
+        assert_eq!(
+            t.cursor_position(),
+            Some((0, 8)),
+            "RIS restores default stops"
+        );
     }
 
     // ---- C14: focus reporting emit (core half) ----
@@ -4225,9 +4269,17 @@ mod tests {
         t.advance(b"\x1b[?1004h"); // enable focus reporting
         assert!(t.focus_reporting());
         t.focus_report(true);
-        assert_eq!(t.take_pty_response().as_slice(), b"\x1b[I", "focus-in emits CSI I");
+        assert_eq!(
+            t.take_pty_response().as_slice(),
+            b"\x1b[I",
+            "focus-in emits CSI I"
+        );
         t.focus_report(false);
-        assert_eq!(t.take_pty_response().as_slice(), b"\x1b[O", "focus-out emits CSI O");
+        assert_eq!(
+            t.take_pty_response().as_slice(),
+            b"\x1b[O",
+            "focus-out emits CSI O"
+        );
     }
 
     #[test]
@@ -4238,7 +4290,10 @@ mod tests {
         let _ = t.take_pty_response();
         t.advance(b"\x1b[?1004l"); // disable again
         t.focus_report(true);
-        assert!(t.take_pty_response().is_empty(), "disabling ?1004 silences reports");
+        assert!(
+            t.take_pty_response().is_empty(),
+            "disabling ?1004 silences reports"
+        );
     }
 
     // ---- C16: reflow / rewrap on resize ----
@@ -4478,13 +4533,21 @@ mod tests {
         assert!(t.origin_mode());
         // CUP row 1 with origin mode -> absolute row = scroll_top (1).
         t.advance(b"\x1b[1;1H");
-        assert_eq!(t.cursor_position(), Some((1, 0)), "row 1 maps to top margin");
+        assert_eq!(
+            t.cursor_position(),
+            Some((1, 0)),
+            "row 1 maps to top margin"
+        );
         // CUP row 2 -> scroll_top + 1 = row 2.
         t.advance(b"\x1b[2;1H");
         assert_eq!(t.cursor_position(), Some((2, 0)));
         // Past the bottom margin clamps to scroll_bottom (3).
         t.advance(b"\x1b[99;1H");
-        assert_eq!(t.cursor_position(), Some((3, 0)), "clamped to bottom margin");
+        assert_eq!(
+            t.cursor_position(),
+            Some((3, 0)),
+            "clamped to bottom margin"
+        );
     }
 
     #[test]
@@ -4570,7 +4633,11 @@ mod tests {
         let cell = t.grid().cell(0, 0).unwrap();
         assert_eq!(cell.c, '\u{2764}');
         assert_eq!(cell.grapheme(), "\u{2764}\u{FE0F}");
-        assert_eq!(t.cursor_position(), Some((0, 1)), "VS16 did not advance cursor");
+        assert_eq!(
+            t.cursor_position(),
+            Some((0, 1)),
+            "VS16 did not advance cursor"
+        );
     }
 
     #[test]
@@ -4589,7 +4656,11 @@ mod tests {
         // is not silently lost.
         let mut t = Terminal::new(2, 10);
         t.advance("\u{0301}".as_bytes());
-        assert_eq!(t.cursor_position(), Some((0, 1)), "leading mark occupies a cell");
+        assert_eq!(
+            t.cursor_position(),
+            Some((0, 1)),
+            "leading mark occupies a cell"
+        );
     }
 
     // ---- C28: OSC 133 C/D command marks ----
@@ -4647,7 +4718,11 @@ mod tests {
         let mut t = Terminal::new(4, 20);
         t.advance(b"\x1b]133;A\x07");
         assert_eq!(t.prompt_marks().len(), 1);
-        assert_eq!(t.command_marks().len(), 0, "A is a prompt mark, not command");
+        assert_eq!(
+            t.command_marks().len(),
+            0,
+            "A is a prompt mark, not command"
+        );
     }
 
     // ---- C30: XTGETTCAP ----
@@ -4680,7 +4755,10 @@ mod tests {
         let mut t = Terminal::new(4, 20);
         t.advance(b"\x1bPq#0;2;100;0;0~\x1b\\");
         assert_eq!(t.images().len(), 1);
-        assert!(t.take_pty_response().is_empty(), "sixel emits no XTGETTCAP reply");
+        assert!(
+            t.take_pty_response().is_empty(),
+            "sixel emits no XTGETTCAP reply"
+        );
     }
 
     // ---- C33: DECRQM ----
@@ -4690,7 +4768,7 @@ mod tests {
         let mut t = Terminal::new(4, 20);
         t.advance(b"\x1b[?2004h"); // enable bracketed paste
         t.advance(b"\x1b[?2004$p"); // DECRQM query
-        // Reply: CSI ? 2004 ; 1 $ y  (1 = set).
+                                    // Reply: CSI ? 2004 ; 1 $ y  (1 = set).
         assert_eq!(t.take_pty_response().as_slice(), b"\x1b[?2004;1$y");
     }
 

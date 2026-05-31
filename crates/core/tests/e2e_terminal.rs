@@ -91,7 +91,7 @@ fn colored_ls_with_osc133_prompt_marks_captured() {
     t.advance(b"\x1b]133;B\x07"); // prompt end / command start
     t.advance(b"ls\r\n");
     t.advance(b"\x1b]133;C\x07"); // command output begins
-    // Coloured directory listing (blue dir, green executable).
+                                  // Coloured directory listing (blue dir, green executable).
     t.advance(b"\x1b[34mDocuments\x1b[0m  \x1b[32mrun.sh\x1b[0m\r\n");
     t.advance(b"\x1b]133;D;0\x07"); // command finished, exit 0
 
@@ -178,7 +178,10 @@ fn cjk_wide_chars_advance_two_columns_and_wrap() {
     // The fourth glyph wrapped onto row 1.
     assert_eq!(t.grid().cell(1, 0).unwrap().c, '界');
     // The row that filled is flagged soft-wrapped (for reflow).
-    assert!(t.grid().is_wrapped(0), "the full wide-char row must wrap-flag");
+    assert!(
+        t.grid().is_wrapped(0),
+        "the full wide-char row must wrap-flag"
+    );
 }
 
 /// (f) A Kitty graphics APC (`ESC _ G f=32,s=1,v=1; <base64 RGBA> ESC \`):
@@ -194,11 +197,18 @@ fn kitty_apc_graphics_decodes_one_image() {
     let apc = format!("\x1b_Gf=32,s=1,v=1,a=T;{payload}\x1b\\");
     t.advance(apc.as_bytes());
 
-    assert_eq!(t.images().len(), 1, "the Kitty APC must decode to one image");
+    assert_eq!(
+        t.images().len(),
+        1,
+        "the Kitty APC must decode to one image"
+    );
     let img: &DecodedImage = &t.images()[0].image;
     assert_eq!(img.width, 1);
     assert_eq!(img.height, 1);
-    assert_eq!(&img.rgba, &rgba, "decoded RGBA must match the transmitted pixel");
+    assert_eq!(
+        &img.rgba, &rgba,
+        "decoded RGBA must match the transmitted pixel"
+    );
 }
 
 /// A Kitty APC split across two `advance()` calls (the realistic
@@ -213,7 +223,11 @@ fn kitty_apc_split_across_advances_decodes_once() {
     let mid = bytes.len() / 2;
     t.advance(&bytes[..mid]);
     t.advance(&bytes[mid..]);
-    assert_eq!(t.images().len(), 1, "a split APC must still decode exactly one image");
+    assert_eq!(
+        t.images().len(),
+        1,
+        "a split APC must still decode exactly one image"
+    );
 }
 
 /// (g) Reflow: write a long logical line that soft-wraps, resize narrower then
@@ -261,7 +275,11 @@ fn full_prompt_command_cycle_lands_coherent_screen() {
     t.advance(b"echo \x1b[1;36mhello\x1b[0m\r\n");
     t.advance(b"\x1b]133;C\x07hello\r\n\x1b]133;D;0\x07");
 
-    assert!(t.title().contains("C0PL4ND"), "title must be captured: {:?}", t.title());
+    assert!(
+        t.title().contains("C0PL4ND"),
+        "title must be captured: {:?}",
+        t.title()
+    );
     assert!(!t.prompt_marks().is_empty(), "prompt mark must be captured");
     // The echoed 'hello' on the command line is bright-cyan + bold.
     assert!(

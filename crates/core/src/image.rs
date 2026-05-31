@@ -141,7 +141,7 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
     const MAX_SIXEL_PIXELS: usize = 16 * 1024 * 1024;
     if width
         .checked_mul(height)
-        .map_or(true, |n| n > MAX_SIXEL_PIXELS)
+        .is_none_or(|n| n > MAX_SIXEL_PIXELS)
     {
         return None;
     }
@@ -259,12 +259,7 @@ pub fn parse_kitty(body: &[u8]) -> Option<KittyCommand> {
 ///
 /// Any other format (or a length mismatch for the raw formats) returns `None` —
 /// an honest gap. `f=32`/`f=24`/`f=100` cover the `icat`/`timg` tools.
-pub fn decode_kitty(
-    format: u16,
-    width: usize,
-    height: usize,
-    raw: &[u8],
-) -> Option<DecodedImage> {
+pub fn decode_kitty(format: u16, width: usize, height: usize, raw: &[u8]) -> Option<DecodedImage> {
     match format {
         32 => {
             if width == 0 || height == 0 {
@@ -299,8 +294,7 @@ pub fn decode_kitty(
             })
         }
         100 => {
-            let dynimg =
-                image::load_from_memory_with_format(raw, image::ImageFormat::Png).ok()?;
+            let dynimg = image::load_from_memory_with_format(raw, image::ImageFormat::Png).ok()?;
             let rgba8 = dynimg.to_rgba8();
             let (w, h) = (rgba8.width() as usize, rgba8.height() as usize);
             Some(DecodedImage {

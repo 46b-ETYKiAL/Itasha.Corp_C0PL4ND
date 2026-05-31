@@ -12,11 +12,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use c0pl4nd_core::config::CursorStyle;
 use c0pl4nd_core::layout::{
     Axis, Direction, Layout, LeafId, Preset, Rect as LRect, SplitOutcome, TabGroup,
 };
 use c0pl4nd_core::layout_persist::{self, LayoutSnapshot, LeafView};
-use c0pl4nd_core::config::CursorStyle;
 use c0pl4nd_core::term::{
     ColorSet, DynamicColor, MouseButton as TermMouseButton, MouseEventKind, MouseMode,
     MouseModifiers,
@@ -101,7 +101,9 @@ fn write_os_clipboard(text: &str) {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
     let spawn = |mut cmd: Command| -> bool {
-        cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         match cmd.spawn() {
             Ok(mut child) => {
                 if let Some(mut stdin) = child.stdin.take() {
@@ -171,17 +173,15 @@ fn read_os_clipboard() -> Option<String> {
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            ["wl-paste", "xclip", "xsel"]
-                .iter()
-                .find_map(|tool| {
-                    let mut cmd = Command::new(tool);
-                    if *tool == "xclip" {
-                        cmd.args(["-selection", "clipboard", "-o"]);
-                    } else if *tool == "xsel" {
-                        cmd.args(["--clipboard", "--output"]);
-                    }
-                    cmd.output().ok().filter(|o| o.status.success())
-                })
+            ["wl-paste", "xclip", "xsel"].iter().find_map(|tool| {
+                let mut cmd = Command::new(tool);
+                if *tool == "xclip" {
+                    cmd.args(["-selection", "clipboard", "-o"]);
+                } else if *tool == "xsel" {
+                    cmd.args(["--clipboard", "--output"]);
+                }
+                cmd.output().ok().filter(|o| o.status.success())
+            })
         }
     }?;
     if !out.status.success() {
@@ -230,7 +230,19 @@ fn format_dropped_path(path: &std::path::Path) -> String {
             c.is_whitespace()
                 || matches!(
                     c,
-                    '"' | '\'' | '&' | '|' | '(' | ')' | '<' | '>' | '^' | ';' | '`' | '$' | '%' | '!'
+                    '"' | '\''
+                        | '&'
+                        | '|'
+                        | '('
+                        | ')'
+                        | '<'
+                        | '>'
+                        | '^'
+                        | ';'
+                        | '`'
+                        | '$'
+                        | '%'
+                        | '!'
                 )
         });
     if needs_quote {
@@ -282,12 +294,7 @@ fn geometry_on_screen(
     monitors.iter().any(|m| {
         let mp = m.position();
         let ms = m.size();
-        let (mx0, my0, mx1, my1) = (
-            mp.x,
-            mp.y,
-            mp.x + ms.width as i32,
-            mp.y + ms.height as i32,
-        );
+        let (mx0, my0, mx1, my1) = (mp.x, mp.y, mp.x + ms.width as i32, mp.y + ms.height as i32);
         let ox = (wx1.min(mx1) - wx0.max(mx0)).max(0);
         let oy = (wy1.min(my1) - wy0.max(my0)).max(0);
         ox >= MIN_VISIBLE && oy >= MIN_VISIBLE
@@ -319,7 +326,10 @@ fn find_url_in_line(chars: &[char], col: usize) -> Option<String> {
     let mut token: String = chars[start..=end].iter().collect();
     // Trim trailing punctuation that is rarely part of the URL.
     while let Some(last) = token.chars().last() {
-        if matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '"' | '\'' | '>') {
+        if matches!(
+            last,
+            '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '"' | '\'' | '>'
+        ) {
             token.pop();
         } else {
             break;
@@ -875,11 +885,7 @@ impl App {
         let rows = SettingRow::ALL;
         // Read the panel state into locals so we never hold a borrow of
         // `self.settings` across a `self`-mutating call below.
-        let Some((idx, themes)) = self
-            .settings
-            .as_ref()
-            .map(|p| (p.idx, p.themes.clone()))
-        else {
+        let Some((idx, themes)) = self.settings.as_ref().map(|p| (p.idx, p.themes.clone())) else {
             return;
         };
         match key {
@@ -980,7 +986,9 @@ impl App {
         for (i, row) in SettingRow::ALL.iter().enumerate() {
             let marker = if i == panel.idx { "\u{25b8} " } else { "  " };
             let value = match row {
-                SettingRow::FontSize => format!("{:.1}  (applies next launch)", self.config.font.size),
+                SettingRow::FontSize => {
+                    format!("{:.1}  (applies next launch)", self.config.font.size)
+                }
                 SettingRow::Theme => self.config.theme.clone(),
                 SettingRow::CursorStyle => match self.config.cursor.style {
                     CursorStyle::Block => "block".into(),
@@ -1155,7 +1163,13 @@ impl App {
         let cell = self.leaf_rect(leaf)?;
         let border = self
             .active_tab()
-            .map(|t| if t.layout.leaf_count() > 1 { BORDER_PX } else { 0 })
+            .map(|t| {
+                if t.layout.leaf_count() > 1 {
+                    BORDER_PX
+                } else {
+                    0
+                }
+            })
             .unwrap_or(0);
         let (ox, oy) = leaf_text_origin(cell, border, self.config.window.padding as f32, 2.0);
         if (px as f32) < ox || (py as f32) < oy {
@@ -1329,7 +1343,13 @@ impl App {
     /// `(px, py)` is the physical-pixel cursor position. Cells are 1-based per
     /// the xterm protocol; the column/row are derived from the focused leaf's
     /// grid origin (matching the render placement: border + 8.0/2.0 pad).
-    fn forward_mouse(&mut self, button: TermMouseButton, kind: MouseEventKind, px: f64, py: f64) -> bool {
+    fn forward_mouse(
+        &mut self,
+        button: TermMouseButton,
+        kind: MouseEventKind,
+        px: f64,
+        py: f64,
+    ) -> bool {
         let focused = self.active_tab().map(|t| t.layout.focused);
         let Some(leaf) = focused else { return false };
         let Some(cell) = self.leaf_rect(leaf) else {
@@ -1337,7 +1357,13 @@ impl App {
         };
         let border = self
             .active_tab()
-            .map(|t| if t.layout.leaf_count() > 1 { BORDER_PX } else { 0 })
+            .map(|t| {
+                if t.layout.leaf_count() > 1 {
+                    BORDER_PX
+                } else {
+                    0
+                }
+            })
             .unwrap_or(0);
         let (ox, oy) = leaf_text_origin(cell, border, self.config.window.padding as f32, 2.0);
         // 1-based cell coordinates, clamped to the cell's grid extent.
@@ -1380,7 +1406,13 @@ impl App {
         let cell = self.leaf_rect(leaf)?;
         let border = self
             .active_tab()
-            .map(|t| if t.layout.leaf_count() > 1 { BORDER_PX } else { 0 })
+            .map(|t| {
+                if t.layout.leaf_count() > 1 {
+                    BORDER_PX
+                } else {
+                    0
+                }
+            })
             .unwrap_or(0);
         let (ox, oy) = leaf_text_origin(cell, border, self.config.window.padding as f32, 2.0);
         if (px as f32) < ox || (py as f32) < oy {
@@ -1434,7 +1466,7 @@ impl App {
         };
         // Blink: when enabled, suppress the cursor during the off half-period.
         if blink {
-            let on = (self.blink_start.elapsed().as_millis() / 530) % 2 == 0;
+            let on = (self.blink_start.elapsed().as_millis() / 530).is_multiple_of(2);
             if !on {
                 return Vec::new();
             }
@@ -1444,23 +1476,29 @@ impl App {
         } else {
             0.0
         };
-        let (ox, oy) =
-            leaf_text_origin(cell, border, self.config.window.padding as f32, 2.0 + strip_top);
+        let (ox, oy) = leaf_text_origin(
+            cell,
+            border,
+            self.config.window.padding as f32,
+            2.0 + strip_top,
+        );
         let x = (ox + col as f32 * self.cell_w()) as i32;
         let y = (oy + row as f32 * self.cell_h()) as i32;
         let cw = self.cell_w().ceil() as i32;
         let ch = self.cell_h().ceil() as i32;
         let a = accent;
-        let (ar, ag, ab) = (a.r() as f32 / 255.0, a.g() as f32 / 255.0, a.b() as f32 / 255.0);
+        let (ar, ag, ab) = (
+            a.r() as f32 / 255.0,
+            a.g() as f32 / 255.0,
+            a.b() as f32 / 255.0,
+        );
         let rect = match shape {
             // Block: full cell, semi-transparent so the glyph shows through.
             c0pl4nd_core::term::CursorShape::Block => {
                 ColorRect::new(x, y, cw, ch, [ar, ag, ab, 0.55])
             }
             // Bar: 2px vertical at the cell's left edge (opaque).
-            c0pl4nd_core::term::CursorShape::Bar => {
-                ColorRect::new(x, y, 2, ch, [ar, ag, ab, 0.95])
-            }
+            c0pl4nd_core::term::CursorShape::Bar => ColorRect::new(x, y, 2, ch, [ar, ag, ab, 0.95]),
             // Underline: 2px horizontal at the cell's bottom (opaque).
             c0pl4nd_core::term::CursorShape::Underline => {
                 ColorRect::new(x, (y + ch - 2).max(y), cw, 2, [ar, ag, ab, 0.95])
@@ -2346,7 +2384,12 @@ impl App {
         } else {
             0.0
         };
-        let (ox, oy) = leaf_text_origin(cell, BORDER_PX, self.config.window.padding as f32, 2.0 + strip);
+        let (ox, oy) = leaf_text_origin(
+            cell,
+            BORDER_PX,
+            self.config.window.padding as f32,
+            2.0 + strip,
+        );
         if let Ok(t) = s.terminal().lock() {
             let rows = t.grid().rows();
             let window_start = t.scrollback_len().saturating_sub(t.view_offset());
@@ -2428,7 +2471,13 @@ impl App {
     ) -> Option<(
         Vec<(String, GColor)>,
         Vec<(usize, usize, [f32; 4])>,
-        Vec<(usize, usize, c0pl4nd_core::grid::UnderlineStyle, bool, [f32; 4])>,
+        Vec<(
+            usize,
+            usize,
+            c0pl4nd_core::grid::UnderlineStyle,
+            bool,
+            [f32; 4],
+        )>,
     )> {
         let tab = self.active_tab()?;
         let s = tab.cells.get(&leaf).and_then(Cell::active)?;
@@ -2457,15 +2506,21 @@ impl App {
         let mut bg_cells: Vec<(usize, usize, [f32; 4])> = Vec::new();
         // Per-cell text decorations (C20/C24): styled underline + strikeout, in
         // logical cell columns (drawn as lines by the renderer, not by glyphon).
-        let mut decos: Vec<(usize, usize, c0pl4nd_core::grid::UnderlineStyle, bool, [f32; 4])> =
-            Vec::new();
+        let mut decos: Vec<(
+            usize,
+            usize,
+            c0pl4nd_core::grid::UnderlineStyle,
+            bool,
+            [f32; 4],
+        )> = Vec::new();
         for (r, row) in rows.iter().enumerate() {
             // Logical-order (char, fg) for the row. Background paints are pushed
             // here in logical cell columns (bidi reorders text only — see
             // `bidi_visual_order`).
             let mut logical: Vec<(char, GColor)> = Vec::with_capacity(row.len());
             for (c, cell) in row.iter().enumerate() {
-                let (fg_rgb, bg_rgb) = cell_render_colors(cell, &self.theme, default_fg, default_bg);
+                let (fg_rgb, bg_rgb) =
+                    cell_render_colors(cell, &self.theme, default_fg, default_bg);
                 if let Some(bg) = bg_rgb {
                     bg_cells.push((
                         r,
@@ -2493,7 +2548,12 @@ impl App {
                         c,
                         cell.flags.underline_style,
                         cell.flags.strikeout,
-                        [uc.0 as f32 / 255.0, uc.1 as f32 / 255.0, uc.2 as f32 / 255.0, 1.0],
+                        [
+                            uc.0 as f32 / 255.0,
+                            uc.1 as f32 / 255.0,
+                            uc.2 as f32 / 255.0,
+                            1.0,
+                        ],
                     ));
                 }
                 logical.push((cell.c, GColor::rgb(fg_rgb.0, fg_rgb.1, fg_rgb.2)));
@@ -2531,7 +2591,9 @@ impl App {
     fn grid_dims(&self) -> (u16, u16) {
         match &self.gpu {
             Some(g) => {
-                let cols = (g.surface_config.width as f32 / self.cell_w()).floor().max(1.0) as u16;
+                let cols = (g.surface_config.width as f32 / self.cell_w())
+                    .floor()
+                    .max(1.0) as u16;
                 let usable = (g.surface_config.height as f32 - TITLEBAR_H).max(self.cell_h());
                 let rows = (usable / self.cell_h()).floor().max(1.0) as u16;
                 (cols, rows)
@@ -2621,12 +2683,8 @@ impl App {
                 let tab = &mut self.tabs[tab_idx];
                 for leaf in tab.layout.leaves() {
                     // Reap every dead tab within this cell, narrowest first.
-                    loop {
-                        let Some(cell) = tab.cells.get_mut(&leaf) else {
-                            break;
-                        };
-                        let Some(dead_idx) =
-                            cell.sessions.iter().position(|s| !s.is_alive())
+                    while let Some(cell) = tab.cells.get_mut(&leaf) {
+                        let Some(dead_idx) = cell.sessions.iter().position(|s| !s.is_alive())
                         else {
                             break;
                         };
@@ -2851,9 +2909,7 @@ impl App {
                 true
             }
             // Live font zoom: Ctrl + / = zoom in, Ctrl - / _ zoom out, Ctrl 0 reset.
-            Key::Character(s)
-                if matches!(s.chars().next(), Some('=') | Some('+')) =>
-            {
+            Key::Character(s) if matches!(s.chars().next(), Some('=') | Some('+')) => {
                 self.zoom_font(0.1);
                 true
             }
@@ -2861,7 +2917,7 @@ impl App {
                 self.zoom_font(-0.1);
                 true
             }
-            Key::Character(s) if s.chars().next() == Some('0') => {
+            Key::Character(s) if s.starts_with('0') => {
                 self.reset_font_scale();
                 true
             }
@@ -2938,12 +2994,7 @@ impl App {
             // SAFETY: hwnd is the live top-level window winit just created; we
             // install exactly once (resumed() early-returns once gpu exists).
             unsafe {
-                crate::win_snap::install(
-                    hwnd,
-                    TITLEBAR_H as i32,
-                    RESIZE_BORDER as i32,
-                    buttons_w,
-                );
+                crate::win_snap::install(hwnd, TITLEBAR_H as i32, RESIZE_BORDER as i32, buttons_w);
             }
         }
     }
@@ -3328,9 +3379,9 @@ impl ApplicationHandler for App {
                 // behaviour). Computed before borrowing gpu to avoid a borrow clash.
                 let dbl_titlebar = if hit == TitlebarHit::Drag {
                     let now = Instant::now();
-                    let dbl = self
-                        .last_titlebar_click
-                        .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(400));
+                    let dbl = self.last_titlebar_click.is_some_and(|t| {
+                        now.duration_since(t) < std::time::Duration::from_millis(400)
+                    });
                     self.last_titlebar_click = Some(now);
                     dbl
                 } else {
@@ -3487,7 +3538,12 @@ impl ApplicationHandler for App {
                 };
                 let reporting = self
                     .active_session()
-                    .and_then(|s| s.terminal().lock().ok().map(|t| t.mouse_mode() != MouseMode::Off))
+                    .and_then(|s| {
+                        s.terminal()
+                            .lock()
+                            .ok()
+                            .map(|t| t.mouse_mode() != MouseMode::Off)
+                    })
                     .unwrap_or(false);
                 if reporting {
                     for _ in 0..lines {
@@ -3612,7 +3668,12 @@ impl ApplicationHandler for App {
                 // session borrow so arrow/Home/End encode SS3 vs CSI correctly.
                 let app_cursor = self
                     .active_session()
-                    .and_then(|s| s.terminal().lock().ok().map(|t| t.application_cursor_keys()))
+                    .and_then(|s| {
+                        s.terminal()
+                            .lock()
+                            .ok()
+                            .map(|t| t.application_cursor_keys())
+                    })
                     .unwrap_or(false);
                 if let Some(bytes) =
                     key_to_bytes(&event.logical_key, &event.text, app_cursor, self.modifiers)
@@ -3666,7 +3727,8 @@ impl ApplicationHandler for App {
         // D2: debounced window-geometry persistence. A resize/move sets
         // `geom_dirty`; we write at most ~once/600ms so an interactive drag
         // doesn't thrash the config file.
-        if self.geom_dirty && now.duration_since(self.last_geom_save) >= Duration::from_millis(600) {
+        if self.geom_dirty && now.duration_since(self.last_geom_save) >= Duration::from_millis(600)
+        {
             self.geom_dirty = false;
             self.last_geom_save = now;
             self.save_window_geometry();
@@ -3693,9 +3755,12 @@ impl ApplicationHandler for App {
                 >= Duration::from_millis(530)
                 && self
                     .active_session()
-                    .and_then(|s| s.terminal().lock().ok().map(|t| {
-                        t.is_cursor_visible() && t.cursor_blink()
-                    }))
+                    .and_then(|s| {
+                        s.terminal()
+                            .lock()
+                            .ok()
+                            .map(|t| t.is_cursor_visible() && t.cursor_blink())
+                    })
                     .unwrap_or(false);
             if blink_due {
                 self.last_blink_redraw = now;
@@ -3751,12 +3816,19 @@ impl App {
         let mut leaf_spans: Vec<LeafSpan> = Vec::with_capacity(cells.len());
         // E1: per-cell background paints per leaf, as (row, col, rgba). Turned
         // into ColorRects below (before the gpu borrow) and drawn behind text.
+        #[allow(clippy::type_complexity)]
         let mut leaf_bgs: Vec<(LeafId, LRect, Vec<(usize, usize, [f32; 4])>)> = Vec::new();
         #[allow(clippy::type_complexity)]
         let mut leaf_decos: Vec<(
             LeafId,
             LRect,
-            Vec<(usize, usize, c0pl4nd_core::grid::UnderlineStyle, bool, [f32; 4])>,
+            Vec<(
+                usize,
+                usize,
+                c0pl4nd_core::grid::UnderlineStyle,
+                bool,
+                [f32; 4],
+            )>,
         )> = Vec::new();
         let mut image_quads: Vec<(LeafId, crate::image_render::ImageQuad)> = Vec::new();
         for (leaf, cell) in &cells {
@@ -4536,6 +4608,7 @@ fn resolve_fg(
 /// the common case). For an inverse cell, the effective foreground is the
 /// cell's background colour and vice-versa — matching every mainstream terminal
 /// (selections, `\e[7m`, cursor-on-cell all rely on this).
+#[allow(clippy::type_complexity)]
 fn cell_render_colors(
     cell: &c0pl4nd_core::Cell,
     theme: &Theme,
@@ -4586,7 +4659,11 @@ fn sanitize_workspace_name(name: &str) -> String {
 
 /// Render a boolean setting as a compact on/off label for the settings panel.
 fn bool_label(b: bool) -> String {
-    if b { "on".to_string() } else { "off".to_string() }
+    if b {
+        "on".to_string()
+    } else {
+        "off".to_string()
+    }
 }
 
 /// Approximate sRGB(0-255) → linear(0-1) for the wgpu clear color.
@@ -4804,10 +4881,20 @@ mod tests {
     #[test]
     fn selection_ordered_normalizes_direction() {
         // anchor after head on screen → ordered swaps them.
-        let s = Selection { leaf: LeafId(0), anchor: (3, 5), head: (1, 2), active: false };
+        let s = Selection {
+            leaf: LeafId(0),
+            anchor: (3, 5),
+            head: (1, 2),
+            active: false,
+        };
         assert_eq!(s.ordered(), ((1, 2), (3, 5)));
         // same row, head right of anchor → unchanged.
-        let s2 = Selection { leaf: LeafId(0), anchor: (1, 2), head: (1, 8), active: false };
+        let s2 = Selection {
+            leaf: LeafId(0),
+            anchor: (1, 2),
+            head: (1, 8),
+            active: false,
+        };
         assert_eq!(s2.ordered(), ((1, 2), (1, 8)));
     }
 

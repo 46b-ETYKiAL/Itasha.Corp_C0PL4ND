@@ -969,7 +969,10 @@ mod tests {
         assert_eq!(restored.tabs[2].layout.leaf_count(), 1);
         // The middle tab's first leaf carries its persisted cwd.
         let cwd = restored.tabs[1].leaves[0].1.cwd.as_deref();
-        assert!(cwd.is_some() && cwd.unwrap().starts_with("/d/"), "got {cwd:?}");
+        assert!(
+            cwd.is_some() && cwd.unwrap().starts_with("/d/"),
+            "got {cwd:?}"
+        );
     }
 
     #[test]
@@ -982,7 +985,12 @@ mod tests {
         let ws = WorkspaceSnapshot::from_tabs(vec![], 5);
         assert_eq!(ws.tabs.len(), 1);
         assert_eq!(ws.active, 0);
-        assert_eq!(ws.tabs[0].root, NodeView::Leaf { view: LeafView::single() });
+        assert_eq!(
+            ws.tabs[0].root,
+            NodeView::Leaf {
+                view: LeafView::single()
+            }
+        );
     }
 
     #[test]
@@ -991,7 +999,10 @@ mod tests {
         let v1 = snap_of(3, |_| LeafView::single());
         let v1_json = v1.to_json().expect("serialize v1");
         // Sanity: the v1 json has no "tabs" key — it is the bare layout format.
-        assert!(!v1_json.contains("\"tabs\""), "v1 file must be the bare layout format");
+        assert!(
+            !v1_json.contains("\"tabs\""),
+            "v1 file must be the bare layout format"
+        );
 
         let ws = WorkspaceSnapshot::from_json(&v1_json).expect("v1 migrates");
         assert_eq!(ws.version, WorkspaceSnapshot::VERSION);
@@ -1015,8 +1026,8 @@ mod tests {
             ],
             1,
         );
-        let tmp = std::env::temp_dir()
-            .join(format!("c0pl4nd-ws-multi-{}.json", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("c0pl4nd-ws-multi-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
 
         ws.save_atomic(&tmp).expect("save_atomic");
@@ -1029,7 +1040,9 @@ mod tests {
 
         let back = WorkspaceSnapshot::load_strict(&tmp).expect("load_strict");
         assert_eq!(ws, back);
-        let restored = WorkspaceSnapshot::load(&tmp).restore_all().expect("restore");
+        let restored = WorkspaceSnapshot::load(&tmp)
+            .restore_all()
+            .expect("restore");
         assert_eq!(restored.tabs.len(), 2);
         assert_eq!(restored.active, 1);
 
@@ -1038,8 +1051,8 @@ mod tests {
 
     #[test]
     fn workspace_corrupt_file_falls_back_to_single_default_tab() {
-        let tmp = std::env::temp_dir()
-            .join(format!("c0pl4nd-ws-corrupt-{}.json", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("c0pl4nd-ws-corrupt-{}.json", std::process::id()));
         std::fs::write(&tmp, "this is { not ] valid json").unwrap();
 
         // Strict surfaces the parse error.
@@ -1083,12 +1096,17 @@ mod tests {
         for _ in 0..(MAX_PANES + 1) {
             children.push(ChildView {
                 flex: 1.0,
-                node: NodeView::Leaf { view: LeafView::single() },
+                node: NodeView::Leaf {
+                    view: LeafView::single(),
+                },
             });
         }
         let bad_tab = LayoutSnapshot {
             version: LayoutSnapshot::VERSION,
-            root: NodeView::Split { axis: Axis::Horizontal, children },
+            root: NodeView::Split {
+                axis: Axis::Horizontal,
+                children,
+            },
             focused_ordinal: 0,
         };
         let mut ws = WorkspaceSnapshot {
@@ -1112,7 +1130,10 @@ mod tests {
         let v = LeafView::single();
         assert!(v.scrollback.is_none());
         let json = serde_json::to_string(&v).unwrap();
-        assert!(!json.contains("scrollback"), "None scrollback is skipped: {json}");
+        assert!(
+            !json.contains("scrollback"),
+            "None scrollback is skipped: {json}"
+        );
 
         // Some round-trips through serde.
         let lines = vec!["line 1".to_string(), "line 2".to_string()];
