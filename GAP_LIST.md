@@ -104,16 +104,18 @@ that needs a tmux-style daemon, an explicit non-goal).
 **Quality:** E2E + performance + security/fuzz test suites + `SECURITY_AUDIT.md`;
 sixel decoder pixel-count ceiling added (audit finding).
 
-### ❌ Remaining (honest — deferred with reason)
-- **Live font zoom (Ctrl +/−/0, Ctrl+scroll)** — `CELL_W`/`LINE_HEIGHT` are
-  compile-time constants used across layout/hit-test/render; live zoom needs
-  them converted to runtime values threaded through ~dozens of sites — a focused
-  refactor, not a quick win. Font size still applies on next launch.
-- **Configurable content padding** — 9 `leaf_text_origin` call sites must stay
-  in lockstep (hit-test ↔ render); deferred as low-value P3 (fixed 8 px is fine).
-- **True curly undercurl** — currently approximated as a straight underline.
-- **Multi-window-tab persistence** — only the active tab's layout persists
-  (the core `WorkspaceSnapshot` supports multi-tab; the app wiring is single-tab).
+### ✅ Previously-remaining items — now all shipped (2026-05-31)
+- **Live font zoom (Ctrl +/−/0, Ctrl+scroll)** — DONE. Grid cell dims +
+  glyph metrics route through `cell_w()`/`cell_h()` (single source of truth);
+  scale 1.0 is byte-identical, and a round-trip unit test proves render↔hit-test
+  alignment at every scale. Chrome/titlebar stays fixed size.
+- **Configurable content padding** — DONE. `config.window.padding` drives the
+  grid left-inset at all 9 `leaf_text_origin` sites in lockstep.
+- **True curly undercurl** — DONE. SGR 4:3 draws a 1px zigzag.
+- **Multi-window-tab persistence** — DONE. All tabs persist via the core
+  multi-tab `WorkspaceSnapshot` v2 (auto-save on close, restore-all on startup).
+
+The entire GAP_LIST is now closed: no remaining items.
 
 ## Shipped Status (final update — master 2026-05-30)
 
