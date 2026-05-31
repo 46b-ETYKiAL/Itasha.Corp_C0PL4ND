@@ -1829,7 +1829,17 @@ impl App {
         let profile = self.config.shell.clone();
         Some(LayoutSnapshot::capture(&tab.layout, |id| {
             match tab.cells.get(&id) {
-                Some(c) => layout_persist::leaf_view_for(&c.group, None, profile.clone()),
+                Some(c) => {
+                    // Capture the pane's current working directory (OSC-7) so a
+                    // restored shell relaunches where the user left it.
+                    let cwd = c.active().and_then(|s| {
+                        s.terminal()
+                            .lock()
+                            .ok()
+                            .and_then(|t| t.cwd().map(String::from))
+                    });
+                    layout_persist::leaf_view_for(&c.group, cwd, profile.clone())
+                }
                 None => LeafView::single(),
             }
         }))
@@ -1873,10 +1883,15 @@ impl App {
         let (rows, cols) = self.preset_cell_dims(content, &restored.layout);
         let mut cells: HashMap<LeafId, Cell> = HashMap::new();
         for (id, view) in &restored.leaves {
-            // Spawn the active tab's shell; additional cell tabs in this leaf
-            // are spawned lazily by the user (live process state is not
-            // restored — by design).
-            match Session::spawn_shell(self.config.shell.as_deref(), rows, cols) {
+            // Spawn the active tab's shell at the restored working directory;
+            // additional cell tabs in this leaf are spawned lazily by the user
+            // (live process state is not restored — by design).
+            match Session::spawn_shell_in(
+                self.config.shell.as_deref(),
+                rows,
+                cols,
+                view.cwd.as_deref(),
+            ) {
                 Ok(s) => {
                     let mut cell = Cell::single(*id, s);
                     cell.group.active = view.active.min(cell.group.len() - 1);
@@ -1924,9 +1939,11 @@ impl App {
             return;
         }
         let restored = layout_persist::load(&path);
-        // Only restore a real multi-pane layout; a single-pane default is the
-        // same as the fresh tab we already have.
-        if restored.layout.leaf_count() > 1 {
+        // Restore a real multi-pane layout, OR a single pane that carries a
+        // saved working directory (otherwise a single-pane default is identical
+        // to the fresh tab we already have, so there's nothing to restore).
+        let has_cwd = restored.leaves.iter().any(|(_, v)| v.cwd.is_some());
+        if restored.layout.leaf_count() > 1 || has_cwd {
             self.materialize_restored(restored);
         }
     }
@@ -2946,6 +2963,10 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => {
                 // D2: persist final geometry before we tear down.
                 self.save_window_geometry();
+                // Session restore: auto-save the active layout (+ per-pane cwd)
+                // as the "default" workspace, which `restore_default_workspace_on_startup`
+                // relaunches on the next run. Fresh shells, restored working dirs.
+                self.save_workspace("default");
                 event_loop.exit();
             }
             WindowEvent::CursorMoved { position, .. } => {

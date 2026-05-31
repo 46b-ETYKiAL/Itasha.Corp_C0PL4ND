@@ -18,12 +18,36 @@ impl PtyProcess {
     /// Spawn the platform default (or configured) shell, attached to a PTY of
     /// the given size.
     pub fn spawn_shell(shell: Option<&str>, rows: u16, cols: u16) -> Result<Self> {
+        Self::spawn_shell_in(shell, rows, cols, None)
+    }
+
+    /// Spawn the shell with an explicit working directory (session restore). The
+    /// `cwd` is used only when it names an existing directory; otherwise the
+    /// spawn falls back to the home directory (a restored cwd that no longer
+    /// exists must not wedge the launch).
+    pub fn spawn_shell_in(
+        shell: Option<&str>,
+        rows: u16,
+        cols: u16,
+        cwd: Option<&str>,
+    ) -> Result<Self> {
         let program = shell.map(str::to_string).unwrap_or_else(default_shell);
-        Self::spawn_program(&program, &[], rows, cols)
+        Self::spawn_program_in(&program, &[], rows, cols, cwd)
     }
 
     /// Spawn an explicit program (used by tests for deterministic one-shots).
     pub fn spawn_program(program: &str, args: &[&str], rows: u16, cols: u16) -> Result<Self> {
+        Self::spawn_program_in(program, args, rows, cols, None)
+    }
+
+    /// Spawn an explicit program with an optional working directory.
+    pub fn spawn_program_in(
+        program: &str,
+        args: &[&str],
+        rows: u16,
+        cols: u16,
+        cwd: Option<&str>,
+    ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -38,8 +62,13 @@ impl PtyProcess {
         for a in args {
             cmd.arg(a);
         }
-        if let Some(home) = dirs_home() {
-            cmd.cwd(home);
+        // Prefer the requested cwd when it exists; else fall back to home.
+        let dir = cwd
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_dir())
+            .or_else(dirs_home);
+        if let Some(d) = dir {
+            cmd.cwd(d);
         }
 
         let child = pair
