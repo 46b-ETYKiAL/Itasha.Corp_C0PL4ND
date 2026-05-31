@@ -39,19 +39,19 @@ fn all_bundled_themes_load_and_validate() {
 }
 
 #[test]
-fn flagship_theme_is_wired_noir() {
-    // Wired Noir is the brand-canon flagship (DECISION-2026-005), shared with
-    // the SCR1B3 editor: cool near-black void hull + one teal accent.
-    let theme = Theme::load_from(&themes_dir().join("wired-noir.toml")).expect("load wired-noir");
-    assert_eq!(
-        c0pl4nd_core::theme::parse_hex(&theme.background).unwrap(),
-        (0x07, 0x0a, 0x0c), // void near-black
-    );
+fn flagship_theme_is_itasha_corp() {
+    // Itasha.Corp is the house brand default, shared by every Itasha.Corp app.
+    // Two brand primaries: electric purple #7700FF + spring green #00FF90.
+    let theme = Theme::load_from(&themes_dir().join("itasha-corp.toml")).expect("load itasha-corp");
     assert_eq!(
         c0pl4nd_core::theme::parse_hex(&theme.cursor).unwrap(),
-        (0x34, 0xe0, 0xd0), // teal — the system voice
+        (0x00, 0xff, 0x90), // brand green — the live/cursor voice
     );
-    // The prior itasha-void theme remains bundled as a non-default alternative.
+    assert_eq!(
+        c0pl4nd_core::theme::parse_hex(&theme.normal.blue).unwrap(),
+        (0x77, 0x00, 0xff), // brand purple — structural accent
+    );
+    // wired-noir + itasha-void remain bundled as non-default alternatives.
     let void = Theme::load_from(&themes_dir().join("itasha-void.toml")).expect("load itasha-void");
     assert_eq!(
         c0pl4nd_core::theme::parse_hex(&void.background).unwrap(),

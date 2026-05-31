@@ -136,38 +136,38 @@ impl Theme {
     /// keeps the terminal usable even if the themes dir is missing.
     pub fn builtin_void() -> Theme {
         let row = |k: &str| k.to_string();
-        // Wired Noir — the canon brand default (DECISION-2026-005), shared with
-        // the SCR1B3 editor. Cool near-black hull, off-white text, one teal
-        // accent. Mirrors assets/themes/wired-noir.toml so the hard-coded
-        // fallback looks identical to the bundled default.
+        // Itasha.Corp — the house brand default, shared by every Itasha.Corp
+        // app. Brand primaries: electric purple #7700FF + spring green #00FF90.
+        // Mirrors assets/themes/itasha-corp.toml so the hard-coded fallback
+        // looks identical to the bundled default.
         Theme {
-            name: "Wired Noir (builtin)".into(),
+            name: "Itasha.Corp (builtin)".into(),
             author: "Itasha.Corp".into(),
-            background: row("#070a0c"),
-            foreground: row("#c8d6dc"),
-            cursor: row("#34e0d0"),
-            cursor_text: row("#070a0c"),
-            selection_background: row("#163a40"),
-            selection_foreground: row("#c8d6dc"),
+            background: row("#0b0613"),
+            foreground: row("#e8e6f0"),
+            cursor: row("#00ff90"),
+            cursor_text: row("#0b0613"),
+            selection_background: row("#33106b"),
+            selection_foreground: row("#e8e6f0"),
             normal: AnsiRow {
-                black: "#0e1417".into(),
-                red: "#ff3b30".into(),
-                green: "#6fb89a".into(),
-                yellow: "#f2b33d".into(),
-                blue: "#79a0b0".into(),
-                magenta: "#9d8bbf".into(),
-                cyan: "#34e0d0".into(),
-                white: "#c8d6dc".into(),
+                black: "#1b1530".into(),
+                red: "#ff3b5c".into(),
+                green: "#00ff90".into(),
+                yellow: "#ffc44d".into(),
+                blue: "#7700ff".into(),
+                magenta: "#b44dff".into(),
+                cyan: "#00ffc8".into(),
+                white: "#e8e6f0".into(),
             },
             bright: AnsiRow {
-                black: "#5a6b73".into(),
-                red: "#ff5c52".into(),
-                green: "#8da88c".into(),
-                yellow: "#c9a86a".into(),
-                blue: "#a9c2cc".into(),
-                magenta: "#b8a6d4".into(),
-                cyan: "#5cebdb".into(),
-                white: "#e6eef2".into(),
+                black: "#4a4366".into(),
+                red: "#ff6f88".into(),
+                green: "#5cffb4".into(),
+                yellow: "#ffd57a".into(),
+                blue: "#9a4dff".into(),
+                magenta: "#cf8aff".into(),
+                cyan: "#5cffda".into(),
+                white: "#ffffff".into(),
             },
         }
     }
@@ -189,6 +189,8 @@ mod tests {
     fn builtin_theme_is_valid() {
         let t = Theme::builtin_void();
         assert!(t.validate().is_ok());
-        assert_eq!(t.ansi(6), (0x34, 0xe0, 0xd0)); // cyan = WIRED-NOIR TEAL
+        assert_eq!(t.ansi(6), (0x00, 0xff, 0xc8)); // cyan = brand mint
+        assert_eq!(t.ansi(4), (0x77, 0x00, 0xff)); // blue = brand purple #7700FF
+        assert_eq!(t.ansi(2), (0x00, 0xff, 0x90)); // green = brand green #00FF90
     }
 }
