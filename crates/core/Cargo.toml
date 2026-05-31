@@ -17,6 +17,10 @@ vte = "0.15"
 portable-pty = "0.8"
 regex = "1"
 sysinfo = "0.39"
+# PNG decoding for the Kitty graphics protocol (f=100). Default features are
+# disabled and only the `png` codec is enabled to keep the dependency surface
+# minimal — Kitty f=24/f=32 are decoded in-house and need no codec.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 toml.workspace = true
