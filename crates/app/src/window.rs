@@ -3259,6 +3259,18 @@ impl App {
         // they lock the focused terminal.
         let cursor_quads = self.cursor_quads(focused, &cells, border, &laid_out_strip, accent);
 
+        // Programming-ligatures toggle. The grid is monospace by default
+        // (`Shaping::Basic` — every char maps 1:1 to its own glyph, preserving
+        // strict cell fidelity). When the user opts in via `ligatures = true`,
+        // the grid runs `Shaping::Advanced` (rustybuzz), so a ligature font
+        // (Fira Code / Cascadia Code) forms `->`, `=>`, `!=`, … Captured before
+        // the `&mut self.gpu` borrow so `self.config` stays accessible.
+        let grid_shaping = if self.config.ligatures {
+            Shaping::Advanced
+        } else {
+            Shaping::Basic
+        };
+
         let Some(gpu) = &mut self.gpu else { return };
         let width = gpu.surface_config.width as f32;
 
@@ -3293,7 +3305,7 @@ impl App {
                     )
                 }),
                 &default_attrs,
-                Shaping::Advanced,
+                grid_shaping,
                 None,
             );
             buf.shape_until_scroll(fs, false);
