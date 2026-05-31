@@ -70,6 +70,8 @@ mod image_render;
 mod pane_render;
 mod screenshot;
 mod update;
+#[cfg(windows)]
+mod win_snap;
 mod window;
 pub use window::run_gui;
 

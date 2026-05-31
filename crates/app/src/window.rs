@@ -2482,6 +2482,37 @@ impl App {
         width - BUTTONS_CELLS * CELL_W - BTN_RIGHT_MARGIN
     }
 
+    /// D4 (Windows): install the custom-frame Aero-Snap subclass on `window`.
+    /// Extracts the HWND via winit's raw-window-handle re-export and hands
+    /// `win_snap` the chrome geometry (title-bar height, resize-border band, and
+    /// caption-button cluster width) so the native hit-test matches what the
+    /// renderer draws. Not compiled off Windows; a missing handle is non-fatal.
+    #[cfg(windows)]
+    fn install_snap(&self, window: &Window) {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = window.window_handle() else {
+            return;
+        };
+        if let RawWindowHandle::Win32(h) = handle.as_raw() {
+            let hwnd: isize = h.hwnd.get();
+            let buttons_w = (BUTTONS_CELLS * CELL_W + BTN_RIGHT_MARGIN).ceil() as i32;
+            // SAFETY: hwnd is the live top-level window winit just created; we
+            // install exactly once (resumed() early-returns once gpu exists).
+            unsafe {
+                crate::win_snap::install(
+                    hwnd,
+                    TITLEBAR_H as i32,
+                    RESIZE_BORDER as i32,
+                    buttons_w,
+                );
+            }
+        }
+    }
+
+    /// Non-Windows: no custom frame to install.
+    #[cfg(not(windows))]
+    fn install_snap(&self, _window: &Window) {}
+
     /// Capture the live window geometry into `self.config.window` and persist
     /// it to the config file (D2). Best-effort: a failed `outer_position()`
     /// (e.g. Wayland) just skips the position. Only the geometry fields are
@@ -2624,6 +2655,11 @@ impl ApplicationHandler for App {
                 attrs.with_inner_size(winit::dpi::LogicalSize::new(width as f64, height as f64));
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+
+        // D4 (Windows): re-enable Aero Snap / maximize animations on the
+        // frameless window by installing the custom-frame subclass. No-op off
+        // Windows; a missing handle is non-fatal (the window just lacks snap).
+        self.install_snap(&window);
 
         let gpu = match pollster::block_on(Gpu::new(window.clone(), self.config.font.size)) {
             Ok(g) => g,
