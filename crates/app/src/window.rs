@@ -1137,7 +1137,7 @@ impl App {
             .active_tab()
             .map(|t| if t.layout.leaf_count() > 1 { BORDER_PX } else { 0 })
             .unwrap_or(0);
-        let (ox, oy) = leaf_text_origin(cell, border, 8.0, 2.0);
+        let (ox, oy) = leaf_text_origin(cell, border, self.config.window.padding as f32, 2.0);
         if (px as f32) < ox || (py as f32) < oy {
             return None;
         }
@@ -1280,7 +1280,7 @@ impl App {
             .active_tab()
             .map(|t| if t.layout.leaf_count() > 1 { BORDER_PX } else { 0 })
             .unwrap_or(0);
-        let (ox, oy) = leaf_text_origin(cell, border, 8.0, 2.0);
+        let (ox, oy) = leaf_text_origin(cell, border, self.config.window.padding as f32, 2.0);
         // 1-based cell coordinates, clamped to the cell's grid extent.
         let col = (((px as f32 - ox) / CELL_W).floor() as i64).max(0) as usize + 1;
         let row = (((py as f32 - oy) / LINE_HEIGHT).floor() as i64).max(0) as usize + 1;
@@ -1323,7 +1323,7 @@ impl App {
             .active_tab()
             .map(|t| if t.layout.leaf_count() > 1 { BORDER_PX } else { 0 })
             .unwrap_or(0);
-        let (ox, oy) = leaf_text_origin(cell, border, 8.0, 2.0);
+        let (ox, oy) = leaf_text_origin(cell, border, self.config.window.padding as f32, 2.0);
         if (px as f32) < ox || (py as f32) < oy {
             return None;
         }
@@ -1385,7 +1385,7 @@ impl App {
         } else {
             0.0
         };
-        let (ox, oy) = leaf_text_origin(cell, border, 8.0, 2.0 + strip_top);
+        let (ox, oy) = leaf_text_origin(cell, border, self.config.window.padding as f32, 2.0 + strip_top);
         let x = (ox + col as f32 * CELL_W) as i32;
         let y = (oy + row as f32 * LINE_HEIGHT) as i32;
         let cw = CELL_W.ceil() as i32;
@@ -2242,7 +2242,7 @@ impl App {
         } else {
             0.0
         };
-        let (ox, oy) = leaf_text_origin(cell, BORDER_PX, 8.0, 2.0 + strip);
+        let (ox, oy) = leaf_text_origin(cell, BORDER_PX, self.config.window.padding as f32, 2.0 + strip);
         if let Ok(t) = s.terminal().lock() {
             let rows = t.grid().rows();
             let window_start = t.scrollback_len().saturating_sub(t.view_offset());
@@ -3586,6 +3586,9 @@ impl App {
         let fg = self.fg_color();
         let accent = self.accent_color();
         let bg = self.bg_color();
+        // Configurable grid content padding (captured before the &mut gpu borrow
+        // so the render-loop call sites match the hit-test sites above).
+        let content_pad = self.config.window.padding as f32;
         let signal_red = GColor::rgb(255, 0, 64);
         let to_rgba = |c: GColor| {
             [
@@ -3934,7 +3937,7 @@ impl App {
                 } else {
                     0.0
                 };
-                let (lx, ly) = leaf_text_origin(*cell, border, 8.0, 2.0 + strip_top);
+                let (lx, ly) = leaf_text_origin(*cell, border, content_pad, 2.0 + strip_top);
                 areas.push(TextArea {
                     buffer: buf,
                     left: lx,
@@ -4040,7 +4043,7 @@ impl App {
             } else {
                 0.0
             };
-            let (ox, oy) = leaf_text_origin(*cell, border, 8.0, 2.0 + strip_top);
+            let (ox, oy) = leaf_text_origin(*cell, border, content_pad, 2.0 + strip_top);
             let cw = CELL_W.ceil() as i32;
             let ch = LINE_HEIGHT.ceil() as i32;
             for (r, c, rgba) in bgs {
@@ -4058,7 +4061,7 @@ impl App {
             } else {
                 0.0
             };
-            let (ox, oy) = leaf_text_origin(*cell, border, 8.0, 2.0 + strip_top);
+            let (ox, oy) = leaf_text_origin(*cell, border, content_pad, 2.0 + strip_top);
             let cw = CELL_W.ceil() as i32;
             let ch = LINE_HEIGHT.ceil() as i32;
             for (r, c, style, strikeout, rgba) in decos {
@@ -4068,7 +4071,18 @@ impl App {
                 let uy = y + ch - 2;
                 match style {
                     U::None => {}
-                    U::Single | U::Curly => chrome.push(ColorRect::new(x, uy, cw, 1, *rgba)),
+                    U::Single => chrome.push(ColorRect::new(x, uy, cw, 1, *rgba)),
+                    U::Curly => {
+                        // Undercurl approximation: a 1px zigzag alternating
+                        // between two adjacent rows every 2px (nvim LSP squiggle).
+                        let mut dx = 0;
+                        while dx < cw {
+                            let w = 2.min(cw - dx);
+                            let yo = if (dx / 2) % 2 == 0 { uy } else { uy - 1 };
+                            chrome.push(ColorRect::new(x + dx, yo, w, 1, *rgba));
+                            dx += 2;
+                        }
+                    }
                     U::Double => {
                         chrome.push(ColorRect::new(x, y + ch - 3, cw, 1, *rgba));
                         chrome.push(ColorRect::new(x, y + ch - 1, cw, 1, *rgba));
@@ -4102,7 +4116,7 @@ impl App {
                 } else {
                     0.0
                 };
-                let (ox, oy) = leaf_text_origin(*cell, border, 8.0, 2.0 + strip_top);
+                let (ox, oy) = leaf_text_origin(*cell, border, content_pad, 2.0 + strip_top);
                 let cw = CELL_W.ceil() as i32;
                 let ch = LINE_HEIGHT.ceil() as i32;
                 // Grid column count derived from the cell width (full-line wash
