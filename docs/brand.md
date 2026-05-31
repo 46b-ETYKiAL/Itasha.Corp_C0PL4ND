@@ -13,21 +13,21 @@ since before the network had a name.
 
 ## Palette
 
+The two **brand primaries** below are the house colors of **every Itasha.Corp
+app** and the foundation of the default theme (`assets/themes/itasha-corp.toml`).
 Use **only** these hexes. No tints, no off-palette greys.
 
 | Role | Name | Hex | Usage |
 |------|------|-----|-------|
-| Background | Void Black | `#08060d` | Canvas, terminal body, plate fills. The default surface. |
-| Primary accent | Signal Teal | `#00e5ff` | Wordmark, prompt chevron, primary text/glyphs, links. |
-| Secondary accent | Neon Pink | `#e020ff` | Chromatic-aberration offset, "local-first" chip, error/link highlights. |
-| Tertiary accent | Operator Violet | `#a020ff` | Rings, frames, grid lines, registration ticks, structural lines. |
-| Status / success | Status Teal | `#00ffb3` | Cursor block, OK states, prompt user segment, success chips. |
-| Alert | Signal Red | `#ff0040` | Errors, kill states, the red window dot. Use sparingly. |
-| Light foreground | Ghost Paper | `#f0eef5` | Body copy on void black, terminal output text, taglines. |
+| **Brand primary — "Itasha"** | Itasha Purple | `#7700FF` | The `Itasha` half of the wordmark; structural accent — rings, frames, grid lines, links, the secondary chrome voice. |
+| **Brand primary — ".Corp"** | Corp Green | `#00FF90` | The `.Corp` half of the wordmark; the live/cursor voice — cursor block, prompt chevron, primary accent, OK/success states. |
+| Background | Void Black | `#0b0613` | Canvas, terminal body, plate fills. The default surface (a deep purple-black). |
+| Alert | Signal Red | `#ff3b5c` | Errors, kill states, the red window dot. Use sparingly. |
+| Light foreground | Ghost Paper | `#e8e6f0` | Body copy on void black, terminal output text, taglines. |
 
 ### Quick contrast rules
-- Foreground text on Void Black: **Ghost Paper** for prose, **Signal Teal** for emphasis.
-- Never place Operator Violet text directly on Void Black at body size — it is a *structural* color (lines, rings), not a text color.
+- Foreground text on Void Black: **Ghost Paper** for prose, **Corp Green** for live emphasis, **Itasha Purple** for structure.
+- The two primaries carry equal weight: **Corp Green** is the *living* accent (cursor, prompt, success), **Itasha Purple** is the *structural* accent (frames, links, the secondary voice). Don't let one drown the other.
 - Signal Red is reserved for genuine alert/error semantics. It is not decoration.
 
 ---
@@ -37,9 +37,14 @@ Use **only** these hexes. No tints, no off-palette greys.
 - **Family:** monospace / terminal first — `Courier New`, `DejaVu Sans Mono`,
   or any installed terminal mono. The product *is* a shell; the type should
   feel like fixed-cell output.
-- **Wordmark "C0PL4ND":** blocky, bold (700), wide letter-spacing (4–6).
+- **Corporate wordmark "Itasha.Corp":** always **two-tone** — `Itasha` in
+  **Itasha Purple `#7700FF`** and `.Corp` in **Corp Green `#00FF90`** (the dot
+  stays with `.Corp`). This split is the single most recognisable brand cue and
+  is mandatory wherever the company name appears (about screens, footers,
+  attributions, social cards). Never render `Itasha.Corp` in one flat color.
+- **Product wordmark "C0PL4ND":** blocky, bold (700), wide letter-spacing (4–6).
   Note the leetspeak spelling — `0` for O, `4` for A. Always render it as
-  `C0PL4ND`, never `COPLAND`.
+  `C0PL4ND`, never `COPLAND`. Drawn in Corp Green (the live accent).
 - **Tagline:** lowercase, mono, Ghost Paper — *"the operator's shell into the wired"*.
 - **Eyebrow / system lines:** prefix with a prompt token `> ` and use
   Status Teal or Signal Teal, small caps-feel via letter-spacing.

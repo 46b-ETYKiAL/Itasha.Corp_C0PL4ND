@@ -867,7 +867,7 @@ impl App {
         }
         names.sort();
         if names.is_empty() {
-            names.push("wired-noir".to_string());
+            names.push("itasha-corp".to_string());
         }
         names
     }

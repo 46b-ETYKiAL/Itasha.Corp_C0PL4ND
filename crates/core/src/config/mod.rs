@@ -223,7 +223,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            theme: "wired-noir".to_string(),
+            theme: "itasha-corp".to_string(),
             font: FontConfig::default(),
             scrollback_lines: 10_000,
             opacity: 1.0,
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn defaults_are_sane_and_valid() {
         let c = Config::default();
-        assert_eq!(c.theme, "wired-noir");
+        assert_eq!(c.theme, "itasha-corp");
         assert_eq!(c.scrollback_lines, 10_000);
         assert!(c.validate().is_ok());
     }
@@ -397,6 +397,6 @@ mod tests {
         let c = Config::from_toml("ligatures = true\n", &p).unwrap();
         assert!(c.ligatures);
         // Untouched fields keep their defaults.
-        assert_eq!(c.theme, "wired-noir");
+        assert_eq!(c.theme, "itasha-corp");
     }
 }
