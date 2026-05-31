@@ -14,6 +14,12 @@ serde.workspace = true
 serde_json = "1"
 toml.workspace = true
 vte = "0.15"
+# PINNED to 0.8.x deliberately. 0.9.0 drops the unmaintained `serial` dep
+# (RUSTSEC-2017-0008) for `serial2`, but is KNOWN-BROKEN on Windows —
+# ConPTY `pty.read` returns garbage / the shell round-trip hangs
+# (wezterm/wezterm#6783, OPEN as of 2026-05). The serial advisory is tracked
+# as an accepted risk in .cargo/audit.toml; bump to >=0.9.x only once #6783 is
+# fixed and the Windows PTY round-trip verifies green.
 portable-pty = "0.8"
 regex = "1"
 # East-Asian / wide-character width lookup (wcwidth). Pure data table, no
