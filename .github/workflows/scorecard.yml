@@ -8,8 +8,15 @@ on:
   branch_protection_rule:
   schedule:
     - cron: "31 5 * * 2"
-  push:
-    branches: [main, master]
+  # NOTE: intentionally NOT triggered on push. Scorecard's SAST check scores how
+  # many recent merged-PR head commits carry a COMPLETED CodeQL run. A
+  # push-triggered Scorecard fires the instant a PR merges — before CodeQL
+  # finishes analysing that merge commit — so it transiently counts the newest
+  # commit(s) as "unscanned" and drops SAST to 9/10 (a false-negative race,
+  # aggravated by admin-merges that don't wait for checks). The weekly schedule
+  # + workflow_dispatch run Scorecard once coverage has settled, keeping SAST a
+  # stable 10/10. Re-run on demand:
+  #   gh workflow run "Scorecard supply-chain security" --ref master
   workflow_dispatch:
 
 permissions: read-all
