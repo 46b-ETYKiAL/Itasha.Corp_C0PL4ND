@@ -3125,14 +3125,22 @@ impl ApplicationHandler for App {
                 // Finalize an in-progress mouse text selection: stop extending
                 // but keep the selection so it can be copied. A zero-area
                 // selection (a plain click, no drag) is dropped.
+                let mut finalized = false;
                 if let Some(sel) = &mut self.selection {
                     if sel.active {
                         sel.active = false;
                         if sel.anchor == sel.head {
                             self.selection = None;
+                        } else {
+                            finalized = true;
                         }
                         self.request_redraw();
                     }
+                }
+                // X11-style copy-on-select (opt-in, default off): copy the moment
+                // the drag ends. Write-only.
+                if finalized && self.config.copy_on_select {
+                    self.copy_selection();
                 }
                 // Clear any caption-button press state (drops the active-state
                 // backplate back to hover/none).

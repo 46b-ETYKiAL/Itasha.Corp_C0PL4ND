@@ -209,6 +209,10 @@ pub struct Config {
     /// `!=`) and complex scripts render. Defaults to `false` so monospace grid
     /// alignment is preserved unless the user opts in.
     pub ligatures: bool,
+    /// Automatically copy a mouse text selection to the clipboard the moment
+    /// the drag ends (X11-style "copy on select"). Write-only. Defaults to
+    /// `false` — copy stays an explicit Ctrl/Cmd+Shift+C unless opted in.
+    pub copy_on_select: bool,
 }
 
 impl Default for Config {
@@ -226,6 +230,7 @@ impl Default for Config {
             startup_panel: true,
             shell: None,
             ligatures: false,
+            copy_on_select: false,
         }
     }
 }
