@@ -59,7 +59,28 @@ pub struct LeafView {
     /// default shell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// Optional captured scrollback for this cell, as inert plain-text lines.
+    ///
+    /// **Default `None`** — scrollback is NOT persisted by the data model
+    /// defaults. Capture is opt-in and wired by the app layer (security: a
+    /// terminal's scrollback can contain echoed secrets, so persisting it is
+    /// always an explicit user choice, not a default). When present, the lines
+    /// are inert text the app replays above a fresh prompt; the loader never
+    /// executes them. The app SHOULD cap captured lines to
+    /// [`SCROLLBACK_MAX_LINES`] at capture time; the loader also clamps on
+    /// load as defense-in-depth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrollback: Option<Vec<String>>,
 }
+
+/// Default cap on persisted scrollback lines per leaf.
+///
+/// The app SHOULD enforce this at *capture* time (so a hostile/huge terminal
+/// cannot bloat the state file); [`LeafView::normalize`] also truncates an
+/// over-cap `scrollback` on *load* as a second line of defense, mirroring the
+/// `MAX_PANES` cap discipline. Chosen to match the research dossier's suggested
+/// `scrollback_max_lines = 2000`.
+pub const SCROLLBACK_MAX_LINES: usize = 2000;
 
 impl LeafView {
     /// A single-tab leaf with no cwd/profile override (the default cell).
@@ -70,10 +91,14 @@ impl LeafView {
             active: 0,
             cwd: None,
             profile: None,
+            scrollback: None,
         }
     }
 
-    /// A leaf carrying explicit launch intent.
+    /// A leaf carrying explicit launch intent (no scrollback).
+    ///
+    /// Scrollback defaults to `None`; use [`LeafView::with_scrollback`] to
+    /// attach captured lines when the app's opt-in scrollback flag is set.
     #[must_use]
     pub fn new(
         tab_count: usize,
@@ -86,8 +111,31 @@ impl LeafView {
             active,
             cwd,
             profile,
+            scrollback: None,
         }
     }
+
+    /// Attach (or clear) captured scrollback lines, returning the updated leaf.
+    ///
+    /// The app calls this only when its opt-in scrollback persistence is
+    /// enabled. Lines are truncated to [`SCROLLBACK_MAX_LINES`] (keeping the
+    /// most-recent tail) so a single over-large terminal cannot bloat the
+    /// state file.
+    #[must_use]
+    pub fn with_scrollback(mut self, scrollback: Option<Vec<String>>) -> Self {
+        self.scrollback = scrollback.map(cap_scrollback);
+        self
+    }
+}
+
+/// Truncate `lines` to the most-recent [`SCROLLBACK_MAX_LINES`] (the tail is
+/// the useful end of scrollback). A no-op when already within the cap.
+fn cap_scrollback(mut lines: Vec<String>) -> Vec<String> {
+    if lines.len() > SCROLLBACK_MAX_LINES {
+        let drop = lines.len() - SCROLLBACK_MAX_LINES;
+        lines.drain(0..drop);
+    }
+    lines
 }
 
 /// A node in the persisted tree: either a split (axis + weighted children) or a
@@ -311,6 +359,222 @@ pub fn load_strict(path: &Path) -> Result<RestoredLayout, LoadError> {
     snap.restore()
 }
 
+// --- multi-tab workspace ---------------------------------------------------
+
+/// A versioned, multi-window-tab workspace: an ordered list of per-tab
+/// [`LayoutSnapshot`]s plus the active tab index.
+///
+/// The original on-disk format is a single bare [`LayoutSnapshot`] (one window
+/// tab). This wrapper adds the "1–6+ terminals across several window tabs"
+/// case while staying **backward compatible**: a v1 single-`LayoutSnapshot`
+/// file is migrated forward into a 1-tab `WorkspaceSnapshot` on load
+/// ([`WorkspaceSnapshot::from_json`]). The wrapper carries its own
+/// [`WorkspaceSnapshot::VERSION`] so a future format change is detected, never
+/// mis-parsed.
+///
+/// Like [`LayoutSnapshot`], the format is structural data only — the loader
+/// reads it, never executes it — and loading **never panics**: a malformed,
+/// empty, or unknown-version file degrades to a single-default-tab workspace
+/// ([`WorkspaceSnapshot::load`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceSnapshot {
+    /// Workspace format version. Current is [`WorkspaceSnapshot::VERSION`].
+    pub version: u32,
+    /// One [`LayoutSnapshot`] per window tab, in tab order. Always `>= 1` after
+    /// a successful load (an empty list is coerced to a single default tab).
+    pub tabs: Vec<LayoutSnapshot>,
+    /// Index of the active window tab. Clamped into range on load.
+    #[serde(default)]
+    pub active: usize,
+}
+
+impl Default for WorkspaceSnapshot {
+    fn default() -> Self {
+        Self::single_tab()
+    }
+}
+
+impl WorkspaceSnapshot {
+    /// Current workspace (multi-tab) format version. Distinct from
+    /// [`LayoutSnapshot::VERSION`]: the wrapper and the per-tab payload version
+    /// independently. v2 is the first version that carries the multi-tab
+    /// wrapper; v1 is the implicit "bare single [`LayoutSnapshot`]" format that
+    /// migrates forward.
+    pub const VERSION: u32 = 2;
+
+    /// A workspace holding a single trivial single-pane tab (the safe fallback,
+    /// used when no file exists or a file is corrupt).
+    #[must_use]
+    pub fn single_tab() -> Self {
+        let tab = LayoutSnapshot {
+            version: LayoutSnapshot::VERSION,
+            root: NodeView::Leaf {
+                view: LeafView::single(),
+            },
+            focused_ordinal: 0,
+        };
+        WorkspaceSnapshot {
+            version: Self::VERSION,
+            tabs: vec![tab],
+            active: 0,
+        }
+    }
+
+    /// Build a workspace from an ordered list of per-tab [`LayoutSnapshot`]s and
+    /// the active tab index. An empty `tabs` list is coerced to a single
+    /// default tab; `active` is clamped into range.
+    #[must_use]
+    pub fn from_tabs(tabs: Vec<LayoutSnapshot>, active: usize) -> Self {
+        if tabs.is_empty() {
+            return Self::single_tab();
+        }
+        let active = active.min(tabs.len() - 1);
+        WorkspaceSnapshot {
+            version: Self::VERSION,
+            tabs,
+            active,
+        }
+    }
+
+    /// Serialize to pretty JSON. Deterministic / byte-stable for a fixed
+    /// snapshot (no maps, no time, no RNG).
+    pub fn to_json(&self) -> Result<String, LoadError> {
+        serde_json::to_string_pretty(self).map_err(|e| LoadError::Parse(e.to_string()))
+    }
+
+    /// Parse a workspace from JSON, with a **v1 → v2 migration shim**:
+    ///
+    /// 1. Try to parse the multi-tab [`WorkspaceSnapshot`] wrapper. If it parses
+    ///    AND its `version` is understood, validate every tab and return it.
+    /// 2. Otherwise, fall back to parsing a bare [`LayoutSnapshot`] (the v1
+    ///    single-tab format) and wrap it into a 1-tab workspace.
+    ///
+    /// A future unknown wrapper version (not v2, and not a valid bare
+    /// `LayoutSnapshot`) is rejected with [`LoadError::UnsupportedVersion`] so
+    /// the caller falls back rather than mis-reading.
+    pub fn from_json(src: &str) -> Result<Self, LoadError> {
+        // Path 1: the multi-tab wrapper.
+        if let Ok(ws) = serde_json::from_str::<WorkspaceSnapshot>(src) {
+            // Only treat it as a wrapper if it is actually our version; a bare
+            // LayoutSnapshot can also deserialize into this struct's shape only
+            // by coincidence, so the version guard plus the `tabs` presence is
+            // what disambiguates.
+            if ws.version == Self::VERSION {
+                let mut ws = ws;
+                ws.validate_and_normalize()?;
+                return Ok(ws);
+            }
+            // A wrapper-shaped value with an unknown version is a real, future
+            // workspace format we do not understand — reject (→ fallback).
+            if !ws.tabs.is_empty() {
+                return Err(LoadError::UnsupportedVersion(ws.version));
+            }
+        }
+
+        // Path 2: v1 migration — a bare single LayoutSnapshot.
+        let tab = LayoutSnapshot::from_json(src)?;
+        Ok(WorkspaceSnapshot::from_tabs(vec![tab], 0))
+    }
+
+    /// Validate every tab (known version, within [`MAX_PANES`], well-formed
+    /// splits) and clamp `active` into range. Coerces an empty `tabs` list to a
+    /// single default tab so a restored workspace always has a visible tab.
+    fn validate_and_normalize(&mut self) -> Result<(), LoadError> {
+        if self.tabs.is_empty() {
+            *self = Self::single_tab();
+            return Ok(());
+        }
+        for tab in &self.tabs {
+            tab.validate()?;
+        }
+        if self.active >= self.tabs.len() {
+            self.active = self.tabs.len() - 1;
+        }
+        Ok(())
+    }
+
+    /// Reconstruct one [`RestoredLayout`] per tab (fresh ids, no live sessions),
+    /// in tab order, plus the clamped active tab index. The app spawns one fresh
+    /// shell per leaf per restored tab.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first tab's [`LoadError`] if any tab is structurally invalid.
+    pub fn restore_all(&self) -> Result<RestoredWorkspace, LoadError> {
+        if self.tabs.is_empty() {
+            return Ok(RestoredWorkspace::single_tab());
+        }
+        let mut tabs = Vec::with_capacity(self.tabs.len());
+        for tab in &self.tabs {
+            tabs.push(tab.restore()?);
+        }
+        let active = self.active.min(tabs.len() - 1);
+        Ok(RestoredWorkspace { tabs, active })
+    }
+
+    /// Atomically write the workspace to `path` as pretty JSON via the
+    /// crash-safe [`crate::atomic_write::atomic_write`] helper (temp-file +
+    /// rename), creating parent dirs. A crash mid-save leaves the previous file
+    /// intact, never a torn one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::Parse`] if serialization fails or [`LoadError::Io`]
+    /// if the write/rename fails.
+    pub fn save_atomic(&self, path: &Path) -> Result<(), LoadError> {
+        let json = self.to_json()?;
+        crate::atomic_write::atomic_write(path, json.as_bytes())
+            .map_err(|e| LoadError::Io(e.to_string()))
+    }
+
+    /// Load a workspace from `path`. **Never panics**: a missing, unreadable,
+    /// malformed, over-cap, or unknown-version file logs a WARN and returns the
+    /// single-default-tab fallback. A v1 single-`LayoutSnapshot` file is
+    /// migrated forward (see [`WorkspaceSnapshot::from_json`]). Use
+    /// [`WorkspaceSnapshot::load_strict`] to surface the error instead.
+    #[must_use]
+    pub fn load(path: &Path) -> WorkspaceSnapshot {
+        match Self::load_strict(path) {
+            Ok(ws) => ws,
+            Err(e) => {
+                tracing::warn!(
+                    "workspace restore failed ({e}); falling back to a single default tab"
+                );
+                Self::single_tab()
+            }
+        }
+    }
+
+    /// Load a workspace from `path`, returning the [`LoadError`] on failure
+    /// instead of the silent fallback. Used by tests and callers that want to
+    /// surface a corrupt-file message.
+    pub fn load_strict(path: &Path) -> Result<WorkspaceSnapshot, LoadError> {
+        let src = std::fs::read_to_string(path).map_err(|e| LoadError::Io(e.to_string()))?;
+        Self::from_json(&src)
+    }
+}
+
+/// The result of restoring a [`WorkspaceSnapshot`]: one [`RestoredLayout`] per
+/// window tab (in tab order) plus the active tab index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestoredWorkspace {
+    /// One reconstructed layout per window tab, in tab order.
+    pub tabs: Vec<RestoredLayout>,
+    /// Index of the active window tab (always in range).
+    pub active: usize,
+}
+
+impl RestoredWorkspace {
+    /// The trivial single-tab, single-pane workspace (the safe fallback).
+    #[must_use]
+    pub fn single_tab() -> Self {
+        RestoredWorkspace {
+            tabs: vec![RestoredLayout::single_pane()],
+            active: 0,
+        }
+    }
+}
+
 // --- internal recursion helpers -------------------------------------------
 
 /// Recursively build a [`NodeView`] from a live [`LayoutNode`], pulling each
@@ -403,13 +667,18 @@ impl LeafView {
     }
 
     /// Clamp `tab_count`/`active` into a usable range (`tab_count >= 1`,
-    /// `active < tab_count`) so a restored cell always has a visible shell.
+    /// `active < tab_count`) so a restored cell always has a visible shell, and
+    /// truncate an over-cap `scrollback` (defense-in-depth: a hand-edited or
+    /// hostile file cannot make restore replay an unbounded blob).
     fn normalize(&mut self) {
         if self.tab_count == 0 {
             self.tab_count = 1;
         }
         if self.active >= self.tab_count {
             self.active = self.tab_count - 1;
+        }
+        if let Some(sb) = self.scrollback.take() {
+            self.scrollback = Some(cap_scrollback(sb));
         }
     }
 }
@@ -423,6 +692,7 @@ pub fn leaf_view_for(group: &TabGroup, cwd: Option<String>, profile: Option<Stri
         active: group.active.min(group.len().saturating_sub(1)),
         cwd,
         profile,
+        scrollback: None,
     }
 }
 
@@ -659,5 +929,244 @@ mod tests {
         assert_eq!(v.tab_count, 3);
         assert_eq!(v.active, 2);
         assert_eq!(v.cwd.as_deref(), Some("/tmp"));
+        assert!(v.scrollback.is_none(), "scrollback defaults to None");
+    }
+
+    // --- WorkspaceSnapshot (multi-tab) -----------------------------------
+
+    /// Build a single-tab snapshot from a live layout, with per-leaf metadata.
+    fn snap_of(n: usize, meta: impl FnMut(LeafId) -> LeafView) -> LayoutSnapshot {
+        LayoutSnapshot::capture(&grid_of(n), meta)
+    }
+
+    #[test]
+    fn workspace_multi_tab_round_trip_is_structural_and_byte_stable() {
+        // Three window tabs of differing shapes; per-leaf cwd on the middle tab.
+        let tab0 = snap_of(2, |_| LeafView::single());
+        let tab1 = snap_of(3, |id| {
+            LeafView::new(1, 0, Some(format!("/d/{}", id.0)), Some("pwsh".into()))
+        });
+        let tab2 = snap_of(1, |_| LeafView::single());
+        let ws = WorkspaceSnapshot::from_tabs(vec![tab0, tab1, tab2], 1);
+        assert_eq!(ws.version, WorkspaceSnapshot::VERSION);
+        assert_eq!(ws.tabs.len(), 3);
+        assert_eq!(ws.active, 1);
+
+        let json = ws.to_json().expect("serialize");
+        let back = WorkspaceSnapshot::from_json(&json).expect("deserialize");
+        assert_eq!(ws, back, "workspace round-trip must be structurally equal");
+
+        // Byte-stable.
+        let json2 = back.to_json().expect("reserialize");
+        assert_eq!(json, json2, "workspace serde output must be byte-stable");
+
+        // Active index + per-leaf cwd survive a full restore.
+        let restored = back.restore_all().expect("restore");
+        assert_eq!(restored.tabs.len(), 3);
+        assert_eq!(restored.active, 1);
+        assert_eq!(restored.tabs[0].layout.leaf_count(), 2);
+        assert_eq!(restored.tabs[1].layout.leaf_count(), 3);
+        assert_eq!(restored.tabs[2].layout.leaf_count(), 1);
+        // The middle tab's first leaf carries its persisted cwd.
+        let cwd = restored.tabs[1].leaves[0].1.cwd.as_deref();
+        assert!(cwd.is_some() && cwd.unwrap().starts_with("/d/"), "got {cwd:?}");
+    }
+
+    #[test]
+    fn workspace_from_tabs_clamps_active_and_coerces_empty() {
+        // Active out of range clamps to the last tab.
+        let ws = WorkspaceSnapshot::from_tabs(vec![snap_of(1, |_| LeafView::single())], 99);
+        assert_eq!(ws.active, 0);
+
+        // Empty tab list coerces to a single default tab.
+        let ws = WorkspaceSnapshot::from_tabs(vec![], 5);
+        assert_eq!(ws.tabs.len(), 1);
+        assert_eq!(ws.active, 0);
+        assert_eq!(ws.tabs[0].root, NodeView::Leaf { view: LeafView::single() });
+    }
+
+    #[test]
+    fn v1_single_layout_file_migrates_to_one_tab_workspace() {
+        // A v1 file is a BARE LayoutSnapshot (no `tabs`/wrapper).
+        let v1 = snap_of(3, |_| LeafView::single());
+        let v1_json = v1.to_json().expect("serialize v1");
+        // Sanity: the v1 json has no "tabs" key — it is the bare layout format.
+        assert!(!v1_json.contains("\"tabs\""), "v1 file must be the bare layout format");
+
+        let ws = WorkspaceSnapshot::from_json(&v1_json).expect("v1 migrates");
+        assert_eq!(ws.version, WorkspaceSnapshot::VERSION);
+        assert_eq!(ws.tabs.len(), 1, "v1 migrates to a single-tab workspace");
+        assert_eq!(ws.active, 0);
+        // The migrated tab is structurally the original v1 layout.
+        assert_eq!(ws.tabs[0], v1);
+
+        // And it fully restores.
+        let restored = ws.restore_all().expect("restore migrated");
+        assert_eq!(restored.tabs.len(), 1);
+        assert_eq!(restored.tabs[0].layout.leaf_count(), 3);
+    }
+
+    #[test]
+    fn workspace_save_atomic_then_load_round_trips_through_disk() {
+        let ws = WorkspaceSnapshot::from_tabs(
+            vec![
+                snap_of(2, |_| LeafView::single()),
+                snap_of(4, |_| LeafView::single()),
+            ],
+            1,
+        );
+        let tmp = std::env::temp_dir()
+            .join(format!("c0pl4nd-ws-multi-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+
+        ws.save_atomic(&tmp).expect("save_atomic");
+
+        // No sibling .tmp left behind on success.
+        let mut tmp_name = tmp.file_name().unwrap().to_os_string();
+        tmp_name.push(".tmp");
+        let sidecar = tmp.parent().unwrap().join(tmp_name);
+        assert!(!sidecar.exists(), "atomic write must leave no .tmp behind");
+
+        let back = WorkspaceSnapshot::load_strict(&tmp).expect("load_strict");
+        assert_eq!(ws, back);
+        let restored = WorkspaceSnapshot::load(&tmp).restore_all().expect("restore");
+        assert_eq!(restored.tabs.len(), 2);
+        assert_eq!(restored.active, 1);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn workspace_corrupt_file_falls_back_to_single_default_tab() {
+        let tmp = std::env::temp_dir()
+            .join(format!("c0pl4nd-ws-corrupt-{}.json", std::process::id()));
+        std::fs::write(&tmp, "this is { not ] valid json").unwrap();
+
+        // Strict surfaces the parse error.
+        assert!(WorkspaceSnapshot::load_strict(&tmp).is_err());
+
+        // The safe loader degrades to a single default tab, never panics.
+        let ws = WorkspaceSnapshot::load(&tmp);
+        assert_eq!(ws.tabs.len(), 1);
+        assert_eq!(ws.active, 0);
+        let restored = ws.restore_all().expect("restore fallback");
+        assert_eq!(restored.tabs.len(), 1);
+        assert_eq!(restored.tabs[0].layout.leaf_count(), 1);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn workspace_missing_file_falls_back_to_single_default_tab() {
+        let missing = std::env::temp_dir().join("c0pl4nd-ws-absent-xyzzy.json");
+        let _ = std::fs::remove_file(&missing);
+        let ws = WorkspaceSnapshot::load(&missing);
+        assert_eq!(ws.tabs.len(), 1);
+        assert_eq!(ws.active, 0);
+    }
+
+    #[test]
+    fn workspace_unknown_future_version_falls_back() {
+        // A wrapper-shaped file with an unknown future version is rejected →
+        // the safe loader degrades to a single default tab.
+        let json = r#"{ "version": 999, "tabs": [ { "version": 1, "root": { "kind": "leaf", "view": { "tab_count": 1, "active": 0 } }, "focused_ordinal": 0 } ], "active": 0 }"#;
+        assert!(matches!(
+            WorkspaceSnapshot::from_json(json),
+            Err(LoadError::UnsupportedVersion(999))
+        ));
+    }
+
+    #[test]
+    fn workspace_over_cap_tab_is_rejected() {
+        // A tab with > MAX_PANES leaves makes the whole workspace invalid.
+        let mut children = Vec::new();
+        for _ in 0..(MAX_PANES + 1) {
+            children.push(ChildView {
+                flex: 1.0,
+                node: NodeView::Leaf { view: LeafView::single() },
+            });
+        }
+        let bad_tab = LayoutSnapshot {
+            version: LayoutSnapshot::VERSION,
+            root: NodeView::Split { axis: Axis::Horizontal, children },
+            focused_ordinal: 0,
+        };
+        let mut ws = WorkspaceSnapshot {
+            version: WorkspaceSnapshot::VERSION,
+            tabs: vec![bad_tab],
+            active: 0,
+        };
+        let json = serde_json::to_string(&ws).unwrap();
+        assert!(WorkspaceSnapshot::from_json(&json).is_err());
+        // restore_all also refuses.
+        assert!(ws.restore_all().is_err());
+        // validate_and_normalize surfaces it directly.
+        assert!(ws.validate_and_normalize().is_err());
+    }
+
+    // --- scrollback slot -------------------------------------------------
+
+    #[test]
+    fn scrollback_defaults_none_and_round_trips_when_some() {
+        // Default: None, and the field is omitted from JSON entirely.
+        let v = LeafView::single();
+        assert!(v.scrollback.is_none());
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(!json.contains("scrollback"), "None scrollback is skipped: {json}");
+
+        // Some round-trips through serde.
+        let lines = vec!["line 1".to_string(), "line 2".to_string()];
+        let v = LeafView::single().with_scrollback(Some(lines.clone()));
+        assert_eq!(v.scrollback.as_deref(), Some(lines.as_slice()));
+        let json = serde_json::to_string(&v).unwrap();
+        let back: LeafView = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.scrollback, Some(lines));
+    }
+
+    #[test]
+    fn scrollback_is_capped_at_capture_and_on_load() {
+        // with_scrollback caps to SCROLLBACK_MAX_LINES (keeping the tail).
+        let big: Vec<String> = (0..(SCROLLBACK_MAX_LINES + 50))
+            .map(|i| i.to_string())
+            .collect();
+        let v = LeafView::single().with_scrollback(Some(big.clone()));
+        let sb = v.scrollback.as_ref().unwrap();
+        assert_eq!(sb.len(), SCROLLBACK_MAX_LINES, "capped at capture time");
+        // The tail (most-recent lines) is kept.
+        assert_eq!(sb.last().unwrap(), &(SCROLLBACK_MAX_LINES + 49).to_string());
+
+        // A hand-built over-cap leaf is also truncated on load (via restore →
+        // normalize), defending against a hostile/edited file.
+        let over: Vec<String> = (0..(SCROLLBACK_MAX_LINES + 10))
+            .map(|i| i.to_string())
+            .collect();
+        let leaf = LeafView {
+            tab_count: 1,
+            active: 0,
+            cwd: None,
+            profile: None,
+            scrollback: Some(over),
+        };
+        let snap = LayoutSnapshot {
+            version: LayoutSnapshot::VERSION,
+            root: NodeView::Leaf { view: leaf },
+            focused_ordinal: 0,
+        };
+        let restored = snap.restore().expect("restore");
+        let loaded_sb = restored.leaves[0].1.scrollback.as_ref().unwrap();
+        assert_eq!(loaded_sb.len(), SCROLLBACK_MAX_LINES, "capped on load");
+    }
+
+    #[test]
+    fn scrollback_survives_full_workspace_round_trip() {
+        let lines = vec!["$ echo hi".to_string(), "hi".to_string()];
+        let tab = LayoutSnapshot::capture(&Layout::new(), |_| {
+            LeafView::single().with_scrollback(Some(lines.clone()))
+        });
+        let ws = WorkspaceSnapshot::from_tabs(vec![tab], 0);
+        let json = ws.to_json().unwrap();
+        let back = WorkspaceSnapshot::from_json(&json).unwrap();
+        let restored = back.restore_all().unwrap();
+        assert_eq!(restored.tabs[0].leaves[0].1.scrollback, Some(lines));
     }
 }

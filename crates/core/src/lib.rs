@@ -6,6 +6,7 @@
 //! seam is deliberately UI-free so a platform-native shell can be layered on
 //! later without re-architecting the engine.
 
+pub mod atomic_write;
 pub mod config;
 pub mod fetch;
 pub mod fuzzy;
