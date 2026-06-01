@@ -10,21 +10,43 @@ description = "C0PL4ND — a fast, local-first, GPU-accelerated terminal emulato
 name = "c0pl4nd"
 path = "src/main.rs"
 
+# Milestone 1: the modern eframe/egui chrome shell, shipped as a SEPARATE binary
+# so the existing winit-driven `c0pl4nd` binary keeps building and shipping. The
+# terminal grid is a placeholder here; Milestone 2 wires real glyphon panes via
+# egui-wgpu paint callbacks. See `.s4f3-data/recon-c0pl4nd-egui-modernization.md`.
+[[bin]]
+name = "c0pl4nd-egui"
+path = "src/egui_main.rs"
+
 [dependencies]
 c0pl4nd-core = { path = "../core" }
 c0pl4nd-renderer = { path = "../renderer" }
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-winit = "0.30"
-wgpu = "29"
-glyphon = "0.11"
+serde.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+glyphon.workspace = true
 pollster = "0.4"
 ureq = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 # BiDi/RTL: Unicode Bidirectional Algorithm for per-row visual reordering of
 # terminal text (right-to-left scripts). Already in the lock graph transitively.
 unicode-bidi = "0.3"
+
+# --- egui chrome bundle (Milestone 1) ---
+eframe.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui_tiles.workspace = true
+egui-phosphor.workspace = true
+window-vibrancy.workspace = true
+
+[dev-dependencies]
+# Headless egui UI tests (kittest = AccessKit-driven). State-assertion tests run
+# everywhere; pixel snapshots are deliberately kept out of CI for now (recon §7).
+egui_kittest = { version = "0.34", features = ["wgpu", "snapshot"] }
 
 # D4 (Windows-only): Win32 custom-frame Aero Snap on the frameless window.
 # Used solely by the `#[cfg(windows)]` `win_snap` module; not linked elsewhere.
