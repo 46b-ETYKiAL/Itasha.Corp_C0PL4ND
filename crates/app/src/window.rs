@@ -363,6 +363,7 @@ enum TitlebarHit {
 enum TabZone {
     Tab(usize),
     NewTab,
+    Settings,
 }
 
 struct Gpu {
@@ -3378,6 +3379,7 @@ impl ApplicationHandler for App {
                     match zone {
                         TabZone::Tab(i) => self.activate_tab(i),
                         TabZone::NewTab => self.spawn_tab(),
+                        TabZone::Settings => self.open_settings_panel(),
                     }
                     return;
                 }
@@ -4150,7 +4152,12 @@ impl App {
             }
             let plus = "  +  ".to_string();
             zone_bytes.push((TabZone::NewTab, byte_off, byte_off + plus.len()));
+            byte_off += plus.len();
             chrome_spans.push((plus, accent));
+            // Clickable settings affordance (opens the in-app settings overlay).
+            let gear = "  \u{2699}  ".to_string();
+            zone_bytes.push((TabZone::Settings, byte_off, byte_off + gear.len()));
+            chrome_spans.push((gear, muted));
         }
         gpu.chrome_buffer.set_rich_text(
             &mut gpu.font_system,
