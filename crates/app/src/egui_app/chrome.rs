@@ -20,6 +20,12 @@ pub struct ChromeActions {
     pub split_down: bool,
     /// User toggled the settings window.
     pub toggle_settings: bool,
+    /// User clicked a caption button (minimize / maximize / close). Routed
+    /// through the action struct (instead of sending the `ViewportCommand`
+    /// inline) so `frame_tick` is the single place that issues the real OS
+    /// command AND records it for the interaction tests to observe — a click on
+    /// the real button thus has an assertable outcome without a window.
+    pub window_cmd: Option<super::WindowCmd>,
 }
 
 impl C0pl4ndApp {
@@ -43,9 +49,7 @@ impl C0pl4ndApp {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
             if title_resp.double_clicked() {
-                let is_max = ui.input(|i| i.viewport().maximized.unwrap_or(false));
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                actions.window_cmd = Some(super::WindowCmd::ToggleMaximize);
             }
 
             ui.separator();
@@ -78,16 +82,13 @@ impl C0pl4ndApp {
             // ---- right-aligned caption controls ----
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("✕").on_hover_text("close").clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    actions.window_cmd = Some(super::WindowCmd::Close);
                 }
                 if ui.button("◻").on_hover_text("maximize").clicked() {
-                    let is_max = ui.input(|i| i.viewport().maximized.unwrap_or(false));
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                    actions.window_cmd = Some(super::WindowCmd::ToggleMaximize);
                 }
                 if ui.button("—").on_hover_text("minimize").clicked() {
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    actions.window_cmd = Some(super::WindowCmd::Minimize);
                 }
                 if ui.button("⚙").on_hover_text("settings").clicked() {
                     actions.toggle_settings = true;

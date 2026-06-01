@@ -119,11 +119,19 @@ pub fn split_focused(
     let Some(focus_tile) = tile_of_pane(tree, focus) else {
         return false;
     };
+    // Capture the focused tile's parent NOW, before we create any wrapper
+    // container. Critical: `insert_container([focus_tile, new_tile])` makes
+    // `focus_tile` a child of the new container WHILE it is still a child of its
+    // original parent, so a later `parent_of(focus_tile)` would be ambiguous and
+    // return whichever parent HashMap iteration hits first — corrupting the tree
+    // (the wrapper gets orphaned, then egui_tiles' simplify GCs the new pane).
+    // This was the split-down "adds no pane" bug, caught by interaction tests.
+    let orig_parent = tree.tiles.parent_of(focus_tile);
     let new_tile = tree.tiles.insert_pane(Pane::new(new_pane));
 
     // If the focused tile's parent is a linear container of the same direction,
     // append into it — egui_tiles keeps the existing fractions.
-    if let Some(parent) = tree.tiles.parent_of(focus_tile) {
+    if let Some(parent) = orig_parent {
         if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(lin))) =
             tree.tiles.get(parent)
         {
@@ -141,25 +149,29 @@ pub fn split_focused(
         }
     }
 
-    // Otherwise wrap the focused tile in a new linear container.
+    // Otherwise wrap the focused tile in a new linear container, then relink the
+    // ORIGINAL parent's slot (captured above) to point at the wrapper.
     let container = tree
         .tiles
         .insert_container(egui_tiles::Linear::new(dir, vec![focus_tile, new_tile]));
-    swap_tile_in_parent(tree, focus_tile, container);
+    match orig_parent {
+        // The focused tile was the root: the wrapper becomes the new root.
+        None => tree.root = Some(container),
+        // Replace focus_tile with the wrapper in the captured parent's children.
+        Some(parent) => replace_child_in_parent(tree, parent, focus_tile, container),
+    }
     true
 }
 
-/// Replace `old`'s slot in its parent (or the root pointer) with `new`. Used by
-/// [`split_focused`] when the focused tile must be wrapped in a new container.
-/// `Tree::root` and `Tree::tiles` are public fields on `egui_tiles::Tree`.
-fn swap_tile_in_parent(tree: &mut egui_tiles::Tree<Pane>, old: TileId, new: TileId) {
-    if tree.root == Some(old) {
-        tree.root = Some(new);
-        return;
-    }
-    let Some(parent) = tree.tiles.parent_of(old) else {
-        return;
-    };
+/// Replace child `old` with `new` in `parent`'s children. Takes the parent
+/// explicitly (the caller captured it before any structural mutation) so this
+/// never calls the now-ambiguous `parent_of`.
+fn replace_child_in_parent(
+    tree: &mut egui_tiles::Tree<Pane>,
+    parent: TileId,
+    old: TileId,
+    new: TileId,
+) {
     if let Some(egui_tiles::Tile::Container(container)) = tree.tiles.get_mut(parent) {
         match container {
             egui_tiles::Container::Linear(lin) => {
@@ -286,6 +298,56 @@ mod tests {
         let applied = split_focused(&mut tree, PaneId(0), PaneId(99), LinearDir::Vertical);
         assert!(!applied, "split must refuse at the 6-pane cap");
         assert_eq!(count_panes(&tree), MAX_PANES);
+    }
+
+    #[test]
+    fn split_focused_wrap_path_adds_a_reachable_pane() {
+        // The WRAP path: a 2-pane horizontal root, split one pane DOWN (vertical)
+        // — direction differs from the parent, so split_focused must wrap the
+        // focused tile in a fresh vertical container. The new pane must be in
+        // storage AND reachable from the root (else egui_tiles' simplify GCs it).
+        let mut tree = build_default_grid(&[PaneId(0), PaneId(1)]);
+        assert_eq!(count_panes(&tree), 2);
+        let applied = split_focused(&mut tree, PaneId(0), PaneId(2), LinearDir::Vertical);
+        assert!(
+            applied,
+            "vertical split of a horizontal-parent pane must apply"
+        );
+        assert_eq!(
+            count_panes(&tree),
+            3,
+            "wrap split must add a pane to storage"
+        );
+
+        // Reachability: walk from root; every counted pane must be reachable.
+        let reachable = reachable_pane_count(&tree);
+        assert_eq!(
+            reachable, 3,
+            "all 3 panes must be REACHABLE from the root (got {reachable}); an \
+             unreachable pane is pruned by egui_tiles simplify next frame"
+        );
+    }
+
+    /// Count panes reachable by walking containers from the tree root — distinct
+    /// from `count_panes` (which counts raw storage). A pane in storage but not
+    /// reachable is a latent bug: egui_tiles' `simplify` removes it.
+    fn reachable_pane_count(tree: &egui_tiles::Tree<Pane>) -> usize {
+        fn walk(tree: &egui_tiles::Tree<Pane>, id: egui_tiles::TileId, n: &mut usize) {
+            match tree.tiles.get(id) {
+                Some(egui_tiles::Tile::Pane(_)) => *n += 1,
+                Some(egui_tiles::Tile::Container(c)) => {
+                    for child in c.children() {
+                        walk(tree, *child, n);
+                    }
+                }
+                None => {}
+            }
+        }
+        let mut n = 0;
+        if let Some(root) = tree.root {
+            walk(tree, root, &mut n);
+        }
+        n
     }
 
     #[test]

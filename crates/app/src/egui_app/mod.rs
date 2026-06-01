@@ -22,6 +22,21 @@ use grid::{count_panes, GridBehavior, Pane, PaneId, PaneIdAllocator};
 /// How many placeholder panes the shell opens with on first launch.
 const INITIAL_PANES: usize = 2;
 
+/// A window-level caption command issued by the titlebar buttons. Routed through
+/// [`chrome::ChromeActions`] so [`C0pl4ndApp::frame_tick`] is the single site
+/// that (a) issues the real `egui::ViewportCommand` to the OS and (b) records
+/// the command in [`C0pl4ndApp::last_window_cmd`] so an interaction test can
+/// assert that clicking the real button produced the real effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowCmd {
+    /// Minimize the window.
+    Minimize,
+    /// Toggle maximized/restored.
+    ToggleMaximize,
+    /// Close the window.
+    Close,
+}
+
 /// The modern egui chrome application. Holds the tiling grid, the focused pane,
 /// a settings-window toggle, and a transient status-bar toast.
 pub struct C0pl4ndApp {
@@ -39,6 +54,11 @@ pub struct C0pl4ndApp {
     settings_open: bool,
     /// A transient status-bar message (e.g. "max 6 panes").
     toast: Option<String>,
+    /// The most recent caption command issued (minimize/maximize/close). Set in
+    /// [`Self::frame_tick`] alongside the real `ViewportCommand`, so interaction
+    /// tests can assert that clicking a caption button had its real effect (the
+    /// OS command itself is not observable in a headless harness).
+    last_window_cmd: Option<WindowCmd>,
 }
 
 impl C0pl4ndApp {
@@ -64,7 +84,43 @@ impl C0pl4ndApp {
             focused_pane,
             settings_open: false,
             toast: None,
+            last_window_cmd: None,
         }
+    }
+
+    // ---- public observation surface (production accessors, NOT test-only) ----
+    //
+    // These are real accessors that the `egui_kittest` interaction tests use to
+    // assert observable outcomes after driving the REAL `frame_tick`. They are
+    // deliberately not `#[cfg(test)]` so the test exercises the exact production
+    // path (no test-only mirror that could drift from the real frame loop — that
+    // drift is how "clicking does nothing" ships). `allow(dead_code)` because the
+    // shipping binary does not yet call every accessor (the test crate, compiled
+    // separately via `#[path]`, is the current consumer); they are a deliberate
+    // public observation API, not dead code.
+    #[allow(dead_code)]
+    /// Number of open panes in the grid.
+    pub fn pane_count(&self) -> usize {
+        count_panes(&self.grid_tree)
+    }
+
+    /// Whether the settings window is currently open.
+    #[allow(dead_code)]
+    pub fn settings_is_open(&self) -> bool {
+        self.settings_open
+    }
+
+    /// The currently-focused pane id.
+    #[allow(dead_code)]
+    pub fn focused_pane(&self) -> PaneId {
+        self.focused_pane
+    }
+
+    /// The most recent caption command the user issued (min/max/close), or
+    /// `None` if no caption button has been clicked this session.
+    #[allow(dead_code)]
+    pub fn last_window_cmd(&self) -> Option<WindowCmd> {
+        self.last_window_cmd
     }
 
     /// `(pane_id, title)` for every pane in the grid, in tree order.
@@ -77,72 +133,6 @@ impl C0pl4ndApp {
                 _ => None,
             })
             .collect()
-    }
-
-    // ---- test-only surface ----
-    //
-    // The `egui_kittest` integration test compiles this module via `#[path]`
-    // into a separate test crate (where `cfg(test)` is active), so it cannot
-    // reach the `pub(super)` / private chrome+grid methods. These thin
-    // `#[cfg(test)]` shims expose the exact actions the real frame loop applies,
-    // without widening the production surface (they vanish from the binary).
-    // `allow(dead_code)` because not every test target exercises every shim
-    // (the binary's own unit-test build uses only a subset).
-
-    /// Number of open placeholder panes.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn pane_count(&self) -> usize {
-        count_panes(&self.grid_tree)
-    }
-
-    /// Whether the settings window is open.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn settings_is_open(&self) -> bool {
-        self.settings_open
-    }
-
-    /// Render the titlebar + tab strip (test entry — wraps the chrome method).
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn titlebar_and_tabs_for_test(&self, ui: &mut egui::Ui) -> chrome::ChromeActions {
-        self.titlebar_and_tabs(ui)
-    }
-
-    /// Render the grid (test entry — wraps the private `grid_ui`).
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn grid_ui_for_test(&mut self, ui: &mut egui::Ui) {
-        self.grid_ui(ui);
-    }
-
-    /// Apply a split-right (test entry).
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn split_right_for_test(&mut self) {
-        self.split(egui_tiles::LinearDir::Horizontal);
-    }
-
-    /// Apply a split-down (test entry).
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn split_down_for_test(&mut self) {
-        self.split(egui_tiles::LinearDir::Vertical);
-    }
-
-    /// Toggle the settings window (test entry).
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn toggle_settings_for_test(&mut self) {
-        self.settings_open = !self.settings_open;
-    }
-
-    /// Set the focused pane (test entry).
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn focus_for_test(&mut self, pane_id: PaneId) {
-        self.focused_pane = pane_id;
     }
 
     /// Split the focused pane, allocating a fresh placeholder pane. Refused (with
@@ -301,7 +291,7 @@ impl C0pl4ndApp {
     /// the top-level entry does not provide; `show(ctx)` remains the working
     /// top-level path (same compromise the reference app documents).
     #[allow(deprecated)]
-    fn frame_tick(&mut self, ctx: &egui::Context) {
+    pub fn frame_tick(&mut self, ctx: &egui::Context) {
         // 1) custom titlebar + tab strip
         let actions = egui::TopBottomPanel::top("titlebar")
             .frame(
@@ -338,6 +328,18 @@ impl C0pl4ndApp {
         }
         if actions.toggle_settings {
             self.settings_open = !self.settings_open;
+        }
+        // Caption command: issue the REAL OS viewport command AND record it so an
+        // interaction test can assert the click had its effect.
+        if let Some(cmd) = actions.window_cmd {
+            self.last_window_cmd = Some(cmd);
+            let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            let vp = match cmd {
+                WindowCmd::Minimize => egui::ViewportCommand::Minimized(true),
+                WindowCmd::ToggleMaximize => egui::ViewportCommand::Maximized(!is_max),
+                WindowCmd::Close => egui::ViewportCommand::Close,
+            };
+            ctx.send_viewport_cmd(vp);
         }
 
         // 4) the (opaque) settings window, if open
