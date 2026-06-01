@@ -5003,16 +5003,14 @@ fn zone_highlight_rect(target: LRect, zone: DropZone, rgba: [f32; 4]) -> ColorRe
 }
 
 /// Resolve a cell's foreground [`c0pl4nd_core::Color`] to an RGB triple.
+/// Thin shim over the shared [`Theme::resolve_color`] so this winit shell and
+/// the egui shell resolve colours through the SAME core path.
 fn resolve_fg(
     color: c0pl4nd_core::Color,
     theme: &Theme,
     default_rgb: (u8, u8, u8),
 ) -> (u8, u8, u8) {
-    match color {
-        c0pl4nd_core::Color::Default => default_rgb,
-        c0pl4nd_core::Color::Indexed(i) => theme.ansi(i),
-        c0pl4nd_core::Color::Rgb(r, g, b) => (r, g, b),
-    }
+    theme.resolve_color(color, default_rgb)
 }
 
 /// Resolve a cell's effective `(foreground, Option<background>)` RGB, applying
@@ -5028,19 +5026,9 @@ fn cell_render_colors(
     default_fg: (u8, u8, u8),
     default_bg: (u8, u8, u8),
 ) -> ((u8, u8, u8), Option<(u8, u8, u8)>) {
-    let fg = resolve_fg(cell.fg, theme, default_fg);
-    let bg = match cell.bg {
-        c0pl4nd_core::Color::Default => None,
-        other => Some(resolve_fg(other, theme, default_bg)),
-    };
-    if cell.flags.inverse {
-        // Swap: the (possibly-default) background becomes the foreground, and
-        // the foreground becomes a now-explicit background quad.
-        let eff_bg = bg.unwrap_or(default_bg);
-        (eff_bg, Some(fg))
-    } else {
-        (fg, bg)
-    }
+    // Delegate to the shared core helper so the inverse/reverse-video handling
+    // is defined once and reused by the egui shell.
+    theme.cell_colors(cell, default_fg, default_bg)
 }
 
 /// Reduce a user-supplied workspace name to a safe file stem.

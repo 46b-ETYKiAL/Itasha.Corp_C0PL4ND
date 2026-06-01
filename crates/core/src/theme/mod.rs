@@ -121,6 +121,49 @@ impl Theme {
         parse_hex(s).unwrap_or((255, 255, 255))
     }
 
+    /// Resolve a [`crate::grid::Color`] against this theme to a concrete
+    /// `(r,g,b)` triple. `Color::Default` yields the supplied `default_rgb`
+    /// (the caller's effective default fg or bg, which may itself be swapped
+    /// under DECSCNM reverse-screen). This is the single color-resolution path
+    /// shared by both the winit and egui renderers — neither re-derives it.
+    pub fn resolve_color(
+        &self,
+        color: crate::grid::Color,
+        default_rgb: (u8, u8, u8),
+    ) -> (u8, u8, u8) {
+        match color {
+            crate::grid::Color::Default => default_rgb,
+            crate::grid::Color::Indexed(i) => self.ansi(i),
+            crate::grid::Color::Rgb(r, g, b) => (r, g, b),
+        }
+    }
+
+    /// Resolve a cell's effective `(foreground, Option<background>)` RGB,
+    /// applying SGR inverse/reverse video. The background is `None` when it
+    /// should use the window default (so the renderer can skip painting a quad
+    /// for the common case). For an inverse cell, the effective foreground is
+    /// the cell's background and vice-versa — matching every mainstream terminal
+    /// (selections, `\e[7m`, cursor-on-cell all rely on this). `default_fg` /
+    /// `default_bg` are the effective defaults (already swapped under DECSCNM).
+    pub fn cell_colors(
+        &self,
+        cell: &crate::grid::Cell,
+        default_fg: (u8, u8, u8),
+        default_bg: (u8, u8, u8),
+    ) -> ((u8, u8, u8), Option<(u8, u8, u8)>) {
+        let fg = self.resolve_color(cell.fg, default_fg);
+        let bg = match cell.bg {
+            crate::grid::Color::Default => None,
+            other => Some(self.resolve_color(other, default_bg)),
+        };
+        if cell.flags.inverse {
+            let eff_bg = bg.unwrap_or(default_bg);
+            (eff_bg, Some(fg))
+        } else {
+            (fg, bg)
+        }
+    }
+
     /// Imports an iTerm2 `.itermcolors` plist XML document into a [`Theme`].
     ///
     /// Maps `Ansi 0..15 Color` into the [`AnsiRow`] normal (0-7) and bright
