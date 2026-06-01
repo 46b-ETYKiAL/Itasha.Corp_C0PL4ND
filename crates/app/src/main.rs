@@ -39,7 +39,24 @@ fn main() -> Result<()> {
         return update::run_update();
     }
 
-    let config = Config::default();
+    // Load the user config from its canonical path, falling back to defaults
+    // when it is absent or unreadable. Previously this was Config::default()
+    // unconditionally, so on-disk settings (theme, opacity, font, cursor,
+    // acrylic, …) never took effect across launches even though the settings
+    // panel wrote them to the file.
+    let config = match Config::default_path().filter(|p| p.exists()) {
+        Some(p) => match std::fs::read_to_string(&p)
+            .map_err(|e| e.to_string())
+            .and_then(|s| Config::from_toml(&s, &p).map_err(|e| e.to_string()))
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("c0pl4nd: failed to load config {p:?}: {e}; using defaults");
+                Config::default()
+            }
+        },
+        None => Config::default(),
+    };
 
     // `c0pl4nd --screenshot <path.png>` — headless render for README/CI media.
     if let Some(pos) = args.iter().position(|a| a == "--screenshot") {
