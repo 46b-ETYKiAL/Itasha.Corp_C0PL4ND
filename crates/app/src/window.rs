@@ -366,6 +366,50 @@ enum TabZone {
     Settings,
 }
 
+/// Pure tab-strip hit-test: the zone whose pixel x-range `[x0, x1)` contains
+/// `x`, if any. Split out from `App::hit_tab` so the click routing is unit
+/// testable without a live window/GPU.
+fn tab_zone_at(x: f32, zones: &[(TabZone, f32, f32)]) -> Option<TabZone> {
+    zones
+        .iter()
+        .find(|&&(_, x0, x1)| x >= x0 && x < x1)
+        .map(|&(z, _, _)| z)
+}
+
+/// Pure settings-panel hit-test: map a click `(x, y)` and the current surface
+/// width to a settings row index, mirroring the panel's render geometry (panel
+/// at `left = (w*0.25).max(40)`, `top = TITLEBAR_H + 40`, a 2-line header, then
+/// the rows at `LINE_HEIGHT` spacing). Split out so it is unit testable.
+fn settings_row_index(x: f64, y: f64, surface_width: f64) -> Option<usize> {
+    let panel_left = (surface_width * 0.25).max(40.0);
+    if x < panel_left - 8.0 || x > panel_left + 440.0 {
+        return None;
+    }
+    let panel_top = TITLEBAR_H as f64 + 40.0;
+    let lh = LINE_HEIGHT as f64;
+    let rel = y - (panel_top + 2.0 * lh);
+    if rel < 0.0 {
+        return None;
+    }
+    let i = (rel / lh) as usize;
+    (i < SettingRow::ALL.len()).then_some(i)
+}
+
+/// Resolve the Ctrl+1..9 tab-jump shortcut (1-based; `9` always selects the
+/// last tab) to a 0-based tab index, or `None` if out of range. Split out so
+/// the keyboard tab nav is unit testable.
+fn resolve_tab_number(n: u8, tab_count: usize) -> Option<usize> {
+    if tab_count == 0 {
+        return None;
+    }
+    let idx = if n == 9 {
+        tab_count - 1
+    } else {
+        (n as usize).saturating_sub(1)
+    };
+    (idx < tab_count).then_some(idx)
+}
+
 struct Gpu {
     window: Arc<Window>,
     device: wgpu::Device,
@@ -946,6 +990,34 @@ impl App {
         let row = rows[idx];
         self.adjust_setting(row, delta, &themes);
         self.persist_config();
+        self.request_redraw();
+    }
+
+    /// Map a physical-pixel point to a settings-panel row index, when the panel
+    /// is open. Mirrors the panel's render geometry: the panel is drawn at
+    /// `left = (w*0.25).max(40)`, `top = TITLEBAR_H + 40`; a 2-line header
+    /// ("settings" + blank) precedes the rows at `LINE_HEIGHT` spacing.
+    fn settings_row_at(&self, x: f64, y: f64) -> Option<usize> {
+        self.settings.as_ref()?;
+        let w = self.gpu.as_ref()?.surface_config.width as f64;
+        settings_row_index(x, y, w)
+    }
+
+    /// Click a settings-panel row: select it, or — if it is already selected —
+    /// cycle its value forward (the GUI equivalent of selecting + pressing →).
+    fn click_settings_row(&mut self, i: usize) {
+        let already = self.settings.as_ref().map(|p| p.idx) == Some(i);
+        if already {
+            let themes = self
+                .settings
+                .as_ref()
+                .map(|p| p.themes.clone())
+                .unwrap_or_default();
+            self.adjust_setting(SettingRow::ALL[i], 1, &themes);
+            self.persist_config();
+        } else if let Some(p) = self.settings.as_mut() {
+            p.idx = i;
+        }
         self.request_redraw();
     }
 
@@ -2770,15 +2842,7 @@ impl App {
     /// standard browser/terminal convention); other out-of-range numbers are
     /// ignored. Drives the Ctrl+1..9 shortcut (E14).
     fn select_tab_by_number(&mut self, n: u8) {
-        if self.tabs.is_empty() {
-            return;
-        }
-        let idx = if n == 9 {
-            self.tabs.len() - 1
-        } else {
-            (n as usize).saturating_sub(1)
-        };
-        if idx < self.tabs.len() {
+        if let Some(idx) = resolve_tab_number(n, self.tabs.len()) {
             self.active = idx;
             self.request_redraw();
         }
@@ -2805,11 +2869,7 @@ impl App {
             return None;
         }
         let gpu = self.gpu.as_ref()?;
-        let xf = x as f32;
-        gpu.tab_zones
-            .iter()
-            .find(|&&(_, x0, x1)| xf >= x0 && xf < x1)
-            .map(|&(z, _, _)| z)
+        tab_zone_at(x as f32, &gpu.tab_zones)
     }
 
     /// Handle a Ctrl/Cmd+Shift tab-control combo. Returns true if consumed.
@@ -3371,6 +3431,18 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                // Settings overlay (GUI): while open it captures clicks — a
+                // click on a row selects it (or cycles its value if already
+                // selected); a click anywhere else dismisses the panel.
+                if self.settings.is_some() {
+                    if let Some(i) = self.settings_row_at(self.cursor.0, self.cursor.1) {
+                        self.click_settings_row(i);
+                    } else {
+                        self.settings = None;
+                        self.request_redraw();
+                    }
+                    return;
+                }
                 // Ctrl+Shift + press on a pane arms a pane-rearrange drag (the
                 // Tabby model). Held first so it pre-empts titlebar/resize hits.
                 let drag_mod = (self.modifiers.control_key() || self.modifiers.super_key())
@@ -5009,6 +5081,89 @@ fn load_theme(name: &str) -> Option<Theme> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Modern tab-strip + settings click routing (the user-facing clicks) ---
+
+    #[test]
+    fn tab_zone_at_routes_clicks_to_the_right_target() {
+        // Zones modelled on the real glyph layout (the on-device DIAG measured
+        // Tab(0)=96-121px, '+'=121-162px at the test size).
+        let zones = vec![
+            (TabZone::Tab(0), 96.0_f32, 121.0),
+            (TabZone::Tab(1), 121.0, 146.0),
+            (TabZone::NewTab, 150.0, 191.0),
+            (TabZone::Settings, 195.0, 233.0),
+        ];
+        assert_eq!(tab_zone_at(100.0, &zones), Some(TabZone::Tab(0)));
+        assert_eq!(tab_zone_at(130.0, &zones), Some(TabZone::Tab(1)));
+        assert_eq!(tab_zone_at(170.0, &zones), Some(TabZone::NewTab));
+        assert_eq!(tab_zone_at(210.0, &zones), Some(TabZone::Settings));
+        // x0 inclusive, x1 exclusive.
+        assert_eq!(tab_zone_at(121.0, &zones), Some(TabZone::Tab(1)));
+        assert_eq!(tab_zone_at(120.999, &zones), Some(TabZone::Tab(0)));
+        // Gaps between zones and outside the strip resolve to nothing.
+        assert_eq!(tab_zone_at(148.0, &zones), None);
+        assert_eq!(tab_zone_at(50.0, &zones), None);
+        assert_eq!(tab_zone_at(300.0, &zones), None);
+        // Empty zones (e.g. search mode) -> nothing clickable, never panics.
+        assert_eq!(tab_zone_at(100.0, &[]), None);
+    }
+
+    #[test]
+    fn settings_row_index_maps_clicks_to_every_row() {
+        let w = 900.0_f64;
+        let panel_left = (w * 0.25).max(40.0);
+        let panel_top = TITLEBAR_H as f64 + 40.0;
+        let lh = LINE_HEIGHT as f64;
+        let first_row_top = panel_top + 2.0 * lh; // 2-line header precedes rows
+                                                  // Every settings row is reachable by a click at its line.
+        for i in 0..SettingRow::ALL.len() {
+            let y = first_row_top + i as f64 * lh + 1.0;
+            assert_eq!(
+                settings_row_index(panel_left + 20.0, y, w),
+                Some(i),
+                "click on row {i} should select row {i}"
+            );
+        }
+        // The header band is not a row.
+        assert_eq!(
+            settings_row_index(panel_left + 20.0, panel_top + 1.0, w),
+            None
+        );
+        // Below the last row is not a row.
+        let below = first_row_top + (SettingRow::ALL.len() as f64) * lh + 1.0;
+        assert_eq!(settings_row_index(panel_left + 20.0, below, w), None);
+        // Clicks left of / far right of the panel miss it (so they can dismiss it).
+        assert_eq!(
+            settings_row_index(panel_left - 50.0, first_row_top + 1.0, w),
+            None
+        );
+        assert_eq!(
+            settings_row_index(panel_left + 500.0, first_row_top + 1.0, w),
+            None
+        );
+    }
+
+    #[test]
+    fn settings_panel_left_edge_clamps_on_narrow_windows() {
+        // On a very narrow window the panel clamps to x=40, not w*0.25.
+        let narrow = 100.0_f64;
+        let y = TITLEBAR_H as f64 + 40.0 + 2.0 * LINE_HEIGHT as f64 + 1.0;
+        assert_eq!(settings_row_index(40.0, y, narrow), Some(0));
+        assert_eq!(settings_row_index(20.0, y, narrow), None);
+    }
+
+    #[test]
+    fn resolve_tab_number_handles_one_based_and_nine_is_last() {
+        // Ctrl+1..5 -> tabs 0..4; Ctrl+9 always = last; out-of-range = None.
+        assert_eq!(resolve_tab_number(1, 5), Some(0));
+        assert_eq!(resolve_tab_number(3, 5), Some(2));
+        assert_eq!(resolve_tab_number(5, 5), Some(4));
+        assert_eq!(resolve_tab_number(9, 5), Some(4));
+        assert_eq!(resolve_tab_number(9, 10), Some(9));
+        assert_eq!(resolve_tab_number(6, 5), None);
+        assert_eq!(resolve_tab_number(1, 0), None);
+    }
 
     #[test]
     fn strip_hidden_for_single_tab_cell() {
