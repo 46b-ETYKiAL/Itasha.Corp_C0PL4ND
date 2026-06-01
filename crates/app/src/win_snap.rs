@@ -107,6 +107,19 @@ pub unsafe fn install(hwnd: isize, titlebar_h: i32, resize_border: i32, buttons_
         0,
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
     );
+
+    // Windows 11: round the window corners to match the modern OS chrome.
+    // Ignored as a harmless no-op on Windows 10 (the attribute is unknown there).
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    };
+    let corner_pref = DWMWCP_ROUND;
+    let _ = DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_WINDOW_CORNER_PREFERENCE,
+        &corner_pref as *const _ as *const core::ffi::c_void,
+        core::mem::size_of_val(&corner_pref) as u32,
+    );
 }
 
 /// Remove the subclass. Safe to call if never installed.
