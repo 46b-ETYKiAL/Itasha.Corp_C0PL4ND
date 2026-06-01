@@ -220,15 +220,16 @@ impl C0pl4ndApp {
         self.pane_titles().into_iter().map(|(id, _)| id).collect()
     }
 
-    /// `(pane_id, title)` for every pane in the grid, in tree order.
+    /// `(pane_id, title)` for every pane in the grid, in STABLE visual order
+    /// (left→right, top→bottom). Built by walking the tree from the root via
+    /// [`grid::panes_in_visual_order`] — NOT by iterating the `ahash::HashMap`
+    /// storage, whose order changes every process launch (the "tab order
+    /// reshuffles between launches" bug). The tab strip and every consumer of
+    /// this list therefore stay in a fixed, on-screen-matching order.
     fn pane_titles(&self) -> Vec<(PaneId, String)> {
-        self.grid_tree
-            .tiles
-            .iter()
-            .filter_map(|(_, tile)| match tile {
-                egui_tiles::Tile::Pane(p) => Some((p.pane_id, format!("pane {}", p.pane_id.raw()))),
-                _ => None,
-            })
+        grid::panes_in_visual_order(&self.grid_tree)
+            .into_iter()
+            .map(|pane_id| (pane_id, format!("pane {}", pane_id.raw())))
             .collect()
     }
 

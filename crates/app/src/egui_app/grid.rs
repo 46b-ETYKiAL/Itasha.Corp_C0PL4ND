@@ -97,6 +97,51 @@ pub fn tile_of_pane(tree: &egui_tiles::Tree<Pane>, pane_id: PaneId) -> Option<Ti
     })
 }
 
+/// Every pane's [`PaneId`] in STABLE visual order — a depth-first walk from the
+/// tree root following each container's declared child order (left→right for a
+/// horizontal container, top→bottom for a vertical one, declared order for tabs
+/// and grids). This is the order the panes APPEAR on screen.
+///
+/// The raw `tree.tiles` storage is an `ahash::HashMap`, so iterating it yields a
+/// DIFFERENT order every process launch — that is the reported "tab order
+/// changed between launches (pane 1, pane 0)" bug. Walking the tree from the
+/// root instead gives a deterministic order that matches the on-screen layout,
+/// so the tab strip never reshuffles.
+///
+/// Panes that are in storage but NOT reachable from the root (a transient state
+/// egui_tiles' `simplify` resolves next frame) are appended afterwards, sorted
+/// by `PaneId`, so the result still covers every pane deterministically.
+pub fn panes_in_visual_order(tree: &egui_tiles::Tree<Pane>) -> Vec<PaneId> {
+    fn walk(tree: &egui_tiles::Tree<Pane>, id: TileId, out: &mut Vec<PaneId>) {
+        match tree.tiles.get(id) {
+            Some(egui_tiles::Tile::Pane(p)) => out.push(p.pane_id),
+            Some(egui_tiles::Tile::Container(c)) => {
+                for child in c.children() {
+                    walk(tree, *child, out);
+                }
+            }
+            None => {}
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(root) = tree.root {
+        walk(tree, root, &mut out);
+    }
+    // Append any storage panes not reachable from the root (sorted by id so the
+    // order is stable), so a transient unreachable pane is still enumerated.
+    let mut orphans: Vec<PaneId> = tree
+        .tiles
+        .iter()
+        .filter_map(|(_, tile)| match tile {
+            egui_tiles::Tile::Pane(p) if !out.contains(&p.pane_id) => Some(p.pane_id),
+            _ => None,
+        })
+        .collect();
+    orphans.sort();
+    out.extend(orphans);
+    out
+}
+
 /// Split the focused pane in the given direction, inserting `new_pane` next to
 /// it. Returns `true` if the split was applied, `false` if it was refused
 /// (because the tree is already at [`MAX_PANES`], or the focused pane is not in
@@ -365,5 +410,73 @@ mod tests {
         let tree = build_default_grid(&[PaneId(10), PaneId(20), PaneId(30)]);
         let snapshot = tree.clone();
         assert_eq!(count_panes(&snapshot), 3);
+    }
+
+    /// Bug-2 guard: `panes_in_visual_order` must be STABLE across repeated calls
+    /// AND must match the declared left→right order — never the random
+    /// `ahash::HashMap` storage order that made the tab strip reshuffle between
+    /// launches. A single call cannot catch nondeterminism, so we call it many
+    /// times and assert every result is identical AND equals the build order.
+    #[test]
+    fn panes_in_visual_order_is_stable_and_matches_layout() {
+        let ids = [PaneId(0), PaneId(1), PaneId(2), PaneId(3)];
+        let tree = build_default_grid(&ids);
+        let first = panes_in_visual_order(&tree);
+        assert_eq!(
+            first,
+            ids.to_vec(),
+            "visual order must be the declared left→right order"
+        );
+        // Repeated calls must be byte-identical — a HashMap-iteration result
+        // would vary run-to-run (and often call-to-call within a run).
+        for _ in 0..50 {
+            assert_eq!(
+                panes_in_visual_order(&tree),
+                first,
+                "pane visual order must be deterministic across calls"
+            );
+        }
+    }
+
+    /// A fresh `Tree` built from the SAME ids in a NEW process-like allocation
+    /// yields the SAME visual order — the property the tab strip relies on so it
+    /// does not reshuffle "pane 1, pane 0" between launches.
+    #[test]
+    fn panes_in_visual_order_stable_across_rebuilds() {
+        let ids = [PaneId(7), PaneId(8), PaneId(9)];
+        let a = panes_in_visual_order(&build_default_grid(&ids));
+        let b = panes_in_visual_order(&build_default_grid(&ids));
+        assert_eq!(
+            a, b,
+            "two builds of the same grid must enumerate identically"
+        );
+        assert_eq!(a, ids.to_vec());
+    }
+
+    /// After a vertical split (the wrap path), the new pane must appear in the
+    /// visual order in its tree position — and the order stays stable.
+    #[test]
+    fn panes_in_visual_order_covers_split_panes() {
+        let mut tree = build_default_grid(&[PaneId(0), PaneId(1)]);
+        assert!(split_focused(
+            &mut tree,
+            PaneId(0),
+            PaneId(2),
+            LinearDir::Vertical
+        ));
+        let order = panes_in_visual_order(&tree);
+        assert_eq!(order.len(), 3, "all three panes enumerated");
+        // Determinism still holds post-split.
+        for _ in 0..20 {
+            assert_eq!(panes_in_visual_order(&tree), order);
+        }
+        // Every pane present exactly once.
+        for id in [PaneId(0), PaneId(1), PaneId(2)] {
+            assert_eq!(
+                order.iter().filter(|p| **p == id).count(),
+                1,
+                "pane {id:?} must appear exactly once"
+            );
+        }
     }
 }

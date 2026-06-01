@@ -148,9 +148,11 @@ impl TermGpu {
 
         let [left, top, w, h] = px_rect;
         let metrics = self.metrics;
-        let default_attrs = Attrs::new()
-            .family(Family::Monospace)
-            .color(GColor::rgb(default_fg[0], default_fg[1], default_fg[2]));
+        let default_attrs = Attrs::new().family(Family::Monospace).color(GColor::rgb(
+            default_fg[0],
+            default_fg[1],
+            default_fg[2],
+        ));
 
         // Borrow the font system + buffers disjointly to (re)build this pane's
         // laid-out glyph buffer from the colour runs.
