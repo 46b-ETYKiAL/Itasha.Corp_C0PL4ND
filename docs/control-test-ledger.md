@@ -53,7 +53,33 @@ software path (recon §7) so the pixel render is 🟡 — verify via the offscre
 | Terminal pane: type text | type `echo <tok>` + Enter | bytes reach the focused pane's real PTY AND `<tok>` appears in that pane's grid | `typing_a_command_reaches_the_pty_and_updates_the_grid` | ✅ |
 | Pane focus | click pane 1's tab, then type | input routes to pane 1's PTY/grid; does NOT leak to pane 0 | `clicking_a_pane_routes_typed_input_to_that_pane_only` | ✅ |
 | Resize → PTY | shrink the window | the focused pane's PTY grid `(cols,rows)` shrinks | `shrinking_the_window_resizes_the_pane_pty` | ✅ |
-| Glyphon GPU render | — | grid glyphs render to the pane texture | — | 🟡 needs human eyes / `screenshot.rs` (no GPU pass under kittest) |
+| Glyphon GPU render (single pane) | — | grid glyphs render to the pane texture | `glyphon_terminal_render_produces_visible_pixels` (offscreen wgpu readback) | ✅ |
+| Glyphon GPU render (**multi-pane**) | — | BOTH panes of a 2-pane split render glyphs into their OWN sub-rects through the shared `TermGpu` (prepare-both-then-render-both), each clipped inside its rect | `glyphon_two_panes_both_render_visible_pixels` (offscreen wgpu readback, two distinct PTY tokens) + `glyphon_terminal_render_through_real_egui_callback` (real egui frame, LEFT+RIGHT halves each ≥100 bright px) | ✅ |
+| Tab order stability | relaunch / re-render | tab strip enumerates panes in STABLE left→right order (never the `ahash::HashMap` random storage order) | `panes_in_visual_order_is_stable_and_matches_layout` + `panes_in_visual_order_stable_across_rebuilds` + `panes_in_visual_order_covers_split_panes` | ✅ |
+| Caption cluster flush-right | — | ⚙ — ◻ ✕ hug the window's RIGHT edge at any width (close button's right edge ≥ `win_w − 16px`; reads ⚙…✕ left→right) | `caption_cluster_is_flush_right` | ✅ |
+
+### Bugs caught / fixed by this discipline (Milestone 2.1)
+
+- **Multi-pane render — only one pane shows / intermittent black.** The
+  single-pane readback test was structurally blind to the multi-pane defect.
+  The new `glyphon_two_panes_both_render_visible_pixels` renders TWO `PaneTerm`s
+  (distinct PTY tokens) into two sub-rects of one offscreen surface through the
+  real `prepare_pane`/`render_pane` path with the egui-wgpu per-callback
+  scissor+viewport sequence, and asserts BOTH pane rects light up (970 / 1042
+  non-bg px, 0 leak) — proving the shared `TermGpu` (shared atlas/viewport/font
+  system, per-pane renderer+buffer) is correct across panes. The real-egui-frame
+  test additionally splits the central band into LEFT/RIGHT halves so a black
+  half can no longer hide behind an aggregate count.
+- **Tab order reshuffled between launches (pane 1, pane 0).** `pane_titles()`
+  iterated the `ahash::HashMap` tile storage, whose order changes every process
+  launch. Fixed by walking the tree from the root in declared child order
+  (`grid::panes_in_visual_order`); now deterministic and matching the on-screen
+  layout.
+- **Caption buttons not flush-right.** The titlebar nested a `left_to_right`
+  layout inside an outer `right_to_left`, floating the cluster mid-strip. Rebuilt
+  on SCR1B3's idiom (`horizontal_centered` with left content first, then a nested
+  `right_to_left` over the remaining width) + painter-drawn caption buttons ported
+  from SCR1B3's `caption_btn`, so the cluster pins flush-right at any width.
 
 Headless logic also unit-tested in `pane_term`/`term_render`/`core::term::keys`
 (key→PTY encoding, debounced resize, pixel→cell mapping, payload geometry).

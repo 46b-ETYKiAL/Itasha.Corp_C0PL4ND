@@ -108,7 +108,7 @@ fn clicking_gear_opens_settings() {
     assert!(!app.borrow().settings_is_open(), "settings closed at start");
     let mut h = harness(&app);
 
-    h.get_by_label(icon::GEAR).click();
+    h.get_by_label("settings").click();
     h.run();
 
     assert!(
@@ -125,7 +125,7 @@ fn settings_close_button_actually_closes_the_window() {
     let mut h = harness(&app);
 
     // Open settings (gear) — the egui Window renders in the same frame_tick.
-    h.get_by_label(icon::GEAR).click();
+    h.get_by_label("settings").click();
     h.run();
     assert!(
         app.borrow().settings_is_open(),
@@ -149,7 +149,7 @@ fn clicking_close_caption_issues_a_close_command() {
     assert_eq!(app.borrow().last_window_cmd(), None);
     let mut h = harness(&app);
 
-    h.get_by_label(icon::X).click();
+    h.get_by_label("close").click();
     h.run();
 
     assert_eq!(
@@ -164,7 +164,7 @@ fn clicking_minimize_caption_issues_a_minimize_command() {
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let mut h = harness(&app);
 
-    h.get_by_label(icon::MINUS).click();
+    h.get_by_label("minimize").click();
     h.run();
 
     assert_eq!(app.borrow().last_window_cmd(), Some(WindowCmd::Minimize));
@@ -175,7 +175,7 @@ fn clicking_maximize_caption_issues_a_maximize_command() {
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let mut h = harness(&app);
 
-    h.get_by_label(icon::SQUARE).click();
+    h.get_by_label("maximize").click();
     h.run();
 
     assert_eq!(
@@ -205,5 +205,48 @@ fn splitting_past_six_panes_is_refused() {
         app.borrow().pane_count(),
         6,
         "the 6-pane cap must hold against a 7th split"
+    );
+}
+
+#[test]
+fn caption_cluster_is_flush_right() {
+    // Bug-3 guard: the caption cluster (⚙ — ◻ ✕) must hug the window's RIGHT
+    // edge at a known width — not float mid-strip (the reported layout bug). The
+    // close button is the rightmost control, so its right edge must sit within a
+    // few logical px of the titlebar's right edge. The old nested-layout code
+    // floated the cluster after the leftover width, failing this.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let win_w = 900.0;
+    // The `build(ctx-closure)` form is deprecated in favour of `build_ui`, but
+    // `build_ui` hands only a `&mut Ui` — `frame_tick` builds TopBottom/Central
+    // panels, so the ctx-closure form is the correct one (same deliberate
+    // deprecation allowance as the shared `harness()` helper above).
+    #[allow(deprecated)]
+    let mut h: Harness<'_> = Harness::builder()
+        .with_size(egui::vec2(win_w, 600.0))
+        .build(move |ctx| app.borrow_mut().frame_tick(ctx));
+    h.run();
+
+    let close = h.get_by_label("close");
+    let close_rect = close.rect();
+    let gear = h.get_by_label("settings");
+    let gear_rect = gear.rect();
+
+    // The close button's right edge must be within the titlebar inner margin
+    // (6px) + a small tolerance of the window's right edge — i.e. flush right.
+    assert!(
+        close_rect.max.x >= win_w - 16.0,
+        "close button right edge ({}) is not flush to the window right edge \
+         ({win_w}); the caption cluster floated mid-strip (Bug 3)",
+        close_rect.max.x
+    );
+    // Reading order at the far right is ⚙ — ◻ ✕: the gear (leftmost of the
+    // cluster) sits to the LEFT of the close (rightmost).
+    assert!(
+        gear_rect.min.x < close_rect.min.x,
+        "caption cluster must read ⚙ … ✕ left→right: gear ({}) must be left of \
+         close ({})",
+        gear_rect.min.x,
+        close_rect.min.x
     );
 }

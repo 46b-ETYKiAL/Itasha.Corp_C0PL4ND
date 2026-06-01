@@ -57,8 +57,18 @@ pub fn itasha_corp_visuals() -> Visuals {
     v.widgets.active.bg_fill = bezel;
     v.widgets.active.bg_stroke = Stroke::new(1.0, purple); // purple on press
     v.widgets.active.fg_stroke = Stroke::new(1.0, fg);
+
+    // Cohesion with SCR1B3 (scribe-render::theme_to_visuals + scribe-app chrome):
+    // separators / hairlines use the bezel tone, weak text uses the muted purple-
+    // grey, and the selection wash is the purple-on-fill the editor uses. These
+    // bring the chrome's hairlines + secondary text into the same visual family.
+    let muted = Color32::from_rgb(0x6a, 0x64, 0x88);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, bezel); // separators
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, fg);
+    v.weak_text_color = Some(muted); // weak() labels read as the muted brand tone
     v.window_corner_radius = CornerRadius::same(8); // frameless rounded
     v.window_stroke = Stroke::new(1.0, bezel);
+
     v
 }
 
@@ -79,6 +89,9 @@ pub mod brand {
     pub const PANEL: Color32 = Color32::from_rgb(0x1c, 0x1c, 0x1f);
     /// `#2c2c33` — bezel.
     pub const BEZEL: Color32 = Color32::from_rgb(0x2c, 0x2c, 0x33);
+    /// `#6a6488` — muted (caption-button base / weak labels). Shared verbatim
+    /// with SCR1B3's `itasha_corp` palette `muted` key for cross-app cohesion.
+    pub const MUTED: Color32 = Color32::from_rgb(0x6a, 0x64, 0x88);
 }
 
 #[cfg(test)]
