@@ -76,7 +76,13 @@ struct SnapGeometry {
 /// `hwnd` must be a valid top-level window handle for the current process,
 /// alive for the duration of the subclass. Called once per window from the UI
 /// thread.
-pub unsafe fn install(hwnd: isize, titlebar_h: i32, resize_border: i32, buttons_w: i32) {
+pub unsafe fn install(
+    hwnd: isize,
+    titlebar_h: i32,
+    resize_border: i32,
+    buttons_w: i32,
+    acrylic: bool,
+) {
     let hwnd = HWND(hwnd as *mut core::ffi::c_void);
     let geom = Box::new(SnapGeometry {
         titlebar_h,
@@ -120,6 +126,20 @@ pub unsafe fn install(hwnd: isize, titlebar_h: i32, resize_border: i32, buttons_
         &corner_pref as *const _ as *const core::ffi::c_void,
         core::mem::size_of_val(&corner_pref) as u32,
     );
+
+    // Windows 11 acrylic/mica backdrop (opt-in). Only meaningful when the window
+    // is translucent (the wgpu surface clears with alpha < 1); on an opaque
+    // surface the backdrop is simply never seen. No-op on Windows 10.
+    if acrylic {
+        use windows::Win32::Graphics::Dwm::{DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE};
+        let backdrop = DWMSBT_TRANSIENTWINDOW;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &backdrop as *const _ as *const core::ffi::c_void,
+            core::mem::size_of_val(&backdrop) as u32,
+        );
+    }
 }
 
 /// Remove the subclass. Safe to call if never installed.

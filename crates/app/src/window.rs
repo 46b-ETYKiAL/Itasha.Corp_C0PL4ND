@@ -410,6 +410,40 @@ fn resolve_tab_number(n: u8, tab_count: usize) -> Option<usize> {
     (idx < tab_count).then_some(idx)
 }
 
+/// Pick the surface composite-alpha mode. When transparency is NOT wanted, use
+/// the surface's native (first) mode — Opaque on every desktop backend, exactly
+/// as before. When transparency IS wanted, prefer PostMultiplied (the
+/// compositor multiplies), then PreMultiplied, and gracefully fall back to the
+/// native mode if the backend exposes neither — so the window simply stays
+/// solid instead of failing. Split out for unit testing.
+fn choose_alpha_mode(
+    want_transparent: bool,
+    modes: &[wgpu::CompositeAlphaMode],
+) -> wgpu::CompositeAlphaMode {
+    let native = modes
+        .first()
+        .copied()
+        .unwrap_or(wgpu::CompositeAlphaMode::Opaque);
+    if !want_transparent {
+        return native;
+    }
+    for pref in [
+        wgpu::CompositeAlphaMode::PostMultiplied,
+        wgpu::CompositeAlphaMode::PreMultiplied,
+        // Inherit defers compositing to the OS/window: for a winit window
+        // created `with_transparent(true)` (which is the only time we ask for
+        // transparency) this lets the DWM acrylic backdrop show through on
+        // GPUs that don't expose explicit pre/post-multiplied modes (e.g. the
+        // Intel/Vulkan surface, which offers only [Opaque, Inherit]).
+        wgpu::CompositeAlphaMode::Inherit,
+    ] {
+        if modes.contains(&pref) {
+            return pref;
+        }
+    }
+    native
+}
+
 struct Gpu {
     window: Arc<Window>,
     device: wgpu::Device,
@@ -3037,11 +3071,28 @@ impl App {
 
     fn bg_color(&self) -> wgpu::Color {
         let (r, g, b) = parse_hex(&self.theme.background).unwrap_or((8, 6, 13));
+        let (mut lr, mut lg, mut lb) = (srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b));
+        // When the surface is non-opaque (translucent / acrylic window) the
+        // clear alpha is the configured opacity so the desktop / DWM backdrop
+        // shows through. A pre-multiplied surface needs the colour channels
+        // pre-scaled by alpha. Opaque surfaces (the default) keep a = 1.0.
+        let mode = self.gpu.as_ref().map(|g| g.surface_config.alpha_mode);
+        let a = match mode {
+            Some(wgpu::CompositeAlphaMode::PreMultiplied)
+            | Some(wgpu::CompositeAlphaMode::PostMultiplied)
+            | Some(wgpu::CompositeAlphaMode::Inherit) => self.config.opacity.clamp(0.0, 1.0) as f64,
+            _ => 1.0,
+        };
+        if matches!(mode, Some(wgpu::CompositeAlphaMode::PreMultiplied)) {
+            lr *= a;
+            lg *= a;
+            lb *= a;
+        }
         wgpu::Color {
-            r: srgb_to_linear(r),
-            g: srgb_to_linear(g),
-            b: srgb_to_linear(b),
-            a: 1.0,
+            r: lr,
+            g: lg,
+            b: lb,
+            a,
         }
     }
 
@@ -3089,7 +3140,7 @@ impl App {
     /// caption-button cluster width) so the native hit-test matches what the
     /// renderer draws. Not compiled off Windows; a missing handle is non-fatal.
     #[cfg(windows)]
-    fn install_snap(&self, window: &Window) {
+    fn install_snap(&self, window: &Window, acrylic: bool) {
         use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
         let Ok(handle) = window.window_handle() else {
             return;
@@ -3100,7 +3151,13 @@ impl App {
             // SAFETY: hwnd is the live top-level window winit just created; we
             // install exactly once (resumed() early-returns once gpu exists).
             unsafe {
-                crate::win_snap::install(hwnd, TITLEBAR_H as i32, RESIZE_BORDER as i32, buttons_w);
+                crate::win_snap::install(
+                    hwnd,
+                    TITLEBAR_H as i32,
+                    RESIZE_BORDER as i32,
+                    buttons_w,
+                    acrylic,
+                );
             }
         }
     }
@@ -3131,7 +3188,7 @@ impl App {
 
     /// Non-Windows: no custom frame to install.
     #[cfg(not(windows))]
-    fn install_snap(&self, _window: &Window) {}
+    fn install_snap(&self, _window: &Window, _acrylic: bool) {}
 
     /// Capture the live window geometry into `self.config.window` and persist
     /// it to the config file (D2). Best-effort: a failed `outer_position()`
@@ -3239,9 +3296,15 @@ impl ApplicationHandler for App {
         let width = (cols as f32 * CELL_W) as u32 + 16;
         let height = (rows as f32 * LINE_HEIGHT) as u32 + 16 + TITLEBAR_H as u32;
 
+        let acrylic = self.config.acrylic;
+        // The window is created translucent when opacity < 1.0 or acrylic is
+        // enabled, so the desktop / DWM backdrop shows through. Default (opacity
+        // 1.0, acrylic off) is a solid window — byte-identical to before.
+        let want_transparent = self.config.opacity < 1.0 || acrylic;
         let mut attrs = Window::default_attributes()
             .with_title(c0pl4nd_core::PRODUCT_NAME)
             .with_decorations(false)
+            .with_transparent(want_transparent)
             .with_resizable(true);
         // D2: restore remembered geometry when it lands on a still-connected
         // monitor; otherwise fall back to the cols/rows-derived default size.
@@ -3279,9 +3342,13 @@ impl ApplicationHandler for App {
         // D4 (Windows): re-enable Aero Snap / maximize animations on the
         // frameless window by installing the custom-frame subclass. No-op off
         // Windows; a missing handle is non-fatal (the window just lacks snap).
-        self.install_snap(&window);
+        self.install_snap(&window, acrylic);
 
-        let gpu = match pollster::block_on(Gpu::new(window.clone(), self.config.font.size)) {
+        let gpu = match pollster::block_on(Gpu::new(
+            window.clone(),
+            self.config.font.size,
+            want_transparent,
+        )) {
             Ok(g) => g,
             Err(e) => {
                 tracing::error!("GPU init failed: {e}");
@@ -4736,7 +4803,7 @@ impl App {
 }
 
 impl Gpu {
-    async fn new(window: Arc<Window>, font_size: f32) -> Result<Gpu> {
+    async fn new(window: Arc<Window>, font_size: f32, want_transparent: bool) -> Result<Gpu> {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window.clone())?;
@@ -4773,7 +4840,7 @@ impl Gpu {
             } else {
                 wgpu::PresentMode::Fifo
             },
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode: choose_alpha_mode(want_transparent, &caps.alpha_modes),
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -5163,6 +5230,29 @@ mod tests {
         assert_eq!(resolve_tab_number(9, 10), Some(9));
         assert_eq!(resolve_tab_number(6, 5), None);
         assert_eq!(resolve_tab_number(1, 0), None);
+    }
+
+    #[test]
+    fn choose_alpha_mode_prefers_transparency_then_falls_back() {
+        use wgpu::CompositeAlphaMode::*;
+        // Default (no transparency wanted): the native/first mode, untouched.
+        assert_eq!(choose_alpha_mode(false, &[Opaque, PostMultiplied]), Opaque);
+        // Transparency wanted: PostMultiplied preferred (no premultiply needed).
+        assert_eq!(
+            choose_alpha_mode(true, &[Opaque, PostMultiplied, PreMultiplied]),
+            PostMultiplied
+        );
+        // PostMultiplied unavailable -> PreMultiplied.
+        assert_eq!(
+            choose_alpha_mode(true, &[Opaque, PreMultiplied]),
+            PreMultiplied
+        );
+        // Only Inherit available alongside Opaque (e.g. the Intel/Vulkan
+        // surface) -> Inherit is preferred so a transparent window composites.
+        assert_eq!(choose_alpha_mode(true, &[Opaque, Inherit]), Inherit);
+        // No transparency-capable mode at all -> graceful fallback to native.
+        assert_eq!(choose_alpha_mode(true, &[Opaque]), Opaque);
+        assert_eq!(choose_alpha_mode(true, &[]), Opaque);
     }
 
     #[test]

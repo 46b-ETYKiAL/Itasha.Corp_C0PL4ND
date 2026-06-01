@@ -189,8 +189,16 @@ pub struct Config {
     pub theme: String,
     pub font: FontConfig,
     pub scrollback_lines: usize,
-    /// Window opacity 0.0..=1.0.
+    /// Window opacity 0.0..=1.0. Below 1.0 the window is created translucent
+    /// (applies next launch); the desktop / acrylic backdrop shows through.
     pub opacity: f32,
+    /// Opt-in Windows 11 acrylic/mica backdrop behind the translucent window.
+    /// Default off, so the default experience is a solid window. Applies next
+    /// launch. Honoured only when the GPU surface supports a non-opaque
+    /// composite-alpha mode; otherwise the window stays opaque (graceful
+    /// fallback).
+    #[serde(default)]
+    pub acrylic: bool,
     pub cursor: CursorConfig,
     pub window: WindowConfig,
     pub effects: EffectsConfig,
@@ -227,6 +235,7 @@ impl Default for Config {
             font: FontConfig::default(),
             scrollback_lines: 10_000,
             opacity: 1.0,
+            acrylic: false,
             cursor: CursorConfig::default(),
             window: WindowConfig::default(),
             effects: EffectsConfig::default(),
