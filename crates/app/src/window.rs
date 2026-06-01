@@ -453,6 +453,9 @@ struct App {
     /// Caption button currently under the cursor (drives the hover backplate).
     /// Only Minimize/Maximize/Close are meaningful; None otherwise.
     hovered_button: Option<TitlebarHit>,
+    /// Tab-strip zone (tab chip / '+' / gear) currently under the cursor, for
+    /// the modern hover backplate. None when not over the strip.
+    hovered_tab: Option<TabZone>,
     /// Caption button currently pressed (mouse down on it), for the stronger
     /// active-state backplate. Cleared on mouse release.
     pressed_button: Option<TitlebarHit>,
@@ -701,6 +704,7 @@ impl App {
             chrome_cursor: winit::window::CursorIcon::Default,
             last_titlebar_click: None,
             hovered_button: None,
+            hovered_tab: None,
             pressed_button: None,
             geom_dirty: false,
             last_geom_save: Instant::now(),
@@ -3322,6 +3326,18 @@ impl ApplicationHandler for App {
                             g.window.request_redraw();
                         }
                     }
+                    // Track the hovered tab-strip zone for the hover backplate.
+                    let new_hover_tab = if edge.is_some() {
+                        None
+                    } else {
+                        self.hit_tab(position.x, position.y)
+                    };
+                    if new_hover_tab != self.hovered_tab {
+                        self.hovered_tab = new_hover_tab;
+                        if let Some(g) = &self.gpu {
+                            g.window.request_redraw();
+                        }
+                    }
                     let icon = if let Some(d) = edge {
                         match d {
                             East | West => CursorIcon::EwResize,
@@ -4543,6 +4559,23 @@ impl App {
                     TITLEBAR_H as i32 - 4,
                     [a[0], a[1], a[2], 0.16],
                 ));
+            }
+            // Hover backplate: a fainter foreground wash behind whatever
+            // tab-strip zone the cursor is over (skipped on the active tab,
+            // which already shows its accent backplate).
+            if let Some(hz) = self.hovered_tab {
+                if hz != TabZone::Tab(self.active) {
+                    if let Some(&(_, x0, x1)) = gpu.tab_zones.iter().find(|&&(z, _, _)| z == hz) {
+                        let f = to_rgba(fg);
+                        chrome.push(ColorRect::new(
+                            x0 as i32,
+                            2,
+                            (x1 - x0) as i32,
+                            TITLEBAR_H as i32 - 4,
+                            [f[0], f[1], f[2], 0.10],
+                        ));
+                    }
+                }
             }
         }
         let prepared_chrome = gpu
