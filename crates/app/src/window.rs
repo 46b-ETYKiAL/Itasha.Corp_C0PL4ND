@@ -4519,6 +4519,25 @@ impl App {
         // text so the button glyph stays legible on top (computed above the gpu
         // borrow to avoid an aliasing conflict).
         chrome.extend(caption_backplates);
+        // Active-tab backplate: a subtle accent-tinted fill behind the active
+        // tab chip so it reads as "selected" like a modern tab bar. Uses the
+        // same glyph-derived geometry as the click zones, so it always lines up.
+        if !self.search_mode {
+            if let Some(&(_, x0, x1)) = gpu
+                .tab_zones
+                .iter()
+                .find(|&&(z, _, _)| z == TabZone::Tab(self.active))
+            {
+                let a = to_rgba(accent);
+                chrome.push(ColorRect::new(
+                    x0 as i32,
+                    2,
+                    (x1 - x0) as i32,
+                    TITLEBAR_H as i32 - 4,
+                    [a[0], a[1], a[2], 0.16],
+                ));
+            }
+        }
         let prepared_chrome = gpu
             .chrome_renderer
             .prepare(&gpu.device, w as f32, h as f32, &chrome);
