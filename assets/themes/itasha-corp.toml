@@ -1,21 +1,21 @@
 # Itasha.Corp — the house brand default, shared by every Itasha.Corp app.
 # Two brand primaries: electric purple #7700FF ("Itasha") + spring green
-# #00FF90 (".Corp"). Deep void hull, off-white text, purple as the structural
+# #00FF90 (".Corp"). Neutral dark grey-black hull, off-white text, purple as the structural
 # accent, green as the live/cursor voice. Akira-red reserved for alarms.
-# WCAG contrast (foreground #e8e6f0 on background #0b0613): ~17:1 (AAA).
+# WCAG contrast (foreground #e8e6f0 on background #121212): ~16:1 (AAA).
 name = "Itasha.Corp"
 author = "Itasha.Corp"
 
 # base UI — void hull, off-white text, brand green cursor
-background = "#0b0613"
+background = "#121212"
 foreground = "#e8e6f0"
 cursor = "#00ff90"
-cursor_text = "#0b0613"
+cursor_text = "#121212"
 selection_background = "#33106b"
 selection_foreground = "#e8e6f0"
 
 [normal]   # ANSI 0-7 — brand purple as blue, brand green as green
-black = "#1b1530"
+black = "#1c1c1c"
 red = "#ff3b5c"
 green = "#00ff90"
 yellow = "#ffc44d"
