@@ -355,6 +355,16 @@ enum TitlebarHit {
     Close,
 }
 
+/// A clickable region of the modern tab strip. `Tab(i)` is the chip for window
+/// tab `i`; `NewTab` is the `+` affordance. Pixel x-ranges are recomputed each
+/// frame from the chrome buffer's actual glyph layout (the rendered glyphs and
+/// the click zones therefore always agree, regardless of font advance / DPI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabZone {
+    Tab(usize),
+    NewTab,
+}
+
 struct Gpu {
     window: Arc<Window>,
     device: wgpu::Device,
@@ -384,6 +394,10 @@ struct Gpu {
     image_renderer: crate::image_render::ImageRenderer,
     chrome_renderer: ChromeRenderer,
     gpu_name: String,
+    /// Clickable tab-strip regions (zone, x_start, x_end) in physical pixels,
+    /// recomputed every frame from the chrome buffer's glyph layout. Read by
+    /// `hit_tab` to route titlebar clicks to tab-switch / new-tab.
+    tab_zones: Vec<(TabZone, f32, f32)>,
 }
 
 impl Gpu {
@@ -2771,6 +2785,28 @@ impl App {
         }
     }
 
+    /// Switch directly to window tab `i` (the modern tab-strip click target).
+    fn activate_tab(&mut self, i: usize) {
+        if i < self.tabs.len() && i != self.active {
+            self.active = i;
+            self.request_redraw();
+        }
+    }
+
+    /// The clickable tab-strip zone under the physical-pixel point, if any.
+    /// Reads the per-frame `tab_zones` computed from the chrome glyph layout.
+    fn hit_tab(&self, x: f64, y: f64) -> Option<TabZone> {
+        if y > TITLEBAR_H as f64 {
+            return None;
+        }
+        let gpu = self.gpu.as_ref()?;
+        let xf = x as f32;
+        gpu.tab_zones
+            .iter()
+            .find(|&&(_, x0, x1)| xf >= x0 && xf < x1)
+            .map(|&(z, _, _)| z)
+    }
+
     /// Handle a Ctrl/Cmd+Shift tab-control combo. Returns true if consumed.
     fn handle_tab_combo(&mut self, key: &Key, event_loop: &ActiveEventLoop) -> bool {
         let handled = match key {
@@ -3332,6 +3368,16 @@ impl ApplicationHandler for App {
                 if let Some(dir) = self.hit_resize_edge(self.cursor.0, self.cursor.1) {
                     if let Some(gpu) = &self.gpu {
                         let _ = gpu.window.drag_resize_window(dir);
+                    }
+                    return;
+                }
+                // Modern tab strip: a click on a tab chip switches to it; the
+                // '+' opens a new tab. Checked BEFORE the titlebar drag/forward
+                // paths so the strip is clickable (it lives in the drag region).
+                if let Some(zone) = self.hit_tab(self.cursor.0, self.cursor.1) {
+                    match zone {
+                        TabZone::Tab(i) => self.activate_tab(i),
+                        TabZone::NewTab => self.spawn_tab(),
                     }
                     return;
                 }
@@ -4077,6 +4123,10 @@ impl App {
         // off the SAME geometry. In search mode the strip yields to the search
         // status line.
         let mut chrome_spans: Vec<(String, GColor)> = Vec::new();
+        // Byte ranges (into the concatenated chrome string) of each clickable
+        // tab-strip zone, used below to map laid-out glyphs back to zones.
+        let mut zone_bytes: Vec<(TabZone, usize, usize)> = Vec::new();
+        let mut byte_off = 0usize;
         if self.search_mode {
             let n = self.search_matches.len();
             let cur = if n == 0 { 0 } else { self.search_idx + 1 };
@@ -4088,12 +4138,19 @@ impl App {
                 accent,
             ));
         } else {
-            chrome_spans.push((format!(" {}   ", c0pl4nd_core::PRODUCT_NAME), accent));
+            let wm = format!(" {}   ", c0pl4nd_core::PRODUCT_NAME);
+            byte_off += wm.len();
+            chrome_spans.push((wm, accent));
             for i in 0..self.tabs.len() {
                 let col = if i == self.active { accent } else { muted };
-                chrome_spans.push((format!(" {} ", i + 1), col));
+                let s = format!(" {} ", i + 1);
+                zone_bytes.push((TabZone::Tab(i), byte_off, byte_off + s.len()));
+                byte_off += s.len();
+                chrome_spans.push((s, col));
             }
-            chrome_spans.push(("  +  ".to_string(), accent));
+            let plus = "  +  ".to_string();
+            zone_bytes.push((TabZone::NewTab, byte_off, byte_off + plus.len()));
+            chrome_spans.push((plus, accent));
         }
         gpu.chrome_buffer.set_rich_text(
             &mut gpu.font_system,
@@ -4109,6 +4166,25 @@ impl App {
         );
         gpu.chrome_buffer
             .shape_until_scroll(&mut gpu.font_system, false);
+        // Map laid-out glyphs back to clickable pixel x-ranges so the rendered
+        // tab chips and their click targets always agree (independent of font
+        // advance / DPI). x is buffer-relative; the buffer draws at CHROME_LEFT.
+        let mut zones: Vec<(TabZone, f32, f32)> = zone_bytes
+            .iter()
+            .map(|&(z, _, _)| (z, f32::INFINITY, f32::NEG_INFINITY))
+            .collect();
+        for run in gpu.chrome_buffer.layout_runs() {
+            for g in run.glyphs.iter() {
+                for (idx, &(_, bs, be)) in zone_bytes.iter().enumerate() {
+                    if g.start >= bs && g.start < be {
+                        let x0 = CHROME_LEFT + g.x;
+                        zones[idx].1 = zones[idx].1.min(x0);
+                        zones[idx].2 = zones[idx].2.max(x0 + g.w);
+                    }
+                }
+            }
+        }
+        gpu.tab_zones = zones.into_iter().filter(|&(_, x0, x1)| x1 > x0).collect();
         // Caption buttons: rendered in their OWN buffer, drawn at the absolute
         // `buttons_left` pixel (see the button_buffer TextArea below) so the
         // glyphs align exactly with the click/hit zones at ANY width — no more
@@ -4625,6 +4701,7 @@ impl Gpu {
             image_renderer,
             chrome_renderer,
             gpu_name,
+            tab_zones: Vec::new(),
         })
     }
 
