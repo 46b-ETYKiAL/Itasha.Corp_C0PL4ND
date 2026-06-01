@@ -1,0 +1,307 @@
+//! Milestone 1 pane grid — `egui_tiles::Tree<Pane>` with PLACEHOLDER panes.
+//!
+//! Each [`Pane`] paints a colored rect + its id as a label; there is NO real
+//! terminal here (that is Milestone 2, which swaps the placeholder body for a
+//! glyphon paint-callback). The grid supports drag-rearrange (egui_tiles
+//! native), programmatic split-right / split-down, a hard **6-pane cap**
+//! enforced via clone-and-snap-back, and per-pane close.
+//!
+//! ## Concepts
+//!
+//! - [`PaneId`] — stable monotonic identifier for each pane. Survives the tree
+//!   round-trip through serde as a plain integer.
+//! - [`Pane`] — thin handle wrapping a `PaneId`. The heavy per-pane state
+//!   (terminal/PTY/glyphon) lives in the host app, keyed by `PaneId`; the pane
+//!   itself carries only the id.
+//! - [`MAX_PANES`] — hard cap (six). Enforced post-frame: clone the `Tree`
+//!   before each frame, snap back if `count > MAX_PANES`.
+
+use egui_tiles::{LinearDir, TileId};
+use serde::{Deserialize, Serialize};
+
+/// Hard upper bound on simultaneously visible panes (recon dossier §4.1).
+pub const MAX_PANES: usize = 6;
+
+/// Stable, monotonically-allocated pane identifier. `#[serde(transparent)]`
+/// over a `u64` newtype so it encodes as a plain integer in any persisted tree.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PaneId(pub u64);
+
+impl PaneId {
+    /// Pluck the integer for direct use in egui id-stack scopes.
+    #[inline]
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+/// A leaf in the `egui_tiles::Tree`. A handle into the host's per-pane state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pane {
+    pub pane_id: PaneId,
+}
+
+impl Pane {
+    pub fn new(pane_id: PaneId) -> Self {
+        Self { pane_id }
+    }
+}
+
+/// Monotonic `PaneId` allocator. Held by the app; bumped on every new pane.
+#[derive(Debug, Default)]
+pub struct PaneIdAllocator {
+    next: u64,
+}
+
+impl PaneIdAllocator {
+    /// Allocate the next id.
+    pub fn next(&mut self) -> PaneId {
+        let id = PaneId(self.next);
+        self.next = self.next.wrapping_add(1);
+        id
+    }
+}
+
+/// Count the leaf panes in an `egui_tiles::Tree`. Used by the 6-pane cap
+/// enforcement after `tree.ui()` runs each frame. Counts EVERY pane in the
+/// tree's storage (a tab container holding N panes counts as N).
+pub fn count_panes(tree: &egui_tiles::Tree<Pane>) -> usize {
+    tree.tiles
+        .iter()
+        .filter(|(_, tile)| matches!(tile, egui_tiles::Tile::Pane(_)))
+        .count()
+}
+
+/// Build a default grid from a list of pane ids — every pane becomes a leaf
+/// inside a single horizontal container (visible side-by-side from the start).
+/// The fixed id-stack key keeps any future persistence stable across versions.
+pub fn build_default_grid(panes: &[PaneId]) -> egui_tiles::Tree<Pane> {
+    let mut tiles = egui_tiles::Tiles::default();
+    let pane_ids: Vec<TileId> = panes
+        .iter()
+        .map(|p| tiles.insert_pane(Pane::new(*p)))
+        .collect();
+    if pane_ids.is_empty() {
+        return egui_tiles::Tree::empty("c0pl4nd-grid");
+    }
+    let root = tiles.insert_horizontal_tile(pane_ids);
+    egui_tiles::Tree::new("c0pl4nd-grid", root, tiles)
+}
+
+/// Find the `TileId` of the leaf pane whose `pane_id` matches, if present.
+pub fn tile_of_pane(tree: &egui_tiles::Tree<Pane>, pane_id: PaneId) -> Option<TileId> {
+    tree.tiles.iter().find_map(|(id, tile)| match tile {
+        egui_tiles::Tile::Pane(p) if p.pane_id == pane_id => Some(*id),
+        _ => None,
+    })
+}
+
+/// Split the focused pane in the given direction, inserting `new_pane` next to
+/// it. Returns `true` if the split was applied, `false` if it was refused
+/// (because the tree is already at [`MAX_PANES`], or the focused pane is not in
+/// the tree).
+///
+/// Strategy (recon dossier §4.4): if the focused pane's parent container is a
+/// linear container already running in the requested direction, append the new
+/// pane there; otherwise wrap the focused tile in a fresh linear container of
+/// `[focused, new]`, swapping it into the focused tile's slot (or making it the
+/// new root when the focused tile is the root).
+pub fn split_focused(
+    tree: &mut egui_tiles::Tree<Pane>,
+    focus: PaneId,
+    new_pane: PaneId,
+    dir: LinearDir,
+) -> bool {
+    if count_panes(tree) >= MAX_PANES {
+        return false;
+    }
+    let Some(focus_tile) = tile_of_pane(tree, focus) else {
+        return false;
+    };
+    let new_tile = tree.tiles.insert_pane(Pane::new(new_pane));
+
+    // If the focused tile's parent is a linear container of the same direction,
+    // append into it — egui_tiles keeps the existing fractions.
+    if let Some(parent) = tree.tiles.parent_of(focus_tile) {
+        if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(lin))) =
+            tree.tiles.get(parent)
+        {
+            if lin.dir == dir {
+                // Insert immediately after the focused tile.
+                let index = lin
+                    .children
+                    .iter()
+                    .position(|c| *c == focus_tile)
+                    .map(|i| i + 1)
+                    .unwrap_or(lin.children.len());
+                tree.move_tile_to_container(new_tile, parent, index, false);
+                return true;
+            }
+        }
+    }
+
+    // Otherwise wrap the focused tile in a new linear container.
+    let container = tree
+        .tiles
+        .insert_container(egui_tiles::Linear::new(dir, vec![focus_tile, new_tile]));
+    swap_tile_in_parent(tree, focus_tile, container);
+    true
+}
+
+/// Replace `old`'s slot in its parent (or the root pointer) with `new`. Used by
+/// [`split_focused`] when the focused tile must be wrapped in a new container.
+/// `Tree::root` and `Tree::tiles` are public fields on `egui_tiles::Tree`.
+fn swap_tile_in_parent(tree: &mut egui_tiles::Tree<Pane>, old: TileId, new: TileId) {
+    if tree.root == Some(old) {
+        tree.root = Some(new);
+        return;
+    }
+    let Some(parent) = tree.tiles.parent_of(old) else {
+        return;
+    };
+    if let Some(egui_tiles::Tile::Container(container)) = tree.tiles.get_mut(parent) {
+        match container {
+            egui_tiles::Container::Linear(lin) => {
+                for child in &mut lin.children {
+                    if *child == old {
+                        *child = new;
+                        break;
+                    }
+                }
+            }
+            egui_tiles::Container::Tabs(tabs) => {
+                for child in &mut tabs.children {
+                    if *child == old {
+                        *child = new;
+                        break;
+                    }
+                }
+            }
+            egui_tiles::Container::Grid(grid) => {
+                let index = grid.children().position(|c| *c == old);
+                if let Some(index) = index {
+                    let _ = grid.replace_at(index, new);
+                }
+            }
+        }
+    }
+}
+
+// ---- Behavior<Pane> implementation ----
+//
+// The host populates `PaneCallbacks` each frame with closures over its own
+// state and feeds it to `tree.ui(&mut behavior, ui)`. This avoids holding
+// `&mut self` across the closure (the borrow problem the dossier flagged).
+
+/// Callbacks the grid renderer dispatches to. The host passes closures closing
+/// over its own state; the `Behavior` impl below only forwards calls.
+pub struct GridBehavior<'a> {
+    /// `(pane_id, title)` pairs for every pane. Used by `tab_title_for_pane`.
+    pub titles: &'a [(PaneId, String)],
+    /// Renderer hook: paint the pane body for the given id. Returns true if the
+    /// pane reported it wants to be dragged this frame.
+    pub render_body: &'a mut dyn FnMut(&mut egui::Ui, PaneId) -> bool,
+    /// Drained by the host after `tree.ui(...)`: ids the pane chrome requested
+    /// be closed this frame.
+    pub close_requests: &'a mut Vec<PaneId>,
+}
+
+impl egui_tiles::Behavior<Pane> for GridBehavior<'_> {
+    fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
+        let label = self
+            .titles
+            .iter()
+            .find(|(id, _)| *id == pane.pane_id)
+            .map(|(_, t)| t.as_str())
+            .unwrap_or("(closed)");
+        label.into()
+    }
+
+    fn pane_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        _tile_id: TileId,
+        pane: &mut Pane,
+    ) -> egui_tiles::UiResponse {
+        let drag_started = (self.render_body)(ui, pane.pane_id);
+        if drag_started {
+            egui_tiles::UiResponse::DragStarted
+        } else {
+            egui_tiles::UiResponse::None
+        }
+    }
+
+    fn min_size(&self) -> f32 {
+        120.0
+    }
+
+    fn gap_width(&self, _style: &egui::Style) -> f32 {
+        4.0
+    }
+
+    fn retain_pane(&mut self, pane: &Pane) -> bool {
+        !self.close_requests.contains(&pane.pane_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pane_id_allocator_monotonic() {
+        let mut a = PaneIdAllocator::default();
+        let a0 = a.next();
+        let a1 = a.next();
+        assert!(a0.0 < a1.0);
+    }
+
+    #[test]
+    fn build_default_grid_counts_panes() {
+        let tree = build_default_grid(&[PaneId(0), PaneId(1), PaneId(2)]);
+        assert_eq!(count_panes(&tree), 3);
+    }
+
+    #[test]
+    fn build_default_grid_empty_is_empty_tree() {
+        let tree = build_default_grid(&[]);
+        assert_eq!(count_panes(&tree), 0);
+    }
+
+    #[test]
+    fn split_focused_adds_a_pane() {
+        let mut tree = build_default_grid(&[PaneId(0)]);
+        assert_eq!(count_panes(&tree), 1);
+        let applied = split_focused(&mut tree, PaneId(0), PaneId(1), LinearDir::Horizontal);
+        assert!(applied);
+        assert_eq!(count_panes(&tree), 2);
+    }
+
+    #[test]
+    fn split_focused_refuses_above_cap() {
+        let ids: Vec<PaneId> = (0..MAX_PANES as u64).map(PaneId).collect();
+        let mut tree = build_default_grid(&ids);
+        assert_eq!(count_panes(&tree), MAX_PANES);
+        let applied = split_focused(&mut tree, PaneId(0), PaneId(99), LinearDir::Vertical);
+        assert!(!applied, "split must refuse at the 6-pane cap");
+        assert_eq!(count_panes(&tree), MAX_PANES);
+    }
+
+    #[test]
+    fn split_focused_unknown_focus_is_noop() {
+        let mut tree = build_default_grid(&[PaneId(0)]);
+        let applied = split_focused(&mut tree, PaneId(42), PaneId(1), LinearDir::Horizontal);
+        assert!(!applied);
+        assert_eq!(count_panes(&tree), 1);
+    }
+
+    /// The 6-pane cap depends on `Tree<Pane>` cloning losslessly (clone before
+    /// the frame, snap back if the count exceeds the cap).
+    #[test]
+    fn grid_clones_losslessly() {
+        let tree = build_default_grid(&[PaneId(10), PaneId(20), PaneId(30)]);
+        let snapshot = tree.clone();
+        assert_eq!(count_panes(&snapshot), 3);
+    }
+}
