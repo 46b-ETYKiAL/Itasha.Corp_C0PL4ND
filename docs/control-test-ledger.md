@@ -40,11 +40,28 @@ semantic (`get_by_label`), never pixel coordinates.
   The old state-only test (`split` called directly with `Horizontal`) never hit
   this path.
 
-## Milestone 2+ (planned controls — tests required before "done")
+## Milestone 2 — live glyphon terminal panes
+
+Test harness: `egui_kittest` + real PTYs (`crates/app/tests/egui_terminal.rs`).
+The PTY/input/resize **logic** is the bug-prone part and is tested headlessly
+with simulated input; the glyphon GPU paint callback can't run under kittest's
+software path (recon §7) so the pixel render is 🟡 — verify via the offscreen
+`screenshot.rs` visual-QA path, NOT kittest.
+
+| Control | User action | Asserted outcome | Test | Status |
+|---|---|---|---|---|
+| Terminal pane: type text | type `echo <tok>` + Enter | bytes reach the focused pane's real PTY AND `<tok>` appears in that pane's grid | `typing_a_command_reaches_the_pty_and_updates_the_grid` | ✅ |
+| Pane focus | click pane 1's tab, then type | input routes to pane 1's PTY/grid; does NOT leak to pane 0 | `clicking_a_pane_routes_typed_input_to_that_pane_only` | ✅ |
+| Resize → PTY | shrink the window | the focused pane's PTY grid `(cols,rows)` shrinks | `shrinking_the_window_resizes_the_pane_pty` | ✅ |
+| Glyphon GPU render | — | grid glyphs render to the pane texture | — | 🟡 needs human eyes / `screenshot.rs` (no GPU pass under kittest) |
+
+Headless logic also unit-tested in `pane_term`/`term_render`/`core::term::keys`
+(key→PTY encoding, debounced resize, pixel→cell mapping, payload geometry).
+
+## Milestone 3+ (planned controls — tests required before "done")
 
 | Control | Asserted outcome | Status |
 |---|---|---|
-| Terminal pane: type text | PTY receives bytes; grid updates | ⬜ |
 | Tab middle-click | tab/pane closes | ⬜ |
 | Tab drag A→B | order changes | ⬜ |
 | Settings: theme dropdown | runtime visuals change | ⬜ |

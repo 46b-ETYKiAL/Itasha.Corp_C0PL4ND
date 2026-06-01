@@ -145,6 +145,7 @@ impl Theme {
     /// the cell's background and vice-versa — matching every mainstream terminal
     /// (selections, `\e[7m`, cursor-on-cell all rely on this). `default_fg` /
     /// `default_bg` are the effective defaults (already swapped under DECSCNM).
+    #[allow(clippy::type_complexity)]
     pub fn cell_colors(
         &self,
         cell: &crate::grid::Cell,

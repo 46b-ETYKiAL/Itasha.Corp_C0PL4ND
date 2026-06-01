@@ -190,6 +190,35 @@ impl C0pl4ndApp {
         self.last_window_cmd
     }
 
+    /// The visible grid text of a pane's terminal, or `None` if the pane has no
+    /// live terminal. Used by interaction tests to assert that PTY output landed
+    /// on screen (the load-bearing type→PTY→grid round-trip).
+    #[allow(dead_code)]
+    pub fn pane_grid_text(&self, pane_id: PaneId) -> Option<String> {
+        self.terms.get(&pane_id).and_then(PaneTerm::grid_text)
+    }
+
+    /// The focused pane's visible grid text. Convenience over
+    /// [`Self::pane_grid_text`] for the common test assertion.
+    #[allow(dead_code)]
+    pub fn focused_grid_text(&self) -> Option<String> {
+        self.pane_grid_text(self.focused_pane)
+    }
+
+    /// A pane's PTY grid size `(cols, rows)`, or `None` if it has no terminal.
+    /// Used by the resize→PTY interaction test.
+    #[allow(dead_code)]
+    pub fn pane_size(&self, pane_id: PaneId) -> Option<(u16, u16)> {
+        self.terms.get(&pane_id).map(PaneTerm::size)
+    }
+
+    /// The ids of every pane with a live terminal, in unspecified order. Used by
+    /// tests to enumerate panes for focus routing assertions.
+    #[allow(dead_code)]
+    pub fn pane_ids(&self) -> Vec<PaneId> {
+        self.pane_titles().into_iter().map(|(id, _)| id).collect()
+    }
+
     /// `(pane_id, title)` for every pane in the grid, in tree order.
     fn pane_titles(&self) -> Vec<(PaneId, String)> {
         self.grid_tree

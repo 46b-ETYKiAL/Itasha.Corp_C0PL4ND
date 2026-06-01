@@ -268,11 +268,30 @@ mod tests {
     // exercised by the offscreen `screenshot.rs` visual-QA path. The headless,
     // bug-prone logic (grid snapshot, input, resize) is tested in `pane_term`
     // and the `egui_terminal` interaction-test binary. This block asserts only
-    // the pure constants/shape that need no GPU.
-    use super::PANE_PAD;
+    // the pure, no-GPU shape: that a `TermPaint` payload carries the pane's
+    // physical rect through to the glyph origin/bounds the GPU layer consumes.
+    use super::{PaneId, TermPaint, PANE_PAD};
 
     #[test]
-    fn pane_pad_is_nonnegative() {
-        assert!(PANE_PAD >= 0.0);
+    fn term_paint_preserves_pane_geometry() {
+        let paint = TermPaint {
+            pane_id: PaneId(7),
+            px_rect: [100.0, 50.0, 640.0, 480.0],
+            default_fg: [10, 20, 30],
+            runs: std::sync::Arc::new(vec![("hi".to_string(), (1, 2, 3))]),
+        };
+        // The pane rect is carried verbatim for the GPU layer to clip against.
+        assert_eq!(paint.px_rect, [100.0, 50.0, 640.0, 480.0]);
+        assert_eq!(paint.pane_id, PaneId(7));
+        // The glyph origin sits inside the rect by PANE_PAD on each axis, so the
+        // padded inset never escapes the pane's left/top edge.
+        let glyph_left = paint.px_rect[0] + PANE_PAD;
+        let glyph_top = paint.px_rect[1] + PANE_PAD;
+        assert!(glyph_left > paint.px_rect[0]);
+        assert!(glyph_top > paint.px_rect[1]);
+        assert!(
+            PANE_PAD < paint.px_rect[2],
+            "pad must not consume the width"
+        );
     }
 }
