@@ -92,6 +92,7 @@ impl C0pl4ndApp {
     /// wgpu render state is absent (should not happen with the `wgpu` backend).
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(theme::itasha_corp_visuals());
+        install_chrome_fonts(&cc.egui_ctx);
         apply_window_effect(cc);
         let mut app = Self::bootstrap();
         app.install_gpu(cc);
@@ -764,6 +765,25 @@ fn load_terminal_theme(config: &c0pl4nd_core::Config) -> c0pl4nd_core::Theme {
         }
     }
     c0pl4nd_core::Theme::builtin_void()
+}
+
+/// Install the Phosphor icon font into egui's font set so the chrome's caption
+/// glyphs (close/maximize/minimize/gear, split-right/down) render as crisp icons
+/// instead of the default-font missing-glyph tofu boxes. Phosphor is merged into
+/// BOTH the proportional and monospace families so a chrome button using either
+/// font resolves the icon codepoint. Called once at startup.
+fn install_chrome_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Thin);
+    // `add_to_fonts` registers the "phosphor" font_data and inserts it into the
+    // Proportional family; also append it to Monospace so monospace buttons can
+    // resolve the icons.
+    if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        if !mono.iter().any(|f| f == "phosphor") {
+            mono.push("phosphor".to_owned());
+        }
+    }
+    ctx.set_fonts(fonts);
 }
 
 /// Apply the OS window effect (acrylic on Windows, vibrancy on macOS). Best-

@@ -46,7 +46,7 @@ window-vibrancy.workspace = true
 [dev-dependencies]
 # Headless egui UI tests (kittest = AccessKit-driven). State-assertion tests run
 # everywhere; pixel snapshots are deliberately kept out of CI for now (recon §7).
-egui_kittest = { version = "0.34", features = ["wgpu", "snapshot"] }
+egui_kittest = { version = "0.34", features = ["wgpu", "snapshot", "eframe"] }
 
 # D4 (Windows-only): Win32 custom-frame Aero Snap on the frameless window.
 # Used solely by the `#[cfg(windows)]` `win_snap` module; not linked elsewhere.

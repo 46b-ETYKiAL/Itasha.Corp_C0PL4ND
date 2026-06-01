@@ -30,6 +30,7 @@ use egui_kittest::Harness;
 
 use egui_app::grid::PaneId;
 use egui_app::{C0pl4ndApp, WindowCmd};
+use egui_phosphor::thin as icon;
 
 /// Build a headless harness that drives the REAL `frame_tick` for one shared app
 /// instance. The same function the shipping binary runs each frame — so a click
@@ -52,7 +53,7 @@ fn clicking_plus_splits_a_new_pane() {
     let before = app.borrow().pane_count();
     let mut h = harness(&app);
 
-    h.get_by_label("+").click();
+    h.get_by_label(icon::COLUMNS).click();
     h.run();
 
     let after = app.borrow().pane_count();
@@ -69,7 +70,7 @@ fn clicking_split_down_splits_a_new_pane() {
     let before = app.borrow().pane_count();
     let mut h = harness(&app);
 
-    h.get_by_label("⬓").click();
+    h.get_by_label(icon::ROWS).click();
     h.run();
 
     assert_eq!(
@@ -107,7 +108,7 @@ fn clicking_gear_opens_settings() {
     assert!(!app.borrow().settings_is_open(), "settings closed at start");
     let mut h = harness(&app);
 
-    h.get_by_label("⚙").click();
+    h.get_by_label(icon::GEAR).click();
     h.run();
 
     assert!(
@@ -124,7 +125,7 @@ fn settings_close_button_actually_closes_the_window() {
     let mut h = harness(&app);
 
     // Open settings (gear) — the egui Window renders in the same frame_tick.
-    h.get_by_label("⚙").click();
+    h.get_by_label(icon::GEAR).click();
     h.run();
     assert!(
         app.borrow().settings_is_open(),
@@ -148,7 +149,7 @@ fn clicking_close_caption_issues_a_close_command() {
     assert_eq!(app.borrow().last_window_cmd(), None);
     let mut h = harness(&app);
 
-    h.get_by_label("✕").click();
+    h.get_by_label(icon::X).click();
     h.run();
 
     assert_eq!(
@@ -163,7 +164,7 @@ fn clicking_minimize_caption_issues_a_minimize_command() {
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let mut h = harness(&app);
 
-    h.get_by_label("—").click();
+    h.get_by_label(icon::MINUS).click();
     h.run();
 
     assert_eq!(app.borrow().last_window_cmd(), Some(WindowCmd::Minimize));
@@ -174,7 +175,7 @@ fn clicking_maximize_caption_issues_a_maximize_command() {
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let mut h = harness(&app);
 
-    h.get_by_label("◻").click();
+    h.get_by_label(icon::SQUARE).click();
     h.run();
 
     assert_eq!(
@@ -192,13 +193,13 @@ fn splitting_past_six_panes_is_refused() {
 
     // bootstrap=2 panes; click + four times to reach 6.
     for _ in 0..4 {
-        h.get_by_label("+").click();
+        h.get_by_label(icon::COLUMNS).click();
         h.run();
     }
     assert_eq!(app.borrow().pane_count(), 6, "reached the 6-pane cap");
 
     // One more + must be refused (count stays 6).
-    h.get_by_label("+").click();
+    h.get_by_label(icon::COLUMNS).click();
     h.run();
     assert_eq!(
         app.borrow().pane_count(),

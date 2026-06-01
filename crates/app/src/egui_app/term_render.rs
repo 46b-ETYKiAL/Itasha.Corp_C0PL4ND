@@ -36,7 +36,10 @@ const PANE_PAD: f32 = 4.0;
 /// its own `TextRenderer` + `Buffer` (keyed by [`PaneId`]) so two panes' glyph
 /// data don't collide in one renderer.
 pub struct TermGpu {
-    /// glyphon's GPU cache (pipelines/bind-group layouts), bound to egui's device.
+    /// glyphon's GPU cache (pipelines/bind-group layouts), bound to egui's
+    /// device. Held to keep the cache alive for the atlas/viewport's lifetime;
+    /// not read directly after construction.
+    #[allow(dead_code)]
     cache: Cache,
     /// The shared glyph atlas, created with egui's `target_format` (pitfall #2).
     atlas: TextAtlas,
@@ -111,6 +114,133 @@ impl TermGpu {
         self.buffers.retain(|id, _| live.contains(id));
         self.renderers.retain(|id, _| live.contains(id));
     }
+
+    /// Build a pane's glyphon `Buffer` from its colour runs, update the shared
+    /// viewport to the full screen, and `prepare` the pane's `TextRenderer` so
+    /// the glyphs are ready to draw. This is the SHARED draw-build code: it is
+    /// called by BOTH the live egui [`TermPaint::prepare`] callback AND the
+    /// offscreen pixel-readback test, so the test exercises the exact production
+    /// glyph build/shape/prepare path (recon dossier §7 visual-QA + the
+    /// black-pane regression guard). `screen_px` is the FULL surface size in
+    /// physical pixels — glyphon maps glyph positions against it, so it MUST be
+    /// the real surface size, not 0×0.
+    ///
+    /// Returns `Ok(())` once the renderer is prepared; surfaces the glyphon error
+    /// otherwise (never silently no-ops).
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_pane(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pane_id: PaneId,
+        px_rect: [f32; 4],
+        default_fg: [u8; 3],
+        runs: &[ColorRun],
+        screen_px: [u32; 2],
+    ) -> Result<(), glyphon::PrepareError> {
+        self.viewport.update(
+            queue,
+            Resolution {
+                width: screen_px[0],
+                height: screen_px[1],
+            },
+        );
+
+        let [left, top, w, h] = px_rect;
+        let metrics = self.metrics;
+        let default_attrs = Attrs::new()
+            .family(Family::Monospace)
+            .color(GColor::rgb(default_fg[0], default_fg[1], default_fg[2]));
+
+        // Borrow the font system + buffers disjointly to (re)build this pane's
+        // laid-out glyph buffer from the colour runs.
+        let TermGpu {
+            font_system,
+            buffers,
+            ..
+        } = self;
+        let buf = buffers
+            .entry(pane_id)
+            .or_insert_with(|| Buffer::new(font_system, metrics));
+        buf.set_size(
+            font_system,
+            Some((w - 2.0 * PANE_PAD).max(1.0)),
+            Some((h - 2.0 * PANE_PAD).max(1.0)),
+        );
+        buf.set_rich_text(
+            font_system,
+            runs.iter().map(|(s, (r, g, b))| {
+                (
+                    s.as_str(),
+                    Attrs::new()
+                        .family(Family::Monospace)
+                        .color(GColor::rgb(*r, *g, *b)),
+                )
+            }),
+            &default_attrs,
+            Shaping::Advanced,
+            None,
+        );
+        buf.shape_until_scroll(font_system, false);
+
+        // Clip glyphs to the pane's physical rect (pitfall #7) via glyphon's own
+        // TextBounds (the egui callback ALSO sets a wgpu scissor for the live
+        // path; the offscreen test relies on these bounds).
+        let bounds = TextBounds {
+            left: left as i32,
+            top: top as i32,
+            right: (left + w) as i32,
+            bottom: (top + h) as i32,
+        };
+
+        let TermGpu {
+            atlas,
+            viewport,
+            font_system,
+            swash_cache,
+            renderers,
+            buffers,
+            ..
+        } = self;
+        let renderer = renderers.entry(pane_id).or_insert_with(|| {
+            TextRenderer::new(atlas, device, wgpu::MultisampleState::default(), None)
+        });
+        let buffer = buffers
+            .get(&pane_id)
+            .expect("buffer was just inserted above");
+        let areas = [TextArea {
+            buffer,
+            left: left + PANE_PAD,
+            top: top + PANE_PAD,
+            scale: 1.0,
+            bounds,
+            default_color: GColor::rgb(default_fg[0], default_fg[1], default_fg[2]),
+            custom_glyphs: &[],
+        }];
+        renderer.prepare(
+            device,
+            queue,
+            font_system,
+            atlas,
+            viewport,
+            areas,
+            swash_cache,
+        )
+    }
+
+    /// Render a previously-[`prepare_pane`]d pane into `pass`. Shared by the live
+    /// egui [`TermPaint::paint`] callback (after it restores the full-screen
+    /// viewport) and the offscreen pixel-readback test.
+    pub fn render_pane(
+        &self,
+        pane_id: PaneId,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) -> Result<(), glyphon::RenderError> {
+        let Some(renderer) = self.renderers.get(&pane_id) else {
+            return Ok(());
+        };
+        renderer.render(&self.atlas, &self.viewport, pass)
+    }
 }
 
 /// Per-pane, per-frame paint payload: the pane's id, its physical-pixel rect,
@@ -129,48 +259,6 @@ pub struct TermPaint {
     pub runs: std::sync::Arc<Vec<ColorRun>>,
 }
 
-impl TermPaint {
-    /// (Re)build this pane's glyphon `Buffer` from the colour runs and lay it
-    /// out to the pane's pixel size. Shared so `prepare` stays small.
-    fn rebuild_buffer(&self, gpu: &mut TermGpu) {
-        let [_, _, w, h] = self.px_rect;
-        let metrics = gpu.metrics;
-        let default = self.default_fg;
-        let default_attrs = Attrs::new()
-            .family(Family::Monospace)
-            .color(GColor::rgb(default[0], default[1], default[2]));
-        // Borrow the font system disjointly from the buffer entry.
-        let TermGpu {
-            font_system,
-            buffers,
-            ..
-        } = gpu;
-        let buf = buffers
-            .entry(self.pane_id)
-            .or_insert_with(|| Buffer::new(font_system, metrics));
-        buf.set_size(
-            font_system,
-            Some((w - 2.0 * PANE_PAD).max(1.0)),
-            Some((h - 2.0 * PANE_PAD).max(1.0)),
-        );
-        buf.set_rich_text(
-            font_system,
-            self.runs.iter().map(|(s, (r, g, b))| {
-                (
-                    s.as_str(),
-                    Attrs::new()
-                        .family(Family::Monospace)
-                        .color(GColor::rgb(*r, *g, *b)),
-                )
-            }),
-            &default_attrs,
-            Shaping::Advanced,
-            None,
-        );
-        buf.shape_until_scroll(font_system, false);
-    }
-}
-
 impl CallbackTrait for TermPaint {
     fn prepare(
         &self,
@@ -183,60 +271,17 @@ impl CallbackTrait for TermPaint {
         let Some(gpu) = resources.get_mut::<TermGpu>() else {
             return Vec::new();
         };
-        gpu.viewport.update(
-            queue,
-            Resolution {
-                width: screen.size_in_pixels[0],
-                height: screen.size_in_pixels[1],
-            },
-        );
-        self.rebuild_buffer(gpu);
-
-        let [left, top, w, h] = self.px_rect;
-        // Clip the glyphs to the pane's physical rect (pitfall #7) — both via
-        // egui's callback scissor AND glyphon's own TextBounds, belt-and-braces.
-        let bounds = TextBounds {
-            left: left as i32,
-            top: top as i32,
-            right: (left + w) as i32,
-            bottom: (top + h) as i32,
-        };
-        let default = self.default_fg;
-        // Build the renderer + buffer borrows disjointly.
-        let TermGpu {
-            atlas,
-            viewport,
-            font_system,
-            swash_cache,
-            renderers,
-            buffers,
-            cache,
-            ..
-        } = gpu;
-        let renderer = renderers.entry(self.pane_id).or_insert_with(|| {
-            TextRenderer::new(atlas, device, wgpu::MultisampleState::default(), None)
-        });
-        let Some(buffer) = buffers.get(&self.pane_id) else {
-            let _ = cache;
-            return Vec::new();
-        };
-        let areas = [TextArea {
-            buffer,
-            left: left + PANE_PAD,
-            top: top + PANE_PAD,
-            scale: 1.0,
-            bounds,
-            default_color: GColor::rgb(default[0], default[1], default[2]),
-            custom_glyphs: &[],
-        }];
-        if let Err(e) = renderer.prepare(
+        // Delegate to the SHARED build/shape/prepare path so the live callback
+        // and the offscreen pixel-readback test exercise the exact same draw
+        // code (the regression guard for the black-pane bug).
+        if let Err(e) = gpu.prepare_pane(
             device,
             queue,
-            font_system,
-            atlas,
-            viewport,
-            areas,
-            swash_cache,
+            self.pane_id,
+            self.px_rect,
+            self.default_fg,
+            &self.runs,
+            screen.size_in_pixels,
         ) {
             tracing::warn!("glyphon prepare failed for pane {:?}: {e}", self.pane_id);
         }
@@ -245,17 +290,28 @@ impl CallbackTrait for TermPaint {
 
     fn paint(
         &self,
-        _info: PaintCallbackInfo,
+        info: PaintCallbackInfo,
         pass: &mut wgpu::RenderPass<'static>,
         resources: &egui_wgpu::CallbackResources,
     ) {
         let Some(gpu) = resources.get::<TermGpu>() else {
             return;
         };
-        let Some(renderer) = gpu.renderers.get(&self.pane_id) else {
-            return;
-        };
-        if let Err(e) = renderer.render(&gpu.atlas, &gpu.viewport, pass) {
+        // ROOT CAUSE of the black-pane bug (Milestone 2): before invoking a paint
+        // callback, egui-wgpu calls `render_pass.set_viewport(rect)` to the
+        // callback's pane rect (egui-wgpu-0.34 renderer.rs §"default viewport for
+        // the render pass"). glyphon's vertex shader maps each glyph's ABSOLUTE
+        // pixel position into NDC against the FULL window resolution
+        // (`2*pos/screen_resolution-1`). With egui's sub-rect viewport active,
+        // that full-screen NDC is then re-mapped into the tiny pane sub-rect —
+        // offsetting + squishing every glyph far outside the pane's scissor, so
+        // NOTHING is visible (pure black). The fix: restore the FULL-screen
+        // viewport here so glyphon's absolute coordinates map correctly. The
+        // scissor (set by egui-wgpu from the callback's clip_rect) STILL clips to
+        // the pane rect, so glyphs never bleed outside the pane.
+        let [sw, sh] = info.screen_size_px;
+        pass.set_viewport(0.0, 0.0, sw as f32, sh as f32, 0.0, 1.0);
+        if let Err(e) = gpu.render_pane(self.pane_id, pass) {
             tracing::warn!("glyphon render failed for pane {:?}: {e}", self.pane_id);
         }
     }
