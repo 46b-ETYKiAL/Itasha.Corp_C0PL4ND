@@ -143,14 +143,14 @@ impl Theme {
         Theme {
             name: "Itasha.Corp (builtin)".into(),
             author: "Itasha.Corp".into(),
-            background: row("#0b0613"),
+            background: row("#121212"),
             foreground: row("#e8e6f0"),
             cursor: row("#00ff90"),
-            cursor_text: row("#0b0613"),
+            cursor_text: row("#121212"),
             selection_background: row("#33106b"),
             selection_foreground: row("#e8e6f0"),
             normal: AnsiRow {
-                black: "#1b1530".into(),
+                black: "#1c1c1c".into(),
                 red: "#ff3b5c".into(),
                 green: "#00ff90".into(),
                 yellow: "#ffc44d".into(),
