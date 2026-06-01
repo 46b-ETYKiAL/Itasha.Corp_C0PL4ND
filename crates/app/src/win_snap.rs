@@ -296,10 +296,7 @@ unsafe fn hit_test(hwnd: HWND, lparam: LPARAM, geom: &SnapGeometry) -> LRESULT {
             // controls in the tab strip (tab chips, the new-tab `+`, the
             // settings gear), both of which stay HTCLIENT so the click reaches
             // winit's MouseInput handler instead of starting a window drag.
-            if pt.y < geom.titlebar_h
-                && pt.x < w - geom.buttons_w
-                && !in_interactive_zone(pt.x)
-            {
+            if pt.y < geom.titlebar_h && pt.x < w - geom.buttons_w && !in_interactive_zone(pt.x) {
                 HTCAPTION
             } else {
                 HTCLIENT

@@ -5307,7 +5307,10 @@ mod tests {
         let cell = BUTTON_CELLS * CELL_W; // 45.0
                                           // A 9px-advance glyph in a 45px cell -> 18px of slack, 9px each side.
         assert_eq!(caption_glyph_left(cluster, 0, cell, 9.0), 1000.0 + 18.0);
-        assert_eq!(caption_glyph_left(cluster, 1, cell, 9.0), 1000.0 + cell + 18.0);
+        assert_eq!(
+            caption_glyph_left(cluster, 1, cell, 9.0),
+            1000.0 + cell + 18.0
+        );
         assert_eq!(
             caption_glyph_left(cluster, 2, cell, 9.0),
             1000.0 + 2.0 * cell + 18.0
