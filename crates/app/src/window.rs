@@ -3823,6 +3823,11 @@ impl App {
             let (r, g, b) = self.theme.ansi(4);
             GColor::rgb(r, g, b)
         };
+        // Muted chrome color (ANSI 8 / bright-black) for inactive tab chips.
+        let muted = {
+            let (r, g, b) = self.theme.ansi(8);
+            GColor::rgb(r, g, b)
+        };
         // Configurable grid content padding (captured before the &mut gpu borrow
         // so the render-loop call sites match the hit-test sites above).
         let content_pad = self.config.window.padding as f32;
@@ -4066,33 +4071,38 @@ impl App {
         // Custom chrome: wordmark (accent) on the left, buttons flush right.
         // The button cluster begins at the SAME pixel `hit_titlebar` uses.
         let buttons_left = Self::buttons_left_px(width);
-        let pad_cols = (((buttons_left - CHROME_LEFT) / CELL_W).round()).max(0.0) as usize;
-        let title = if self.search_mode {
+        // Modern tab strip: the wordmark, then one chip per tab (active chip in
+        // accent, inactive chips muted), then a '+' new-tab affordance. Replaces
+        // the old "[N/M]" counter. Click hit-testing is wired in `hit_titlebar`
+        // off the SAME geometry. In search mode the strip yields to the search
+        // status line.
+        let mut chrome_spans: Vec<(String, GColor)> = Vec::new();
+        if self.search_mode {
             let n = self.search_matches.len();
             let cur = if n == 0 { 0 } else { self.search_idx + 1 };
-            format!(
-                " search /{}  [{cur}/{n}]  (esc to exit) ",
-                self.search_query
-            )
-        } else if self.tabs.len() > 1 {
-            format!(
-                " {}  [{}/{}] ",
-                c0pl4nd_core::PRODUCT_NAME,
-                self.active + 1,
-                self.tabs.len()
-            )
+            chrome_spans.push((
+                format!(
+                    " search /{}  [{cur}/{n}]  (esc to exit) ",
+                    self.search_query
+                ),
+                accent,
+            ));
         } else {
-            format!(" {} ", c0pl4nd_core::PRODUCT_NAME)
-        };
-        // Title: left-aligned, truncated to the button column so it never runs
-        // under the caption buttons. It is drawn in `chrome_buffer` at the left.
-        let chrome: String = title.chars().take(pad_cols).collect();
+            chrome_spans.push((format!(" {}   ", c0pl4nd_core::PRODUCT_NAME), accent));
+            for i in 0..self.tabs.len() {
+                let col = if i == self.active { accent } else { muted };
+                chrome_spans.push((format!(" {} ", i + 1), col));
+            }
+            chrome_spans.push(("  +  ".to_string(), accent));
+        }
         gpu.chrome_buffer.set_rich_text(
             &mut gpu.font_system,
-            [(
-                chrome.as_str(),
-                Attrs::new().family(Family::Monospace).color(accent),
-            )],
+            chrome_spans.iter().map(|(s, col)| {
+                (
+                    s.as_str(),
+                    Attrs::new().family(Family::Monospace).color(*col),
+                )
+            }),
             &Attrs::new().family(Family::Monospace).color(fg),
             Shaping::Advanced,
             None,
@@ -4181,10 +4191,10 @@ impl App {
         let w = gpu.surface_config.width as i32;
         let h = gpu.surface_config.height as i32;
         let mut areas = vec![
-            // Title bar chrome (wordmark / tab counter), left-aligned.
+            // Title bar chrome (wordmark + tab strip), left-aligned.
             TextArea {
                 buffer: &gpu.chrome_buffer,
-                left: 6.0,
+                left: CHROME_LEFT,
                 top: 6.0,
                 scale: 1.0,
                 bounds: TextBounds {
