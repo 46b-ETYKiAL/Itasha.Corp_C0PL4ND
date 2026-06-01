@@ -53,6 +53,40 @@ const HTBOTTOMRIGHT: isize = 17;
 /// Subclass id for our snap wndproc (any stable per-process value).
 const SUBCLASS_ID: usize = 0xC0_71_4D; // "C0PL4ND"-ish marker.
 
+/// Physical-pixel x-ranges within the title-bar strip that are INTERACTIVE
+/// (the tab chips, the new-tab `+`, the settings gear). These MUST hit-test as
+/// `HTCLIENT` so a click reaches winit's `MouseInput` (and our tab router)
+/// instead of being swallowed by Windows as a title-bar drag (`HTCAPTION`).
+/// Published every frame by the renderer (`window.rs`) after it shapes the tab
+/// chrome. A single global is correct: C0PL4ND uses ONE OS window — tabs are
+/// in-window — so per-HWND keying is unnecessary.
+static INTERACTIVE_ZONES: std::sync::OnceLock<std::sync::Mutex<Vec<(i32, i32)>>> =
+    std::sync::OnceLock::new();
+
+/// Publish the interactive title-bar x-ranges (physical px) for the hit-test.
+/// Called from the renderer each frame. Lock-guarded, no `unsafe`.
+pub fn set_interactive_zones(zones: Vec<(i32, i32)>) {
+    let cell = INTERACTIVE_ZONES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    if let Ok(mut g) = cell.lock() {
+        *g = zones;
+    }
+}
+
+/// True when client-space x `px` falls within a published interactive zone.
+fn in_interactive_zone(px: i32) -> bool {
+    INTERACTIVE_ZONES
+        .get()
+        .and_then(|m| m.lock().ok())
+        .map(|g| zone_contains(px, &g))
+        .unwrap_or(false)
+}
+
+/// Pure half-open membership test: is `px` within any `[x0, x1)` range? Split
+/// out so the hit-test predicate is unit-testable without a window/global.
+fn zone_contains(px: i32, zones: &[(i32, i32)]) -> bool {
+    zones.iter().any(|&(x0, x1)| px >= x0 && px < x1)
+}
+
 /// Geometry the hit-test needs, in PHYSICAL pixels, matching the renderer.
 /// Stored in a leaked `Box` whose pointer is the subclass `dwrefdata`, so the
 /// wndproc can read it without any global state.
@@ -257,10 +291,15 @@ unsafe fn hit_test(hwnd: HWND, lparam: LPARAM, geom: &SnapGeometry) -> LRESULT {
         (_, _, _, true) => HTRIGHT,
         _ => {
             // Inside the body. The title-bar strip (below the top resize band,
-            // above titlebar_h) is the drag region — EXCEPT the caption-button
-            // cluster at the right edge, which stays HTCLIENT so our own
-            // min/max/close handler receives the click.
-            if pt.y < geom.titlebar_h && pt.x < w - geom.buttons_w {
+            // above titlebar_h) is the drag region — EXCEPT (a) the
+            // caption-button cluster at the right edge and (b) the interactive
+            // controls in the tab strip (tab chips, the new-tab `+`, the
+            // settings gear), both of which stay HTCLIENT so the click reaches
+            // winit's MouseInput handler instead of starting a window drag.
+            if pt.y < geom.titlebar_h
+                && pt.x < w - geom.buttons_w
+                && !in_interactive_zone(pt.x)
+            {
                 HTCAPTION
             } else {
                 HTCLIENT
@@ -292,5 +331,41 @@ unsafe fn clamp_maxinfo(hwnd: HWND, lparam: LPARAM) {
         (*mmi).ptMaxSize.y = work.bottom - work.top;
         (*mmi).ptMaxTrackSize.x = work.right - work.left;
         (*mmi).ptMaxTrackSize.y = work.bottom - work.top;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zone_contains_is_half_open_and_multi_range() {
+        // Two interactive ranges (e.g. the tab chip and the '+' affordance).
+        let zones = [(96, 121), (140, 181)];
+        // Inside the first range: HTCLIENT (interactive).
+        assert!(zone_contains(96, &zones)); // left edge inclusive
+        assert!(zone_contains(120, &zones));
+        // The right edge is EXCLUSIVE so adjacent ranges never double-count.
+        assert!(!zone_contains(121, &zones));
+        // The gap between ranges stays draggable (HTCAPTION).
+        assert!(!zone_contains(130, &zones));
+        // Inside the second range.
+        assert!(zone_contains(140, &zones));
+        assert!(zone_contains(180, &zones));
+        assert!(!zone_contains(181, &zones));
+        // No zones published yet -> nothing is interactive (whole strip drags).
+        assert!(!zone_contains(100, &[]));
+    }
+
+    #[test]
+    fn set_interactive_zones_publishes_for_the_hit_test() {
+        set_interactive_zones(vec![(10, 20), (30, 40)]);
+        assert!(in_interactive_zone(15));
+        assert!(in_interactive_zone(35));
+        assert!(!in_interactive_zone(25));
+        // Re-publishing replaces (does not accumulate) the previous frame.
+        set_interactive_zones(vec![(100, 110)]);
+        assert!(in_interactive_zone(105));
+        assert!(!in_interactive_zone(15));
     }
 }

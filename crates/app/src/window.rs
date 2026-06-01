@@ -376,6 +376,16 @@ fn tab_zone_at(x: f32, zones: &[(TabZone, f32, f32)]) -> Option<TabZone> {
         .map(|&(z, _, _)| z)
 }
 
+/// Left x for a caption glyph so it sits horizontally centred in its
+/// `cell_w`-wide backplate, given the cluster origin `cluster_left`, the
+/// button's `idx` in the cluster, and the glyph's measured advance `glyph_w`.
+/// Split out so the centring math is unit-testable independent of the GPU.
+/// Clamps to the slot's left edge when a glyph is wider than its cell.
+fn caption_glyph_left(cluster_left: f32, idx: usize, cell_w: f32, glyph_w: f32) -> f32 {
+    let slot_x = cluster_left + idx as f32 * cell_w;
+    slot_x + ((cell_w - glyph_w) / 2.0).max(0.0)
+}
+
 /// Pure settings-panel hit-test: map a click `(x, y)` and the current surface
 /// width to a settings row index, mirroring the panel's render geometry (panel
 /// at `left = (w*0.25).max(40)`, `top = TITLEBAR_H + 40`, a 2-line header, then
@@ -463,11 +473,12 @@ struct Gpu {
     /// strip (>=2 tabs, or a short cell under the cursor). Keyed by `LeafId`.
     tabbar_buffers: HashMap<LeafId, Buffer>,
     chrome_buffer: Buffer,
-    /// The min/max/close caption glyphs, in their OWN buffer drawn at the
-    /// absolute `buttons_left_px` so the rendered glyphs line up exactly with
-    /// the click/hit zones (and the native win_snap caption region) at any
-    /// window width — instead of drifting via accumulated space-padding.
-    button_buffer: Buffer,
+    /// The min/max/close caption glyphs — ONE buffer per glyph (no padding) so
+    /// each can be independently centred (H+V) in its fixed backplate cell.
+    /// Space-padding could not centre symbol glyphs (□ U+25A1, ✕ U+2715) whose
+    /// font-fallback advance differs from the space advance, leaving them
+    /// visibly off-centre in their hover squares. Order: [minimize, max, close].
+    caption_buffers: [Buffer; 3],
     palette_buffer: Buffer,
     splash_buffer: Buffer,
     image_renderer: crate::image_render::ImageRenderer,
@@ -4347,26 +4358,41 @@ impl App {
             }
         }
         gpu.tab_zones = zones.into_iter().filter(|&(_, x0, x1)| x1 > x0).collect();
-        // Caption buttons: rendered in their OWN buffer, drawn at the absolute
-        // `buttons_left` pixel (see the button_buffer TextArea below) so the
-        // glyphs align exactly with the click/hit zones at ANY width — no more
-        // space-padding drift. Each button is BUTTON_CELLS (5) cells wide.
-        let button_spans = [
-            ("  \u{2014}  ", fg),         // minimize  —
-            ("  \u{25a1}  ", fg),         // maximize  □
-            ("  \u{2715}  ", signal_red), // close     ✕
-        ];
-        gpu.button_buffer.set_rich_text(
-            &mut gpu.font_system,
-            button_spans
+        // Windows: hand the interactive tab-strip x-ranges to the native
+        // hit-test so clicks on tabs / '+' / gear are HTCLIENT (reach winit)
+        // instead of HTCAPTION (window drag). Without this the whole strip is a
+        // drag region and the buttons appear dead. Physical px, surface-relative
+        // — exactly the space win_snap's ScreenToClient produces.
+        #[cfg(windows)]
+        {
+            let izones: Vec<(i32, i32)> = gpu
+                .tab_zones
                 .iter()
-                .map(|(s, col)| (*s, Attrs::new().family(Family::Monospace).color(*col))),
-            &Attrs::new().family(Family::Monospace).color(fg),
-            Shaping::Advanced,
-            None,
-        );
-        gpu.button_buffer
-            .shape_until_scroll(&mut gpu.font_system, false);
+                .map(|&(_, x0, x1)| (x0.floor() as i32, x1.ceil() as i32))
+                .collect();
+            crate::win_snap::set_interactive_zones(izones);
+        }
+        // Caption buttons: each glyph in its OWN single-glyph buffer (no
+        // padding) so it can be centred within its BUTTON_CELLS-wide backplate
+        // in the render section below — independent of how the symbol font's
+        // advance compares to the space advance. Order: [minimize, max, close].
+        let caption_glyphs: [(&str, GColor); 3] = [
+            ("\u{2014}", fg),         // minimize  —
+            ("\u{25a1}", fg),         // maximize  □
+            ("\u{2715}", signal_red), // close     ✕
+        ];
+        for (i, (glyph, col)) in caption_glyphs.iter().enumerate() {
+            let fs = &mut gpu.font_system;
+            let buf = &mut gpu.caption_buffers[i];
+            buf.set_text(
+                fs,
+                glyph,
+                &Attrs::new().family(Family::Monospace).color(*col),
+                Shaping::Advanced,
+                None,
+            );
+            buf.shape_until_scroll(fs, false);
+        }
 
         if let Some(pt) = palette_text.as_ref().or(settings_text.as_ref()) {
             gpu.palette_buffer.set_text(
@@ -4444,23 +4470,41 @@ impl App {
                 default_color: fg,
                 custom_glyphs: &[],
             },
-            // Caption buttons (min / max / close), pinned at the ABSOLUTE
-            // `buttons_left` pixel so the glyphs match their click/hit zones.
-            TextArea {
-                buffer: &gpu.button_buffer,
-                left: buttons_left,
-                top: 6.0,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: w,
-                    bottom: TITLEBAR_H as i32,
-                },
-                default_color: fg,
-                custom_glyphs: &[],
-            },
         ];
+        // Caption buttons (min / max / close): each glyph centred — H and V —
+        // in its BUTTON_CELLS-wide backplate. The horizontal offset is measured
+        // from the glyph's own laid-out advance (gw) so symbol-font fallback
+        // (□/✕) can't push it off-centre; the vertical offset centres the line
+        // box in the title bar. Slots are pinned at the ABSOLUTE `buttons_left`
+        // pixel so they line up with the hit/backplate geometry at any width.
+        {
+            let cap_cell_w = BUTTON_CELLS * CELL_W;
+            let cap_top = ((TITLEBAR_H - gpu.metrics.line_height) / 2.0).max(0.0);
+            for i in 0..gpu.caption_buffers.len() {
+                let buf = &gpu.caption_buffers[i];
+                let mut gw = 0.0f32;
+                for run in buf.layout_runs() {
+                    for g in run.glyphs.iter() {
+                        gw = gw.max(g.x + g.w);
+                    }
+                }
+                let left = caption_glyph_left(buttons_left, i, cap_cell_w, gw);
+                areas.push(TextArea {
+                    buffer: buf,
+                    left,
+                    top: cap_top,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: w,
+                        bottom: TITLEBAR_H as i32,
+                    },
+                    default_color: fg,
+                    custom_glyphs: &[],
+                });
+            }
+        }
         // One terminal-grid TextArea per visible leaf, placed at its cell origin
         // and clipped to the cell. glyphon clips text via `bounds`, so no wgpu
         // scissor is needed for the grid layer.
@@ -4856,12 +4900,14 @@ impl Gpu {
         let metrics = Metrics::new(font_size.max(8.0), LINE_HEIGHT.max(font_size + 2.0));
         let mut chrome_buffer = Buffer::new(&mut font_system, metrics);
         chrome_buffer.set_size(&mut font_system, Some(size.width as f32), Some(TITLEBAR_H));
-        let mut button_buffer = Buffer::new(&mut font_system, metrics);
-        button_buffer.set_size(
-            &mut font_system,
-            Some(BUTTONS_CELLS * CELL_W + BTN_RIGHT_MARGIN + CELL_W),
-            Some(TITLEBAR_H),
-        );
+        // One buffer per caption glyph (min/max/close), each sized to a single
+        // backplate cell so the glyph can be centred within it (see render).
+        let cap_cell_w = BUTTON_CELLS * CELL_W;
+        let caption_buffers: [Buffer; 3] = std::array::from_fn(|_| {
+            let mut b = Buffer::new(&mut font_system, metrics);
+            b.set_size(&mut font_system, Some(cap_cell_w), Some(TITLEBAR_H));
+            b
+        });
         let mut palette_buffer = Buffer::new(&mut font_system, metrics);
         palette_buffer.set_size(
             &mut font_system,
@@ -4893,7 +4939,7 @@ impl Gpu {
             leaf_buffers: HashMap::new(),
             tabbar_buffers: HashMap::new(),
             chrome_buffer,
-            button_buffer,
+            caption_buffers,
             palette_buffer,
             splash_buffer,
             image_renderer,
@@ -5253,6 +5299,26 @@ mod tests {
         // No transparency-capable mode at all -> graceful fallback to native.
         assert_eq!(choose_alpha_mode(true, &[Opaque]), Opaque);
         assert_eq!(choose_alpha_mode(true, &[]), Opaque);
+    }
+
+    #[test]
+    fn caption_glyph_left_centres_each_button_in_its_cell() {
+        let cluster = 1000.0_f32;
+        let cell = BUTTON_CELLS * CELL_W; // 45.0
+                                          // A 9px-advance glyph in a 45px cell -> 18px of slack, 9px each side.
+        assert_eq!(caption_glyph_left(cluster, 0, cell, 9.0), 1000.0 + 18.0);
+        assert_eq!(caption_glyph_left(cluster, 1, cell, 9.0), 1000.0 + cell + 18.0);
+        assert_eq!(
+            caption_glyph_left(cluster, 2, cell, 9.0),
+            1000.0 + 2.0 * cell + 18.0
+        );
+        // A WIDER symbol-fallback glyph (e.g. ✕ at 14px) still centres: less
+        // slack, but symmetric — this is exactly what space-padding could not do.
+        let left_wide = caption_glyph_left(cluster, 2, cell, 14.0);
+        let slot_x = cluster + 2.0 * cell;
+        assert!((left_wide - (slot_x + (cell - 14.0) / 2.0)).abs() < 1e-3);
+        // Glyph wider than its cell clamps to the slot's left edge (never negative).
+        assert_eq!(caption_glyph_left(cluster, 0, cell, 60.0), cluster);
     }
 
     #[test]
