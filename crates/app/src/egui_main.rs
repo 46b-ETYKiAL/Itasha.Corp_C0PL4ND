@@ -5,6 +5,11 @@
 //! eframe owns the winit event loop — there is no second event loop here, and
 //! no Win32 window subclass (window controls go through `ViewportCommand`).
 
+// Release builds are a GUI subsystem app: no extra console window pops up
+// alongside the window (a debug build keeps the console so tracing/wgpu logs
+// are visible). Without this, launching the installed app spawns a second
+// "terminal" window showing the wgpu/Vulkan INFO log spam.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // The egui chrome shell is pure-safe Rust; no `unsafe` FFI lives in this binary
 // (the `win_snap.rs` Win32 subclass is NOT compiled into `c0pl4nd-egui`).
 #![forbid(unsafe_code)]
