@@ -5,16 +5,19 @@
 //! SEPARATE binary (`c0pl4nd-egui`) so the existing winit-driven `c0pl4nd`
 //! binary keeps building and shipping unchanged. The chrome (frameless
 //! titlebar, two-tone wordmark, tab strip, caption buttons, status bar) and the
-//! `egui_tiles` pane grid are real and clickable; the pane BODIES are
-//! placeholders (a colored rect + the pane id) — Milestone 2 replaces them with
-//! the live glyphon terminal via an egui-wgpu paint callback.
+//! `egui_tiles` pane grid are real and clickable; each pane body hosts a live
+//! PTY whose visible grid is drawn with egui's NATIVE coloured-text painter (see
+//! [`paint_grid_native`]). An earlier milestone rendered the grid through a
+//! glyphon GPU paint callback / offscreen texture, but that path composited
+//! black inside `egui_tiles` panes on the real swapchain (while passing the wgpu
+//! test harness); native text renders reliably everywhere and matches SCR1B3's
+//! coloured-text approach, so the glyphon path was removed.
 //!
-//! No PTY, no terminal, no winit event loop here — eframe owns the loop.
+//! eframe owns the event loop; no winit plumbing here.
 
 pub mod chrome;
 pub mod grid;
 pub mod pane_term;
-pub mod term_render;
 mod theme;
 
 use std::collections::HashMap;
@@ -56,10 +59,6 @@ pub struct C0pl4ndApp {
     /// Per-pane live terminal state (PTY + grid), keyed by pane id. A pane with
     /// no entry (or a failed spawn) renders an error/placeholder body.
     terms: HashMap<PaneId, PaneTerm>,
-    /// The cell metrics (physical px) used to map a pane rect → `(cols, rows)`.
-    /// Refreshed from the GPU font once the glyphon resources exist; the
-    /// fallback keeps headless math sane before the first real frame.
-    cell_metrics: CellMetrics,
     /// Monotonic pane-id allocator.
     pane_alloc: PaneIdAllocator,
     /// The currently-focused pane (drives tab highlight + input routing).
@@ -73,10 +72,12 @@ pub struct C0pl4ndApp {
     /// tests can assert that clicking a caption button had its real effect (the
     /// OS command itself is not observable in a headless harness).
     last_window_cmd: Option<WindowCmd>,
-    /// True once the glyphon GPU resources have been installed into egui-wgpu's
-    /// `callback_resources` (only in a real eframe window, never in headless
-    /// tests). When false, panes render the headless text fallback.
-    gpu_ready: bool,
+    /// True when running in a real eframe window (a wgpu render state exists),
+    /// false in the headless `egui_kittest` harness. Drives the per-frame
+    /// `request_repaint` pump so live PTY output animates without an input
+    /// event — but NOT in headless tests, where an unconditional repaint would
+    /// make `Harness::run` loop until `max_steps`.
+    live_window: bool,
 }
 
 /// The PTY grid size used to spawn a pane before its real pixel rect is known.
@@ -87,35 +88,19 @@ const SPAWN_ROWS: u16 = 24;
 
 impl C0pl4ndApp {
     /// Build the app inside eframe, applying the brand Visuals + window effect,
-    /// and capturing egui's shared wgpu device to stand up the glyphon terminal
-    /// resources (recon dossier §2.2). Falls back to the headless build when the
-    /// wgpu render state is absent (should not happen with the `wgpu` backend).
+    /// and computing the terminal cell metrics from egui's monospace font (the
+    /// font the grid is actually drawn with). Marks the app as a live window so
+    /// the per-frame repaint pump runs.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(theme::itasha_corp_visuals());
         install_chrome_fonts(&cc.egui_ctx);
         apply_window_effect(cc);
         let mut app = Self::bootstrap();
-        app.install_gpu(cc);
+        // A wgpu render state means a real window (also true under the wgpu test
+        // harness, which drives frames explicitly with `step()`); headless tests
+        // built via `bootstrap()` leave this false.
+        app.live_window = cc.wgpu_render_state.is_some();
         app
-    }
-
-    /// Capture egui's shared `wgpu::Device`/`Queue`/`target_format` and install
-    /// the glyphon [`term_render::TermGpu`] into egui-wgpu's `callback_resources`
-    /// so the per-pane paint callbacks can reach it. Refreshes the cell metrics
-    /// from the real GPU font. No-op (leaves `gpu_ready=false`) when the wgpu
-    /// backend is unavailable — panes then render the headless text fallback.
-    fn install_gpu(&mut self, cc: &eframe::CreationContext<'_>) {
-        let Some(rs) = cc.wgpu_render_state.as_ref() else {
-            tracing::warn!("eframe has no wgpu render state; terminal grid uses text fallback");
-            return;
-        };
-        let font_px = self.config.font.size.max(6.0);
-        let line_px = font_px * 1.3;
-        let mut gpu =
-            term_render::TermGpu::new(&rs.device, &rs.queue, rs.target_format, font_px, line_px);
-        self.cell_metrics = gpu.cell_metrics();
-        rs.renderer.write().callback_resources.insert(gpu);
-        self.gpu_ready = true;
     }
 
     /// Construct the app state independent of eframe — used by `new` and by the
@@ -138,13 +123,12 @@ impl C0pl4ndApp {
             theme,
             grid_tree,
             terms,
-            cell_metrics: CellMetrics::FALLBACK,
             pane_alloc,
             focused_pane,
             settings_open: false,
             toast: None,
             last_window_cmd: None,
-            gpu_ready: false,
+            live_window: false,
         }
     }
 
@@ -250,34 +234,34 @@ impl C0pl4ndApp {
 
     /// Paint one terminal pane's body and wire its per-frame interaction:
     ///
-    /// 1. Allocate the pane rect and paint the theme background quad behind the
-    ///    glyphs (so text never blends directly against the acrylic — pitfall #3).
-    /// 2. Compute the physical-pixel rect and DEBOUNCED-resize the PTY to fit.
-    /// 3. Snapshot the grid into colour runs and queue the glyphon paint
-    ///    callback (recon dossier §2.3) — or, when the GPU is unavailable
-    ///    (headless tests), paint the grid text with egui's own painter so the
-    ///    pane is never blank.
+    /// 1. Allocate the pane rect and paint the theme background quad + focus ring
+    ///    behind the glyphs (so text never blends directly against the acrylic).
+    /// 2. Compute the physical-pixel size and DEBOUNCED-resize the PTY to fit.
+    /// 3. DISPLAY the visible grid with egui's native coloured-text painter via
+    ///    [`paint_grid_native`].
     /// 4. Report click (refocus) + drag-start (egui_tiles).
     ///
     /// A failed-spawn pane paints an error label instead of a grid — never a
     /// panic. This is a FREE function (not `&mut self`) so the `grid_ui` closure
     /// can borrow `terms`/`theme` disjointly from `self.grid_tree` (which
     /// `tree.ui` borrows mutably) — the classic egui_tiles borrow split.
-    #[allow(clippy::too_many_arguments)]
     fn render_pane_body(
         ui: &mut egui::Ui,
         pane_id: PaneId,
         focused: bool,
         terms: &mut HashMap<PaneId, PaneTerm>,
         theme: &c0pl4nd_core::Theme,
-        cell_metrics: CellMetrics,
-        gpu_ready: bool,
         font_size: f32,
     ) -> PaneBodyOutcome {
         let (rect, resp) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         let ppp = ui.ctx().pixels_per_point();
         let painter = ui.painter_at(rect);
+        // Cell metrics from the SAME monospace font the grid is drawn with, so
+        // the PTY's `(cols, rows)` match the rendered glyph size. Measured via a
+        // probe galley (`Painter::layout_job`); ppp scales points → physical px
+        // to match the `rect * ppp` resize math below.
+        let cell_metrics = monospace_cell_metrics(&painter, font_size, ppp);
 
         // --- background quad (theme bg) + focus ring ---
         let bg = terms
@@ -308,37 +292,16 @@ impl C0pl4ndApp {
             term.resize_to_px(px_w, px_h, cell_metrics);
         }
 
-        // --- render the grid ---
+        // --- display the grid ---
         match terms.get(&pane_id) {
             Some(term) if term.error().is_none() => {
-                if gpu_ready {
-                    // Queue the real glyphon GPU paint callback. The grid
-                    // snapshot happens on the CPU here; the callback only paints.
-                    if let Some(runs) = term.grid_spans() {
-                        let fg = term_default_fg(theme);
-                        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
-                            rect,
-                            term_render::TermPaint {
-                                pane_id,
-                                px_rect: [rect.left() * ppp, rect.top() * ppp, px_w, px_h],
-                                default_fg: [fg.0, fg.1, fg.2],
-                                runs: std::sync::Arc::new(runs),
-                            },
-                        ));
-                    }
-                } else {
-                    // Headless fallback: paint the grid text with egui so the
-                    // pane is never blank (and so a snapshot test can read it).
-                    let fg = term_default_fg(theme);
-                    let text = term.grid_text().unwrap_or_default();
-                    painter.text(
-                        rect.left_top() + egui::vec2(4.0, 4.0),
-                        egui::Align2::LEFT_TOP,
-                        text,
-                        egui::FontId::monospace(font_size),
-                        egui::Color32::from_rgb(fg.0, fg.1, fg.2),
-                    );
-                }
+                // Single native render path for BOTH the live window and headless
+                // snapshots (see `paint_grid_native`). egui's own glyph painter
+                // draws the coloured grid reliably on the real swapchain — the
+                // glyphon GPU paths (callback + offscreen texture) composited
+                // black inside `egui_tiles` panes live while passing the wgpu
+                // test harness.
+                paint_grid_native(&painter, rect, term, font_size, theme);
             }
             Some(term) => {
                 // Failed spawn: show the error, never panic.
@@ -459,20 +422,10 @@ impl C0pl4ndApp {
             // Disjoint borrows: the closure touches these fields, NOT grid_tree.
             let terms = &mut self.terms;
             let theme = &self.theme;
-            let cell_metrics = self.cell_metrics;
-            let gpu_ready = self.gpu_ready;
             let font_size = self.config.font.size;
             let mut render_body = |ui: &mut egui::Ui, pid: PaneId| -> bool {
-                let outcome = Self::render_pane_body(
-                    ui,
-                    pid,
-                    pid == focused,
-                    terms,
-                    theme,
-                    cell_metrics,
-                    gpu_ready,
-                    font_size,
-                );
+                let outcome =
+                    Self::render_pane_body(ui, pid, pid == focused, terms, theme, font_size);
                 if outcome.clicked {
                     clicked = Some(pid);
                 }
@@ -553,14 +506,11 @@ impl eframe::App for C0pl4ndApp {
     /// `Panel::show(ctx, …)` path via a cloned `ctx`, matching the reference
     /// egui app. The work lives in [`frame_tick`](Self::frame_tick) so the
     /// headless tests can drive it without an `eframe::Frame`.
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.frame_tick(&ctx);
-        // Reap closed-pane GPU buffers via the eframe render state (only
-        // reachable through the Frame, not the Context).
-        if let Some(rs) = frame.wgpu_render_state() {
-            self.gc_gpu_panes(rs);
-        }
+        // The grid is painted with egui's native text painter inside
+        // `render_pane_body` during `frame_tick`; there is no post-frame GPU pass.
     }
 }
 
@@ -636,34 +586,34 @@ impl C0pl4ndApp {
         }
 
         // Live terminals: keep repainting so PTY output animates without waiting
-        // for an input event — but ONLY in the real window (`gpu_ready`). In the
+        // for an input event — but ONLY in the real window (`live_window`). In the
         // headless `egui_kittest` harness an unconditional `request_repaint`
         // makes `Harness::run` loop until `max_steps` (the UI never settles); the
         // tests there drive frames explicitly with `h.run()` after each input, so
-        // they do not need the animation pump. (Closed-pane GPU buffers are
-        // reaped in `App::ui` via the eframe Frame's render state.)
-        if self.gpu_ready {
+        // they do not need the animation pump.
+        if self.live_window {
             ctx.request_repaint();
         }
     }
+}
 
-    /// Drop the glyphon GPU buffers/renderers for panes that no longer exist, so
-    /// a closed pane does not leak its glyph buffer. Called from `App::ui` with
-    /// the eframe render state (the only place the wgpu backend is reachable).
-    /// No-op in headless tests (no render state, `gpu_ready == false`).
-    fn gc_gpu_panes(&mut self, render_state: &eframe::egui_wgpu::RenderState) {
-        if !self.gpu_ready {
-            return;
-        }
-        let live: Vec<PaneId> = self.terms.keys().copied().collect();
-        if let Some(gpu) = render_state
-            .renderer
-            .write()
-            .callback_resources
-            .get_mut::<term_render::TermGpu>()
-        {
-            gpu.retain_panes(&live);
-        }
+/// Cell metrics (physical px) derived from egui's monospace font at `font_size`
+/// — the same font [`paint_grid_native`] draws the grid with — so the PTY's
+/// `(cols, rows)` match the rendered glyph size. Width is the advance of `'M'`;
+/// height is the font's row height; both scaled to physical pixels by the
+/// context's `pixels_per_point`.
+fn monospace_cell_metrics(painter: &egui::Painter, font_size: f32, ppp: f32) -> CellMetrics {
+    let probe = egui::text::LayoutJob::single_section(
+        "M".to_string(),
+        egui::text::TextFormat {
+            font_id: egui::FontId::monospace(font_size.max(6.0)),
+            ..Default::default()
+        },
+    );
+    let size = painter.layout_job(probe).size();
+    CellMetrics {
+        advance_w: (size.x * ppp).max(1.0),
+        line_h: (size.y * ppp).max(1.0),
     }
 }
 
@@ -679,6 +629,67 @@ struct PaneBodyOutcome {
 /// runs with no explicit SGR colour, and the egui-painter fallback colour.
 fn term_default_fg(theme: &c0pl4nd_core::Theme) -> (u8, u8, u8) {
     c0pl4nd_core::theme::parse_hex(&theme.foreground).unwrap_or((232, 230, 240))
+}
+
+/// Paint a pane's visible grid with egui's NATIVE text painter, using the
+/// per-cell colour runs from [`PaneTerm::grid_spans`]. This is the single,
+/// engine-agnostic render path for BOTH the live window and the headless
+/// snapshot tests — identical code, so a passing test faithfully proves the
+/// live render. It deliberately uses egui's own glyph rasteriser (the same one
+/// that draws the chrome, and the same approach SCR1B3 uses for coloured code)
+/// rather than a glyphon GPU paint callback: the glyphon paint (in-pass
+/// callback AND offscreen texture) composited black inside `egui_tiles` panes
+/// on the real eframe/winit swapchain — a class of defect the wgpu test harness
+/// could not reproduce — whereas native text renders reliably everywhere.
+///
+/// Rows are NOT wrapped (`max_width = INFINITY`): each terminal row stays one
+/// visual line and is clipped at the pane edge by the caller's `painter_at`
+/// clip rect, so row alignment is preserved.
+fn paint_grid_native(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    term: &PaneTerm,
+    font_size: f32,
+    theme: &c0pl4nd_core::Theme,
+) {
+    let default_fg = term_default_fg(theme);
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = f32::INFINITY;
+    let font = egui::FontId::monospace(font_size);
+    match term.grid_spans() {
+        Some(runs) if !runs.is_empty() => {
+            for (text, (r, g, b)) in runs {
+                job.append(
+                    &text,
+                    0.0,
+                    egui::text::TextFormat {
+                        font_id: font.clone(),
+                        color: egui::Color32::from_rgb(r, g, b),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        _ => {
+            // No colour runs (e.g. dead session mid-frame): mono fallback so the
+            // pane is never blank.
+            job.append(
+                &term.grid_text().unwrap_or_default(),
+                0.0,
+                egui::text::TextFormat {
+                    font_id: font.clone(),
+                    color: egui::Color32::from_rgb(default_fg.0, default_fg.1, default_fg.2),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+    let galley = painter.layout_job(job);
+    painter.galley(
+        rect.left_top() + egui::vec2(4.0, 4.0),
+        galley,
+        egui::Color32::from_rgb(default_fg.0, default_fg.1, default_fg.2),
+    );
 }
 
 /// Map an `egui::Key` (+ modifiers) onto the engine-agnostic [`LogicalKey`] for

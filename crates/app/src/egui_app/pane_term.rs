@@ -42,13 +42,6 @@ pub struct CellMetrics {
 }
 
 impl CellMetrics {
-    /// A sane fallback used before the GPU font metrics are known (and in
-    /// headless tests). Roughly a 14px monospace cell.
-    pub const FALLBACK: CellMetrics = CellMetrics {
-        advance_w: 8.0,
-        line_h: 18.0,
-    };
-
     /// Compute `(cols, rows)` for a pane of `px_w` × `px_h` physical pixels,
     /// each clamped to at least 1 (a degenerate zero-size pane still gets a
     /// 1×1 grid rather than a panic / zero-division).
