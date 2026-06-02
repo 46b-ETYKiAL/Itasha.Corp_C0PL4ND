@@ -32,6 +32,10 @@ pub struct ChromeActions {
     /// User clicked the "+" new-terminal button; open a new pane (the host picks
     /// the split direction to keep the grid balanced).
     pub new_terminal: bool,
+    /// User picked a shell from the top-bar ▾ switcher; index into
+    /// [`super::C0pl4ndApp::shell_profiles`]. The host opens a new terminal with
+    /// that shell and makes it the active profile for the plain "+" button.
+    pub open_shell: Option<usize>,
     /// User toggled the settings window.
     pub toggle_settings: bool,
     /// User clicked a caption button (minimize / maximize / close). Routed
@@ -140,15 +144,52 @@ impl C0pl4ndApp {
             // Single "+" new-terminal button: opens a new pane and lets the host
             // expand the grid logically (it splits the focused pane along its
             // longer axis, keeping panes balanced — no manual direction choice).
+            // It runs the active shell profile (set via the ▾ switcher below).
             let new_term = ui
                 .button(RichText::new(icon::PLUS).size(16.0))
-                .on_hover_text("new terminal");
+                .on_hover_text(format!("new terminal ({})", self.active_shell_label()));
             new_term.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "new terminal")
             });
             if new_term.clicked() {
                 actions.new_terminal = true;
             }
+
+            // Shell switcher (▾): lists the shells detected on this machine.
+            // Picking one opens a new terminal running it AND makes it the active
+            // profile for the plain "+" button — the Windows-Terminal "+ ▾"
+            // profile pattern. This is the user's "run things other than
+            // PowerShell — an easy switch in the top bar" affordance.
+            let menu = ui.menu_button(
+                RichText::new(format!("{} ▾", icon::TERMINAL_WINDOW)).size(13.0),
+                |ui| {
+                    ui.label(RichText::new("Open a new terminal with…").weak().small());
+                    ui.separator();
+                    let active = self.active_shell_label().to_owned();
+                    for (i, profile) in self.shell_profiles().iter().enumerate() {
+                        let mut label = profile.label.clone();
+                        if profile.label == active {
+                            label.push_str("  ✓");
+                        }
+                        let item = ui.button(&label);
+                        item.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                format!("open shell {}", profile.label),
+                            )
+                        });
+                        if item.clicked() {
+                            actions.open_shell = Some(i);
+                        }
+                    }
+                },
+            );
+            menu.response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "shell menu")
+            });
+            menu.response
+                .on_hover_text("Choose which shell new terminals run");
 
             // ---- right-pinned caption cluster ----
             // Placed at ABSOLUTE rects via `ui.put`. Every layout-flow attempt

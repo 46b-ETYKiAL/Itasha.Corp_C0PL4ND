@@ -392,3 +392,48 @@ fn pane_keeps_its_content_after_adding_a_terminal() {
          black-pane bug). pane 0 grid:\n{after}"
     );
 }
+
+#[test]
+fn shell_menu_opens_a_new_terminal() {
+    // The top-bar ▾ shell switcher must open a new terminal for the picked
+    // shell. We pick the always-present "Default shell" so the test is
+    // deterministic on every OS (named profiles like PowerShell/WSL are only
+    // present when detected), and assert a new pane appeared.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let before = app.borrow().pane_count();
+    let mut h = harness(&app);
+
+    // Open the ▾ menu, then click the "Default shell" item.
+    h.get_by_label("shell menu").click();
+    h.run();
+    h.get_by_label("open shell Default shell").click();
+    h.run();
+
+    assert_eq!(
+        app.borrow().pane_count(),
+        before + 1,
+        "picking a shell from the ▾ menu must open exactly one new terminal"
+    );
+}
+
+#[test]
+fn shell_switcher_lists_the_default_profile_first() {
+    // The detected profile list always leads with the platform default, and the
+    // active-shell label resolves to it at startup — the invariant the "+" hover
+    // and the ▾ menu's ✓ marker rely on.
+    let app = C0pl4ndApp::bootstrap();
+    let profiles = app.shell_profiles();
+    assert!(
+        !profiles.is_empty(),
+        "there is always at least one shell profile"
+    );
+    assert!(
+        profiles[0].program.is_none(),
+        "the first profile is the platform default (program None)"
+    );
+    assert_eq!(
+        app.active_shell_label(),
+        profiles[0].label,
+        "the active shell defaults to the first (platform default) profile"
+    );
+}

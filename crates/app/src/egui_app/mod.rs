@@ -19,6 +19,7 @@ pub mod chrome;
 pub mod grid;
 pub mod pane_term;
 mod settings;
+pub mod shells;
 mod theme;
 
 use std::collections::{HashMap, HashSet};
@@ -70,6 +71,12 @@ pub struct C0pl4ndApp {
     /// The focused pane's last-rendered size `(w, h)` in points. Drives the
     /// "+" button's split direction (split the longer axis to stay balanced).
     last_focused_size: Option<(f32, f32)>,
+    /// Shells offered by the top-bar switcher, platform default first. Detected
+    /// once at construction (`shells::detect_profiles`).
+    shell_profiles: Vec<shells::ShellProfile>,
+    /// Index into `shell_profiles` that the plain "+" button and new terminals
+    /// use. Set when the user picks a shell from the top-bar ▾ menu.
+    active_shell: usize,
     /// Whether the chrome fonts (incl. the `phosphor-fill` family used for a
     /// pinned tab's solid pin) have been installed on the egui context. Set in
     /// `new`; the first `frame_tick` installs them otherwise (e.g. headless
@@ -141,6 +148,8 @@ impl C0pl4ndApp {
             focused_pane,
             pinned: HashSet::new(),
             last_focused_size: None,
+            shell_profiles: shells::detect_profiles(),
+            active_shell: 0,
             fonts_installed: false,
             settings_open: false,
             toast: None,
@@ -149,12 +158,22 @@ impl C0pl4ndApp {
         }
     }
 
-    /// Spawn a fresh live terminal for `pid` and register it. Used by `split`.
+    /// Spawn a fresh live terminal for `pid` running the active shell profile,
+    /// and register it. Used by `split`. The default profile (program `None`,
+    /// index 0) uses the platform default shell; a named profile launches its
+    /// explicit program + args. A failed spawn degrades to an error pane.
     fn spawn_term(&mut self, pid: PaneId) {
-        self.terms.insert(
-            pid,
-            PaneTerm::spawn(self.theme.clone(), SPAWN_COLS, SPAWN_ROWS),
-        );
+        let theme = self.theme.clone();
+        let profile = self.shell_profiles.get(self.active_shell);
+        let term = match profile.and_then(|p| p.program.clone()) {
+            Some(program) => {
+                let args: Vec<String> = profile.map(|p| p.args.clone()).unwrap_or_default();
+                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                PaneTerm::spawn_program(theme, &program, &arg_refs, SPAWN_COLS, SPAWN_ROWS)
+            }
+            None => PaneTerm::spawn(theme, SPAWN_COLS, SPAWN_ROWS),
+        };
+        self.terms.insert(pid, term);
     }
 
     // ---- public observation surface (production accessors, NOT test-only) ----
@@ -267,6 +286,33 @@ impl C0pl4ndApp {
             egui_tiles::LinearDir::Vertical // tall → stacked
         };
         self.split(dir);
+    }
+
+    /// Make shell profile `idx` active and open a new terminal running it (the
+    /// top-bar ▾ menu path). Subsequent plain "+" presses then use the same
+    /// shell, mirroring the Windows-Terminal "+ ▾" profile behaviour. An
+    /// out-of-range index is ignored (defensive — the menu only emits valid
+    /// indices).
+    fn open_shell(&mut self, idx: usize) {
+        if idx < self.shell_profiles.len() {
+            self.active_shell = idx;
+            self.new_terminal();
+        }
+    }
+
+    /// The shell profiles offered by the top-bar switcher (platform default
+    /// first). Used by the chrome to render the ▾ menu.
+    pub fn shell_profiles(&self) -> &[shells::ShellProfile] {
+        &self.shell_profiles
+    }
+
+    /// The label of the currently-active shell profile (what new terminals run).
+    /// Used by the chrome's hover text and by interaction tests.
+    pub fn active_shell_label(&self) -> &str {
+        self.shell_profiles
+            .get(self.active_shell)
+            .map(|p| p.label.as_str())
+            .unwrap_or("Default shell")
     }
 
     /// Paint one terminal pane's body and wire its per-frame interaction:
@@ -721,6 +767,9 @@ impl C0pl4ndApp {
         }
         if actions.new_terminal {
             self.new_terminal();
+        }
+        if let Some(idx) = actions.open_shell {
+            self.open_shell(idx);
         }
         if actions.toggle_settings {
             self.settings_open = !self.settings_open;
