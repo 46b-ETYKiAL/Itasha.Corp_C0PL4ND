@@ -245,6 +245,21 @@ impl PaneTerm {
         Some(out)
     }
 
+    /// The cursor cell as `(row, col)` (0-based, within the visible grid) when
+    /// it should be DRAWN: the session is alive, the cursor is visible (DECTCEM
+    /// `?25`), and the view is not scrolled back into history (a terminal hides
+    /// the cursor while you scroll up). `None` otherwise — the caller draws no
+    /// caret.
+    pub fn cursor_cell(&self) -> Option<(usize, usize)> {
+        let session = self.session.as_ref()?;
+        let term = session.terminal();
+        let guard = term.lock().ok()?;
+        if !guard.is_cursor_visible() {
+            return None;
+        }
+        guard.cursor_position()
+    }
+
     /// The visible grid as plain text (used by tests to assert PTY output landed
     /// on screen, and as a headless render fallback). `None` for a dead session.
     pub fn grid_text(&self) -> Option<String> {

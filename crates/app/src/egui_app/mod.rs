@@ -282,6 +282,7 @@ impl C0pl4ndApp {
     /// panic. This is a FREE function (not `&mut self`) so the `grid_ui` closure
     /// can borrow `terms`/`theme` disjointly from `self.grid_tree` (which
     /// `tree.ui` borrows mutably) — the classic egui_tiles borrow split.
+    #[allow(clippy::too_many_arguments)]
     fn render_pane_body(
         ui: &mut egui::Ui,
         pane_id: PaneId,
@@ -289,6 +290,7 @@ impl C0pl4ndApp {
         terms: &mut HashMap<PaneId, PaneTerm>,
         theme: &c0pl4nd_core::Theme,
         font_size: f32,
+        cursor_cfg: c0pl4nd_core::config::CursorConfig,
     ) -> PaneBodyOutcome {
         let (rect, resp) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -338,7 +340,7 @@ impl C0pl4ndApp {
                 // glyphon GPU paths (callback + offscreen texture) composited
                 // black inside `egui_tiles` panes live while passing the wgpu
                 // test harness.
-                paint_grid_native(&painter, rect, term, font_size, theme);
+                paint_grid_native(&painter, rect, term, font_size, theme, focused, cursor_cfg);
             }
             Some(term) => {
                 // Failed spawn: show the error, never panic.
@@ -462,9 +464,17 @@ impl C0pl4ndApp {
             let terms = &mut self.terms;
             let theme = &self.theme;
             let font_size = self.config.font.size;
+            let cursor_cfg = self.config.cursor;
             let mut render_body = |ui: &mut egui::Ui, pid: PaneId| -> bool {
-                let outcome =
-                    Self::render_pane_body(ui, pid, pid == focused, terms, theme, font_size);
+                let outcome = Self::render_pane_body(
+                    ui,
+                    pid,
+                    pid == focused,
+                    terms,
+                    theme,
+                    font_size,
+                    cursor_cfg,
+                );
                 if outcome.clicked {
                     clicked = Some(pid);
                 }
@@ -802,6 +812,8 @@ fn paint_grid_native(
     term: &PaneTerm,
     font_size: f32,
     theme: &c0pl4nd_core::Theme,
+    focused: bool,
+    cursor_cfg: c0pl4nd_core::config::CursorConfig,
 ) {
     let default_fg = term_default_fg(theme);
     let mut job = egui::text::LayoutJob::default();
@@ -836,11 +848,66 @@ fn paint_grid_native(
         }
     }
     let galley = painter.layout_job(job);
+    let origin = rect.left_top() + egui::vec2(4.0, 4.0);
     painter.galley(
-        rect.left_top() + egui::vec2(4.0, 4.0),
+        origin,
         galley,
         egui::Color32::from_rgb(default_fg.0, default_fg.1, default_fg.2),
     );
+
+    // --- terminal cursor ---
+    if let Some((row, col)) = term.cursor_cell() {
+        // Cell size in POINTS from the same monospace font the grid uses (a
+        // probe-galley 'M' advance), so the caret lands on the cell grid.
+        let probe = painter.layout_job(egui::text::LayoutJob::single_section(
+            "M".to_string(),
+            egui::text::TextFormat {
+                font_id: egui::FontId::monospace(font_size),
+                ..Default::default()
+            },
+        ));
+        let (cw, ch) = (probe.size().x.max(1.0), probe.size().y.max(1.0));
+        let cell_min = origin + egui::vec2(col as f32 * cw, row as f32 * ch);
+        let cell = egui::Rect::from_min_size(cell_min, egui::vec2(cw, ch));
+        let cur = c0pl4nd_core::theme::parse_hex(&theme.cursor).unwrap_or((0, 255, 144));
+        let col32 = egui::Color32::from_rgb(cur.0, cur.1, cur.2);
+        // Blink only on the focused pane (and only if configured). The live
+        // window repaints every frame, so the phase animates without an explicit
+        // repaint request; headless tests see a steady ON frame.
+        let on = if cursor_cfg.blink && focused {
+            (painter.ctx().input(|i| i.time) / 1.06).fract() < 0.5
+        } else {
+            true
+        };
+        if on {
+            match cursor_cfg.style {
+                c0pl4nd_core::config::CursorStyle::Block => {
+                    if focused {
+                        // Semi-transparent fill so the glyph beneath stays legible.
+                        painter.rect_filled(cell, 1.0, col32.gamma_multiply(0.55));
+                    } else {
+                        painter.rect_stroke(
+                            cell,
+                            1.0,
+                            egui::Stroke::new(1.0, col32),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                }
+                c0pl4nd_core::config::CursorStyle::Bar => {
+                    let bar = egui::Rect::from_min_size(cell_min, egui::vec2(2.0, ch));
+                    painter.rect_filled(bar, 0.0, col32);
+                }
+                c0pl4nd_core::config::CursorStyle::Underline => {
+                    let under = egui::Rect::from_min_size(
+                        cell_min + egui::vec2(0.0, ch - 2.0),
+                        egui::vec2(cw, 2.0),
+                    );
+                    painter.rect_filled(under, 0.0, col32);
+                }
+            }
+        }
+    }
 }
 
 /// Map an `egui::Key` (+ modifiers) onto the engine-agnostic [`LogicalKey`] for
