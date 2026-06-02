@@ -18,6 +18,7 @@
 pub mod chrome;
 pub mod grid;
 pub mod pane_term;
+mod settings;
 mod theme;
 
 use std::collections::HashMap;
@@ -474,23 +475,80 @@ impl C0pl4ndApp {
         }
     }
 
-    /// The settings window (opaque placeholder — Milestone 2 fills it in).
+    /// The settings window (Milestone 2): a grouped, well-spaced, searchable
+    /// two-pane window matching the sibling SCR1B3 editor's layout. Delegates the
+    /// whole UI to the [`settings`] module (a free function so it never fights
+    /// `self`'s borrow), then live-applies any change: persist the config to
+    /// disk, reload the terminal color theme when the theme stem changed (so the
+    /// live panes repaint, not just the chrome), and re-apply the egui Visuals.
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.settings_open;
-        egui::Window::new("Settings")
-            .open(&mut open)
-            .resizable(true)
-            .frame(egui::Frame::window(&ctx.global_style()).fill(theme::brand::PANEL))
-            .show(ctx, |ui| {
-                ui.label("C0PL4ND settings (placeholder — milestone 2)");
-                ui.separator();
-                ui.label(egui::RichText::new("Theme: itasha_corp").color(theme::brand::GREEN));
-                ui.label(format!(
-                    "Font: {} @ {}pt",
-                    self.config.font.family, self.config.font.size
-                ));
-            });
+        let outcome = settings::show(ctx, &mut self.config, &mut open);
         self.settings_open = open;
+
+        if outcome.changed {
+            // Reload the terminal grid's color theme so a theme change shows in
+            // the live PTY panes immediately (the chrome Visuals are re-applied
+            // below; the grid glyph colours come from this `Theme`, not Visuals).
+            if outcome.theme_changed {
+                self.theme = load_terminal_theme(&self.config);
+            }
+            // Re-apply the chrome Visuals so opacity/theme tweaks repaint the
+            // egui surface without waiting for a relaunch.
+            ctx.set_visuals(theme::itasha_corp_visuals());
+            // Persist to the platform config file so the change survives a
+            // relaunch — but ONLY in a real window. The headless `egui_kittest`
+            // harness sets `live_window == false`; persisting there would write
+            // the user's real `%APPDATA%\c0pl4nd\config.toml` from a test run
+            // (test pollution). The live in-memory apply above is what the tests
+            // observe; the disk write is a real-window-only side effect.
+            // Best-effort: a write failure (e.g. read-only config dir) never
+            // blocks the live in-memory apply.
+            if self.live_window {
+                if let Some(path) = c0pl4nd_core::Config::default_path() {
+                    let _ = self.config.save_to(&path);
+                }
+            }
+        }
+    }
+
+    // ---- settings observation surface (production accessors, NOT test-only) ----
+    //
+    // Real accessors the `egui_kittest` settings tests use to assert observable
+    // Config/theme changes after driving the REAL `settings::show` through
+    // `frame_tick`. Deliberately not `#[cfg(test)]` so the test exercises the
+    // exact production path (the same observation-accessor discipline the other
+    // public accessors above follow).
+
+    /// The current font size (pt) from the live config. Used by the settings
+    /// slider interaction test.
+    #[allow(dead_code)]
+    pub fn config_font_size(&self) -> f32 {
+        self.config.font.size
+    }
+
+    /// The current cursor blink flag from the live config.
+    #[allow(dead_code)]
+    pub fn config_cursor_blink(&self) -> bool {
+        self.config.cursor.blink
+    }
+
+    /// The current terminal color theme stem from the live config.
+    #[allow(dead_code)]
+    pub fn config_theme(&self) -> &str {
+        &self.config.theme
+    }
+
+    /// The current scrollback line count from the live config.
+    #[allow(dead_code)]
+    pub fn config_scrollback_lines(&self) -> usize {
+        self.config.scrollback_lines
+    }
+
+    /// The current multi-line-paste-warning flag from the live config.
+    #[allow(dead_code)]
+    pub fn config_paste_warn_multiline(&self) -> bool {
+        self.config.paste_warn_multiline
     }
 }
 
