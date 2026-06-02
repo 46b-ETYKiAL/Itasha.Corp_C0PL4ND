@@ -1,6 +1,6 @@
-//! Binary entry point for `c0pl4nd-egui` — the modern eframe/egui chrome shell
-//! (Milestone 1). The legacy winit-driven `c0pl4nd` binary (`src/main.rs`) is
-//! untouched; this is a parallel binary so both build and ship side by side.
+//! Binary entry point for `c0pl4nd` — the modern eframe/egui app (the canonical
+//! binary). The legacy winit-driven terminal (`src/main.rs`) ships as
+//! `c0pl4nd-legacy`; both build side by side.
 //!
 //! eframe owns the winit event loop — there is no second event loop here, and
 //! no Win32 window subclass (window controls go through `ViewportCommand`).
@@ -23,13 +23,20 @@ fn main() -> eframe::Result<()> {
         )
         .try_init();
 
-    let viewport = egui::ViewportBuilder::default()
+    let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1100.0, 720.0])
         .with_min_inner_size([520.0, 360.0])
         .with_app_id("com.itashacorp.c0pl4nd")
         .with_title("C0PL4ND")
         .with_decorations(false) // frameless — we draw our own titlebar
         .with_transparent(true); // required for rounded corners + acrylic blur
+                                 // Runtime window + taskbar icon (the sigil). The exe's embedded icon
+                                 // resource (build.rs) covers the Start-menu shortcut / Explorer /
+                                 // Add-Remove-Programs; this covers the live window. Best-effort — a decode
+                                 // failure leaves the platform default rather than blocking startup.
+    if let Some(icon) = load_app_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
 
     let options = eframe::NativeOptions {
         viewport,
@@ -43,4 +50,19 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(egui_app::C0pl4ndApp::new(cc)))),
     )
+}
+
+/// Decode the embedded sigil PNG into an eframe window icon. Returns `None` on a
+/// decode failure (the caller falls back to the platform default).
+fn load_app_icon() -> Option<egui::IconData> {
+    // `packaging/windows/c0pl4nd-256.png` is the 256px sigil (same mark as the
+    // embedded `.ico`), included at compile time so the icon ships in the binary.
+    const PNG: &[u8] = include_bytes!("../../../packaging/windows/c0pl4nd-256.png");
+    let img = image::load_from_memory(PNG).ok()?.into_rgba8();
+    let (width, height) = img.dimensions();
+    Some(egui::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
+    })
 }
