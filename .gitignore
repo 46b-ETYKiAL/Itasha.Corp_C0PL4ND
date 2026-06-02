@@ -11,3 +11,5 @@ Thumbs.db
 relfinal.log
 *.log
 egui-app.png
+
+egui-*.png

@@ -21,7 +21,7 @@ pub mod pane_term;
 mod settings;
 mod theme;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use eframe::egui;
 
@@ -64,6 +64,9 @@ pub struct C0pl4ndApp {
     pane_alloc: PaneIdAllocator,
     /// The currently-focused pane (drives tab highlight + input routing).
     focused_pane: PaneId,
+    /// Panes the user pinned: their tabs sort first and can't be closed via the
+    /// tab × (must unpin first).
+    pinned: HashSet<PaneId>,
     /// Whether the settings window is open.
     settings_open: bool,
     /// A transient status-bar message (e.g. "max 6 panes").
@@ -126,6 +129,7 @@ impl C0pl4ndApp {
             terms,
             pane_alloc,
             focused_pane,
+            pinned: HashSet::new(),
             settings_open: false,
             toast: None,
             last_window_cmd: None,
@@ -167,6 +171,12 @@ impl C0pl4ndApp {
     #[allow(dead_code)]
     pub fn focused_pane(&self) -> PaneId {
         self.focused_pane
+    }
+
+    /// Whether `pane_id` is currently pinned (tab sorts first, × hidden).
+    #[allow(dead_code)]
+    pub fn is_pinned(&self, pane_id: PaneId) -> bool {
+        self.pinned.contains(&pane_id)
     }
 
     /// The most recent caption command the user issued (min/max/close), or
@@ -452,25 +462,34 @@ impl C0pl4ndApp {
 
         // Apply close requests; keep at least one pane alive. Drop the closed
         // pane's terminal (PTY + reader thread) so it does not leak.
-        if !closes.is_empty() {
-            for pid in closes {
-                if count_panes(&self.grid_tree) <= 1 {
-                    break;
-                }
-                if let Some(tile) = grid::tile_of_pane(&self.grid_tree, pid) {
-                    self.grid_tree.tiles.remove(tile);
-                    self.grid_tree.simplify_children_of_tile(
-                        self.grid_tree.root.unwrap_or(tile),
-                        &egui_tiles::SimplificationOptions::default(),
-                    );
-                    self.terms.remove(&pid);
-                }
-            }
-            // Re-anchor focus if the focused pane was closed.
-            if grid::tile_of_pane(&self.grid_tree, self.focused_pane).is_none() {
-                if let Some((pid, _)) = self.pane_titles().first() {
-                    self.focused_pane = *pid;
-                }
+        for pid in closes {
+            self.close_pane(pid);
+        }
+    }
+
+    /// Close one pane: remove its tile + terminal (PTY + reader thread), drop its
+    /// pinned state, and re-anchor focus if the focused pane was the one closed.
+    /// Keeps at least one pane alive — the last pane is never closed. Shared by
+    /// the egui_tiles close button (via `grid_ui`) and the tab-bar × (via
+    /// `frame_tick`).
+    fn close_pane(&mut self, pid: PaneId) {
+        if count_panes(&self.grid_tree) <= 1 {
+            return;
+        }
+        let Some(tile) = grid::tile_of_pane(&self.grid_tree, pid) else {
+            return;
+        };
+        self.grid_tree.tiles.remove(tile);
+        self.grid_tree.simplify_children_of_tile(
+            self.grid_tree.root.unwrap_or(tile),
+            &egui_tiles::SimplificationOptions::default(),
+        );
+        self.terms.remove(&pid);
+        self.pinned.remove(&pid);
+        // Re-anchor focus if the focused pane was closed.
+        if grid::tile_of_pane(&self.grid_tree, self.focused_pane).is_none() {
+            if let Some((p, _)) = self.pane_titles().first() {
+                self.focused_pane = *p;
             }
         }
     }
@@ -588,14 +607,36 @@ impl C0pl4ndApp {
         //    "typing reaches the PTY and the grid updates" path).
         self.forward_input_to_focused(ctx);
 
-        // 1) custom titlebar + tab strip
+        // 1) custom titlebar + tab strip. Fixed height so the drag region below
+        //    is exactly the bar (not the whole remaining column), and so the
+        //    caption-cluster geometry is stable.
         let actions = egui::TopBottomPanel::top("titlebar")
+            .exact_height(40.0)
             .frame(
                 egui::Frame::new()
                     .fill(theme::brand::PANEL)
                     .inner_margin(6.0),
             )
-            .show(ctx, |ui| self.titlebar_and_tabs(ui))
+            .show(ctx, |ui| {
+                // Frameless-window move: dragging any EMPTY part of the titlebar
+                // moves the window; double-click toggles maximize. Added FIRST so
+                // it sits behind the tabs/buttons (egui gives later widgets the
+                // click), so only the empty bar area initiates a drag.
+                let bar = ui.interact(
+                    ui.max_rect(),
+                    egui::Id::new("c0pl4nd_titlebar_drag"),
+                    egui::Sense::click_and_drag(),
+                );
+                if bar.drag_started_by(egui::PointerButton::Primary) {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+                if bar.double_clicked() {
+                    let is_max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                }
+                self.titlebar_and_tabs(ui)
+            })
             .inner;
 
         // 2) status bar
@@ -615,6 +656,15 @@ impl C0pl4ndApp {
         // Apply chrome actions AFTER the panels close (no mid-borrow mutation).
         if let Some(pid) = actions.focus_tab {
             self.focused_pane = pid;
+        }
+        if let Some(pid) = actions.pin_tab {
+            // Toggle pinned state.
+            if !self.pinned.remove(&pid) {
+                self.pinned.insert(pid);
+            }
+        }
+        if let Some(pid) = actions.close_tab {
+            self.close_pane(pid);
         }
         if actions.split_right {
             self.split(egui_tiles::LinearDir::Horizontal);

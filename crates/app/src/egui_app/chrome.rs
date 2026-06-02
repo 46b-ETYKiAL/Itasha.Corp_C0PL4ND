@@ -25,6 +25,10 @@ use super::C0pl4ndApp;
 pub struct ChromeActions {
     /// User clicked a tab; switch focus to this pane.
     pub focus_tab: Option<super::grid::PaneId>,
+    /// User clicked a tab's close (×); close this pane.
+    pub close_tab: Option<super::grid::PaneId>,
+    /// User clicked a tab's pin; toggle this pane's pinned state.
+    pub pin_tab: Option<super::grid::PaneId>,
     /// User clicked the `+` / split-right button.
     pub split_right: bool,
     /// User clicked the split-down button.
@@ -67,17 +71,71 @@ impl C0pl4ndApp {
 
             ui.separator();
 
-            // tab strip (one tab per pane) — in STABLE visual order.
-            for (pane_id, title) in self.pane_titles() {
+            // Tab strip: one tab per pane, SCR1B3-style — each tab is
+            // [title] [pin] [×]. Pinned tabs sort first and carry a violet pin;
+            // their × is hidden (unpin to close) so they can't be shut by
+            // accident. Clicking the title focuses the pane; × closes it.
+            let mut tabs = self.pane_titles();
+            // Stable sort: pinned first, original visual order preserved within
+            // each group (`sort_by_key` is stable).
+            tabs.sort_by_key(|(pid, _)| !self.pinned.contains(pid));
+            for (pane_id, title) in tabs {
                 let selected = pane_id == self.focused_pane;
-                let text = if selected {
-                    RichText::new(&title).color(brand::GREEN)
-                } else {
-                    RichText::new(&title).color(brand::FG)
-                };
-                if ui.selectable_label(selected, text).clicked() {
-                    actions.focus_tab = Some(pane_id);
-                }
+                let is_pinned = self.pinned.contains(&pane_id);
+                // Per-tab accessible labels: the pin/× are glyph buttons, so each
+                // would otherwise expose the same name across tabs (ambiguous for
+                // screen readers AND `get_by_label` tests). Make them unique +
+                // descriptive per tab.
+                let pin_label = format!("{} {title}", if is_pinned { "unpin" } else { "pin" });
+                let close_label = format!("close {title}");
+                ui.scope(|ui| {
+                    // Tight spacing INSIDE a tab so title/pin/× read as one unit.
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    let label = RichText::new(&title).color(if selected {
+                        brand::GREEN
+                    } else {
+                        brand::FG
+                    });
+                    if ui.selectable_label(selected, label).clicked() {
+                        actions.focus_tab = Some(pane_id);
+                    }
+                    let pin_col = if is_pinned {
+                        brand::PURPLE
+                    } else {
+                        brand::MUTED
+                    };
+                    let pin = ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(icon::PUSH_PIN).size(13.0).color(pin_col),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text(&pin_label);
+                    pin.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &pin_label)
+                    });
+                    if pin.clicked() {
+                        actions.pin_tab = Some(pane_id);
+                    }
+                    if !is_pinned {
+                        let close = ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(icon::X).size(13.0).color(brand::MUTED),
+                                )
+                                .frame(false),
+                            )
+                            .on_hover_text(&close_label);
+                        close.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &close_label)
+                        });
+                        if close.clicked() {
+                            actions.close_tab = Some(pane_id);
+                        }
+                    }
+                });
+                ui.separator();
             }
 
             // new-pane (split-right) / split-down buttons.

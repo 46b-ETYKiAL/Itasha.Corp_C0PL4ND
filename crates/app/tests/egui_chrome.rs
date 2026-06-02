@@ -250,3 +250,78 @@ fn caption_cluster_is_flush_right() {
         close_rect.min.x
     );
 }
+
+#[test]
+fn clicking_tab_pin_toggles_pinned() {
+    // Bootstrap opens panes 0 and 1; nothing pinned initially.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    assert!(!app.borrow().is_pinned(PaneId(0)), "pane 0 starts unpinned");
+    let mut h = harness(&app);
+
+    // Click pane 0's pin (label "pin pane 0") → it becomes pinned.
+    h.get_by_label("pin pane 0").click();
+    h.run();
+    assert!(
+        app.borrow().is_pinned(PaneId(0)),
+        "clicking the tab pin must pin the pane"
+    );
+
+    // The pin relabels to "unpin pane 0"; clicking it unpins.
+    h.get_by_label("unpin pane 0").click();
+    h.run();
+    assert!(
+        !app.borrow().is_pinned(PaneId(0)),
+        "clicking the pin again must unpin the pane"
+    );
+}
+
+#[test]
+fn clicking_tab_close_removes_the_pane() {
+    // Bootstrap opens two panes (0, 1).
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let before = app.borrow().pane_count();
+    assert_eq!(before, 2, "bootstrap opens two panes");
+    let mut h = harness(&app);
+
+    // Click pane 1's close (label "close pane 1") → exactly one pane closes.
+    h.get_by_label("close pane 1").click();
+    h.run();
+
+    let after = app.borrow().pane_count();
+    assert_eq!(
+        after,
+        before - 1,
+        "clicking a tab × must close exactly that pane (before={before}, after={after})"
+    );
+    // The surviving pane is focused (focus re-anchors off the closed pane).
+    assert_eq!(
+        app.borrow().focused_pane(),
+        PaneId(0),
+        "focus re-anchors to the surviving pane"
+    );
+}
+
+#[test]
+fn pinned_tab_has_no_close_button() {
+    // A pinned tab hides its × so it can't be closed by accident (unpin first).
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    // Both tabs start with a close button.
+    assert!(
+        h.query_by_label("close pane 0").is_some(),
+        "an unpinned tab exposes a close button"
+    );
+
+    // Pin pane 0; its close button disappears, pane 1's remains.
+    h.get_by_label("pin pane 0").click();
+    h.run();
+    assert!(
+        h.query_by_label("close pane 0").is_none(),
+        "a pinned tab must NOT expose a close button"
+    );
+    assert!(
+        h.query_by_label("close pane 1").is_some(),
+        "the still-unpinned tab keeps its close button"
+    );
+}
