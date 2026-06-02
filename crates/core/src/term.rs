@@ -10,8 +10,10 @@ use crate::grid::{Cell, CellFlags, Color, Grid, UnderlineStyle};
 use std::collections::VecDeque;
 use vte::{Params, Parser, Perform};
 
+pub mod keys;
 pub mod osc;
 
+pub use keys::{encode_key, KeyModifiers, LogicalKey};
 use osc::{base64_decode, base64_encode, format_color_reply, parse_color_spec, Rgb};
 pub use osc::{
     ClipboardSelection, ClipboardWrite, ColorSet, CommandMark, CommandMarkKind, DynamicColor,

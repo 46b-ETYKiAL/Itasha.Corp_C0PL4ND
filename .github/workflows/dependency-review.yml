@@ -40,7 +40,11 @@ jobs:
           # Fail the PR on any moderate-or-higher advisory.
           fail-on-severity: moderate
           comment-summary-in-pr: always
-          # Keep the license allow-list in lockstep with deny.toml.
+          # Keep the license allow-list in lockstep with deny.toml. OFL-1.1 +
+          # Ubuntu-font-1.0 cover egui's bundled default fonts
+          # (`epaint_default_fonts`); both are permissive OSI/FSF font licenses
+          # that allow embedding + redistribution in software.
           allow-licenses: >-
             MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause,
-            BSD-3-Clause, ISC, Zlib, Unicode-3.0, MPL-2.0, CC0-1.0, BSL-1.0
+            BSD-3-Clause, ISC, Zlib, Unicode-3.0, Unicode-DFS-2016, MPL-2.0,
+            CC0-1.0, BSL-1.0, CDLA-Permissive-2.0, OFL-1.1, Ubuntu-font-1.0

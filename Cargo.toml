@@ -26,6 +26,30 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 
+# --- GPU/windowing anchor (promoted to workspace so the egui bundle and the
+#     existing terminal-grid renderer share ONE pinned wgpu/winit/glyphon). ---
+# These resolve to wgpu 29.0.3 / winit 0.30.13 / glyphon 0.11.0 — the same set
+# the reference egui app (SCR1B3) locks, so eframe and glyphon can share one
+# wgpu::Device with no duplicate-wgpu-in-the-tree problem (recon dossier §0/§1).
+wgpu = "29"
+winit = "0.30"
+glyphon = "0.11"
+
+# --- egui bundle (Milestone 1: chrome only) — versions proven mutually
+#     compatible with wgpu 29 by SCR1B3's Cargo.lock (recon dossier §1.1). ---
+eframe = { version = "0.34", default-features = false, features = [
+    "wgpu",          # wgpu backend — shares Device/Queue with glyphon (Milestone 2)
+    "default_fonts",
+    "accesskit",     # a11y tree (also what egui_kittest queries in tests)
+    "wayland",
+    "x11",
+] }
+egui = "0.34"
+egui-wgpu = "0.34"
+egui_tiles = "0.15"
+egui-phosphor = { version = "0.12", default-features = false, features = ["thin"] }
+window-vibrancy = "0.7"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

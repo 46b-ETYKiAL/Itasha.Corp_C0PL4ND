@@ -35,6 +35,13 @@ allow = [
     # Community Data License Agreement — Permissive 2.0; permissive, entered the
     # tree transitively via the sysinfo dependency. Compatible with MIT/Apache.
     "CDLA-Permissive-2.0",
+    # Font licenses for egui's bundled default fonts (`epaint_default_fonts`):
+    # OFL-1.1 (SIL Open Font License — Hack/NotoEmoji) and Ubuntu-font-1.0 (the
+    # Ubuntu font). Both are OSI/FSF-recognised permissive font licenses that
+    # explicitly allow embedding + redistribution in software, so shipping the
+    # bundled fonts is compliant. The fonts ship as data; no code is OFL/UFL.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
 ]
 confidence-threshold = 0.8
 

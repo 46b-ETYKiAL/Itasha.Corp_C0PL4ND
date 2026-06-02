@@ -5003,16 +5003,14 @@ fn zone_highlight_rect(target: LRect, zone: DropZone, rgba: [f32; 4]) -> ColorRe
 }
 
 /// Resolve a cell's foreground [`c0pl4nd_core::Color`] to an RGB triple.
+/// Thin shim over the shared [`Theme::resolve_color`] so this winit shell and
+/// the egui shell resolve colours through the SAME core path.
 fn resolve_fg(
     color: c0pl4nd_core::Color,
     theme: &Theme,
     default_rgb: (u8, u8, u8),
 ) -> (u8, u8, u8) {
-    match color {
-        c0pl4nd_core::Color::Default => default_rgb,
-        c0pl4nd_core::Color::Indexed(i) => theme.ansi(i),
-        c0pl4nd_core::Color::Rgb(r, g, b) => (r, g, b),
-    }
+    theme.resolve_color(color, default_rgb)
 }
 
 /// Resolve a cell's effective `(foreground, Option<background>)` RGB, applying
@@ -5028,19 +5026,9 @@ fn cell_render_colors(
     default_fg: (u8, u8, u8),
     default_bg: (u8, u8, u8),
 ) -> ((u8, u8, u8), Option<(u8, u8, u8)>) {
-    let fg = resolve_fg(cell.fg, theme, default_fg);
-    let bg = match cell.bg {
-        c0pl4nd_core::Color::Default => None,
-        other => Some(resolve_fg(other, theme, default_bg)),
-    };
-    if cell.flags.inverse {
-        // Swap: the (possibly-default) background becomes the foreground, and
-        // the foreground becomes a now-explicit background quad.
-        let eff_bg = bg.unwrap_or(default_bg);
-        (eff_bg, Some(fg))
-    } else {
-        (fg, bg)
-    }
+    // Delegate to the shared core helper so the inverse/reverse-video handling
+    // is defined once and reused by the egui shell.
+    theme.cell_colors(cell, default_fg, default_bg)
 }
 
 /// Reduce a user-supplied workspace name to a safe file stem.
@@ -5104,64 +5092,52 @@ fn key_to_bytes(
     app_cursor: bool,
     mods: ModifiersState,
 ) -> Option<Vec<u8>> {
-    // Arrow / Home / End: SS3 in application-cursor mode, else CSI.
-    let cursor = |c: u8| -> Vec<u8> {
-        if app_cursor {
-            vec![0x1b, b'O', c]
-        } else {
-            vec![0x1b, b'[', c]
-        }
+    use c0pl4nd_core::term::{encode_key, KeyModifiers, LogicalKey};
+    // Map the winit key onto the engine-agnostic `LogicalKey`, then delegate to
+    // the ONE canonical encoder in `c0pl4nd_core::term::keys` so the escape
+    // sequences are not duplicated between this (winit) shell and the egui shell.
+    let logical = match key {
+        Key::Named(NamedKey::Enter) => LogicalKey::Enter,
+        Key::Named(NamedKey::Backspace) => LogicalKey::Backspace,
+        Key::Named(NamedKey::Tab) => LogicalKey::Tab,
+        Key::Named(NamedKey::Escape) => LogicalKey::Escape,
+        Key::Named(NamedKey::Space) => LogicalKey::Space,
+        Key::Named(NamedKey::ArrowUp) => LogicalKey::ArrowUp,
+        Key::Named(NamedKey::ArrowDown) => LogicalKey::ArrowDown,
+        Key::Named(NamedKey::ArrowRight) => LogicalKey::ArrowRight,
+        Key::Named(NamedKey::ArrowLeft) => LogicalKey::ArrowLeft,
+        Key::Named(NamedKey::Home) => LogicalKey::Home,
+        Key::Named(NamedKey::End) => LogicalKey::End,
+        Key::Named(NamedKey::Insert) => LogicalKey::Insert,
+        Key::Named(NamedKey::Delete) => LogicalKey::Delete,
+        Key::Named(NamedKey::PageUp) => LogicalKey::PageUp,
+        Key::Named(NamedKey::PageDown) => LogicalKey::PageDown,
+        Key::Named(NamedKey::F1) => LogicalKey::Function(1),
+        Key::Named(NamedKey::F2) => LogicalKey::Function(2),
+        Key::Named(NamedKey::F3) => LogicalKey::Function(3),
+        Key::Named(NamedKey::F4) => LogicalKey::Function(4),
+        Key::Named(NamedKey::F5) => LogicalKey::Function(5),
+        Key::Named(NamedKey::F6) => LogicalKey::Function(6),
+        Key::Named(NamedKey::F7) => LogicalKey::Function(7),
+        Key::Named(NamedKey::F8) => LogicalKey::Function(8),
+        Key::Named(NamedKey::F9) => LogicalKey::Function(9),
+        Key::Named(NamedKey::F10) => LogicalKey::Function(10),
+        Key::Named(NamedKey::F11) => LogicalKey::Function(11),
+        Key::Named(NamedKey::F12) => LogicalKey::Function(12),
+        // Everything else: the composed text the platform delivered (printable
+        // chars, IME output). `None` when there is no text → encodes nothing.
+        _ => LogicalKey::Text(text.as_ref().map(|s| s.to_string()).unwrap_or_default()),
     };
-    // `ESC [ <n> ~` editing/function-key form.
-    let tilde = |n: &[u8]| -> Vec<u8> {
-        let mut v = Vec::with_capacity(n.len() + 3);
-        v.extend_from_slice(b"\x1b[");
-        v.extend_from_slice(n);
-        v.push(b'~');
-        v
-    };
-    let base: Option<Vec<u8>> = match key {
-        Key::Named(NamedKey::Enter) => Some(vec![b'\r']),
-        Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
-        Key::Named(NamedKey::Tab) => Some(vec![b'\t']),
-        Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
-        Key::Named(NamedKey::Space) => Some(vec![b' ']),
-        Key::Named(NamedKey::ArrowUp) => Some(cursor(b'A')),
-        Key::Named(NamedKey::ArrowDown) => Some(cursor(b'B')),
-        Key::Named(NamedKey::ArrowRight) => Some(cursor(b'C')),
-        Key::Named(NamedKey::ArrowLeft) => Some(cursor(b'D')),
-        Key::Named(NamedKey::Home) => Some(cursor(b'H')),
-        Key::Named(NamedKey::End) => Some(cursor(b'F')),
-        Key::Named(NamedKey::Insert) => Some(tilde(b"2")),
-        Key::Named(NamedKey::Delete) => Some(tilde(b"3")),
-        Key::Named(NamedKey::PageUp) => Some(tilde(b"5")),
-        Key::Named(NamedKey::PageDown) => Some(tilde(b"6")),
-        // F1–F4 use SS3 (the VT100 PF-key form); F5–F12 use CSI tilde.
-        Key::Named(NamedKey::F1) => Some(vec![0x1b, b'O', b'P']),
-        Key::Named(NamedKey::F2) => Some(vec![0x1b, b'O', b'Q']),
-        Key::Named(NamedKey::F3) => Some(vec![0x1b, b'O', b'R']),
-        Key::Named(NamedKey::F4) => Some(vec![0x1b, b'O', b'S']),
-        Key::Named(NamedKey::F5) => Some(tilde(b"15")),
-        Key::Named(NamedKey::F6) => Some(tilde(b"17")),
-        Key::Named(NamedKey::F7) => Some(tilde(b"18")),
-        Key::Named(NamedKey::F8) => Some(tilde(b"19")),
-        Key::Named(NamedKey::F9) => Some(tilde(b"20")),
-        Key::Named(NamedKey::F10) => Some(tilde(b"21")),
-        Key::Named(NamedKey::F11) => Some(tilde(b"23")),
-        Key::Named(NamedKey::F12) => Some(tilde(b"24")),
-        _ => text.as_ref().map(|s| s.as_bytes().to_vec()),
-    };
-    // Alt = Meta: prefix ESC for a text-producing key (never double-prefix a
-    // sequence that already starts with ESC, e.g. the arrows above).
-    match base {
-        Some(bytes) if mods.alt_key() && bytes.first() != Some(&0x1b) => {
-            let mut v = Vec::with_capacity(bytes.len() + 1);
-            v.push(0x1b);
-            v.extend_from_slice(&bytes);
-            Some(v)
-        }
-        other => other,
-    }
+    encode_key(
+        &logical,
+        app_cursor,
+        KeyModifiers {
+            ctrl: mods.control_key(),
+            alt: mods.alt_key(),
+            shift: mods.shift_key(),
+            logo: mods.super_key(),
+        },
+    )
 }
 
 /// Load a theme file from the bundled themes directory (next to the binary or
