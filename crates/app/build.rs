@@ -13,18 +13,23 @@
 //! Windows Search indexes for an executable, which also improves Start-menu
 //! discoverability.
 //!
-//! Windows-only: gated on the target OS so Linux/macOS builds skip it entirely.
+//! Windows-only: the resource code is `#[cfg(windows)]`-gated so it is compiled
+//! ONLY on a Windows host. `winresource` is a host-gated build-dependency
+//! (`[target.'cfg(windows)'.build-dependencies]`), so it is absent on
+//! Linux/macOS hosts — the cfg gate (not a runtime check) is what keeps the
+//! build script compiling there.
 
 fn main() {
     // Re-run if the icon changes.
     println!("cargo:rerun-if-changed=../../packaging/windows/c0pl4nd.ico");
     println!("cargo:rerun-if-changed=build.rs");
 
-    // Only the Windows target carries a PE resource section.
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
-        return;
-    }
+    #[cfg(windows)]
+    embed_windows_resource();
+}
 
+#[cfg(windows)]
+fn embed_windows_resource() {
     let manifest_dir =
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is always set by cargo");
     let icon = std::path::Path::new(&manifest_dir).join("../../packaging/windows/c0pl4nd.ico");
