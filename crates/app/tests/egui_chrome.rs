@@ -323,3 +323,72 @@ fn pinned_tab_has_no_close_button() {
         "the still-unpinned tab keeps its close button"
     );
 }
+
+#[test]
+fn pane_keeps_its_content_after_adding_a_terminal() {
+    // Regression for "the existing terminal goes black after I open a new one":
+    // opening a new terminal splits + RESIZES the existing pane; the resize must
+    // not blank its grid. Drives a real PTY through the production frame loop.
+    use std::time::{Duration, Instant};
+    const TOKEN: &str = "QWERTYZ123";
+
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+    if app.borrow().focused_grid_text().is_none() {
+        eprintln!("no live PTY on this platform; skipping resize-content test");
+        return;
+    }
+
+    // Type a command that prints the token into pane 0, then submit.
+    for ch in format!("echo {TOKEN}").chars() {
+        h.event(egui::Event::Text(ch.to_string()));
+    }
+    h.step();
+    h.key_press(egui::Key::Enter);
+    h.step();
+
+    // Poll until the token lands in pane 0's grid.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = false;
+    while Instant::now() < deadline {
+        h.step();
+        if app
+            .borrow()
+            .pane_grid_text(PaneId(0))
+            .is_some_and(|t| t.contains(TOKEN))
+        {
+            seen = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    if !seen {
+        eprintln!("token never reached pane 0 (no PTY echo); skipping");
+        return;
+    }
+
+    // Add a terminal → splits + resizes pane 0. Run several frames so the
+    // debounced resize + reflow settle.
+    h.get_by_label("new terminal").click();
+    // Settle: poll up to ~2s for the resize/reflow (+ any ConPTY repaint).
+    let rd = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < rd {
+        h.step();
+        if app
+            .borrow()
+            .pane_grid_text(PaneId(0))
+            .is_some_and(|t| t.contains(TOKEN))
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+
+    // Pane 0 must STILL show its content — a blanked grid here is the black-pane.
+    let after = app.borrow().pane_grid_text(PaneId(0)).unwrap_or_default();
+    assert!(
+        after.contains(TOKEN),
+        "pane 0 lost its content after adding a terminal (resize blanked it = the \
+         black-pane bug). pane 0 grid:\n{after}"
+    );
+}

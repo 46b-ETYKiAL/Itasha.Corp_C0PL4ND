@@ -1080,4 +1080,46 @@ mod tests {
         assert_eq!(app.pane_count(), grid::MAX_PANES, "cap must hold");
         assert!(app.toast.is_some());
     }
+
+    /// Regression for "the existing terminal goes black after I close one and
+    /// open a new one". An orphaned pane (in storage but unreachable from the
+    /// tree root) is COUNTED by `pane_count` but rendered NOWHERE — i.e. black.
+    /// After close+new-terminal, EVERY pane must be reachable from the root.
+    #[test]
+    fn close_then_new_terminal_keeps_every_pane_reachable() {
+        fn reachable(tree: &egui_tiles::Tree<Pane>) -> Vec<PaneId> {
+            fn walk(tree: &egui_tiles::Tree<Pane>, id: egui_tiles::TileId, out: &mut Vec<PaneId>) {
+                match tree.tiles.get(id) {
+                    Some(egui_tiles::Tile::Pane(p)) => out.push(p.pane_id),
+                    Some(egui_tiles::Tile::Container(c)) => {
+                        for ch in c.children() {
+                            walk(tree, *ch, out);
+                        }
+                    }
+                    None => {}
+                }
+            }
+            let mut out = Vec::new();
+            if let Some(root) = tree.root {
+                walk(tree, root, &mut out);
+            }
+            out
+        }
+
+        let mut app = C0pl4ndApp::bootstrap(); // 1 pane (id 0)
+        app.new_terminal(); // → 0, 1
+        assert_eq!(app.pane_count(), 2);
+        app.close_pane(app.focused_pane); // close the new one
+        assert_eq!(app.pane_count(), 1, "back to one pane after close");
+        app.new_terminal(); // → survivor + a fresh pane
+        assert_eq!(app.pane_count(), 2, "two panes after re-adding");
+
+        let reachable = reachable(&app.grid_tree);
+        assert_eq!(
+            reachable.len(),
+            app.pane_count(),
+            "every pane must be reachable from the root after close+new (an \
+             orphaned pane renders black); reachable={reachable:?}"
+        );
+    }
 }
