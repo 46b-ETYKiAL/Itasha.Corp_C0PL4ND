@@ -29,7 +29,7 @@ use grid::{count_panes, GridBehavior, Pane, PaneId, PaneIdAllocator};
 use pane_term::{CellMetrics, PaneTerm};
 
 /// How many placeholder panes the shell opens with on first launch.
-const INITIAL_PANES: usize = 2;
+const INITIAL_PANES: usize = 1;
 
 /// A window-level caption command issued by the titlebar buttons. Routed through
 /// [`chrome::ChromeActions`] so [`C0pl4ndApp::frame_tick`] is the single site
@@ -67,6 +67,15 @@ pub struct C0pl4ndApp {
     /// Panes the user pinned: their tabs sort first and can't be closed via the
     /// tab × (must unpin first).
     pinned: HashSet<PaneId>,
+    /// The focused pane's last-rendered size `(w, h)` in points. Drives the
+    /// "+" button's split direction (split the longer axis to stay balanced).
+    last_focused_size: Option<(f32, f32)>,
+    /// Whether the chrome fonts (incl. the `phosphor-fill` family used for a
+    /// pinned tab's solid pin) have been installed on the egui context. Set in
+    /// `new`; the first `frame_tick` installs them otherwise (e.g. headless
+    /// tests built via `bootstrap()`), so referencing the `phosphor-fill` family
+    /// can never hit an unregistered-family panic.
+    fonts_installed: bool,
     /// Whether the settings window is open.
     settings_open: bool,
     /// A transient status-bar message (e.g. "max 6 panes").
@@ -100,9 +109,10 @@ impl C0pl4ndApp {
         install_chrome_fonts(&cc.egui_ctx);
         apply_window_effect(cc);
         let mut app = Self::bootstrap();
-        // A wgpu render state means a real window (also true under the wgpu test
-        // harness, which drives frames explicitly with `step()`); headless tests
-        // built via `bootstrap()` leave this false.
+        app.fonts_installed = true; // already installed above; skip the frame-tick install
+                                    // A wgpu render state means a real window (also true under the wgpu test
+                                    // harness, which drives frames explicitly with `step()`); headless tests
+                                    // built via `bootstrap()` leave this false.
         app.live_window = cc.wgpu_render_state.is_some();
         app
     }
@@ -130,6 +140,8 @@ impl C0pl4ndApp {
             pane_alloc,
             focused_pane,
             pinned: HashSet::new(),
+            last_focused_size: None,
+            fonts_installed: false,
             settings_open: false,
             toast: None,
             last_window_cmd: None,
@@ -243,6 +255,20 @@ impl C0pl4ndApp {
         }
     }
 
+    /// Open a new terminal (the single "+" button). Splits the focused pane
+    /// along its LONGER axis so panes stay balanced: a wide pane splits
+    /// left|right, a tall pane splits top/bottom. This gives a "logical" grid
+    /// expansion without asking the user to pick a direction.
+    fn new_terminal(&mut self) {
+        let (w, h) = self.last_focused_size.unwrap_or((16.0, 9.0));
+        let dir = if w >= h {
+            egui_tiles::LinearDir::Horizontal // wide → side-by-side
+        } else {
+            egui_tiles::LinearDir::Vertical // tall → stacked
+        };
+        self.split(dir);
+    }
+
     /// Paint one terminal pane's body and wire its per-frame interaction:
     ///
     /// 1. Allocate the pane rect and paint the theme background quad + focus ring
@@ -338,6 +364,7 @@ impl C0pl4ndApp {
         PaneBodyOutcome {
             drag_started: resp.drag_started(),
             clicked: resp.clicked(),
+            size: rect.size(),
         }
     }
 
@@ -426,6 +453,7 @@ impl C0pl4ndApp {
         let mut closes: Vec<PaneId> = Vec::new();
         let focused = self.focused_pane;
         let mut clicked: Option<PaneId> = None;
+        let mut focused_size: Option<(f32, f32)> = None;
 
         // Snapshot BEFORE the frame so we can revert a drag that exceeds the cap.
         let pre = self.grid_tree.clone();
@@ -440,6 +468,9 @@ impl C0pl4ndApp {
                 if outcome.clicked {
                     clicked = Some(pid);
                 }
+                if pid == focused {
+                    focused_size = Some((outcome.size.x, outcome.size.y));
+                }
                 outcome.drag_started
             };
             let mut behavior = GridBehavior {
@@ -448,6 +479,9 @@ impl C0pl4ndApp {
                 close_requests: &mut closes,
             };
             self.grid_tree.ui(&mut behavior, ui);
+        }
+        if let Some(s) = focused_size {
+            self.last_focused_size = Some(s);
         }
 
         // Enforce the cap: a drag-to-split that pushed us over 6 reverts.
@@ -601,6 +635,15 @@ impl C0pl4ndApp {
     /// top-level path (same compromise the reference app documents).
     #[allow(deprecated)]
     pub fn frame_tick(&mut self, ctx: &egui::Context) {
+        // Ensure the chrome fonts (incl. the `phosphor-fill` family) are
+        // installed before any widget references them — `new()` does this for
+        // the real app; headless tests built via `bootstrap()` install here on
+        // frame 1 (otherwise the pinned tab's `FontFamily::Name("phosphor-fill")`
+        // would panic on an unregistered family).
+        if !self.fonts_installed {
+            install_chrome_fonts(ctx);
+            self.fonts_installed = true;
+        }
         // 0) forward this frame's keyboard/paste to the FOCUSED pane's PTY. Done
         //    BEFORE the panels so the keystrokes reach the PTY whose grid this
         //    same frame then snapshots — proving the round-trip (the load-bearing
@@ -666,11 +709,8 @@ impl C0pl4ndApp {
         if let Some(pid) = actions.close_tab {
             self.close_pane(pid);
         }
-        if actions.split_right {
-            self.split(egui_tiles::LinearDir::Horizontal);
-        }
-        if actions.split_down {
-            self.split(egui_tiles::LinearDir::Vertical);
+        if actions.new_terminal {
+            self.new_terminal();
         }
         if actions.toggle_settings {
             self.settings_open = !self.settings_open;
@@ -731,6 +771,9 @@ struct PaneBodyOutcome {
     drag_started: bool,
     /// True when the pane body was clicked (a refocus request).
     clicked: bool,
+    /// The pane's body size (points) this frame — used to pick the "+" split
+    /// direction for the focused pane.
+    size: egui::Vec2,
 }
 
 /// The theme's default foreground as an `(r,g,b)` triple — the glyph colour for
@@ -894,7 +937,20 @@ fn load_terminal_theme(config: &c0pl4nd_core::Config) -> c0pl4nd_core::Theme {
 /// font resolves the icon codepoint. Called once at startup.
 fn install_chrome_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+    // Thin = the default chrome icon weight (registered as "phosphor").
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Thin);
+    // Fill = SOLID glyphs, registered under a SEPARATE family so most icons stay
+    // thin but a pinned tab can show a solid pin (`add_to_fonts` always uses the
+    // "phosphor" key, so a second call would overwrite Thin with Fill). Use via
+    // `RichText::new(fill_glyph).family(FontFamily::Name("phosphor-fill".into()))`.
+    fonts.font_data.insert(
+        "phosphor-fill".to_owned(),
+        egui_phosphor::Variant::Fill.font_data().into(),
+    );
+    fonts.families.insert(
+        egui::FontFamily::Name("phosphor-fill".into()),
+        vec!["phosphor-fill".to_owned()],
+    );
     // `add_to_fonts` registers the "phosphor" font_data and inserts it into the
     // Proportional family; also append it to Monospace so monospace buttons can
     // resolve the icons.

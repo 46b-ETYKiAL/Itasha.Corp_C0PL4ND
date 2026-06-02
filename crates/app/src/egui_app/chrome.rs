@@ -29,10 +29,9 @@ pub struct ChromeActions {
     pub close_tab: Option<super::grid::PaneId>,
     /// User clicked a tab's pin; toggle this pane's pinned state.
     pub pin_tab: Option<super::grid::PaneId>,
-    /// User clicked the `+` / split-right button.
-    pub split_right: bool,
-    /// User clicked the split-down button.
-    pub split_down: bool,
+    /// User clicked the "+" new-terminal button; open a new pane (the host picks
+    /// the split direction to keep the grid balanced).
+    pub new_terminal: bool,
     /// User toggled the settings window.
     pub toggle_settings: bool,
     /// User clicked a caption button (minimize / maximize / close). Routed
@@ -99,18 +98,18 @@ impl C0pl4ndApp {
                     if ui.selectable_label(selected, label).clicked() {
                         actions.focus_tab = Some(pane_id);
                     }
-                    let pin_col = if is_pinned {
-                        brand::PURPLE
+                    // Pinned → SOLID violet pin (Fill family); unpinned → thin
+                    // muted pin. The fill glyph makes "pinned" read at a glance.
+                    let pin_text = if is_pinned {
+                        RichText::new(egui_phosphor::fill::PUSH_PIN)
+                            .family(egui::FontFamily::Name("phosphor-fill".into()))
+                            .size(13.0)
+                            .color(brand::PURPLE)
                     } else {
-                        brand::MUTED
+                        RichText::new(icon::PUSH_PIN).size(13.0).color(brand::MUTED)
                     };
                     let pin = ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new(icon::PUSH_PIN).size(13.0).color(pin_col),
-                            )
-                            .frame(false),
-                        )
+                        .add(egui::Button::new(pin_text).frame(false))
                         .on_hover_text(&pin_label);
                     pin.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &pin_label)
@@ -138,20 +137,17 @@ impl C0pl4ndApp {
                 ui.separator();
             }
 
-            // new-pane (split-right) / split-down buttons.
-            if ui
-                .button(RichText::new(icon::COLUMNS).size(16.0))
-                .on_hover_text("split right (new pane)")
-                .clicked()
-            {
-                actions.split_right = true;
-            }
-            if ui
-                .button(RichText::new(icon::ROWS).size(16.0))
-                .on_hover_text("split down")
-                .clicked()
-            {
-                actions.split_down = true;
+            // Single "+" new-terminal button: opens a new pane and lets the host
+            // expand the grid logically (it splits the focused pane along its
+            // longer axis, keeping panes balanced — no manual direction choice).
+            let new_term = ui
+                .button(RichText::new(icon::PLUS).size(16.0))
+                .on_hover_text("new terminal");
+            new_term.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "new terminal")
+            });
+            if new_term.clicked() {
+                actions.new_terminal = true;
             }
 
             // ---- right-pinned caption cluster ----

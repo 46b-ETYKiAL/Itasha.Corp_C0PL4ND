@@ -30,7 +30,6 @@ use egui_kittest::Harness;
 
 use egui_app::grid::PaneId;
 use egui_app::{C0pl4ndApp, WindowCmd};
-use egui_phosphor::thin as icon;
 
 /// Build a headless harness that drives the REAL `frame_tick` for one shared app
 /// instance. The same function the shipping binary runs each frame — so a click
@@ -48,41 +47,27 @@ fn harness(app: &RefCell<C0pl4ndApp>) -> Harness<'_> {
 }
 
 #[test]
-fn clicking_plus_splits_a_new_pane() {
+fn clicking_new_terminal_adds_a_pane() {
+    // Bootstrap opens ONE pane; the single "+" button adds another.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let before = app.borrow().pane_count();
+    assert_eq!(before, 1, "app opens with a single terminal");
     let mut h = harness(&app);
 
-    h.get_by_label(icon::COLUMNS).click();
+    h.get_by_label("new terminal").click();
     h.run();
 
     let after = app.borrow().pane_count();
     assert_eq!(
         after,
         before + 1,
-        "clicking + must spawn exactly one pane (before={before}, after={after})"
-    );
-}
-
-#[test]
-fn clicking_split_down_splits_a_new_pane() {
-    let app = RefCell::new(C0pl4ndApp::bootstrap());
-    let before = app.borrow().pane_count();
-    let mut h = harness(&app);
-
-    h.get_by_label(icon::ROWS).click();
-    h.run();
-
-    assert_eq!(
-        app.borrow().pane_count(),
-        before + 1,
-        "split-down adds a pane"
+        "clicking the new-terminal button must spawn exactly one pane (before={before}, after={after})"
     );
 }
 
 #[test]
 fn clicking_a_tab_changes_the_focused_pane() {
-    // Bootstrap opens two panes (ids 0 and 1); pane 0 is focused initially.
+    // Bootstrap opens one pane (id 0, focused). Add a second, then click back.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     assert_eq!(
         app.borrow().focused_pane(),
@@ -91,14 +76,22 @@ fn clicking_a_tab_changes_the_focused_pane() {
     );
     let mut h = harness(&app);
 
-    // Click the OTHER pane's tab (label "pane 1") and assert focus actually moved.
-    h.get_by_label("pane 1").click();
+    // Add a second terminal → focus moves to the new pane (id 1).
+    h.get_by_label("new terminal").click();
     h.run();
-
     assert_eq!(
         app.borrow().focused_pane(),
         PaneId(1),
-        "clicking the 'pane 1' tab must move focus to pane 1"
+        "a new terminal takes focus"
+    );
+
+    // Click pane 0's tab → focus moves back to pane 0.
+    h.get_by_label("pane 0").click();
+    h.run();
+    assert_eq!(
+        app.borrow().focused_pane(),
+        PaneId(0),
+        "clicking the 'pane 0' tab must move focus to pane 0"
     );
 }
 
@@ -191,15 +184,15 @@ fn splitting_past_six_panes_is_refused() {
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let mut h = harness(&app);
 
-    // bootstrap=2 panes; click + four times to reach 6.
-    for _ in 0..4 {
-        h.get_by_label(icon::COLUMNS).click();
+    // bootstrap=1 pane; click "new terminal" five times to reach 6.
+    for _ in 0..5 {
+        h.get_by_label("new terminal").click();
         h.run();
     }
     assert_eq!(app.borrow().pane_count(), 6, "reached the 6-pane cap");
 
-    // One more + must be refused (count stays 6).
-    h.get_by_label(icon::COLUMNS).click();
+    // One more must be refused (count stays 6).
+    h.get_by_label("new terminal").click();
     h.run();
     assert_eq!(
         app.borrow().pane_count(),
@@ -253,7 +246,7 @@ fn caption_cluster_is_flush_right() {
 
 #[test]
 fn clicking_tab_pin_toggles_pinned() {
-    // Bootstrap opens panes 0 and 1; nothing pinned initially.
+    // Bootstrap opens one pane (id 0); nothing pinned initially.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     assert!(!app.borrow().is_pinned(PaneId(0)), "pane 0 starts unpinned");
     let mut h = harness(&app);
@@ -277,11 +270,13 @@ fn clicking_tab_pin_toggles_pinned() {
 
 #[test]
 fn clicking_tab_close_removes_the_pane() {
-    // Bootstrap opens two panes (0, 1).
+    // Open a second terminal so there are two panes (0, 1) to close one of.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
-    let before = app.borrow().pane_count();
-    assert_eq!(before, 2, "bootstrap opens two panes");
     let mut h = harness(&app);
+    h.get_by_label("new terminal").click();
+    h.run();
+    let before = app.borrow().pane_count();
+    assert_eq!(before, 2, "two panes after adding one");
 
     // Click pane 1's close (label "close pane 1") → exactly one pane closes.
     h.get_by_label("close pane 1").click();
@@ -304,8 +299,11 @@ fn clicking_tab_close_removes_the_pane() {
 #[test]
 fn pinned_tab_has_no_close_button() {
     // A pinned tab hides its × so it can't be closed by accident (unpin first).
+    // Open a second terminal so pane 1's close button is present to compare.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let mut h = harness(&app);
+    h.get_by_label("new terminal").click();
+    h.run();
 
     // Both tabs start with a close button.
     assert!(
