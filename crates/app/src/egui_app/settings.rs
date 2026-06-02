@@ -135,14 +135,54 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> Outcom
     // host reloads the terminal color theme only when this differs).
     let theme_before = config.theme.clone();
 
+    // Center the window the first time it opens via a one-time default position.
+    // `.anchor()` is deliberately NOT used: an anchored egui window is re-pinned
+    // to its anchor every frame and is therefore IMMOVABLE — that was the root
+    // cause of the "settings can't be dragged" report. `.default_pos` places it
+    // once, then the title bar drags freely.
+    let win_size = egui::vec2(720.0, 560.0);
+    let default_pos = ctx.content_rect().center() - win_size * 0.5;
+
+    // Esc dismisses settings (in addition to the title-bar ✕ and the in-content
+    // Close button) — the conventional overlay-dismiss key.
+    if keep_open && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        keep_open = false;
+    }
+
+    // Set by the in-content Close button below; applied after the frame so the
+    // mutation does not fight the `&mut keep_open` borrow the Window holds.
+    let mut close_requested = false;
+
     egui::Window::new("settings")
         .open(&mut keep_open)
         .collapsible(false)
         .resizable(false)
-        .fixed_size([720.0, 560.0])
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .movable(true)
+        .fixed_size(win_size)
+        .default_pos(default_pos)
         .frame(egui::Frame::window(&ctx.global_style()).fill(theme::brand::PANEL))
         .show(ctx, |ui| {
+            // In-content header: title + an unmissable Close ✕. The egui
+            // title-bar ✕ can read as low-contrast against the dark custom
+            // frame (the "can't close it" report), so this is a clear,
+            // always-visible dismiss. Fixed-height — it does not eat the scroll
+            // area's fill below.
+            ui.horizontal(|ui| {
+                ui.heading(egui::RichText::new("Settings").color(theme::brand::GREEN));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let close = ui
+                        .button(egui::RichText::new("✕").size(16.0))
+                        .on_hover_text("Close settings (Esc)");
+                    close.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "close settings")
+                    });
+                    if close.clicked() {
+                        close_requested = true;
+                    }
+                });
+            });
+            ui.separator();
+
             ui.horizontal_top(|ui| {
                 // ---- Left category nav ----
                 ui.vertical(|ui| {
@@ -180,6 +220,10 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> Outcom
                 });
             });
         });
+
+    if close_requested {
+        keep_open = false;
+    }
 
     ctx.data_mut(|d| {
         d.insert_temp(cat_id, category);
