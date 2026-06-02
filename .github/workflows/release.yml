@@ -223,10 +223,18 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p sbom
-          cargo cyclonedx --all --format json --override-filename c0pl4nd-sbom
+          # NOTE: do NOT pass `--override-filename` — it renames output to
+          # `<name>.json` (dropping the `.cdx` infix) AND collides all workspace
+          # members onto one filename, so the `*.cdx.json` collector below found
+          # nothing and the job failed. Default naming writes one
+          # `<crate>.cdx.json` per member (c0pl4nd / c0pl4nd-core /
+          # c0pl4nd-renderer), which the collector + attest glob match.
+          cargo cyclonedx --all --format json
           # cargo-cyclonedx writes per-crate files; collect them.
           find . -name '*.cdx.json' -not -path './target/*' -exec cp {} sbom/ \;
           ls -la sbom
+          # Fail loudly if no SBOM was produced (don't ship a release missing it).
+          test "$(find sbom -name '*.cdx.json' | wc -l)" -gt 0
 
       - name: Attest SBOM provenance
         # actions/attest-build-provenance@v4.1.0
