@@ -165,7 +165,7 @@ impl C0pl4ndApp {
             );
             ui.separator();
             ui.label(
-                RichText::new("C0PL4ND — egui chrome (milestone 1, placeholder grid)")
+                RichText::new("C0PL4ND — local-first terminal")
                     .color(brand::FG)
                     .weak(),
             );
