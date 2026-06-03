@@ -85,6 +85,25 @@ pub struct C0pl4ndApp {
     fonts_installed: bool,
     /// Whether the settings window is open.
     settings_open: bool,
+    /// Recently-run commands, surfaced by the command palette for quick
+    /// find/run. Captured best-effort from typed input (committed on Enter).
+    cmd_history: c0pl4nd_core::command_history::CommandHistory,
+    /// Accumulator for the line currently being typed in the focused pane.
+    /// Committed to `cmd_history` on Enter, reset on focus change. Best-effort:
+    /// it models printable text + Backspace, not full shell line-editing.
+    input_line: String,
+    /// Whether the command palette overlay is open.
+    palette_open: bool,
+    /// The palette's fuzzy-search query.
+    palette_query: String,
+    /// The palette's selected row (index into the filtered results).
+    palette_sel: usize,
+    /// The command most recently run FROM the palette (Enter or click). Set in
+    /// [`Self::run_palette_selection`] so an interaction test can assert that
+    /// driving the real palette ran the real command — the same observation
+    /// pattern as [`Self::last_window_cmd`] (the PTY write itself is not
+    /// observable in the headless harness).
+    last_palette_run: Option<String>,
     /// A transient status-bar message (e.g. "max 6 panes").
     toast: Option<String>,
     /// The most recent caption command issued (minimize/maximize/close). Set in
@@ -152,6 +171,12 @@ impl C0pl4ndApp {
             active_shell: 0,
             fonts_installed: false,
             settings_open: false,
+            cmd_history: c0pl4nd_core::command_history::CommandHistory::default(),
+            input_line: String::new(),
+            palette_open: false,
+            palette_query: String::new(),
+            palette_sel: 0,
+            last_palette_run: None,
             toast: None,
             last_window_cmd: None,
             live_window: false,
@@ -489,6 +514,42 @@ impl C0pl4ndApp {
                 forwarded.extend_from_slice(s.as_bytes());
             }
         }
+
+        // Best-effort capture of the line being typed, for the command-palette
+        // history (see `c0pl4nd_core::command_history`). Printable text accrues,
+        // Backspace pops one char, and Enter commits the line then clears the
+        // accumulator. This models printable input + Backspace, NOT full shell
+        // line-editing (cursor motion, kill-line) — exactly the contract the
+        // `command_history` module documents. Only runs when typing reaches the
+        // PTY (the palette routes its own keys away from here), so the history is
+        // a record of what the user actually ran, not what they searched for.
+        // Ordinary printable characters (incl. Space) arrive as `LogicalKey::Text`
+        // (egui delivers them via `Event::Text`); only the special keys below are
+        // `LogicalKey` variants, so this captures the full typed line.
+        for (lk, _m) in &keys {
+            match lk {
+                LogicalKey::Text(t) => {
+                    // Ctrl-letter chords arrive here as a single C0 control byte
+                    // (Ctrl+C = 0x03, Ctrl+U = 0x15, …), NOT printable line
+                    // content. Ctrl+C / Ctrl+U abort the current line in a shell,
+                    // so mirror that by clearing the accumulator; other control
+                    // bytes are ignored. Printable text (incl. Space) accrues.
+                    if t.chars().all(|c| !c.is_control()) {
+                        self.input_line.push_str(t);
+                    } else if t == "\u{3}" || t == "\u{15}" {
+                        self.input_line.clear();
+                    }
+                }
+                LogicalKey::Backspace => {
+                    self.input_line.pop();
+                }
+                LogicalKey::Enter => {
+                    let line = std::mem::take(&mut self.input_line);
+                    self.cmd_history.record(line);
+                }
+                _ => {}
+            }
+        }
         forwarded
     }
 
@@ -547,6 +608,9 @@ impl C0pl4ndApp {
         }
 
         if let Some(pid) = clicked {
+            if pid != self.focused_pane {
+                self.input_line.clear(); // the typed-line accumulator is per-pane
+            }
             self.focused_pane = pid;
         }
 
@@ -659,6 +723,151 @@ impl C0pl4ndApp {
     pub fn config_paste_warn_multiline(&self) -> bool {
         self.config.paste_warn_multiline
     }
+
+    // ---- command palette (quick find/run previously-run commands) ----
+    //
+    // The palette surfaces `cmd_history` (commands the user typed + ran in any
+    // pane this session) and lets them fuzzy-search and re-run one with Enter.
+    // It is opened with Ctrl+Shift+P (handled in `frame_tick`). These methods are
+    // the production logic the frame loop calls — the interaction tests drive
+    // them through the real frame loop, NOT as a test-only mirror.
+
+    /// Toggle the command palette. Opening it resets the query, selection, and
+    /// the in-flight typed-line accumulator (so a half-typed line is not later
+    /// recorded as if it had been run after the palette closes).
+    fn toggle_palette(&mut self) {
+        self.palette_open = !self.palette_open;
+        if self.palette_open {
+            self.palette_query.clear();
+            self.palette_sel = 0;
+            self.input_line.clear();
+        }
+    }
+
+    /// The palette's filtered results for the current query — every history entry
+    /// (most-recent-first) when the query is empty, fuzzy-filtered otherwise.
+    fn palette_results(&self) -> Vec<String> {
+        self.cmd_history.search(&self.palette_query)
+    }
+
+    /// Move the palette selection by `delta` rows, clamped to the result range.
+    /// A no-op when there are no results.
+    fn palette_move(&mut self, delta: i64) {
+        let n = self.palette_results().len();
+        if n == 0 {
+            self.palette_sel = 0;
+            return;
+        }
+        let max = n as i64 - 1;
+        let cur = self.palette_sel as i64;
+        self.palette_sel = (cur + delta).clamp(0, max) as usize;
+    }
+
+    /// Run the currently-selected history entry in the focused pane: write it to
+    /// the PTY followed by a carriage return (what the shell sees for Enter),
+    /// move it to the front of the history, and close the palette. Returns the
+    /// command run (for tests). Closes the palette with no command when the
+    /// result set is empty.
+    fn run_palette_selection(&mut self) -> Option<String> {
+        let cmd = self.palette_results().get(self.palette_sel).cloned();
+        if let Some(ref c) = cmd {
+            if let Some(term) = self.terms.get_mut(&self.focused_pane) {
+                term.write_bytes(c.as_bytes());
+                term.write_bytes(b"\r");
+            }
+            // Re-running moves the command to the front (no duplicate).
+            self.cmd_history.record(c.clone());
+        }
+        self.last_palette_run = cmd.clone();
+        self.palette_open = false;
+        cmd
+    }
+
+    /// Whether the command palette is currently open. Observation accessor for
+    /// the interaction tests (asserts Ctrl+Shift+P toggled it through the real
+    /// frame loop).
+    #[allow(dead_code)]
+    pub fn palette_open(&self) -> bool {
+        self.palette_open
+    }
+
+    /// The recorded command history, most-recent-first. Observation accessor for
+    /// the interaction tests (asserts typed-then-Enter lines were captured).
+    #[allow(dead_code)]
+    pub fn command_history_entries(&self) -> Vec<String> {
+        self.cmd_history.entries().map(str::to_string).collect()
+    }
+
+    /// The command most recently run from the palette, if any. Observation
+    /// accessor for the interaction test (asserts Enter on a selection ran the
+    /// real command through the real frame loop).
+    #[allow(dead_code)]
+    pub fn last_palette_run(&self) -> Option<String> {
+        self.last_palette_run.clone()
+    }
+
+    /// Render the command-palette overlay: a centred window with an auto-focused
+    /// fuzzy-search box over the command history and a selectable result list.
+    /// Clicking a row runs it (same path as Enter). Navigation (↑/↓/Enter/Esc)
+    /// is handled in [`Self::frame_tick`] before this renders, so the list here
+    /// only needs to display the current query + selection and report a click.
+    ///
+    /// Immutable state is snapshotted into locals before the window closure so
+    /// the closure's `&mut palette_query` (for the `TextEdit`) does not collide
+    /// with reads of `palette_sel` / `cmd_history` on the same `self`.
+    fn command_palette_window(&mut self, ctx: &egui::Context) {
+        let results = self.palette_results();
+        // Clamp selection if the result set shrank since the last frame.
+        if self.palette_sel >= results.len() {
+            self.palette_sel = results.len().saturating_sub(1);
+        }
+        let sel = self.palette_sel;
+        let history_empty = self.cmd_history.is_empty();
+        let query = &mut self.palette_query;
+        let mut clicked: Option<usize> = None;
+
+        egui::Window::new("Command palette")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
+            .default_width(540.0)
+            .show(ctx, |ui| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(query)
+                        .hint_text("Search previously-run commands…")
+                        .desired_width(f32::INFINITY),
+                );
+                // Keep the search box focused for the palette's whole lifetime so
+                // typed characters always populate the query, never the PTY.
+                resp.request_focus();
+                ui.separator();
+                if results.is_empty() {
+                    ui.weak(if history_empty {
+                        "No commands run yet — run something, then reopen with Ctrl+Shift+P."
+                    } else {
+                        "No matches."
+                    });
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(280.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for (i, cmd) in results.iter().enumerate() {
+                                if ui.selectable_label(i == sel, cmd).clicked() {
+                                    clicked = Some(i);
+                                }
+                            }
+                        });
+                }
+                ui.separator();
+                ui.weak("↑/↓ select · Enter run · Esc close");
+            });
+
+        if let Some(i) = clicked {
+            self.palette_sel = i;
+            self.run_palette_selection();
+        }
+    }
 }
 
 impl eframe::App for C0pl4ndApp {
@@ -700,11 +909,61 @@ impl C0pl4ndApp {
             install_chrome_fonts(ctx);
             self.fonts_installed = true;
         }
-        // 0) forward this frame's keyboard/paste to the FOCUSED pane's PTY. Done
-        //    BEFORE the panels so the keystrokes reach the PTY whose grid this
-        //    same frame then snapshots — proving the round-trip (the load-bearing
-        //    "typing reaches the PTY and the grid updates" path).
-        self.forward_input_to_focused(ctx);
+        // 0a) command palette: Ctrl+Shift+P (Cmd+Shift+P on macOS) toggles it. The
+        //     matching key-press is removed from the event stream so it never
+        //     reaches the PTY — without this, on the close frame (palette already
+        //     open) the `P` would fall through to `forward_input_to_focused` and
+        //     be encoded as the Ctrl+P control byte. Done explicitly rather than
+        //     via `consume_key` so the ctrl-OR-command match is unambiguous on
+        //     every platform.
+        let toggle_palette = ctx.input_mut(|i| {
+            let mut found = false;
+            i.events.retain(|ev| {
+                let hit = matches!(
+                    ev,
+                    egui::Event::Key { key: egui::Key::P, pressed: true, modifiers, .. }
+                    if modifiers.shift && (modifiers.ctrl || modifiers.command)
+                );
+                found |= hit;
+                !hit
+            });
+            found
+        });
+        if toggle_palette {
+            self.toggle_palette();
+        }
+
+        // 0b) route this frame's input. When the palette is open, its navigation
+        //     keys (↑/↓/Enter/Esc) are consumed here and the typed query is
+        //     captured by the palette's focused TextEdit — NOT forwarded to the
+        //     PTY. Otherwise keyboard/paste goes to the FOCUSED pane's PTY BEFORE
+        //     the panels, so the keystrokes reach the PTY whose grid this same
+        //     frame then snapshots (the load-bearing "typing reaches the PTY and
+        //     the grid updates" round-trip).
+        if self.palette_open {
+            let (up, down, enter, esc) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                )
+            });
+            if up {
+                self.palette_move(-1);
+            }
+            if down {
+                self.palette_move(1);
+            }
+            if esc {
+                self.palette_open = false;
+            }
+            if enter {
+                self.run_palette_selection();
+            }
+        } else {
+            self.forward_input_to_focused(ctx);
+        }
 
         // 1) custom titlebar + tab strip. Fixed height so the drag region below
         //    is exactly the bar (not the whole remaining column), and so the
@@ -754,6 +1013,9 @@ impl C0pl4ndApp {
 
         // Apply chrome actions AFTER the panels close (no mid-borrow mutation).
         if let Some(pid) = actions.focus_tab {
+            if pid != self.focused_pane {
+                self.input_line.clear(); // the typed-line accumulator is per-pane
+            }
             self.focused_pane = pid;
         }
         if let Some(pid) = actions.pin_tab {
@@ -790,6 +1052,12 @@ impl C0pl4ndApp {
         // 4) the (opaque) settings window, if open
         if self.settings_open {
             self.settings_window(ctx);
+        }
+
+        // 5) the command palette overlay, if open (rendered last so it floats
+        //    above the chrome + grid; its nav keys were handled in step 0b).
+        if self.palette_open {
+            self.command_palette_window(ctx);
         }
 
         // Live terminals: keep repainting so PTY output animates without waiting

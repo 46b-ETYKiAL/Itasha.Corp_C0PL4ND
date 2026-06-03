@@ -264,6 +264,12 @@ impl C0pl4ndApp {
                     .color(brand::FG)
                     .weak(),
             );
+            ui.separator();
+            ui.label(
+                RichText::new("Ctrl+Shift+P: commands")
+                    .color(brand::FG)
+                    .weak(),
+            );
             if let Some(toast) = &self.toast {
                 ui.separator();
                 ui.label(RichText::new(toast).color(brand::PURPLE));
