@@ -153,8 +153,12 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> Outcom
     // mutation does not fight the `&mut keep_open` borrow the Window holds.
     let mut close_requested = false;
 
+    // NOTE: deliberately NO `.open(&mut keep_open)` — that adds egui's own
+    // title-bar ✕, which (a) duplicates the clear in-content Close button below
+    // and (b) reads as low-contrast on the dark custom frame. The in-content
+    // button + Esc are the single, obvious dismiss path (the "two close buttons"
+    // report). Closing flows through `keep_open` → `*open` exactly as before.
     egui::Window::new("settings")
-        .open(&mut keep_open)
         .collapsible(false)
         .resizable(false)
         .movable(true)
@@ -171,7 +175,7 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> Outcom
                 ui.heading(egui::RichText::new("Settings").color(theme::brand::GREEN));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let close = ui
-                        .button(egui::RichText::new("✕").size(16.0))
+                        .button(egui::RichText::new(egui_phosphor::thin::X).size(16.0))
                         .on_hover_text("Close settings (Esc)");
                     close.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "close settings")

@@ -125,9 +125,11 @@ fn settings_close_button_actually_closes_the_window() {
         "precondition: settings open"
     );
 
-    // Click the egui Window's own close button (egui labels it "Close window",
-    // distinct from the caption "✕" — verified from the accesskit node dump).
-    h.get_by_label("Close window").click();
+    // Click the in-content Close button (labelled "close settings"). The egui
+    // Window's own title-bar ✕ was removed (it duplicated this button and read
+    // as low-contrast on the dark frame), so this in-content button + Esc are
+    // the single dismiss path.
+    h.get_by_label("close settings").click();
     h.run();
 
     assert!(
