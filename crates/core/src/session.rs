@@ -117,11 +117,20 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // Best-effort: the reader thread exits on PTY EOF when the child dies.
-        if let Some(handle) = self.reader_thread.take() {
-            // Detach — we don't block Drop on the child; the OS reaps the PTY.
-            drop(handle);
-        }
+        // Kill the child shell FIRST. This is load-bearing for two reasons:
+        //   1. It reaps the shell so it is not left as an orphaned `cmd.exe`
+        //      (the session previously leaked one process per pane — ~148 after
+        //      a heavy session).
+        //   2. With the child dead, the reader thread's blocking `read()` gets
+        //      EOF and the thread exits on its own, and the PTY master can close
+        //      without `ClosePseudoConsole` blocking (the close-hang).
+        // We then DETACH the reader thread rather than `join()` it: a ConPTY
+        // master does not always deliver EOF promptly, and blocking `Drop` on a
+        // `join()` would re-introduce the very hang we are fixing. The detached
+        // thread observes EOF shortly after and exits; `PtyProcess::Drop` is the
+        // backstop that also kills the child if we are dropped another way.
+        self.pty.kill();
+        self.reader_thread.take();
     }
 }
 
