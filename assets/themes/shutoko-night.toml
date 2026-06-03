@@ -1,0 +1,32 @@
+# Shutoko Night — ported from the SCR1B3 editor (heritage-alt line).
+# 80s–2000s JDM, the Itasha brand root. Documented period paint codes:
+# NH-547 Berlina Black, BT2 Bayside Blue, Mazda Soul-Red-Crystal precedent.
+name = "Shutoko Night"
+author = "Itasha.Corp"
+
+background = "#050505"
+foreground = "#bcc0c4"
+cursor = "#0c2d6a"
+cursor_text = "#bcc0c4"
+selection_background = "#143c5a"
+selection_foreground = "#bcc0c4"
+
+[normal]
+black = "#0a0c14"
+red = "#c42030"
+green = "#28ff60"
+yellow = "#f0a040"
+blue = "#0c2d6a"
+magenta = "#ff3088"
+cyan = "#143c8a"
+white = "#bcc0c4"
+
+[bright]
+black = "#3a404a"
+red = "#9a1a1f"
+green = "#5cff8a"
+yellow = "#ffc070"
+blue = "#143c8a"
+magenta = "#ff5ca0"
+cyan = "#5a8a80"
+white = "#e0e4e8"

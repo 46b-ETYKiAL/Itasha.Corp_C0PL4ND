@@ -1,0 +1,32 @@
+# Lain Mauve — ported from the SCR1B3 editor (calm-canon line).
+# Wired-era violet melancholy: cool mauve system voice over a faint
+# violet-biased near-black, off-white text, Akira-red alarm-only.
+name = "Lain Mauve"
+author = "Itasha.Corp"
+
+background = "#0a070e"
+foreground = "#d2c6dc"
+cursor = "#c89ae8"
+cursor_text = "#0a070e"
+selection_background = "#221c2e"
+selection_foreground = "#d2c6dc"
+
+[normal]
+black = "#120e18"
+red = "#ff3b30"
+green = "#8ab89a"
+yellow = "#f2b33d"
+blue = "#8a9ab8"
+magenta = "#c89ae8"
+cyan = "#b0a0c2"
+white = "#d2c6dc"
+
+[bright]
+black = "#6a5a73"
+red = "#ff5c52"
+green = "#a8c4b4"
+yellow = "#ffce5c"
+blue = "#a8b4d0"
+magenta = "#dcb4f0"
+cyan = "#c9a8c4"
+white = "#ece2f0"

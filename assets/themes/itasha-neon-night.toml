@@ -1,0 +1,31 @@
+# Itasha Neon Night — ported from the SCR1B3 editor (brand-signature line).
+# Deepest-contrast variant; pure-black void, max-saturation tokens. Dark-room.
+name = "Itasha Neon Night"
+author = "Itasha.Corp"
+
+background = "#000000"
+foreground = "#ffffff"
+cursor = "#00ffff"
+cursor_text = "#000000"
+selection_background = "#004949"
+selection_foreground = "#ffffff"
+
+[normal]
+black = "#050505"
+red = "#ff0050"
+green = "#00ff80"
+yellow = "#f2b33d"
+blue = "#5570ff"
+magenta = "#ff00aa"
+cyan = "#00ffff"
+white = "#ffffff"
+
+[bright]
+black = "#505050"
+red = "#ff3b30"
+green = "#08ff00"
+yellow = "#ffce5c"
+blue = "#8060ff"
+magenta = "#ff50c0"
+cyan = "#5cffff"
+white = "#ffffff"

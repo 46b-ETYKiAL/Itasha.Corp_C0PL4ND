@@ -1,0 +1,32 @@
+# Atompunk Sodium — ported from the SCR1B3 editor (heritage-alt line).
+# Eames-era atompunk. OPT-IN ONLY: sodium-orange-as-system-voice is a
+# documented exception to the accent discipline.
+name = "Atompunk Sodium"
+author = "Itasha.Corp"
+
+background = "#0c0a08"
+foreground = "#e0d8c8"
+cursor = "#ffa030"
+cursor_text = "#0c0a08"
+selection_background = "#241f18"
+selection_foreground = "#e0d8c8"
+
+[normal]
+black = "#16130e"
+red = "#d8302a"
+green = "#8ab098"
+yellow = "#ffa030"
+blue = "#7a90b0"
+magenta = "#a8b8c4"
+cyan = "#3acab8"
+white = "#e0d8c8"
+
+[bright]
+black = "#5a544a"
+red = "#f0504a"
+green = "#a8c4b4"
+yellow = "#ffc060"
+blue = "#a0b0c8"
+magenta = "#c0c4c8"
+cyan = "#5cdcc8"
+white = "#f0e8d8"

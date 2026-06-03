@@ -1,0 +1,33 @@
+# Phosphor Amber — ported from the SCR1B3 editor (calm-canon line).
+# BBS / hairline-terminal heritage: amber-on-deep-brown phosphor read, one
+# amber accent as the system voice, Akira-red reserved for alarms.
+# SCR1B3 palette mapped onto C0PL4ND's ANSI-16 terminal schema.
+name = "Phosphor Amber"
+author = "Itasha.Corp"
+
+background = "#0c0705"
+foreground = "#f2c46a"
+cursor = "#ffc04a"
+cursor_text = "#0c0705"
+selection_background = "#24180c"
+selection_foreground = "#f2c46a"
+
+[normal]
+black = "#140c07"
+red = "#ff4a30"
+green = "#8ab06a"
+yellow = "#ffe17a"
+blue = "#a0804a"
+magenta = "#c4a86a"
+cyan = "#ffc04a"
+white = "#f2c46a"
+
+[bright]
+black = "#6a4f2a"
+red = "#ff6a50"
+green = "#a8c48a"
+yellow = "#ffeca0"
+blue = "#c4a86a"
+magenta = "#e8c48a"
+cyan = "#ffd57a"
+white = "#fff0d0"

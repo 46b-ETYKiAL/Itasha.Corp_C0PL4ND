@@ -1,0 +1,32 @@
+# A11y High Contrast — ported from the SCR1B3 editor (calm-canon line).
+# WCAG AAA-target: pure white text on pure black, a single max-chroma teal
+# accent, saturated complements. For low-vision users.
+name = "A11y High Contrast"
+author = "Itasha.Corp"
+
+background = "#000000"
+foreground = "#ffffff"
+cursor = "#00ffe0"
+cursor_text = "#000000"
+selection_background = "#003a36"
+selection_foreground = "#ffffff"
+
+[normal]
+black = "#121418"
+red = "#ff4030"
+green = "#70ffa0"
+yellow = "#ffcc00"
+blue = "#9ac4ff"
+magenta = "#c0a0ff"
+cyan = "#00ffe0"
+white = "#ffffff"
+
+[bright]
+black = "#9aa6ac"
+red = "#ff6a5a"
+green = "#a0ffc0"
+yellow = "#ffe060"
+blue = "#c0e0ff"
+magenta = "#d8c0ff"
+cyan = "#7cffec"
+white = "#ffffff"

@@ -1,0 +1,31 @@
+# Itasha Neon Pastel — ported from the SCR1B3 editor (brand-signature line).
+# ~30% chroma; 8-hour-session comfort variant of the neon line.
+name = "Itasha Neon Pastel"
+author = "Itasha.Corp"
+
+background = "#0e0e10"
+foreground = "#dfe3e6"
+cursor = "#9ee5e5"
+cursor_text = "#0e0e10"
+selection_background = "#1f2125"
+selection_foreground = "#dfe3e6"
+
+[normal]
+black = "#16171a"
+red = "#ff7a78"
+green = "#9ed4b8"
+yellow = "#f2c98d"
+blue = "#8a92d6"
+magenta = "#d896c8"
+cyan = "#9ee5e5"
+white = "#dfe3e6"
+
+[bright]
+black = "#525762"
+red = "#ff9794"
+green = "#a4d493"
+yellow = "#f7dcae"
+blue = "#a698c8"
+magenta = "#e8aad8"
+cyan = "#bdf0f0"
+white = "#f0f4f6"

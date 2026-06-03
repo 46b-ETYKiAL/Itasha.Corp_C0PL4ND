@@ -1,0 +1,31 @@
+# Itasha Neon Aurora — ported from the SCR1B3 editor (brand-signature line).
+# Cyan-violet axis only; Wired-net aurora mood over a cold marine near-black.
+name = "Itasha Neon Aurora"
+author = "Itasha.Corp"
+
+background = "#03070f"
+foreground = "#cce5ff"
+cursor = "#5cffe5"
+cursor_text = "#03070f"
+selection_background = "#141a2e"
+selection_foreground = "#cce5ff"
+
+[normal]
+black = "#0a0e1c"
+red = "#ff3b30"
+green = "#5ce8c8"
+yellow = "#f2b33d"
+blue = "#5c80ff"
+magenta = "#8a78ff"
+cyan = "#5cffe5"
+white = "#cce5ff"
+
+[bright]
+black = "#48607a"
+red = "#ff5c52"
+green = "#5cffae"
+yellow = "#ffce5c"
+blue = "#7c98ff"
+magenta = "#a060ff"
+cyan = "#8cfff0"
+white = "#e6f2ff"

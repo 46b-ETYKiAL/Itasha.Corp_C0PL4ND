@@ -1,0 +1,32 @@
+# Itasha Neon — ported from the SCR1B3 editor (brand-signature line).
+# Cyan system voice on pure black, hot-pink / fuchsia / electric-violet
+# demoted to syntax-token roles. Maps onto C0PL4ND's ANSI-16 schema.
+name = "Itasha Neon"
+author = "Itasha.Corp"
+
+background = "#000000"
+foreground = "#ffffff"
+cursor = "#00ffff"
+cursor_text = "#000000"
+selection_background = "#003a3a"
+selection_foreground = "#ffffff"
+
+[normal]
+black = "#0a0a0a"
+red = "#ff0050"
+green = "#00ff80"
+yellow = "#f2b33d"
+blue = "#2200ff"
+magenta = "#ff00aa"
+cyan = "#00ffff"
+white = "#ffffff"
+
+[bright]
+black = "#464646"
+red = "#ff0000"
+green = "#08ff00"
+yellow = "#ffce5c"
+blue = "#5d00ff"
+magenta = "#ff50c0"
+cyan = "#5cffff"
+white = "#ffffff"
