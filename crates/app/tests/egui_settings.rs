@@ -652,6 +652,76 @@ fn editing_the_initial_columns_changes_the_drag_value() {
 }
 
 #[test]
+fn editing_the_padding_changes_the_live_grid_text_origin() {
+    // Window.padding was a DEAD field: the terminal grid was always inset by a
+    // hardcoded 4px, so changing Padding in settings did nothing on screen. It
+    // is now read LIVE each frame and threaded into the grid paint origin.
+    //
+    // This is a no-tautology interaction test: drive the REAL Padding DragValue
+    // up off its default, then assert the OBSERVABLE rendering input changed —
+    // the grid text origin (computed by the exact `grid_text_origin` helper the
+    // production paint path uses) moves further from the pane's top-left corner.
+    // We assert a downstream RENDER effect, not just the stored config value.
+    let probe_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let origin_before = app.borrow().grid_text_origin_for(probe_rect);
+    let padding_before = app.borrow().config_window_padding();
+    assert_eq!(
+        padding_before, 8,
+        "precondition: padding defaults to 8px (the config default)"
+    );
+    let mut h = harness(&app);
+
+    open_settings(&mut h);
+    select_category(&mut h, "Window");
+
+    // The Window section renders DragValues (SpinButtons in the a11y tree) in
+    // order: Padding (8), Initial columns (80), Initial rows (24). Target the
+    // one reading 8 — the Padding spinner — focus it, type a larger value, and
+    // commit with Enter (egui DragValue accepts keyboard text entry on focus).
+    {
+        let padding = h
+            .get_all_by_role(egui::accesskit::Role::SpinButton)
+            .find(|n| {
+                n.accesskit_node()
+                    .numeric_value()
+                    .is_some_and(|v| (v - 8.0).abs() < f64::EPSILON)
+            })
+            .expect("Window must render a Padding spinner defaulting to 8");
+        padding.focus();
+        padding.type_text("24");
+    }
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+
+    let padding_after = app.borrow().config_window_padding();
+    assert_ne!(
+        padding_after, padding_before,
+        "editing the Padding spinner must change the live padding \
+         (before={padding_before}, after={padding_after})"
+    );
+
+    // The load-bearing assertion: the change reaches the RENDER path. A larger
+    // padding insets the grid further, so the live text origin must move down
+    // and to the right of where it was at the default padding.
+    let origin_after = app.borrow().grid_text_origin_for(probe_rect);
+    assert!(
+        origin_after.x > origin_before.x && origin_after.y > origin_before.y,
+        "raising Padding must move the live grid text origin further into the \
+         pane (before={origin_before:?}, after={origin_after:?})"
+    );
+    // And it must equal exactly the new padding inset from the pane corner —
+    // proving the SAME helper the paint path uses produced it.
+    assert_eq!(
+        origin_after,
+        probe_rect.left_top() + egui::vec2(f32::from(padding_after), f32::from(padding_after)),
+        "the live grid origin must be the pane top-left inset by the new padding"
+    );
+}
+
+#[test]
 fn pressing_escape_dismisses_settings() {
     // Esc is the conventional overlay-dismiss key; the window must honour it.
     // (Guards the `.anchor()`-free, `default_pos` window: an earlier anchored

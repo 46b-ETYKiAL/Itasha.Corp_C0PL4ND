@@ -530,13 +530,17 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         help(ui, "Typeface, size, and text shaping.");
         grid("font_grid").show(ui, |ui| {
             if row_visible(q, "family typeface") {
-                ui.label("Family");
+                ui.label("Family").on_hover_text(
+                    "Primary monospace typeface. Applies on restart — the font \
+                     atlas is built at launch.",
+                );
                 changed |= ui
                     .add(
                         egui::TextEdit::singleline(&mut config.font.family)
                             .hint_text("Monaspace Neon")
                             .desired_width(200.0),
                     )
+                    .on_hover_text("Applies on the next launch.")
                     .changed();
                 changed |= reset_to_default(ui, &mut config.font.family, &def.font.family);
                 ui.end_row();
@@ -556,9 +560,13 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             }
 
             if row_visible(q, "line height") {
-                ui.label("Line height");
+                ui.label("Line height").on_hover_text(
+                    "Row height for the primary font. Applies on restart — the grid \
+                     cell metrics are derived at launch.",
+                );
                 changed |= ui
                     .add(egui::Slider::new(&mut config.font.line_height, 12.0..=48.0).suffix(" px"))
+                    .on_hover_text("Applies on the next launch.")
                     .changed();
                 changed |=
                     reset_to_default(ui, &mut config.font.line_height, &def.font.line_height);
@@ -663,13 +671,17 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         help(ui, "Scrollback, shell, and clipboard behavior.");
         grid("terminal_grid").show(ui, |ui| {
             if row_visible(q, "scrollback lines history") {
-                ui.label("Scrollback");
+                ui.label("Scrollback").on_hover_text(
+                    "History lines kept per pane. Applies on restart — a pane's \
+                     buffer is sized when its shell spawns.",
+                );
                 changed |= ui
                     .add(
                         egui::Slider::new(&mut config.scrollback_lines, 100..=1_000_000)
                             .logarithmic(true)
                             .suffix(" lines"),
                     )
+                    .on_hover_text("Applies on the next launch.")
                     .changed();
                 changed |=
                     reset_to_default(ui, &mut config.scrollback_lines, &def.scrollback_lines);
@@ -749,13 +761,15 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         );
         grid("window_grid").show(ui, |ui| {
             if row_visible(q, "padding inner margin") {
-                ui.label("Padding");
+                ui.label("Padding")
+                    .on_hover_text("Inner inset between the pane edge and the terminal grid.");
                 changed |= ui
                     .add(
                         egui::DragValue::new(&mut config.window.padding)
                             .range(0..=32)
                             .suffix(" px"),
                     )
+                    .on_hover_text("Applies live — the grid re-insets without a restart.")
                     .changed();
                 changed |= reset_to_default(ui, &mut config.window.padding, &def.window.padding);
                 ui.end_row();

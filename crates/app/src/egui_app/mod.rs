@@ -383,6 +383,7 @@ impl C0pl4ndApp {
         theme: &c0pl4nd_core::Theme,
         font_size: f32,
         cursor_cfg: c0pl4nd_core::config::CursorConfig,
+        padding: f32,
     ) -> PaneBodyOutcome {
         let (rect, resp) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -420,8 +421,15 @@ impl C0pl4ndApp {
         );
 
         // --- resize the PTY to fit this rect (debounced) ---
-        let px_w = rect.width() * ppp;
-        let px_h = rect.height() * ppp;
+        // The configurable inner padding (points) insets the text on every edge,
+        // so the area available for the terminal grid is the rect minus 2×padding
+        // on each axis. Subtract it BEFORE the px conversion so the computed
+        // (cols, rows) match what `paint_grid_native` actually draws inside the
+        // padded origin — otherwise a large padding would size the PTY for the
+        // full rect and clip the last row/column.
+        let pad = padding.max(0.0);
+        let px_w = (rect.width() - 2.0 * pad).max(0.0) * ppp;
+        let px_h = (rect.height() - 2.0 * pad).max(0.0) * ppp;
         if let Some(term) = terms.get_mut(&pane_id) {
             term.resize_to_px(px_w, px_h, cell_metrics);
         }
@@ -435,7 +443,9 @@ impl C0pl4ndApp {
                 // glyphon GPU paths (callback + offscreen texture) composited
                 // black inside `egui_tiles` panes live while passing the wgpu
                 // test harness.
-                paint_grid_native(&painter, rect, term, font_size, theme, focused, cursor_cfg);
+                paint_grid_native(
+                    &painter, rect, term, font_size, theme, focused, cursor_cfg, pad,
+                );
             }
             Some(term) => {
                 // Failed spawn: show the error, never panic.
@@ -596,6 +606,10 @@ impl C0pl4ndApp {
             let theme = &self.theme;
             let font_size = self.config.font.size;
             let cursor_cfg = self.config.cursor;
+            // Read the inner padding LIVE from the config so a Settings change
+            // moves the grid inset without a relaunch (it was a hardcoded 4px
+            // before). `u16` config → f32 points for the painter.
+            let padding = f32::from(self.config.window.padding);
             let mut render_body = |ui: &mut egui::Ui, pid: PaneId| -> bool {
                 let outcome = Self::render_pane_body(
                     ui,
@@ -605,6 +619,7 @@ impl C0pl4ndApp {
                     theme,
                     font_size,
                     cursor_cfg,
+                    padding,
                 );
                 if outcome.clicked {
                     clicked = Some(pid);
@@ -800,6 +815,25 @@ impl C0pl4ndApp {
     #[allow(dead_code)]
     pub fn config_paste_warn_multiline(&self) -> bool {
         self.config.paste_warn_multiline
+    }
+
+    /// The current inner window padding (points) from the live config — the
+    /// value `grid_ui` threads into the grid paint each frame, so it reflects
+    /// what the terminal grid is actually inset by. Observation accessor for the
+    /// padding live-apply interaction test.
+    #[allow(dead_code)]
+    pub fn config_window_padding(&self) -> u16 {
+        self.config.window.padding
+    }
+
+    /// The grid text origin a focused pane WOULD draw at for a given body
+    /// `rect`, using the LIVE config padding — exercising the exact
+    /// [`grid_text_origin`] helper the production paint path uses. Lets the
+    /// interaction test prove a Padding change moves the rendered origin (not
+    /// just the stored config value), with no GPU. Pure read of live state.
+    #[allow(dead_code)]
+    pub fn grid_text_origin_for(&self, rect: egui::Rect) -> egui::Pos2 {
+        grid_text_origin(rect, f32::from(self.config.window.padding))
     }
 
     // ---- command palette (quick find/run previously-run commands) ----
@@ -1249,6 +1283,17 @@ fn term_default_fg(theme: &c0pl4nd_core::Theme) -> (u8, u8, u8) {
     c0pl4nd_core::theme::parse_hex(&theme.foreground).unwrap_or((232, 230, 240))
 }
 
+/// The top-left point at which a pane's terminal grid text is drawn, given the
+/// pane's body `rect` and the configurable inner `padding` (points). Pure +
+/// GPU-free so the padding live-apply wiring is unit-testable: the origin must
+/// move with the padding (a larger padding insets the grid further from the
+/// pane's top-left corner). Negative paddings are clamped to zero so a bad
+/// config can never push the origin outside the pane.
+fn grid_text_origin(rect: egui::Rect, padding: f32) -> egui::Pos2 {
+    let p = padding.max(0.0);
+    rect.left_top() + egui::vec2(p, p)
+}
+
 /// Paint a pane's visible grid with egui's NATIVE text painter, using the
 /// per-cell colour runs from [`PaneTerm::grid_spans`]. This is the single,
 /// engine-agnostic render path for BOTH the live window and the headless
@@ -1263,6 +1308,12 @@ fn term_default_fg(theme: &c0pl4nd_core::Theme) -> (u8, u8, u8) {
 /// Rows are NOT wrapped (`max_width = INFINITY`): each terminal row stays one
 /// visual line and is clipped at the pane edge by the caller's `painter_at`
 /// clip rect, so row alignment is preserved.
+///
+/// The argument list is a bundle of per-frame render inputs (font size, theme,
+/// focus, cursor config, padding) threaded from the single call site in
+/// [`C0pl4ndApp::render_pane_body`]; the `too_many_arguments` allow matches that
+/// sibling free function for the same reason.
+#[allow(clippy::too_many_arguments)]
 fn paint_grid_native(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -1271,6 +1322,7 @@ fn paint_grid_native(
     theme: &c0pl4nd_core::Theme,
     focused: bool,
     cursor_cfg: c0pl4nd_core::config::CursorConfig,
+    padding: f32,
 ) {
     let default_fg = term_default_fg(theme);
     let mut job = egui::text::LayoutJob::default();
@@ -1305,7 +1357,14 @@ fn paint_grid_native(
         }
     }
     let galley = painter.layout_job(job);
-    let origin = rect.left_top() + egui::vec2(4.0, 4.0);
+    // Inset the grid by the configurable window padding (points). This is read
+    // live from `config.window.padding` each frame (threaded down from
+    // `grid_ui`), so changing Padding in settings moves the text origin without
+    // a relaunch — the previously-hardcoded 4px is now the default value of the
+    // setting, not a constant. The origin is computed by the pure
+    // [`grid_text_origin`] helper so the live-apply wiring is unit-testable
+    // without a GPU.
+    let origin = grid_text_origin(rect, padding);
     painter.galley(
         origin,
         galley,
@@ -1637,6 +1696,36 @@ mod tests {
         let app = C0pl4ndApp::bootstrap();
         assert_eq!(app.pane_count(), INITIAL_PANES);
         assert!(!app.settings_is_open());
+    }
+
+    #[test]
+    fn grid_text_origin_insets_by_padding() {
+        // The grid text origin is the pane top-left inset by the padding on
+        // BOTH axes; a larger padding moves it further into the pane.
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(400.0, 300.0));
+        assert_eq!(
+            grid_text_origin(rect, 8.0),
+            egui::pos2(18.0, 28.0),
+            "padding must inset the origin from the pane top-left on both axes"
+        );
+        let near = grid_text_origin(rect, 4.0);
+        let far = grid_text_origin(rect, 16.0);
+        assert!(
+            far.x > near.x && far.y > near.y,
+            "a larger padding must move the origin further into the pane"
+        );
+    }
+
+    #[test]
+    fn grid_text_origin_clamps_negative_padding() {
+        // A bad (negative) config can never push the origin outside the pane —
+        // it clamps to the pane top-left (zero inset).
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        assert_eq!(
+            grid_text_origin(rect, -5.0),
+            rect.left_top(),
+            "negative padding must clamp to zero inset (origin == pane top-left)"
+        );
     }
 
     #[test]
