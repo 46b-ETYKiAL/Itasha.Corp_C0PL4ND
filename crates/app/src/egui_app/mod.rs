@@ -131,10 +131,15 @@ impl C0pl4ndApp {
     /// font the grid is actually drawn with). Marks the app as a live window so
     /// the per-frame repaint pump runs.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_visuals(theme::itasha_corp_visuals());
         install_chrome_fonts(&cc.egui_ctx);
         apply_window_effect(cc);
         let mut app = Self::bootstrap();
+        // Apply Visuals DERIVED FROM the loaded terminal theme so the whole
+        // chrome follows the active theme from the first frame (a light theme →
+        // light UI, a dark theme → dark UI). Done after `bootstrap()` so
+        // `app.theme` is loaded.
+        cc.egui_ctx
+            .set_visuals(theme::visuals_from_theme(&app.theme));
         app.fonts_installed = true; // already installed above; skip the frame-tick install
                                     // A wgpu render state means a real window (also true under the wgpu test
                                     // harness, which drives frames explicitly with `step()`); headless tests
@@ -383,10 +388,13 @@ impl C0pl4ndApp {
             egui::CornerRadius::same(4),
             egui::Color32::from_rgb(bg.0, bg.1, bg.2),
         );
+        // Focus ring + bezel follow the active theme (accent on focus, bezel
+        // otherwise) so the grid chrome matches the rest of the themed UI.
+        let pane_colors = theme::ChromeColors::from_theme(theme);
         let stroke = if focused {
-            egui::Stroke::new(2.0, theme::brand::GREEN)
+            egui::Stroke::new(2.0, pane_colors.accent)
         } else {
-            egui::Stroke::new(1.0, theme::brand::BEZEL)
+            egui::Stroke::new(1.0, pane_colors.bezel)
         };
         painter.rect_stroke(
             rect,
@@ -420,7 +428,7 @@ impl C0pl4ndApp {
                     egui::Align2::CENTER_CENTER,
                     term.error().unwrap_or("terminal unavailable"),
                     egui::FontId::monospace(14.0),
-                    theme::brand::FG,
+                    pane_colors.fg,
                 );
             }
             None => {
@@ -429,7 +437,7 @@ impl C0pl4ndApp {
                     egui::Align2::CENTER_CENTER,
                     format!("pane {} (no terminal)", pane_id.raw()),
                     egui::FontId::monospace(14.0),
-                    theme::brand::FG,
+                    pane_colors.fg,
                 );
             }
         }
@@ -656,7 +664,10 @@ impl C0pl4ndApp {
     /// live panes repaint, not just the chrome), and re-apply the egui Visuals.
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.settings_open;
-        let outcome = settings::show(ctx, &mut self.config, &mut open);
+        // Theme-derived palette so the settings window fill + headings follow
+        // the active theme along with the rest of the chrome.
+        let colors = theme::ChromeColors::from_theme(&self.theme);
+        let outcome = settings::show(ctx, &mut self.config, &mut open, colors);
         self.settings_open = open;
 
         if outcome.changed {
@@ -672,9 +683,12 @@ impl C0pl4ndApp {
                     term.set_theme(self.theme.clone());
                 }
             }
-            // Re-apply the chrome Visuals so opacity/theme tweaks repaint the
-            // egui surface without waiting for a relaunch.
-            ctx.set_visuals(theme::itasha_corp_visuals());
+            // Re-apply the chrome Visuals DERIVED FROM the (possibly changed)
+            // terminal theme so the WHOLE app UI — titlebar, tabs, status bar,
+            // settings window, panel fills — follows the picked theme (a light
+            // theme flips the chrome light, a dark one dark) without waiting for
+            // a relaunch. `self.theme` was reloaded just above on a theme change.
+            ctx.set_visuals(theme::visuals_from_theme(&self.theme));
             // Persist to the platform config file so the change survives a
             // relaunch — but ONLY in a real window. The headless `egui_kittest`
             // harness sets `live_window == false`; persisting there would write
@@ -716,6 +730,16 @@ impl C0pl4ndApp {
     #[allow(dead_code)]
     pub fn config_theme(&self) -> &str {
         &self.config.theme
+    }
+
+    /// Whether the egui Visuals DERIVED from the active terminal theme read as
+    /// LIGHT (window-fill luminance > 0.5). Observation accessor for the
+    /// whole-app-theming interaction test: it asserts the chrome flips light
+    /// after picking a light theme (ghost-paper) and dark after a dark one,
+    /// exercising the same `visuals_from_theme` derivation the live app applies.
+    #[allow(dead_code)]
+    pub fn visuals_are_light(&self) -> bool {
+        theme::is_light(theme::visuals_from_theme(&self.theme).window_fill)
     }
 
     /// The current scrollback line count from the live config.
@@ -971,16 +995,18 @@ impl C0pl4ndApp {
             self.forward_input_to_focused(ctx);
         }
 
+        // Theme-derived chrome surface palette — the titlebar / tab strip /
+        // status bar / central pane / settings window all follow the active
+        // terminal theme through these (a light theme flips the whole chrome
+        // light, a dark one dark). The wordmark keeps its fixed brand accent.
+        let colors = theme::ChromeColors::from_theme(&self.theme);
+
         // 1) custom titlebar + tab strip. Fixed height so the drag region below
         //    is exactly the bar (not the whole remaining column), and so the
         //    caption-cluster geometry is stable.
         let actions = egui::TopBottomPanel::top("titlebar")
             .exact_height(40.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::brand::PANEL)
-                    .inner_margin(6.0),
-            )
+            .frame(egui::Frame::new().fill(colors.panel).inner_margin(6.0))
             .show(ctx, |ui| {
                 // Frameless-window move: dragging any EMPTY part of the titlebar
                 // moves the window; double-click toggles maximize. Added FIRST so
@@ -999,22 +1025,18 @@ impl C0pl4ndApp {
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
                 }
-                self.titlebar_and_tabs(ui)
+                self.titlebar_and_tabs(ui, colors)
             })
             .inner;
 
         // 2) status bar
         egui::TopBottomPanel::bottom("status")
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::brand::PANEL)
-                    .inner_margin(4.0),
-            )
-            .show(ctx, |ui| self.status_bar(ui));
+            .frame(egui::Frame::new().fill(colors.panel).inner_margin(4.0))
+            .show(ctx, |ui| self.status_bar(ui, colors));
 
         // 3) the pane grid (egui_tiles) — LIVE terminal panes (Milestone 2)
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(theme::brand::BG))
+            .frame(egui::Frame::new().fill(colors.bg))
             .show(ctx, |ui| self.grid_ui(ui));
 
         // Apply chrome actions AFTER the panels close (no mid-borrow mutation).
