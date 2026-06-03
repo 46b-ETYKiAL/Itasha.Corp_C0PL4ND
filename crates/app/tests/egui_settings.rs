@@ -221,8 +221,12 @@ fn picking_a_theme_in_the_combo_changes_the_live_config() {
 
     // Open the theme combo (role ComboBox; its accessible VALUE is the current
     // stem, not a label) and pick a distinctly-different built-in by its menu
-    // label. The Appearance section has exactly one ComboBox (the theme picker).
-    h.get_by_role(egui::accesskit::Role::ComboBox).click();
+    // label. The Appearance section renders the theme picker FIRST, then the
+    // (transparency-gated) window-mode combo — target the first.
+    h.get_all_by_role(egui::accesskit::Role::ComboBox)
+        .next()
+        .expect("Appearance must render the theme combo")
+        .click();
     h.run();
     h.get_by_label("ghost-paper").click(); // the opened menu item
     h.run();
@@ -322,8 +326,12 @@ fn picking_a_light_theme_flips_the_whole_ui_light() {
     open_settings(&mut h);
     select_category(&mut h, "Appearance");
 
-    // Pick the light ghost-paper theme via the real combo.
-    h.get_by_role(egui::accesskit::Role::ComboBox).click();
+    // Pick the light ghost-paper theme via the real combo (the FIRST combo in
+    // the Appearance section; the second is the window-mode picker).
+    h.get_all_by_role(egui::accesskit::Role::ComboBox)
+        .next()
+        .expect("theme combo")
+        .click();
     h.run();
     h.get_by_label("ghost-paper").click();
     h.run();
@@ -334,13 +342,173 @@ fn picking_a_light_theme_flips_the_whole_ui_light() {
 
     // Pick a dark theme back (wired-noir) — the UI must return to a dark base,
     // proving the derivation tracks BOTH polarities, not a one-way latch.
-    h.get_by_role(egui::accesskit::Role::ComboBox).click();
+    h.get_all_by_role(egui::accesskit::Role::ComboBox)
+        .next()
+        .expect("theme combo")
+        .click();
     h.run();
     h.get_by_label("wired-noir").click();
     h.run();
     assert!(
         !app.borrow().visuals_are_light(),
         "picking a dark theme back must flip the whole UI dark again"
+    );
+}
+
+#[test]
+fn toggling_transparency_master_flips_the_live_config() {
+    // The master transparency switch defaults OFF (opaque, safe). Navigate to
+    // Appearance, click the master toggle, and assert the live config flipped on
+    // — the real widget → real config path that gates the whole transparency
+    // system.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    assert!(
+        !app.borrow().config_transparency_enabled(),
+        "precondition: transparency is opt-in (off)"
+    );
+    let mut h = harness(&app);
+
+    open_settings(&mut h);
+    select_category(&mut h, "Appearance");
+
+    h.get_by_label("Enable window transparency").click();
+    h.run();
+
+    assert!(
+        app.borrow().config_transparency_enabled(),
+        "clicking the master toggle must turn transparency ON in the live config"
+    );
+}
+
+#[test]
+fn picking_a_window_mode_changes_the_live_config_and_effective_translucency() {
+    // With the master toggle ON, picking a translucent mode (Glass) in the mode
+    // combo must update the live window_mode AND make the window effectively
+    // translucent — the cause→effect a "dead mode picker" bug would hide.
+    use c0pl4nd_core::config::WindowMode;
+
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    assert_eq!(
+        app.borrow().config_window_mode(),
+        WindowMode::Opaque,
+        "precondition: default mode is opaque"
+    );
+    let mut h = harness(&app);
+
+    open_settings(&mut h);
+    select_category(&mut h, "Appearance");
+
+    // Turn the master on first (the mode combo is disabled while it's off).
+    h.get_by_label("Enable window transparency").click();
+    h.run();
+
+    // The Appearance section now has TWO ComboBoxes: the theme picker (first)
+    // and the window-mode picker (second). Open the SECOND and pick "glass /
+    // acrylic" by its menu label.
+    let mode_combo = h
+        .get_all_by_role(egui::accesskit::Role::ComboBox)
+        .nth(1)
+        .expect("Appearance must render a window-mode combo when transparency is on");
+    mode_combo.click();
+    h.run();
+    h.get_by_label("glass / acrylic").click();
+    h.run();
+
+    assert_eq!(
+        app.borrow().config_window_mode(),
+        WindowMode::Glass,
+        "picking glass / acrylic must update the live window_mode"
+    );
+    assert!(
+        app.borrow().config_effective_translucent(),
+        "master ON + Glass mode must make the window effectively translucent"
+    );
+}
+
+#[test]
+fn the_opacity_slider_changes_the_live_config() {
+    // With the master on and a translucent mode, the opacity slider must move
+    // the live opacity off its default. The slider is enabled only when
+    // transparency_enabled && the mode is translucent, so we set that up via the
+    // real widgets first, then click the (now-enabled) opacity slider track.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let before = app.borrow().config_opacity();
+    assert_eq!(before, 1.0, "precondition: opacity defaults to 100%");
+    let mut h = harness(&app);
+
+    open_settings(&mut h);
+    select_category(&mut h, "Appearance");
+
+    // Master on.
+    h.get_by_label("Enable window transparency").click();
+    h.run();
+    // Pick a translucent mode (Transparent) so the opacity row is enabled.
+    h.get_all_by_role(egui::accesskit::Role::ComboBox)
+        .nth(1)
+        .expect("window-mode combo")
+        .click();
+    h.run();
+    h.get_by_label("transparent").click();
+    h.run();
+
+    // The Appearance section renders sliders in order: opacity (first), then
+    // tint strength. Click the FIRST slider's track — a center click on the
+    // 0.30..=1.0 range lands below 100%, so the value must CHANGE.
+    h.get_all_by_role(egui::accesskit::Role::Slider)
+        .next()
+        .expect("Appearance must render an opacity slider when translucent")
+        .click();
+    h.run();
+
+    let after = app.borrow().config_opacity();
+    assert_ne!(
+        after, before,
+        "clicking the opacity slider track must change the live opacity \
+         (before={before}, after={after})"
+    );
+}
+
+#[test]
+fn the_tint_strength_slider_changes_the_live_config() {
+    // Tint strength is enabled whenever the master is on (independent of mode).
+    // Turning the master on then clicking the tint-strength slider track must
+    // move it off its 0.0 default — proving the tint control is wired.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    assert_eq!(
+        app.borrow().config_tint_strength(),
+        0.0,
+        "precondition: tint strength defaults to 0%"
+    );
+    let mut h = harness(&app);
+
+    open_settings(&mut h);
+    select_category(&mut h, "Appearance");
+
+    // Master on (enables the tint controls).
+    h.get_by_label("Enable window transparency").click();
+    h.run();
+    // Pick a translucent mode so BOTH the opacity slider (first) and the
+    // tint-strength slider (second) render as enabled — a deterministic order.
+    h.get_all_by_role(egui::accesskit::Role::ComboBox)
+        .nth(1)
+        .expect("window-mode combo")
+        .click();
+    h.run();
+    h.get_by_label("transparent").click();
+    h.run();
+
+    // The Appearance section renders sliders in order: opacity (first), tint
+    // strength (second). Click the SECOND slider's track to raise tint strength.
+    h.get_all_by_role(egui::accesskit::Role::Slider)
+        .nth(1)
+        .expect("Appearance must render a tint-strength slider when the master is on")
+        .click();
+    h.run();
+
+    assert_ne!(
+        app.borrow().config_tint_strength(),
+        0.0,
+        "clicking the tint-strength slider track must raise the live tint strength"
     );
 }
 

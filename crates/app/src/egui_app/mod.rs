@@ -132,8 +132,15 @@ impl C0pl4ndApp {
     /// the per-frame repaint pump runs.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_chrome_fonts(&cc.egui_ctx);
-        apply_window_effect(cc);
         let mut app = Self::bootstrap();
+        // Apply the OS glass/acrylic/mica/vibrancy effect — ONLY when the master
+        // transparency toggle is on AND the chosen mode wants a non-opaque
+        // surface (`effective_translucent`). Otherwise the window is a normal
+        // opaque window: no layered surface, so no DWM ghost-on-close risk.
+        // Done after `bootstrap()` so `app.config` is the source of truth.
+        if app.config.effective_translucent() {
+            apply_window_effect(cc, app.config.window_mode, &app.config.tint);
+        }
         // Apply Visuals DERIVED FROM the loaded terminal theme so the whole
         // chrome follows the active theme from the first frame (a light theme →
         // light UI, a dark theme → dark UI). Done after `bootstrap()` so
@@ -726,6 +733,38 @@ impl C0pl4ndApp {
         self.config.cursor.blink
     }
 
+    /// The master transparency toggle from the live config. Observation
+    /// accessor for the transparency interaction tests.
+    #[allow(dead_code)]
+    pub fn config_transparency_enabled(&self) -> bool {
+        self.config.transparency_enabled
+    }
+
+    /// The current window translucency mode from the live config.
+    #[allow(dead_code)]
+    pub fn config_window_mode(&self) -> c0pl4nd_core::config::WindowMode {
+        self.config.window_mode
+    }
+
+    /// The current window opacity (0.30..=1.0) from the live config.
+    #[allow(dead_code)]
+    pub fn config_opacity(&self) -> f32 {
+        self.config.opacity
+    }
+
+    /// The current window tint strength (0.0..=1.0) from the live config.
+    #[allow(dead_code)]
+    pub fn config_tint_strength(&self) -> f32 {
+        self.config.tint_strength
+    }
+
+    /// Whether the window is effectively translucent for the live config
+    /// (master toggle on AND a non-opaque mode).
+    #[allow(dead_code)]
+    pub fn config_effective_translucent(&self) -> bool {
+        self.config.effective_translucent()
+    }
+
     /// The current terminal color theme stem from the live config.
     #[allow(dead_code)]
     pub fn config_theme(&self) -> &str {
@@ -901,10 +940,17 @@ impl C0pl4ndApp {
 }
 
 impl eframe::App for C0pl4ndApp {
-    /// Frameless + transparent => clear to transparent so rounded corners and
-    /// the OS acrylic blur show through.
+    /// Frameless window clear color.
+    ///
+    /// When the window is effectively translucent (master toggle on + a
+    /// translucent mode) we clear to fully transparent so the rounded corners
+    /// and the OS blur (acrylic / mica / vibrancy) — or, for `Transparent`
+    /// mode and on Linux, the desktop itself — show through; `window_clear_color`
+    /// folds the `opacity` slider into the alpha for the portable see-through
+    /// look. When opaque, we clear to the theme background at full alpha so the
+    /// desktop never bleeds through a solid window.
     fn clear_color(&self, _v: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
+        window_clear_color(&self.config, &self.theme)
     }
 
     /// eframe 0.34's `App` main entry is `ui(&mut self, &mut Ui, &mut Frame)`;
@@ -1086,6 +1132,14 @@ impl C0pl4ndApp {
         //    above the chrome + grid; its nav keys were handled in step 0b).
         if self.palette_open {
             self.command_palette_window(ctx);
+        }
+
+        // 6) window color-tint overlay (a subtle full-window wash). Only painted
+        //    when the window is effectively translucent AND the user dialled in
+        //    a tint strength — mirrors SCR1B3. A solid (opaque) window never
+        //    gets washed; the gate keeps the default experience untouched.
+        if self.config.effective_translucent() && self.config.tint_strength > 0.0 {
+            paint_tint_overlay(ctx, &self.config.tint, self.config.tint_strength);
         }
 
         // Live terminals: keep repainting so PTY output animates without waiting
@@ -1382,25 +1436,138 @@ fn install_chrome_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Apply the OS window effect (acrylic on Windows, vibrancy on macOS). Best-
-/// effort + graceful on unsupported platforms (recon dossier §3.3).
-fn apply_window_effect(cc: &eframe::CreationContext<'_>) {
-    let _ = cc;
-    #[cfg(windows)]
-    {
-        // Tinted blur matching the void background (#121212 @ 160 alpha).
-        let _ = window_vibrancy::apply_acrylic(cc, Some((0x12, 0x12, 0x12, 160)));
+/// The frameless-window clear color for the current config + theme.
+///
+/// * **Opaque** (master off, or `Opaque` mode): the theme background at full
+///   alpha — a solid window the desktop never bleeds through.
+/// * **Translucent with a native blur** (`Glass`/`Mica`/`Vibrancy`): fully
+///   transparent so the OS blur backdrop shows through.
+/// * **`Transparent` mode** (portable, no native blur): the theme background
+///   with alpha folded down to the `opacity` slider so the desktop shows
+///   through at the chosen strength.
+///
+/// Free function (takes `&Config`, `&Theme`) so the headless tests can assert
+/// the clear color for a given config without an eframe window.
+fn window_clear_color(config: &c0pl4nd_core::Config, theme: &c0pl4nd_core::Theme) -> [f32; 4] {
+    if !config.effective_translucent() {
+        // Opaque: solid theme background, full alpha.
+        let (r, g, b) =
+            c0pl4nd_core::theme::parse_hex(&theme.background).unwrap_or((0x12, 0x12, 0x12));
+        return [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
     }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = window_vibrancy::apply_vibrancy(
-            cc,
-            window_vibrancy::NSVisualEffectMaterial::HudWindow,
-            None,
-            None,
-        );
+    match config.window_mode {
+        // Native blur backdrops want a fully transparent surface so the OS
+        // composited blur shows through.
+        c0pl4nd_core::config::WindowMode::Glass
+        | c0pl4nd_core::config::WindowMode::Mica
+        | c0pl4nd_core::config::WindowMode::Vibrancy => [0.0, 0.0, 0.0, 0.0],
+        // Portable see-through: theme background, alpha = opacity slider.
+        c0pl4nd_core::config::WindowMode::Transparent => {
+            let (r, g, b) =
+                c0pl4nd_core::theme::parse_hex(&theme.background).unwrap_or((0x12, 0x12, 0x12));
+            let a = config.opacity.clamp(0.30, 1.0);
+            [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a]
+        }
+        // Unreachable: effective_translucent() ruled Opaque out above.
+        c0pl4nd_core::config::WindowMode::Opaque => [0.0, 0.0, 0.0, 0.0],
     }
-    // Linux: the transparent surface + brand tint carry the look (no native API).
+}
+
+/// Paint a full-window translucent tint overlay (a subtle color wash) on a
+/// foreground layer — portable across every translucent mode and OS, mirroring
+/// SCR1B3's `paint_tint_overlay`. A no-op when `strength <= 0` or the tint is
+/// not a valid `#RRGGBB`.
+fn paint_tint_overlay(ctx: &egui::Context, tint_hex: &str, strength: f32) {
+    if strength <= 0.0 {
+        return;
+    }
+    let Ok((r, g, b)) = c0pl4nd_core::theme::parse_hex(tint_hex) else {
+        return;
+    };
+    let a = (strength.clamp(0.0, 1.0) * 90.0).round() as u8;
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("c0pl4nd-tint-overlay"),
+    ));
+    painter.rect_filled(
+        ctx.content_rect(),
+        0.0,
+        egui::Color32::from_rgba_unmultiplied(r, g, b, a),
+    );
+}
+
+/// Parse a `#RRGGBB` tint to an RGBA quad for native blur tinting.
+///
+/// Only consumed by Windows' `window_vibrancy::apply_acrylic` (acrylic takes a
+/// tint; mica/vibrancy do not). Gating the fn to Windows keeps `-D warnings`
+/// (clippy `dead_code`) green on Linux and macOS without a blanket allow.
+#[cfg(windows)]
+fn tint_rgba(hex: &str, alpha: u8) -> Option<(u8, u8, u8, u8)> {
+    c0pl4nd_core::theme::parse_hex(hex)
+        .ok()
+        .map(|(r, g, b)| (r, g, b, alpha))
+}
+
+/// Apply the OS window effect for the chosen [`WindowMode`] (best-effort,
+/// graceful on unsupported platforms — recon dossier §3.3). Windows:
+/// acrylic (Glass) / mica (Mica); macOS: vibrancy; elsewhere (Linux) the
+/// portable transparent surface + the tint overlay carry the look. Called only
+/// when the master transparency toggle is on AND the mode wants a non-opaque
+/// surface (`Config::effective_translucent`), so an opaque window never gets a
+/// layered surface (no ghost-on-close risk).
+fn apply_window_effect(
+    cc: &eframe::CreationContext<'_>,
+    mode: c0pl4nd_core::config::WindowMode,
+    tint_hex: &str,
+) {
+    let _ = (cc, tint_hex);
+    match mode {
+        c0pl4nd_core::config::WindowMode::Glass => {
+            #[cfg(windows)]
+            {
+                let _ = window_vibrancy::apply_acrylic(cc, tint_rgba(tint_hex, 160));
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = window_vibrancy::apply_vibrancy(
+                    cc,
+                    window_vibrancy::NSVisualEffectMaterial::HudWindow,
+                    None,
+                    None,
+                );
+            }
+        }
+        c0pl4nd_core::config::WindowMode::Mica => {
+            #[cfg(windows)]
+            {
+                let _ = window_vibrancy::apply_mica(cc, Some(true));
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = window_vibrancy::apply_vibrancy(
+                    cc,
+                    window_vibrancy::NSVisualEffectMaterial::HudWindow,
+                    None,
+                    None,
+                );
+            }
+        }
+        c0pl4nd_core::config::WindowMode::Vibrancy => {
+            #[cfg(target_os = "macos")]
+            {
+                let _ = window_vibrancy::apply_vibrancy(
+                    cc,
+                    window_vibrancy::NSVisualEffectMaterial::Sidebar,
+                    None,
+                    None,
+                );
+            }
+        }
+        // Transparent: the portable reduced-alpha surface carries the look (no
+        // native blur). Opaque: no effect at all.
+        c0pl4nd_core::config::WindowMode::Transparent
+        | c0pl4nd_core::config::WindowMode::Opaque => {}
+    }
 }
 
 #[cfg(test)]
@@ -1474,5 +1641,72 @@ mod tests {
             "every pane must be reachable from the root after close+new (an \
              orphaned pane renders black); reachable={reachable:?}"
         );
+    }
+
+    // ---- Transparency clear-color (SCR1B3-parity model) ----
+
+    fn cfg_mode(enabled: bool, mode: c0pl4nd_core::config::WindowMode) -> c0pl4nd_core::Config {
+        c0pl4nd_core::Config {
+            transparency_enabled: enabled,
+            window_mode: mode,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn clear_color_is_opaque_when_transparency_off() {
+        // The default (master off) must clear to a SOLID surface (alpha 1.0) so
+        // the desktop never bleeds through — the safe, unchanged default.
+        let app = C0pl4ndApp::bootstrap();
+        let [_, _, _, a] = window_clear_color(&app.config, &app.theme);
+        assert_eq!(a, 1.0, "opaque window clears at full alpha");
+    }
+
+    #[test]
+    fn clear_color_is_transparent_for_native_blur_modes() {
+        // Glass/Mica/Vibrancy want a fully transparent surface so the OS blur
+        // backdrop shows through.
+        let app = C0pl4ndApp::bootstrap();
+        for mode in [
+            c0pl4nd_core::config::WindowMode::Glass,
+            c0pl4nd_core::config::WindowMode::Mica,
+            c0pl4nd_core::config::WindowMode::Vibrancy,
+        ] {
+            let cfg = cfg_mode(true, mode);
+            let [_, _, _, a] = window_clear_color(&cfg, &app.theme);
+            assert_eq!(a, 0.0, "native-blur mode {mode:?} clears fully transparent");
+        }
+    }
+
+    #[test]
+    fn clear_color_folds_opacity_into_alpha_for_transparent_mode() {
+        // Portable Transparent mode: alpha tracks the opacity slider so the
+        // desktop shows through at the chosen strength.
+        let app = C0pl4ndApp::bootstrap();
+        let mut cfg = cfg_mode(true, c0pl4nd_core::config::WindowMode::Transparent);
+        cfg.opacity = 0.6;
+        let [_, _, _, a] = window_clear_color(&cfg, &app.theme);
+        assert!(
+            (a - 0.6).abs() < 1e-6,
+            "Transparent mode alpha must equal the opacity slider (got {a})"
+        );
+
+        // The 0.30 floor is honoured even if a lower opacity slips through.
+        cfg.opacity = 0.1;
+        let [_, _, _, a2] = window_clear_color(&cfg, &app.theme);
+        assert!(
+            (a2 - 0.30).abs() < 1e-6,
+            "alpha is clamped to the 0.30 floor"
+        );
+    }
+
+    #[test]
+    fn clear_color_master_off_overrides_a_translucent_mode() {
+        // A translucent mode with the MASTER toggle off must still clear opaque
+        // — the master switch is the single kill-switch every path consults.
+        let app = C0pl4ndApp::bootstrap();
+        let cfg = cfg_mode(false, c0pl4nd_core::config::WindowMode::Glass);
+        let [_, _, _, a] = window_clear_color(&cfg, &app.theme);
+        assert_eq!(a, 1.0, "master off forces an opaque clear even for Glass");
     }
 }
