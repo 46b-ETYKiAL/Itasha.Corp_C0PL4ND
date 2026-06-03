@@ -56,7 +56,7 @@ egui_kittest = { version = "0.34", features = ["wgpu", "snapshot", "eframe"] }
 # Embeds the sigil icon + version resource into the exe (build.rs). Windows-only
 # build dependency; uses the MSVC resource compiler. Pinned exact per dep policy.
 [target.'cfg(windows)'.build-dependencies]
-winresource = "=0.1.23"
+winresource = "=0.1.31"
 
 # D4 (Windows-only): Win32 custom-frame Aero Snap on the frameless window.
 # Used solely by the `#[cfg(windows)]` `win_snap` module; not linked elsewhere.
