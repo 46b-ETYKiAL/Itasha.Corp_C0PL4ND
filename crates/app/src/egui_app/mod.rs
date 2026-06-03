@@ -235,6 +235,15 @@ impl C0pl4ndApp {
         self.settings_open
     }
 
+    /// Number of live terminal sessions currently held. Observation accessor for
+    /// the fast-shutdown test: after [`prepare_shutdown`](Self::prepare_shutdown)
+    /// this MUST be zero (every `PaneTerm` dropped → every PTY child killed, no
+    /// orphans).
+    #[allow(dead_code)]
+    pub fn term_count(&self) -> usize {
+        self.terms.len()
+    }
+
     /// The currently-focused pane id.
     #[allow(dead_code)]
     pub fn focused_pane(&self) -> PaneId {
@@ -967,6 +976,41 @@ impl eframe::App for C0pl4ndApp {
 }
 
 impl C0pl4ndApp {
+    /// Run the necessary on-close cleanup, synchronously and fast, so the Close
+    /// handler can immediately `std::process::exit(0)` afterwards instead of
+    /// waiting on eframe/wgpu's slow graceful GPU-device + swapchain +
+    /// winit-window-destroy teardown (the actual source of the slow-to-close
+    /// latency — the PTY teardown is ~2ms and is not the bottleneck).
+    ///
+    /// Two side effects, in order:
+    ///
+    /// 1. **Persist config** — the same best-effort `config.save_to(default_path)`
+    ///    write the settings-change handler performs, gated on `live_window` so a
+    ///    headless test never writes the user's real `%APPDATA%\c0pl4nd\config.toml`
+    ///    (test pollution). This is the save-on-close that MUST still happen before
+    ///    a fast exit.
+    /// 2. **Drop every live terminal** — `self.terms.clear()` drops each
+    ///    [`PaneTerm`], and dropping a `PaneTerm` runs its `Session::Drop`, which
+    ///    kills the PTY child. This is the no-orphan guarantee: after this call no
+    ///    `cmd.exe` (or other shell) is left running. It is ~2ms for the canonical
+    ///    six-pane layout and is done BEFORE the process exits so the children are
+    ///    reaped, not orphaned, even though `process::exit` runs no destructors.
+    ///
+    /// Kept separate from the `process::exit(0)` call so tests can exercise the
+    /// cleanup (save + child reaping) WITHOUT terminating the test runner.
+    pub fn prepare_shutdown(&mut self) {
+        // 1) Persist config — real-window-only, best-effort (a write failure must
+        //    never wedge the close path). Mirrors the settings-handler save.
+        if self.live_window {
+            if let Some(path) = c0pl4nd_core::Config::default_path() {
+                let _ = self.config.save_to(&path);
+            }
+        }
+        // 2) Drop every PaneTerm → each Session::Drop kills its PTY child. No
+        //    orphaned shells survive the close.
+        self.terms.clear();
+    }
+
     /// One per-frame tick of the chrome + grid. Separated from `eframe::App::ui`
     /// so `egui_kittest` can drive it through a `Context` without a `Frame`.
     ///
@@ -1115,12 +1159,26 @@ impl C0pl4ndApp {
         if let Some(cmd) = actions.window_cmd {
             self.last_window_cmd = Some(cmd);
             let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-            let vp = match cmd {
-                WindowCmd::Minimize => egui::ViewportCommand::Minimized(true),
-                WindowCmd::ToggleMaximize => egui::ViewportCommand::Maximized(!is_max),
-                WindowCmd::Close => egui::ViewportCommand::Close,
-            };
-            ctx.send_viewport_cmd(vp);
+            match cmd {
+                WindowCmd::Minimize => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
+                WindowCmd::ToggleMaximize => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                }
+                WindowCmd::Close => {
+                    // Fast clean shutdown: run the necessary cleanup (persist
+                    // config + reap every PTY child so none orphan), then exit
+                    // immediately. This skips eframe/wgpu's slow graceful
+                    // GPU-device + swapchain + winit-window-destroy teardown —
+                    // the OS reclaims the GPU/window handles instantly — which is
+                    // what made the window slow to close. `prepare_shutdown` does
+                    // the load-bearing work; `process::exit(0)` is safe under
+                    // `#![forbid(unsafe_code)]`.
+                    self.prepare_shutdown();
+                    std::process::exit(0);
+                }
+            }
         }
 
         // 4) the (opaque) settings window, if open
@@ -1641,6 +1699,43 @@ mod tests {
             "every pane must be reachable from the root after close+new (an \
              orphaned pane renders black); reachable={reachable:?}"
         );
+    }
+
+    /// Fast-close contract: `prepare_shutdown` must reap EVERY live terminal so
+    /// no PTY child is orphaned after the window closes, while NOT terminating
+    /// the process (the real Close handler calls `process::exit(0)` AFTER this;
+    /// the test exercises only the cleanup so it does not kill the test runner).
+    ///
+    /// The config save is real-window-only (`live_window`); `bootstrap()` leaves
+    /// it false, so this test deliberately does NOT write the user's real config
+    /// (no test pollution) — it asserts the no-orphan child-reaping side effect,
+    /// which is the load-bearing correctness guarantee of the fast exit.
+    #[test]
+    fn prepare_shutdown_reaps_all_terminals_without_exit() {
+        let mut app = C0pl4ndApp::bootstrap();
+        // Open a couple more panes so there are several live PaneTerms to reap.
+        app.new_terminal();
+        app.new_terminal();
+        assert!(
+            app.term_count() > 0,
+            "precondition: at least one live terminal before shutdown"
+        );
+        assert!(
+            !app.live_window,
+            "bootstrap() is headless: the config save is skipped (no test pollution)"
+        );
+
+        // The cleanup the real Close handler runs before process::exit(0).
+        app.prepare_shutdown();
+
+        assert_eq!(
+            app.term_count(),
+            0,
+            "every PaneTerm must be dropped (Session::Drop kills its PTY child) \
+             so no shell is orphaned after the window closes"
+        );
+        // Reaching here proves prepare_shutdown returned normally — it did NOT
+        // call process::exit (which would abort the test runner).
     }
 
     // ---- Transparency clear-color (SCR1B3-parity model) ----
