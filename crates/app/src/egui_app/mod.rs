@@ -665,6 +665,12 @@ impl C0pl4ndApp {
             // below; the grid glyph colours come from this `Theme`, not Visuals).
             if outcome.theme_changed {
                 self.theme = load_terminal_theme(&self.config);
+                // Propagate to the LIVE panes: each PaneTerm holds its own theme
+                // clone (glyph + background colours resolve from it), so without
+                // this the picker would change `self.theme` but no visible pane.
+                for term in self.terms.values_mut() {
+                    term.set_theme(self.theme.clone());
+                }
             }
             // Re-apply the chrome Visuals so opacity/theme tweaks repaint the
             // egui surface without waiting for a relaunch.
@@ -1310,6 +1316,14 @@ fn load_terminal_theme(config: &c0pl4nd_core::Config) -> c0pl4nd_core::Theme {
         if let Ok(t) = c0pl4nd_core::Theme::load_from(&c) {
             return t;
         }
+    }
+    // No on-disk file matched (the common case in the INSTALLED app, whose CWD
+    // is not the source tree and which ships no `assets/themes/` next to the
+    // exe). Resolve from the COMPILED-IN theme set so selection still works —
+    // this is the fix for "the theme doesn't change". On-disk files above still
+    // win when present, so a user can override a built-in or add their own.
+    if let Some(t) = c0pl4nd_core::Theme::builtin_named(&config.theme) {
+        return t;
     }
     c0pl4nd_core::Theme::builtin_void()
 }

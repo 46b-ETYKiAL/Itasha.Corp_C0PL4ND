@@ -215,6 +215,51 @@ impl Theme {
             },
         }
     }
+
+    /// Themes COMPILED INTO the binary, keyed by their config name (the file
+    /// stem under `assets/themes/`). The terminal-theme loader resolves these so
+    /// theme selection ALWAYS works regardless of the process's CWD or whether an
+    /// `assets/themes/` directory ships next to the installed binary. The prior
+    /// file-only loader silently fell back to `builtin_void` whenever the file
+    /// could not be found (i.e. in every installed launch), which the user
+    /// experienced as "the theme doesn't change".
+    pub const EMBEDDED_THEMES: &'static [(&'static str, &'static str)] = &[
+        (
+            "itasha-corp",
+            include_str!("../../../../assets/themes/itasha-corp.toml"),
+        ),
+        (
+            "itasha-void",
+            include_str!("../../../../assets/themes/itasha-void.toml"),
+        ),
+        (
+            "itasha-void-high-contrast",
+            include_str!("../../../../assets/themes/itasha-void-high-contrast.toml"),
+        ),
+        (
+            "ghost-paper",
+            include_str!("../../../../assets/themes/ghost-paper.toml"),
+        ),
+        (
+            "wired-noir",
+            include_str!("../../../../assets/themes/wired-noir.toml"),
+        ),
+        (
+            "wired-colorblind",
+            include_str!("../../../../assets/themes/wired-colorblind.toml"),
+        ),
+    ];
+
+    /// Resolve a compiled-in theme by its config name. Returns `None` for an
+    /// unknown name or a theme that fails to parse/validate. This is the
+    /// CWD-independent resolution path that makes theme selection work in the
+    /// installed app (see [`Theme::EMBEDDED_THEMES`]).
+    pub fn builtin_named(name: &str) -> Option<Theme> {
+        Self::EMBEDDED_THEMES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .and_then(|(_, src)| Theme::from_toml(src).ok())
+    }
 }
 
 #[cfg(test)]
@@ -227,6 +272,26 @@ mod tests {
         assert_eq!(parse_hex("00e5ff").unwrap(), (0, 229, 255));
         assert!(parse_hex("#12345").is_err());
         assert!(parse_hex("#zzzzzz").is_err());
+    }
+
+    /// The compiled-in theme set is the CWD-independent resolution path that
+    /// fixes "the theme doesn't change" in the installed app: every advertised
+    /// name must parse+validate, distinct themes must differ, unknown → None.
+    #[test]
+    fn embedded_themes_resolve_and_differ() {
+        for (name, _) in Theme::EMBEDDED_THEMES {
+            assert!(
+                Theme::builtin_named(name).is_some(),
+                "embedded theme {name:?} must parse + validate"
+            );
+        }
+        let noir = Theme::builtin_named("wired-noir").expect("wired-noir embedded");
+        let paper = Theme::builtin_named("ghost-paper").expect("ghost-paper embedded");
+        assert_ne!(
+            noir.background, paper.background,
+            "distinct embedded themes must have distinct backgrounds"
+        );
+        assert!(Theme::builtin_named("no-such-theme").is_none());
     }
 
     #[test]
