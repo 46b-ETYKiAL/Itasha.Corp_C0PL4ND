@@ -19,6 +19,7 @@ pub mod chrome;
 pub mod grid;
 pub mod pane_term;
 mod settings;
+pub mod shells;
 mod theme;
 
 use std::collections::{HashMap, HashSet};
@@ -29,7 +30,7 @@ use grid::{count_panes, GridBehavior, Pane, PaneId, PaneIdAllocator};
 use pane_term::{CellMetrics, PaneTerm};
 
 /// How many placeholder panes the shell opens with on first launch.
-const INITIAL_PANES: usize = 2;
+const INITIAL_PANES: usize = 1;
 
 /// A window-level caption command issued by the titlebar buttons. Routed through
 /// [`chrome::ChromeActions`] so [`C0pl4ndApp::frame_tick`] is the single site
@@ -67,8 +68,42 @@ pub struct C0pl4ndApp {
     /// Panes the user pinned: their tabs sort first and can't be closed via the
     /// tab × (must unpin first).
     pinned: HashSet<PaneId>,
+    /// The focused pane's last-rendered size `(w, h)` in points. Drives the
+    /// "+" button's split direction (split the longer axis to stay balanced).
+    last_focused_size: Option<(f32, f32)>,
+    /// Shells offered by the top-bar switcher, platform default first. Detected
+    /// once at construction (`shells::detect_profiles`).
+    shell_profiles: Vec<shells::ShellProfile>,
+    /// Index into `shell_profiles` that the plain "+" button and new terminals
+    /// use. Set when the user picks a shell from the top-bar ▾ menu.
+    active_shell: usize,
+    /// Whether the chrome fonts (incl. the `phosphor-fill` family used for a
+    /// pinned tab's solid pin) have been installed on the egui context. Set in
+    /// `new`; the first `frame_tick` installs them otherwise (e.g. headless
+    /// tests built via `bootstrap()`), so referencing the `phosphor-fill` family
+    /// can never hit an unregistered-family panic.
+    fonts_installed: bool,
     /// Whether the settings window is open.
     settings_open: bool,
+    /// Recently-run commands, surfaced by the command palette for quick
+    /// find/run. Captured best-effort from typed input (committed on Enter).
+    cmd_history: c0pl4nd_core::command_history::CommandHistory,
+    /// Accumulator for the line currently being typed in the focused pane.
+    /// Committed to `cmd_history` on Enter, reset on focus change. Best-effort:
+    /// it models printable text + Backspace, not full shell line-editing.
+    input_line: String,
+    /// Whether the command palette overlay is open.
+    palette_open: bool,
+    /// The palette's fuzzy-search query.
+    palette_query: String,
+    /// The palette's selected row (index into the filtered results).
+    palette_sel: usize,
+    /// The command most recently run FROM the palette (Enter or click). Set in
+    /// [`Self::run_palette_selection`] so an interaction test can assert that
+    /// driving the real palette ran the real command — the same observation
+    /// pattern as [`Self::last_window_cmd`] (the PTY write itself is not
+    /// observable in the headless harness).
+    last_palette_run: Option<String>,
     /// A transient status-bar message (e.g. "max 6 panes").
     toast: Option<String>,
     /// The most recent caption command issued (minimize/maximize/close). Set in
@@ -100,9 +135,10 @@ impl C0pl4ndApp {
         install_chrome_fonts(&cc.egui_ctx);
         apply_window_effect(cc);
         let mut app = Self::bootstrap();
-        // A wgpu render state means a real window (also true under the wgpu test
-        // harness, which drives frames explicitly with `step()`); headless tests
-        // built via `bootstrap()` leave this false.
+        app.fonts_installed = true; // already installed above; skip the frame-tick install
+                                    // A wgpu render state means a real window (also true under the wgpu test
+                                    // harness, which drives frames explicitly with `step()`); headless tests
+                                    // built via `bootstrap()` leave this false.
         app.live_window = cc.wgpu_render_state.is_some();
         app
     }
@@ -130,19 +166,39 @@ impl C0pl4ndApp {
             pane_alloc,
             focused_pane,
             pinned: HashSet::new(),
+            last_focused_size: None,
+            shell_profiles: shells::detect_profiles(),
+            active_shell: 0,
+            fonts_installed: false,
             settings_open: false,
+            cmd_history: c0pl4nd_core::command_history::CommandHistory::default(),
+            input_line: String::new(),
+            palette_open: false,
+            palette_query: String::new(),
+            palette_sel: 0,
+            last_palette_run: None,
             toast: None,
             last_window_cmd: None,
             live_window: false,
         }
     }
 
-    /// Spawn a fresh live terminal for `pid` and register it. Used by `split`.
+    /// Spawn a fresh live terminal for `pid` running the active shell profile,
+    /// and register it. Used by `split`. The default profile (program `None`,
+    /// index 0) uses the platform default shell; a named profile launches its
+    /// explicit program + args. A failed spawn degrades to an error pane.
     fn spawn_term(&mut self, pid: PaneId) {
-        self.terms.insert(
-            pid,
-            PaneTerm::spawn(self.theme.clone(), SPAWN_COLS, SPAWN_ROWS),
-        );
+        let theme = self.theme.clone();
+        let profile = self.shell_profiles.get(self.active_shell);
+        let term = match profile.and_then(|p| p.program.clone()) {
+            Some(program) => {
+                let args: Vec<String> = profile.map(|p| p.args.clone()).unwrap_or_default();
+                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                PaneTerm::spawn_program(theme, &program, &arg_refs, SPAWN_COLS, SPAWN_ROWS)
+            }
+            None => PaneTerm::spawn(theme, SPAWN_COLS, SPAWN_ROWS),
+        };
+        self.terms.insert(pid, term);
     }
 
     // ---- public observation surface (production accessors, NOT test-only) ----
@@ -243,6 +299,47 @@ impl C0pl4ndApp {
         }
     }
 
+    /// Open a new terminal (the single "+" button). Splits the focused pane
+    /// along its LONGER axis so panes stay balanced: a wide pane splits
+    /// left|right, a tall pane splits top/bottom. This gives a "logical" grid
+    /// expansion without asking the user to pick a direction.
+    fn new_terminal(&mut self) {
+        let (w, h) = self.last_focused_size.unwrap_or((16.0, 9.0));
+        let dir = if w >= h {
+            egui_tiles::LinearDir::Horizontal // wide → side-by-side
+        } else {
+            egui_tiles::LinearDir::Vertical // tall → stacked
+        };
+        self.split(dir);
+    }
+
+    /// Make shell profile `idx` active and open a new terminal running it (the
+    /// top-bar ▾ menu path). Subsequent plain "+" presses then use the same
+    /// shell, mirroring the Windows-Terminal "+ ▾" profile behaviour. An
+    /// out-of-range index is ignored (defensive — the menu only emits valid
+    /// indices).
+    fn open_shell(&mut self, idx: usize) {
+        if idx < self.shell_profiles.len() {
+            self.active_shell = idx;
+            self.new_terminal();
+        }
+    }
+
+    /// The shell profiles offered by the top-bar switcher (platform default
+    /// first). Used by the chrome to render the ▾ menu.
+    pub fn shell_profiles(&self) -> &[shells::ShellProfile] {
+        &self.shell_profiles
+    }
+
+    /// The label of the currently-active shell profile (what new terminals run).
+    /// Used by the chrome's hover text and by interaction tests.
+    pub fn active_shell_label(&self) -> &str {
+        self.shell_profiles
+            .get(self.active_shell)
+            .map(|p| p.label.as_str())
+            .unwrap_or("Default shell")
+    }
+
     /// Paint one terminal pane's body and wire its per-frame interaction:
     ///
     /// 1. Allocate the pane rect and paint the theme background quad + focus ring
@@ -256,6 +353,7 @@ impl C0pl4ndApp {
     /// panic. This is a FREE function (not `&mut self`) so the `grid_ui` closure
     /// can borrow `terms`/`theme` disjointly from `self.grid_tree` (which
     /// `tree.ui` borrows mutably) — the classic egui_tiles borrow split.
+    #[allow(clippy::too_many_arguments)]
     fn render_pane_body(
         ui: &mut egui::Ui,
         pane_id: PaneId,
@@ -263,6 +361,7 @@ impl C0pl4ndApp {
         terms: &mut HashMap<PaneId, PaneTerm>,
         theme: &c0pl4nd_core::Theme,
         font_size: f32,
+        cursor_cfg: c0pl4nd_core::config::CursorConfig,
     ) -> PaneBodyOutcome {
         let (rect, resp) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -312,7 +411,7 @@ impl C0pl4ndApp {
                 // glyphon GPU paths (callback + offscreen texture) composited
                 // black inside `egui_tiles` panes live while passing the wgpu
                 // test harness.
-                paint_grid_native(&painter, rect, term, font_size, theme);
+                paint_grid_native(&painter, rect, term, font_size, theme, focused, cursor_cfg);
             }
             Some(term) => {
                 // Failed spawn: show the error, never panic.
@@ -338,6 +437,7 @@ impl C0pl4ndApp {
         PaneBodyOutcome {
             drag_started: resp.drag_started(),
             clicked: resp.clicked(),
+            size: rect.size(),
         }
     }
 
@@ -414,6 +514,42 @@ impl C0pl4ndApp {
                 forwarded.extend_from_slice(s.as_bytes());
             }
         }
+
+        // Best-effort capture of the line being typed, for the command-palette
+        // history (see `c0pl4nd_core::command_history`). Printable text accrues,
+        // Backspace pops one char, and Enter commits the line then clears the
+        // accumulator. This models printable input + Backspace, NOT full shell
+        // line-editing (cursor motion, kill-line) — exactly the contract the
+        // `command_history` module documents. Only runs when typing reaches the
+        // PTY (the palette routes its own keys away from here), so the history is
+        // a record of what the user actually ran, not what they searched for.
+        // Ordinary printable characters (incl. Space) arrive as `LogicalKey::Text`
+        // (egui delivers them via `Event::Text`); only the special keys below are
+        // `LogicalKey` variants, so this captures the full typed line.
+        for (lk, _m) in &keys {
+            match lk {
+                LogicalKey::Text(t) => {
+                    // Ctrl-letter chords arrive here as a single C0 control byte
+                    // (Ctrl+C = 0x03, Ctrl+U = 0x15, …), NOT printable line
+                    // content. Ctrl+C / Ctrl+U abort the current line in a shell,
+                    // so mirror that by clearing the accumulator; other control
+                    // bytes are ignored. Printable text (incl. Space) accrues.
+                    if t.chars().all(|c| !c.is_control()) {
+                        self.input_line.push_str(t);
+                    } else if t == "\u{3}" || t == "\u{15}" {
+                        self.input_line.clear();
+                    }
+                }
+                LogicalKey::Backspace => {
+                    self.input_line.pop();
+                }
+                LogicalKey::Enter => {
+                    let line = std::mem::take(&mut self.input_line);
+                    self.cmd_history.record(line);
+                }
+                _ => {}
+            }
+        }
         forwarded
     }
 
@@ -426,6 +562,7 @@ impl C0pl4ndApp {
         let mut closes: Vec<PaneId> = Vec::new();
         let focused = self.focused_pane;
         let mut clicked: Option<PaneId> = None;
+        let mut focused_size: Option<(f32, f32)> = None;
 
         // Snapshot BEFORE the frame so we can revert a drag that exceeds the cap.
         let pre = self.grid_tree.clone();
@@ -434,11 +571,22 @@ impl C0pl4ndApp {
             let terms = &mut self.terms;
             let theme = &self.theme;
             let font_size = self.config.font.size;
+            let cursor_cfg = self.config.cursor;
             let mut render_body = |ui: &mut egui::Ui, pid: PaneId| -> bool {
-                let outcome =
-                    Self::render_pane_body(ui, pid, pid == focused, terms, theme, font_size);
+                let outcome = Self::render_pane_body(
+                    ui,
+                    pid,
+                    pid == focused,
+                    terms,
+                    theme,
+                    font_size,
+                    cursor_cfg,
+                );
                 if outcome.clicked {
                     clicked = Some(pid);
+                }
+                if pid == focused {
+                    focused_size = Some((outcome.size.x, outcome.size.y));
                 }
                 outcome.drag_started
             };
@@ -449,6 +597,9 @@ impl C0pl4ndApp {
             };
             self.grid_tree.ui(&mut behavior, ui);
         }
+        if let Some(s) = focused_size {
+            self.last_focused_size = Some(s);
+        }
 
         // Enforce the cap: a drag-to-split that pushed us over 6 reverts.
         if count_panes(&self.grid_tree) > grid::MAX_PANES {
@@ -457,6 +608,9 @@ impl C0pl4ndApp {
         }
 
         if let Some(pid) = clicked {
+            if pid != self.focused_pane {
+                self.input_line.clear(); // the typed-line accumulator is per-pane
+            }
             self.focused_pane = pid;
         }
 
@@ -569,6 +723,151 @@ impl C0pl4ndApp {
     pub fn config_paste_warn_multiline(&self) -> bool {
         self.config.paste_warn_multiline
     }
+
+    // ---- command palette (quick find/run previously-run commands) ----
+    //
+    // The palette surfaces `cmd_history` (commands the user typed + ran in any
+    // pane this session) and lets them fuzzy-search and re-run one with Enter.
+    // It is opened with Ctrl+Shift+P (handled in `frame_tick`). These methods are
+    // the production logic the frame loop calls — the interaction tests drive
+    // them through the real frame loop, NOT as a test-only mirror.
+
+    /// Toggle the command palette. Opening it resets the query, selection, and
+    /// the in-flight typed-line accumulator (so a half-typed line is not later
+    /// recorded as if it had been run after the palette closes).
+    fn toggle_palette(&mut self) {
+        self.palette_open = !self.palette_open;
+        if self.palette_open {
+            self.palette_query.clear();
+            self.palette_sel = 0;
+            self.input_line.clear();
+        }
+    }
+
+    /// The palette's filtered results for the current query — every history entry
+    /// (most-recent-first) when the query is empty, fuzzy-filtered otherwise.
+    fn palette_results(&self) -> Vec<String> {
+        self.cmd_history.search(&self.palette_query)
+    }
+
+    /// Move the palette selection by `delta` rows, clamped to the result range.
+    /// A no-op when there are no results.
+    fn palette_move(&mut self, delta: i64) {
+        let n = self.palette_results().len();
+        if n == 0 {
+            self.palette_sel = 0;
+            return;
+        }
+        let max = n as i64 - 1;
+        let cur = self.palette_sel as i64;
+        self.palette_sel = (cur + delta).clamp(0, max) as usize;
+    }
+
+    /// Run the currently-selected history entry in the focused pane: write it to
+    /// the PTY followed by a carriage return (what the shell sees for Enter),
+    /// move it to the front of the history, and close the palette. Returns the
+    /// command run (for tests). Closes the palette with no command when the
+    /// result set is empty.
+    fn run_palette_selection(&mut self) -> Option<String> {
+        let cmd = self.palette_results().get(self.palette_sel).cloned();
+        if let Some(ref c) = cmd {
+            if let Some(term) = self.terms.get_mut(&self.focused_pane) {
+                term.write_bytes(c.as_bytes());
+                term.write_bytes(b"\r");
+            }
+            // Re-running moves the command to the front (no duplicate).
+            self.cmd_history.record(c.clone());
+        }
+        self.last_palette_run = cmd.clone();
+        self.palette_open = false;
+        cmd
+    }
+
+    /// Whether the command palette is currently open. Observation accessor for
+    /// the interaction tests (asserts Ctrl+Shift+P toggled it through the real
+    /// frame loop).
+    #[allow(dead_code)]
+    pub fn palette_open(&self) -> bool {
+        self.palette_open
+    }
+
+    /// The recorded command history, most-recent-first. Observation accessor for
+    /// the interaction tests (asserts typed-then-Enter lines were captured).
+    #[allow(dead_code)]
+    pub fn command_history_entries(&self) -> Vec<String> {
+        self.cmd_history.entries().map(str::to_string).collect()
+    }
+
+    /// The command most recently run from the palette, if any. Observation
+    /// accessor for the interaction test (asserts Enter on a selection ran the
+    /// real command through the real frame loop).
+    #[allow(dead_code)]
+    pub fn last_palette_run(&self) -> Option<String> {
+        self.last_palette_run.clone()
+    }
+
+    /// Render the command-palette overlay: a centred window with an auto-focused
+    /// fuzzy-search box over the command history and a selectable result list.
+    /// Clicking a row runs it (same path as Enter). Navigation (↑/↓/Enter/Esc)
+    /// is handled in [`Self::frame_tick`] before this renders, so the list here
+    /// only needs to display the current query + selection and report a click.
+    ///
+    /// Immutable state is snapshotted into locals before the window closure so
+    /// the closure's `&mut palette_query` (for the `TextEdit`) does not collide
+    /// with reads of `palette_sel` / `cmd_history` on the same `self`.
+    fn command_palette_window(&mut self, ctx: &egui::Context) {
+        let results = self.palette_results();
+        // Clamp selection if the result set shrank since the last frame.
+        if self.palette_sel >= results.len() {
+            self.palette_sel = results.len().saturating_sub(1);
+        }
+        let sel = self.palette_sel;
+        let history_empty = self.cmd_history.is_empty();
+        let query = &mut self.palette_query;
+        let mut clicked: Option<usize> = None;
+
+        egui::Window::new("Command palette")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
+            .default_width(540.0)
+            .show(ctx, |ui| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(query)
+                        .hint_text("Search previously-run commands…")
+                        .desired_width(f32::INFINITY),
+                );
+                // Keep the search box focused for the palette's whole lifetime so
+                // typed characters always populate the query, never the PTY.
+                resp.request_focus();
+                ui.separator();
+                if results.is_empty() {
+                    ui.weak(if history_empty {
+                        "No commands run yet — run something, then reopen with Ctrl+Shift+P."
+                    } else {
+                        "No matches."
+                    });
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(280.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for (i, cmd) in results.iter().enumerate() {
+                                if ui.selectable_label(i == sel, cmd).clicked() {
+                                    clicked = Some(i);
+                                }
+                            }
+                        });
+                }
+                ui.separator();
+                ui.weak("↑/↓ select · Enter run · Esc close");
+            });
+
+        if let Some(i) = clicked {
+            self.palette_sel = i;
+            self.run_palette_selection();
+        }
+    }
 }
 
 impl eframe::App for C0pl4ndApp {
@@ -601,11 +900,70 @@ impl C0pl4ndApp {
     /// top-level path (same compromise the reference app documents).
     #[allow(deprecated)]
     pub fn frame_tick(&mut self, ctx: &egui::Context) {
-        // 0) forward this frame's keyboard/paste to the FOCUSED pane's PTY. Done
-        //    BEFORE the panels so the keystrokes reach the PTY whose grid this
-        //    same frame then snapshots — proving the round-trip (the load-bearing
-        //    "typing reaches the PTY and the grid updates" path).
-        self.forward_input_to_focused(ctx);
+        // Ensure the chrome fonts (incl. the `phosphor-fill` family) are
+        // installed before any widget references them — `new()` does this for
+        // the real app; headless tests built via `bootstrap()` install here on
+        // frame 1 (otherwise the pinned tab's `FontFamily::Name("phosphor-fill")`
+        // would panic on an unregistered family).
+        if !self.fonts_installed {
+            install_chrome_fonts(ctx);
+            self.fonts_installed = true;
+        }
+        // 0a) command palette: Ctrl+Shift+P (Cmd+Shift+P on macOS) toggles it. The
+        //     matching key-press is removed from the event stream so it never
+        //     reaches the PTY — without this, on the close frame (palette already
+        //     open) the `P` would fall through to `forward_input_to_focused` and
+        //     be encoded as the Ctrl+P control byte. Done explicitly rather than
+        //     via `consume_key` so the ctrl-OR-command match is unambiguous on
+        //     every platform.
+        let toggle_palette = ctx.input_mut(|i| {
+            let mut found = false;
+            i.events.retain(|ev| {
+                let hit = matches!(
+                    ev,
+                    egui::Event::Key { key: egui::Key::P, pressed: true, modifiers, .. }
+                    if modifiers.shift && (modifiers.ctrl || modifiers.command)
+                );
+                found |= hit;
+                !hit
+            });
+            found
+        });
+        if toggle_palette {
+            self.toggle_palette();
+        }
+
+        // 0b) route this frame's input. When the palette is open, its navigation
+        //     keys (↑/↓/Enter/Esc) are consumed here and the typed query is
+        //     captured by the palette's focused TextEdit — NOT forwarded to the
+        //     PTY. Otherwise keyboard/paste goes to the FOCUSED pane's PTY BEFORE
+        //     the panels, so the keystrokes reach the PTY whose grid this same
+        //     frame then snapshots (the load-bearing "typing reaches the PTY and
+        //     the grid updates" round-trip).
+        if self.palette_open {
+            let (up, down, enter, esc) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                )
+            });
+            if up {
+                self.palette_move(-1);
+            }
+            if down {
+                self.palette_move(1);
+            }
+            if esc {
+                self.palette_open = false;
+            }
+            if enter {
+                self.run_palette_selection();
+            }
+        } else {
+            self.forward_input_to_focused(ctx);
+        }
 
         // 1) custom titlebar + tab strip. Fixed height so the drag region below
         //    is exactly the bar (not the whole remaining column), and so the
@@ -655,6 +1013,9 @@ impl C0pl4ndApp {
 
         // Apply chrome actions AFTER the panels close (no mid-borrow mutation).
         if let Some(pid) = actions.focus_tab {
+            if pid != self.focused_pane {
+                self.input_line.clear(); // the typed-line accumulator is per-pane
+            }
             self.focused_pane = pid;
         }
         if let Some(pid) = actions.pin_tab {
@@ -666,11 +1027,11 @@ impl C0pl4ndApp {
         if let Some(pid) = actions.close_tab {
             self.close_pane(pid);
         }
-        if actions.split_right {
-            self.split(egui_tiles::LinearDir::Horizontal);
+        if actions.new_terminal {
+            self.new_terminal();
         }
-        if actions.split_down {
-            self.split(egui_tiles::LinearDir::Vertical);
+        if let Some(idx) = actions.open_shell {
+            self.open_shell(idx);
         }
         if actions.toggle_settings {
             self.settings_open = !self.settings_open;
@@ -691,6 +1052,12 @@ impl C0pl4ndApp {
         // 4) the (opaque) settings window, if open
         if self.settings_open {
             self.settings_window(ctx);
+        }
+
+        // 5) the command palette overlay, if open (rendered last so it floats
+        //    above the chrome + grid; its nav keys were handled in step 0b).
+        if self.palette_open {
+            self.command_palette_window(ctx);
         }
 
         // Live terminals: keep repainting so PTY output animates without waiting
@@ -731,6 +1098,9 @@ struct PaneBodyOutcome {
     drag_started: bool,
     /// True when the pane body was clicked (a refocus request).
     clicked: bool,
+    /// The pane's body size (points) this frame — used to pick the "+" split
+    /// direction for the focused pane.
+    size: egui::Vec2,
 }
 
 /// The theme's default foreground as an `(r,g,b)` triple — the glyph colour for
@@ -759,6 +1129,8 @@ fn paint_grid_native(
     term: &PaneTerm,
     font_size: f32,
     theme: &c0pl4nd_core::Theme,
+    focused: bool,
+    cursor_cfg: c0pl4nd_core::config::CursorConfig,
 ) {
     let default_fg = term_default_fg(theme);
     let mut job = egui::text::LayoutJob::default();
@@ -793,11 +1165,66 @@ fn paint_grid_native(
         }
     }
     let galley = painter.layout_job(job);
+    let origin = rect.left_top() + egui::vec2(4.0, 4.0);
     painter.galley(
-        rect.left_top() + egui::vec2(4.0, 4.0),
+        origin,
         galley,
         egui::Color32::from_rgb(default_fg.0, default_fg.1, default_fg.2),
     );
+
+    // --- terminal cursor ---
+    if let Some((row, col)) = term.cursor_cell() {
+        // Cell size in POINTS from the same monospace font the grid uses (a
+        // probe-galley 'M' advance), so the caret lands on the cell grid.
+        let probe = painter.layout_job(egui::text::LayoutJob::single_section(
+            "M".to_string(),
+            egui::text::TextFormat {
+                font_id: egui::FontId::monospace(font_size),
+                ..Default::default()
+            },
+        ));
+        let (cw, ch) = (probe.size().x.max(1.0), probe.size().y.max(1.0));
+        let cell_min = origin + egui::vec2(col as f32 * cw, row as f32 * ch);
+        let cell = egui::Rect::from_min_size(cell_min, egui::vec2(cw, ch));
+        let cur = c0pl4nd_core::theme::parse_hex(&theme.cursor).unwrap_or((0, 255, 144));
+        let col32 = egui::Color32::from_rgb(cur.0, cur.1, cur.2);
+        // Blink only on the focused pane (and only if configured). The live
+        // window repaints every frame, so the phase animates without an explicit
+        // repaint request; headless tests see a steady ON frame.
+        let on = if cursor_cfg.blink && focused {
+            (painter.ctx().input(|i| i.time) / 1.06).fract() < 0.5
+        } else {
+            true
+        };
+        if on {
+            match cursor_cfg.style {
+                c0pl4nd_core::config::CursorStyle::Block => {
+                    if focused {
+                        // Semi-transparent fill so the glyph beneath stays legible.
+                        painter.rect_filled(cell, 1.0, col32.gamma_multiply(0.55));
+                    } else {
+                        painter.rect_stroke(
+                            cell,
+                            1.0,
+                            egui::Stroke::new(1.0, col32),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                }
+                c0pl4nd_core::config::CursorStyle::Bar => {
+                    let bar = egui::Rect::from_min_size(cell_min, egui::vec2(2.0, ch));
+                    painter.rect_filled(bar, 0.0, col32);
+                }
+                c0pl4nd_core::config::CursorStyle::Underline => {
+                    let under = egui::Rect::from_min_size(
+                        cell_min + egui::vec2(0.0, ch - 2.0),
+                        egui::vec2(cw, 2.0),
+                    );
+                    painter.rect_filled(under, 0.0, col32);
+                }
+            }
+        }
+    }
 }
 
 /// Map an `egui::Key` (+ modifiers) onto the engine-agnostic [`LogicalKey`] for
@@ -894,7 +1321,20 @@ fn load_terminal_theme(config: &c0pl4nd_core::Config) -> c0pl4nd_core::Theme {
 /// font resolves the icon codepoint. Called once at startup.
 fn install_chrome_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+    // Thin = the default chrome icon weight (registered as "phosphor").
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Thin);
+    // Fill = SOLID glyphs, registered under a SEPARATE family so most icons stay
+    // thin but a pinned tab can show a solid pin (`add_to_fonts` always uses the
+    // "phosphor" key, so a second call would overwrite Thin with Fill). Use via
+    // `RichText::new(fill_glyph).family(FontFamily::Name("phosphor-fill".into()))`.
+    fonts.font_data.insert(
+        "phosphor-fill".to_owned(),
+        egui_phosphor::Variant::Fill.font_data().into(),
+    );
+    fonts.families.insert(
+        egui::FontFamily::Name("phosphor-fill".into()),
+        vec!["phosphor-fill".to_owned()],
+    );
     // `add_to_fonts` registers the "phosphor" font_data and inserts it into the
     // Proportional family; also append it to Monospace so monospace buttons can
     // resolve the icons.
@@ -956,5 +1396,47 @@ mod tests {
         app.split(egui_tiles::LinearDir::Vertical);
         assert_eq!(app.pane_count(), grid::MAX_PANES, "cap must hold");
         assert!(app.toast.is_some());
+    }
+
+    /// Regression for "the existing terminal goes black after I close one and
+    /// open a new one". An orphaned pane (in storage but unreachable from the
+    /// tree root) is COUNTED by `pane_count` but rendered NOWHERE — i.e. black.
+    /// After close+new-terminal, EVERY pane must be reachable from the root.
+    #[test]
+    fn close_then_new_terminal_keeps_every_pane_reachable() {
+        fn reachable(tree: &egui_tiles::Tree<Pane>) -> Vec<PaneId> {
+            fn walk(tree: &egui_tiles::Tree<Pane>, id: egui_tiles::TileId, out: &mut Vec<PaneId>) {
+                match tree.tiles.get(id) {
+                    Some(egui_tiles::Tile::Pane(p)) => out.push(p.pane_id),
+                    Some(egui_tiles::Tile::Container(c)) => {
+                        for ch in c.children() {
+                            walk(tree, *ch, out);
+                        }
+                    }
+                    None => {}
+                }
+            }
+            let mut out = Vec::new();
+            if let Some(root) = tree.root {
+                walk(tree, root, &mut out);
+            }
+            out
+        }
+
+        let mut app = C0pl4ndApp::bootstrap(); // 1 pane (id 0)
+        app.new_terminal(); // → 0, 1
+        assert_eq!(app.pane_count(), 2);
+        app.close_pane(app.focused_pane); // close the new one
+        assert_eq!(app.pane_count(), 1, "back to one pane after close");
+        app.new_terminal(); // → survivor + a fresh pane
+        assert_eq!(app.pane_count(), 2, "two panes after re-adding");
+
+        let reachable = reachable(&app.grid_tree);
+        assert_eq!(
+            reachable.len(),
+            app.pane_count(),
+            "every pane must be reachable from the root after close+new (an \
+             orphaned pane renders black); reachable={reachable:?}"
+        );
     }
 }

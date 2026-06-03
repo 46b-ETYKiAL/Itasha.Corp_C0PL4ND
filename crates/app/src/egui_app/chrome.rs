@@ -29,10 +29,13 @@ pub struct ChromeActions {
     pub close_tab: Option<super::grid::PaneId>,
     /// User clicked a tab's pin; toggle this pane's pinned state.
     pub pin_tab: Option<super::grid::PaneId>,
-    /// User clicked the `+` / split-right button.
-    pub split_right: bool,
-    /// User clicked the split-down button.
-    pub split_down: bool,
+    /// User clicked the "+" new-terminal button; open a new pane (the host picks
+    /// the split direction to keep the grid balanced).
+    pub new_terminal: bool,
+    /// User picked a shell from the top-bar ▾ switcher; index into
+    /// [`super::C0pl4ndApp::shell_profiles`]. The host opens a new terminal with
+    /// that shell and makes it the active profile for the plain "+" button.
+    pub open_shell: Option<usize>,
     /// User toggled the settings window.
     pub toggle_settings: bool,
     /// User clicked a caption button (minimize / maximize / close). Routed
@@ -99,18 +102,18 @@ impl C0pl4ndApp {
                     if ui.selectable_label(selected, label).clicked() {
                         actions.focus_tab = Some(pane_id);
                     }
-                    let pin_col = if is_pinned {
-                        brand::PURPLE
+                    // Pinned → SOLID violet pin (Fill family); unpinned → thin
+                    // muted pin. The fill glyph makes "pinned" read at a glance.
+                    let pin_text = if is_pinned {
+                        RichText::new(egui_phosphor::fill::PUSH_PIN)
+                            .family(egui::FontFamily::Name("phosphor-fill".into()))
+                            .size(13.0)
+                            .color(brand::PURPLE)
                     } else {
-                        brand::MUTED
+                        RichText::new(icon::PUSH_PIN).size(13.0).color(brand::MUTED)
                     };
                     let pin = ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new(icon::PUSH_PIN).size(13.0).color(pin_col),
-                            )
-                            .frame(false),
-                        )
+                        .add(egui::Button::new(pin_text).frame(false))
                         .on_hover_text(&pin_label);
                     pin.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &pin_label)
@@ -138,21 +141,55 @@ impl C0pl4ndApp {
                 ui.separator();
             }
 
-            // new-pane (split-right) / split-down buttons.
-            if ui
-                .button(RichText::new(icon::COLUMNS).size(16.0))
-                .on_hover_text("split right (new pane)")
-                .clicked()
-            {
-                actions.split_right = true;
+            // Single "+" new-terminal button: opens a new pane and lets the host
+            // expand the grid logically (it splits the focused pane along its
+            // longer axis, keeping panes balanced — no manual direction choice).
+            // It runs the active shell profile (set via the ▾ switcher below).
+            let new_term = ui
+                .button(RichText::new(icon::PLUS).size(16.0))
+                .on_hover_text(format!("new terminal ({})", self.active_shell_label()));
+            new_term.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "new terminal")
+            });
+            if new_term.clicked() {
+                actions.new_terminal = true;
             }
-            if ui
-                .button(RichText::new(icon::ROWS).size(16.0))
-                .on_hover_text("split down")
-                .clicked()
-            {
-                actions.split_down = true;
-            }
+
+            // Shell switcher (▾): lists the shells detected on this machine.
+            // Picking one opens a new terminal running it AND makes it the active
+            // profile for the plain "+" button — the Windows-Terminal "+ ▾"
+            // profile pattern. This is the user's "run things other than
+            // PowerShell — an easy switch in the top bar" affordance.
+            let menu = ui.menu_button(
+                RichText::new(format!("{} ▾", icon::TERMINAL_WINDOW)).size(13.0),
+                |ui| {
+                    ui.label(RichText::new("Open a new terminal with…").weak().small());
+                    ui.separator();
+                    let active = self.active_shell_label().to_owned();
+                    for (i, profile) in self.shell_profiles().iter().enumerate() {
+                        let mut label = profile.label.clone();
+                        if profile.label == active {
+                            label.push_str("  ✓");
+                        }
+                        let item = ui.button(&label);
+                        item.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                format!("open shell {}", profile.label),
+                            )
+                        });
+                        if item.clicked() {
+                            actions.open_shell = Some(i);
+                        }
+                    }
+                },
+            );
+            menu.response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "shell menu")
+            });
+            menu.response
+                .on_hover_text("Choose which shell new terminals run");
 
             // ---- right-pinned caption cluster ----
             // Placed at ABSOLUTE rects via `ui.put`. Every layout-flow attempt
@@ -224,6 +261,12 @@ impl C0pl4ndApp {
             ui.separator();
             ui.label(
                 RichText::new("C0PL4ND — local-first terminal")
+                    .color(brand::FG)
+                    .weak(),
+            );
+            ui.separator();
+            ui.label(
+                RichText::new("Ctrl+Shift+P: commands")
                     .color(brand::FG)
                     .weak(),
             );

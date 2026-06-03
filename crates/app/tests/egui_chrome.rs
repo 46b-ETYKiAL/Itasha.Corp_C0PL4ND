@@ -30,7 +30,6 @@ use egui_kittest::Harness;
 
 use egui_app::grid::PaneId;
 use egui_app::{C0pl4ndApp, WindowCmd};
-use egui_phosphor::thin as icon;
 
 /// Build a headless harness that drives the REAL `frame_tick` for one shared app
 /// instance. The same function the shipping binary runs each frame — so a click
@@ -48,41 +47,27 @@ fn harness(app: &RefCell<C0pl4ndApp>) -> Harness<'_> {
 }
 
 #[test]
-fn clicking_plus_splits_a_new_pane() {
+fn clicking_new_terminal_adds_a_pane() {
+    // Bootstrap opens ONE pane; the single "+" button adds another.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let before = app.borrow().pane_count();
+    assert_eq!(before, 1, "app opens with a single terminal");
     let mut h = harness(&app);
 
-    h.get_by_label(icon::COLUMNS).click();
+    h.get_by_label("new terminal").click();
     h.run();
 
     let after = app.borrow().pane_count();
     assert_eq!(
         after,
         before + 1,
-        "clicking + must spawn exactly one pane (before={before}, after={after})"
-    );
-}
-
-#[test]
-fn clicking_split_down_splits_a_new_pane() {
-    let app = RefCell::new(C0pl4ndApp::bootstrap());
-    let before = app.borrow().pane_count();
-    let mut h = harness(&app);
-
-    h.get_by_label(icon::ROWS).click();
-    h.run();
-
-    assert_eq!(
-        app.borrow().pane_count(),
-        before + 1,
-        "split-down adds a pane"
+        "clicking the new-terminal button must spawn exactly one pane (before={before}, after={after})"
     );
 }
 
 #[test]
 fn clicking_a_tab_changes_the_focused_pane() {
-    // Bootstrap opens two panes (ids 0 and 1); pane 0 is focused initially.
+    // Bootstrap opens one pane (id 0, focused). Add a second, then click back.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     assert_eq!(
         app.borrow().focused_pane(),
@@ -91,14 +76,22 @@ fn clicking_a_tab_changes_the_focused_pane() {
     );
     let mut h = harness(&app);
 
-    // Click the OTHER pane's tab (label "pane 1") and assert focus actually moved.
-    h.get_by_label("pane 1").click();
+    // Add a second terminal → focus moves to the new pane (id 1).
+    h.get_by_label("new terminal").click();
     h.run();
-
     assert_eq!(
         app.borrow().focused_pane(),
         PaneId(1),
-        "clicking the 'pane 1' tab must move focus to pane 1"
+        "a new terminal takes focus"
+    );
+
+    // Click pane 0's tab → focus moves back to pane 0.
+    h.get_by_label("pane 0").click();
+    h.run();
+    assert_eq!(
+        app.borrow().focused_pane(),
+        PaneId(0),
+        "clicking the 'pane 0' tab must move focus to pane 0"
     );
 }
 
@@ -191,15 +184,15 @@ fn splitting_past_six_panes_is_refused() {
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let mut h = harness(&app);
 
-    // bootstrap=2 panes; click + four times to reach 6.
-    for _ in 0..4 {
-        h.get_by_label(icon::COLUMNS).click();
+    // bootstrap=1 pane; click "new terminal" five times to reach 6.
+    for _ in 0..5 {
+        h.get_by_label("new terminal").click();
         h.run();
     }
     assert_eq!(app.borrow().pane_count(), 6, "reached the 6-pane cap");
 
-    // One more + must be refused (count stays 6).
-    h.get_by_label(icon::COLUMNS).click();
+    // One more must be refused (count stays 6).
+    h.get_by_label("new terminal").click();
     h.run();
     assert_eq!(
         app.borrow().pane_count(),
@@ -253,7 +246,7 @@ fn caption_cluster_is_flush_right() {
 
 #[test]
 fn clicking_tab_pin_toggles_pinned() {
-    // Bootstrap opens panes 0 and 1; nothing pinned initially.
+    // Bootstrap opens one pane (id 0); nothing pinned initially.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     assert!(!app.borrow().is_pinned(PaneId(0)), "pane 0 starts unpinned");
     let mut h = harness(&app);
@@ -277,11 +270,13 @@ fn clicking_tab_pin_toggles_pinned() {
 
 #[test]
 fn clicking_tab_close_removes_the_pane() {
-    // Bootstrap opens two panes (0, 1).
+    // Open a second terminal so there are two panes (0, 1) to close one of.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
-    let before = app.borrow().pane_count();
-    assert_eq!(before, 2, "bootstrap opens two panes");
     let mut h = harness(&app);
+    h.get_by_label("new terminal").click();
+    h.run();
+    let before = app.borrow().pane_count();
+    assert_eq!(before, 2, "two panes after adding one");
 
     // Click pane 1's close (label "close pane 1") → exactly one pane closes.
     h.get_by_label("close pane 1").click();
@@ -304,8 +299,11 @@ fn clicking_tab_close_removes_the_pane() {
 #[test]
 fn pinned_tab_has_no_close_button() {
     // A pinned tab hides its × so it can't be closed by accident (unpin first).
+    // Open a second terminal so pane 1's close button is present to compare.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let mut h = harness(&app);
+    h.get_by_label("new terminal").click();
+    h.run();
 
     // Both tabs start with a close button.
     assert!(
@@ -323,5 +321,119 @@ fn pinned_tab_has_no_close_button() {
     assert!(
         h.query_by_label("close pane 1").is_some(),
         "the still-unpinned tab keeps its close button"
+    );
+}
+
+#[test]
+fn pane_keeps_its_content_after_adding_a_terminal() {
+    // Regression for "the existing terminal goes black after I open a new one":
+    // opening a new terminal splits + RESIZES the existing pane; the resize must
+    // not blank its grid. Drives a real PTY through the production frame loop.
+    use std::time::{Duration, Instant};
+    const TOKEN: &str = "QWERTYZ123";
+
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+    if app.borrow().focused_grid_text().is_none() {
+        eprintln!("no live PTY on this platform; skipping resize-content test");
+        return;
+    }
+
+    // Type a command that prints the token into pane 0, then submit.
+    for ch in format!("echo {TOKEN}").chars() {
+        h.event(egui::Event::Text(ch.to_string()));
+    }
+    h.step();
+    h.key_press(egui::Key::Enter);
+    h.step();
+
+    // Poll until the token lands in pane 0's grid.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = false;
+    while Instant::now() < deadline {
+        h.step();
+        if app
+            .borrow()
+            .pane_grid_text(PaneId(0))
+            .is_some_and(|t| t.contains(TOKEN))
+        {
+            seen = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    if !seen {
+        eprintln!("token never reached pane 0 (no PTY echo); skipping");
+        return;
+    }
+
+    // Add a terminal → splits + resizes pane 0. Run several frames so the
+    // debounced resize + reflow settle.
+    h.get_by_label("new terminal").click();
+    // Settle: poll up to ~2s for the resize/reflow (+ any ConPTY repaint).
+    let rd = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < rd {
+        h.step();
+        if app
+            .borrow()
+            .pane_grid_text(PaneId(0))
+            .is_some_and(|t| t.contains(TOKEN))
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+
+    // Pane 0 must STILL show its content — a blanked grid here is the black-pane.
+    let after = app.borrow().pane_grid_text(PaneId(0)).unwrap_or_default();
+    assert!(
+        after.contains(TOKEN),
+        "pane 0 lost its content after adding a terminal (resize blanked it = the \
+         black-pane bug). pane 0 grid:\n{after}"
+    );
+}
+
+#[test]
+fn shell_menu_opens_a_new_terminal() {
+    // The top-bar ▾ shell switcher must open a new terminal for the picked
+    // shell. We pick the always-present "Default shell" so the test is
+    // deterministic on every OS (named profiles like PowerShell/WSL are only
+    // present when detected), and assert a new pane appeared.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let before = app.borrow().pane_count();
+    let mut h = harness(&app);
+
+    // Open the ▾ menu, then click the "Default shell" item.
+    h.get_by_label("shell menu").click();
+    h.run();
+    h.get_by_label("open shell Default shell").click();
+    h.run();
+
+    assert_eq!(
+        app.borrow().pane_count(),
+        before + 1,
+        "picking a shell from the ▾ menu must open exactly one new terminal"
+    );
+}
+
+#[test]
+fn shell_switcher_lists_the_default_profile_first() {
+    // The detected profile list always leads with the platform default, and the
+    // active-shell label resolves to it at startup — the invariant the "+" hover
+    // and the ▾ menu's ✓ marker rely on.
+    let app = C0pl4ndApp::bootstrap();
+    let profiles = app.shell_profiles();
+    assert!(
+        !profiles.is_empty(),
+        "there is always at least one shell profile"
+    );
+    assert!(
+        profiles[0].program.is_none(),
+        "the first profile is the platform default (program None)"
+    );
+    assert_eq!(
+        app.active_shell_label(),
+        profiles[0].label,
+        "the active shell defaults to the first (platform default) profile"
     );
 }

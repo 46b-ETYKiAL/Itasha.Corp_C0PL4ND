@@ -47,7 +47,7 @@ eframe = { version = "0.34", default-features = false, features = [
 egui = "0.34"
 egui-wgpu = "0.34"
 egui_tiles = "0.15"
-egui-phosphor = { version = "0.12", default-features = false, features = ["thin"] }
+egui-phosphor = { version = "0.12", default-features = false, features = ["thin", "fill"] }
 window-vibrancy = "0.7"
 
 [profile.release]

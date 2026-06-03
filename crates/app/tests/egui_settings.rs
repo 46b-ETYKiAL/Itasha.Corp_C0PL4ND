@@ -278,3 +278,50 @@ fn searching_reveals_a_setting_from_another_category() {
          clicking the filtered Blink toggle must flip the live config"
     );
 }
+
+#[test]
+fn clicking_the_close_button_dismisses_settings() {
+    // The in-content Close ✕ (added after the "can't close it" report — the
+    // title-bar ✕ reads low-contrast against the dark frame) must actually
+    // dismiss the window: open settings, click the labelled close, assert the
+    // live `settings_open` flag flipped to false.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    open_settings(&mut h);
+    assert!(
+        app.borrow().settings_is_open(),
+        "precondition: settings open"
+    );
+
+    h.get_by_label("close settings").click();
+    h.run();
+
+    assert!(
+        !app.borrow().settings_is_open(),
+        "clicking the in-content Close ✕ must dismiss the settings window"
+    );
+}
+
+#[test]
+fn pressing_escape_dismisses_settings() {
+    // Esc is the conventional overlay-dismiss key; the window must honour it.
+    // (Guards the `.anchor()`-free, `default_pos` window: an earlier anchored
+    // window could not be moved OR reliably dismissed.)
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    open_settings(&mut h);
+    assert!(
+        app.borrow().settings_is_open(),
+        "precondition: settings open"
+    );
+
+    h.key_press(egui::Key::Escape);
+    h.run();
+
+    assert!(
+        !app.borrow().settings_is_open(),
+        "pressing Escape must dismiss the settings window"
+    );
+}
