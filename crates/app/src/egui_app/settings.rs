@@ -27,7 +27,7 @@ use eframe::egui;
 use c0pl4nd_core::config::CursorStyle;
 use c0pl4nd_core::Config;
 
-use super::theme;
+use super::theme::ChromeColors;
 
 /// Left-nav categories, in display order. Each maps to a section rendered by
 /// [`render_sections`].
@@ -136,7 +136,12 @@ fn help(ui: &mut egui::Ui, text: &str) {
 /// Render the settings window. `open` is toggled false when the user closes it
 /// (via the egui Window's built-in ✕). Returns the [`Outcome`] for this frame so
 /// the host can persist + re-apply the theme.
-pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> Outcome {
+pub fn show(
+    ctx: &egui::Context,
+    config: &mut Config,
+    open: &mut bool,
+    colors: ChromeColors,
+) -> Outcome {
     let mut changed = false;
     let mut keep_open = *open;
 
@@ -184,7 +189,7 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> Outcom
         .movable(true)
         .fixed_size(win_size)
         .default_pos(default_pos)
-        .frame(egui::Frame::window(&ctx.global_style()).fill(theme::brand::PANEL))
+        .frame(egui::Frame::window(&ctx.global_style()).fill(colors.panel))
         .show(ctx, |ui| {
             // In-content header: title + an unmissable Close ✕. The egui
             // title-bar ✕ can read as low-contrast against the dark custom
@@ -192,7 +197,7 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> Outcom
             // always-visible dismiss. Fixed-height — it does not eat the scroll
             // area's fill below.
             ui.horizontal(|ui| {
-                ui.heading(egui::RichText::new("Settings").color(theme::brand::GREEN));
+                ui.heading(egui::RichText::new("Settings").color(colors.accent));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let close = ui
                         .button(egui::RichText::new(egui_phosphor::thin::X).size(16.0))

@@ -304,6 +304,47 @@ fn clicking_the_close_button_dismisses_settings() {
 }
 
 #[test]
+fn picking_a_light_theme_flips_the_whole_ui_light() {
+    // Whole-app theming: the chrome (titlebar / tabs / status bar / settings
+    // window / panel fills) must follow the active terminal theme. Picking a
+    // LIGHT theme (ghost-paper) must derive a LIGHT egui base; picking a DARK
+    // theme back must derive a DARK base. We drive the REAL theme picker through
+    // the real frame loop and observe `visuals_are_light()` (which recomputes
+    // the SAME `visuals_from_theme` derivation the live app applies on a theme
+    // change) — no set-then-assert tautology.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    assert!(
+        !app.borrow().visuals_are_light(),
+        "precondition: the default itasha-corp theme is DARK"
+    );
+    let mut h = harness(&app);
+
+    open_settings(&mut h);
+    select_category(&mut h, "Appearance");
+
+    // Pick the light ghost-paper theme via the real combo.
+    h.get_by_role(egui::accesskit::Role::ComboBox).click();
+    h.run();
+    h.get_by_label("ghost-paper").click();
+    h.run();
+    assert!(
+        app.borrow().visuals_are_light(),
+        "picking the light ghost-paper theme must flip the whole UI light"
+    );
+
+    // Pick a dark theme back (wired-noir) — the UI must return to a dark base,
+    // proving the derivation tracks BOTH polarities, not a one-way latch.
+    h.get_by_role(egui::accesskit::Role::ComboBox).click();
+    h.run();
+    h.get_by_label("wired-noir").click();
+    h.run();
+    assert!(
+        !app.borrow().visuals_are_light(),
+        "picking a dark theme back must flip the whole UI dark again"
+    );
+}
+
+#[test]
 fn pressing_escape_dismisses_settings() {
     // Esc is the conventional overlay-dismiss key; the window must honour it.
     // (Guards the `.anchor()`-free, `default_pos` window: an earlier anchored

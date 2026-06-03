@@ -15,7 +15,7 @@
 use egui::{RichText, Sense};
 use egui_phosphor::thin as icon;
 
-use super::theme::brand;
+use super::theme::{brand, ChromeColors};
 use super::C0pl4ndApp;
 
 /// Outcome of one chrome frame — the actions the user requested via the chrome
@@ -48,8 +48,15 @@ pub struct ChromeActions {
 
 impl C0pl4ndApp {
     /// Paint the titlebar (wordmark + tab strip + caption controls). Returns the
-    /// actions the host should apply this frame.
-    pub(super) fn titlebar_and_tabs(&self, ui: &mut egui::Ui) -> ChromeActions {
+    /// actions the host should apply this frame. `colors` carries the
+    /// theme-derived chrome palette so the tab text / caption glyphs / accents
+    /// follow the active terminal theme (the two-tone C0PL4ND wordmark keeps its
+    /// fixed brand accent — the brand identity).
+    pub(super) fn titlebar_and_tabs(
+        &self,
+        ui: &mut egui::Ui,
+        colors: ChromeColors,
+    ) -> ChromeActions {
         let mut actions = ChromeActions::default();
         // One left→right row: the LEFT content (wordmark + tabs + split buttons)
         // flows normally; the caption cluster is then placed at absolute rects
@@ -95,9 +102,9 @@ impl C0pl4ndApp {
                     // Tight spacing INSIDE a tab so title/pin/× read as one unit.
                     ui.spacing_mut().item_spacing.x = 3.0;
                     let label = RichText::new(&title).color(if selected {
-                        brand::GREEN
+                        colors.accent
                     } else {
-                        brand::FG
+                        colors.fg
                     });
                     if ui.selectable_label(selected, label).clicked() {
                         actions.focus_tab = Some(pane_id);
@@ -110,7 +117,7 @@ impl C0pl4ndApp {
                             .size(13.0)
                             .color(brand::PURPLE)
                     } else {
-                        RichText::new(icon::PUSH_PIN).size(13.0).color(brand::MUTED)
+                        RichText::new(icon::PUSH_PIN).size(13.0).color(colors.muted)
                     };
                     let pin = ui
                         .add(egui::Button::new(pin_text).frame(false))
@@ -125,7 +132,7 @@ impl C0pl4ndApp {
                         let close = ui
                             .add(
                                 egui::Button::new(
-                                    RichText::new(icon::X).size(13.0).color(brand::MUTED),
+                                    RichText::new(icon::X).size(13.0).color(colors.muted),
                                 )
                                 .frame(false),
                             )
@@ -228,7 +235,7 @@ impl C0pl4ndApp {
                 let resp = ui
                     .put(
                         rect,
-                        egui::Button::new(RichText::new(glyph).size(16.0).color(brand::MUTED)),
+                        egui::Button::new(RichText::new(glyph).size(16.0).color(colors.muted)),
                     )
                     .on_hover_text(hover);
                 // Accessible label (for screen readers AND the `get_by_label`
@@ -250,29 +257,30 @@ impl C0pl4ndApp {
         actions
     }
 
-    /// Paint the bottom status bar — pane count + a brand-tinted hint.
-    pub(super) fn status_bar(&self, ui: &mut egui::Ui) {
+    /// Paint the bottom status bar — pane count + a theme-tinted hint. `colors`
+    /// carries the theme-derived palette so the bar follows the active theme.
+    pub(super) fn status_bar(&self, ui: &mut egui::Ui, colors: ChromeColors) {
         ui.horizontal(|ui| {
             let panes = super::grid::count_panes(&self.grid_tree);
             ui.label(
                 RichText::new(format!("{panes}/{} panes", super::grid::MAX_PANES))
-                    .color(brand::GREEN),
+                    .color(colors.accent),
             );
             ui.separator();
             ui.label(
                 RichText::new("C0PL4ND — local-first terminal")
-                    .color(brand::FG)
+                    .color(colors.fg)
                     .weak(),
             );
             ui.separator();
             ui.label(
                 RichText::new("Ctrl+Shift+P: commands")
-                    .color(brand::FG)
+                    .color(colors.fg)
                     .weak(),
             );
             if let Some(toast) = &self.toast {
                 ui.separator();
-                ui.label(RichText::new(toast).color(brand::PURPLE));
+                ui.label(RichText::new(toast).color(colors.accent));
             }
         });
     }
