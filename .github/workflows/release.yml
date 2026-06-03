@@ -63,7 +63,7 @@ jobs:
 
       - name: Checkout
         # actions/checkout@v4.2.2
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
 
@@ -203,7 +203,7 @@ jobs:
 
       - name: Checkout
         # actions/checkout@v4.2.2
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
 
@@ -279,12 +279,12 @@ jobs:
         with:
           egress-policy: audit
       - name: Checkout C0PL4ND (assets + licenses)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           path: app
           persist-credentials: false
       - name: Checkout installer framework (F0RG3-W1R3)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           repository: 46b-ETYKiAL/Itasha.Corp_F0RG3-W1R3
           path: framework
