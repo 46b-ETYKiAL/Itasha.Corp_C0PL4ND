@@ -12,6 +12,7 @@
 //! buttons use Phosphor glyphs via `ui.button` so they self-size and never fall
 //! back to tofu.
 
+use c0pl4nd_core::term::MouseMode;
 use egui::{RichText, Sense};
 use egui_phosphor::thin as icon;
 
@@ -278,10 +279,63 @@ impl C0pl4ndApp {
                     .color(colors.fg)
                     .weak(),
             );
+            // Mouse-reporting badge: when the FOCUSED pane's TUI has grabbed the
+            // mouse (DEC ?1000/?1002/?1003), show a small badge so the user can
+            // see why their clicks/scroll go to the app instead of the terminal.
+            // Hidden entirely when reporting is Off (the common case).
+            if let Some(term) = self.terms.get(&self.focused_pane) {
+                let mode = term.mouse_mode();
+                if let Some(label) = mouse_mode_badge_label(mode) {
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!("{} {label}", icon::MOUSE_SIMPLE))
+                            .color(colors.accent),
+                    )
+                    .on_hover_text(
+                        "The focused application has enabled mouse reporting \
+                         (clicks and scroll are sent to the program).",
+                    );
+                }
+            }
             if let Some(toast) = &self.toast {
                 ui.separator();
                 ui.label(RichText::new(toast).color(colors.accent));
             }
         });
+    }
+}
+
+/// The status-bar badge label for a mouse-reporting mode, or `None` when mouse
+/// reporting is [`MouseMode::Off`] (no badge shown). Kept as a free function so
+/// the badge-visibility logic is unit-testable without an egui `Ui`.
+fn mouse_mode_badge_label(mode: MouseMode) -> Option<&'static str> {
+    match mode {
+        MouseMode::Off => None,
+        MouseMode::Normal => Some("MOUSE"),
+        MouseMode::ButtonEvent => Some("MOUSE: BTN"),
+        MouseMode::AnyEvent => Some("MOUSE: ANY"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mouse_mode_badge_hidden_when_off() {
+        assert_eq!(mouse_mode_badge_label(MouseMode::Off), None);
+    }
+
+    #[test]
+    fn mouse_mode_badge_shown_when_reporting() {
+        assert_eq!(mouse_mode_badge_label(MouseMode::Normal), Some("MOUSE"));
+        assert_eq!(
+            mouse_mode_badge_label(MouseMode::ButtonEvent),
+            Some("MOUSE: BTN")
+        );
+        assert_eq!(
+            mouse_mode_badge_label(MouseMode::AnyEvent),
+            Some("MOUSE: ANY")
+        );
     }
 }

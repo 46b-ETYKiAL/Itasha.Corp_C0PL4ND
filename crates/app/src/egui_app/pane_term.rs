@@ -21,7 +21,7 @@
 //! simulated input — which is exactly the "typing reaches the PTY and the grid
 //! updates" class of bug Milestone 2 must guard against.
 
-use c0pl4nd_core::term::{encode_key, KeyModifiers, LogicalKey};
+use c0pl4nd_core::term::{encode_key, KeyModifiers, LogicalKey, MouseMode};
 use c0pl4nd_core::{Session, Theme};
 
 /// A foreground colour run: a string of consecutive same-colour glyphs and the
@@ -143,6 +143,23 @@ impl PaneTerm {
             .lock()
             .map(|t| t.application_cursor_keys())
             .unwrap_or(false)
+    }
+
+    /// The terminal's active mouse-reporting mode (`?1000` / `?1002` / `?1003`),
+    /// as requested by the focused application (vim/tmux/htop grab the mouse this
+    /// way). Locks the terminal briefly, mirroring
+    /// [`app_cursor`](Self::app_cursor), and returns [`MouseMode::Off`] when there
+    /// is no live session or the lock is poisoned. Cheap and non-panicking, so it
+    /// is safe to call once per frame from the status-bar paint.
+    pub fn mouse_mode(&self) -> MouseMode {
+        let Some(session) = &self.session else {
+            return MouseMode::Off;
+        };
+        session
+            .terminal()
+            .lock()
+            .map(|t| t.mouse_mode())
+            .unwrap_or(MouseMode::Off)
     }
 
     /// Write raw bytes straight to the PTY (used for pasted text). Best-effort:
@@ -283,6 +300,17 @@ impl PaneTerm {
     pub fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
     }
+
+    /// Test-only handle to the shared terminal, so a unit test can drive escape
+    /// sequences (e.g. `?1000h`) directly into the parser — deterministically,
+    /// without depending on the asynchronous PTY reader thread (which would make
+    /// the test flaky). Returns `None` for a failed-spawn pane.
+    #[cfg(test)]
+    fn terminal_for_test(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::Mutex<c0pl4nd_core::Terminal>>> {
+        self.session.as_ref().map(Session::terminal)
+    }
 }
 
 #[cfg(test)]
@@ -345,6 +373,44 @@ mod tests {
         assert_eq!(pane.size(), (40, 12));
         // Idempotent again.
         assert_eq!(pane.resize(40, 12), None);
+    }
+
+    /// The status-bar mouse-mode badge is driven by [`PaneTerm::mouse_mode`].
+    /// A fresh pane reports [`MouseMode::Off`] (no badge); after the focused app
+    /// enables DEC `?1000` mouse tracking the accessor must reflect it (badge
+    /// shown). Drives the shared terminal directly — deterministic, no reliance
+    /// on the async PTY reader thread.
+    #[test]
+    fn mouse_mode_reflects_terminal_state() {
+        let pane = PaneTerm::spawn(void_theme(), 80, 24);
+        // Default: no mouse reporting → no badge.
+        assert_eq!(
+            pane.mouse_mode(),
+            MouseMode::Off,
+            "a fresh pane must report MouseMode::Off (badge hidden)"
+        );
+        // If the shell could not spawn on this box, there is no terminal to
+        // drive; the Off default above is still the meaningful assertion.
+        let Some(term) = pane.terminal_for_test() else {
+            return;
+        };
+        // App enables ?1000 (normal button tracking) — the badge-trigger state.
+        term.lock().unwrap().advance(b"\x1b[?1000h");
+        assert_eq!(
+            pane.mouse_mode(),
+            MouseMode::Normal,
+            "after ?1000h the accessor must report Normal (badge shown)"
+        );
+        // ?1003 (any-event) is also a reporting mode (badge stays shown).
+        term.lock().unwrap().advance(b"\x1b[?1003h");
+        assert_eq!(pane.mouse_mode(), MouseMode::AnyEvent);
+        // App disables tracking → back to Off (badge hidden again).
+        term.lock().unwrap().advance(b"\x1b[?1003l");
+        assert_eq!(
+            pane.mouse_mode(),
+            MouseMode::Off,
+            "after ?1003l the accessor must report Off (badge hidden)"
+        );
     }
 
     #[test]
