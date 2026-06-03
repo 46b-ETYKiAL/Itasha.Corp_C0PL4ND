@@ -248,6 +248,78 @@ impl Theme {
             "wired-colorblind",
             include_str!("../../../../assets/themes/wired-colorblind.toml"),
         ),
+        // Ported from the SCR1B3 editor for a cohesive Itasha.Corp product
+        // family (calm-canon line).
+        (
+            "phosphor-amber",
+            include_str!("../../../../assets/themes/phosphor-amber.toml"),
+        ),
+        (
+            "lain-mauve",
+            include_str!("../../../../assets/themes/lain-mauve.toml"),
+        ),
+        (
+            "a11y-high-contrast",
+            include_str!("../../../../assets/themes/a11y-high-contrast.toml"),
+        ),
+        // itasha-neon family (brand-signature line).
+        (
+            "itasha-neon",
+            include_str!("../../../../assets/themes/itasha-neon.toml"),
+        ),
+        (
+            "itasha-neon-pastel",
+            include_str!("../../../../assets/themes/itasha-neon-pastel.toml"),
+        ),
+        (
+            "itasha-neon-soft",
+            include_str!("../../../../assets/themes/itasha-neon-soft.toml"),
+        ),
+        (
+            "itasha-neon-night",
+            include_str!("../../../../assets/themes/itasha-neon-night.toml"),
+        ),
+        (
+            "itasha-neon-dawn",
+            include_str!("../../../../assets/themes/itasha-neon-dawn.toml"),
+        ),
+        (
+            "itasha-neon-aurora",
+            include_str!("../../../../assets/themes/itasha-neon-aurora.toml"),
+        ),
+        // Heritage-alt influence palettes.
+        (
+            "geocities-bbs",
+            include_str!("../../../../assets/themes/geocities-bbs.toml"),
+        ),
+        (
+            "lain-wired",
+            include_str!("../../../../assets/themes/lain-wired.toml"),
+        ),
+        (
+            "kusanagi-dive",
+            include_str!("../../../../assets/themes/kusanagi-dive.toml"),
+        ),
+        (
+            "akira-redshift",
+            include_str!("../../../../assets/themes/akira-redshift.toml"),
+        ),
+        (
+            "atompunk-sodium",
+            include_str!("../../../../assets/themes/atompunk-sodium.toml"),
+        ),
+        (
+            "terminal-lock",
+            include_str!("../../../../assets/themes/terminal-lock.toml"),
+        ),
+        (
+            "mecha-armour",
+            include_str!("../../../../assets/themes/mecha-armour.toml"),
+        ),
+        (
+            "shutoko-night",
+            include_str!("../../../../assets/themes/shutoko-night.toml"),
+        ),
     ];
 
     /// Resolve a compiled-in theme by its config name. Returns `None` for an

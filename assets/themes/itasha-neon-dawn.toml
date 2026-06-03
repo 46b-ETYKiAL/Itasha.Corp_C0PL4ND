@@ -1,0 +1,31 @@
+# Itasha Neon Dawn — ported from the SCR1B3 editor (brand-signature line).
+# The neon line ported to a light appearance; daytime partner. WCAG AAA body.
+name = "Itasha Neon Dawn"
+author = "Itasha.Corp"
+
+background = "#fafbfd"
+foreground = "#0e1014"
+cursor = "#0a90a0"
+cursor_text = "#fafbfd"
+selection_background = "#cfe7eb"
+selection_foreground = "#0e1014"
+
+[normal]
+black = "#0e1014"
+red = "#c41e14"
+green = "#1f7a44"
+yellow = "#a67012"
+blue = "#1f28b8"
+magenta = "#a01080"
+cyan = "#0a90a0"
+white = "#5a6068"
+
+[bright]
+black = "#2a2c30"
+red = "#c5174f"
+green = "#2a8a14"
+yellow = "#8a5a00"
+blue = "#4825c0"
+magenta = "#c0188c"
+cyan = "#0c7484"
+white = "#8a909a"

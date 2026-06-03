@@ -1,0 +1,31 @@
+# Terminal Lock — ported from the SCR1B3 editor (heritage-alt line).
+# Tektronix 4014 / Hercules green-phosphor heritage: terminal-green on black.
+name = "Terminal Lock"
+author = "Itasha.Corp"
+
+background = "#000000"
+foreground = "#33ff66"
+cursor = "#33ff66"
+cursor_text = "#000000"
+selection_background = "#0a3a1f"
+selection_foreground = "#33ff66"
+
+[normal]
+black = "#020602"
+red = "#ff3030"
+green = "#33ff66"
+yellow = "#ffaa00"
+blue = "#33ff66"
+magenta = "#80ff80"
+cyan = "#00e0d0"
+white = "#bbffbb"
+
+[bright]
+black = "#0a4a1f"
+red = "#ff6060"
+green = "#80ff80"
+yellow = "#ffd050"
+blue = "#80ff80"
+magenta = "#a0ffa0"
+cyan = "#5cf0e0"
+white = "#e0ffe0"

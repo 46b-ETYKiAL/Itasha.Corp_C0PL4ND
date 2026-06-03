@@ -1,0 +1,31 @@
+# Mecha Armour — ported from the SCR1B3 editor (heritage-alt line).
+# Gundam RX-78-2 Federation colour-spec: white/blue/red/yellow on graphite.
+name = "Mecha Armour"
+author = "Itasha.Corp"
+
+background = "#0a0c10"
+foreground = "#e0e4ec"
+cursor = "#a8b0c0"
+cursor_text = "#0a0c10"
+selection_background = "#202732"
+selection_foreground = "#e0e4ec"
+
+[normal]
+black = "#14181f"
+red = "#c41028"
+green = "#588048"
+yellow = "#f0c020"
+blue = "#0040a8"
+magenta = "#4a6ab8"
+cyan = "#a8b0c0"
+white = "#dce4ec"
+
+[bright]
+black = "#3a4250"
+red = "#e84050"
+green = "#7aa068"
+yellow = "#ffd850"
+blue = "#3a6ad0"
+magenta = "#7a90d0"
+cyan = "#c0c8d4"
+white = "#ffffff"

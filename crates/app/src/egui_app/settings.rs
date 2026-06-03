@@ -52,6 +52,26 @@ const BUILTIN_THEMES: &[&str] = &[
     "ghost-paper",
     "wired-noir",
     "wired-colorblind",
+    // Ported from the SCR1B3 editor (calm-canon line).
+    "phosphor-amber",
+    "lain-mauve",
+    "a11y-high-contrast",
+    // itasha-neon family (brand-signature line).
+    "itasha-neon",
+    "itasha-neon-pastel",
+    "itasha-neon-soft",
+    "itasha-neon-night",
+    "itasha-neon-dawn",
+    "itasha-neon-aurora",
+    // Heritage-alt influence palettes.
+    "geocities-bbs",
+    "lain-wired",
+    "kusanagi-dive",
+    "akira-redshift",
+    "atompunk-sodium",
+    "terminal-lock",
+    "mecha-armour",
+    "shutoko-night",
 ];
 
 /// What [`show`] reports back to the host after a frame.

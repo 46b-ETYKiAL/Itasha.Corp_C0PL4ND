@@ -1,0 +1,32 @@
+# Lain Wired — ported from the SCR1B3 editor (heritage-alt line).
+# Serial Experiments Lain (the Wired): deep violet-black, mauve system voice,
+# copper-circuit warning. Sister to (and distinct from) Lain Mauve.
+name = "Lain Wired"
+author = "Itasha.Corp"
+
+background = "#080614"
+foreground = "#bcb8e5"
+cursor = "#8c6cd0"
+cursor_text = "#080614"
+selection_background = "#1c1830"
+selection_foreground = "#bcb8e5"
+
+[normal]
+black = "#100c1f"
+red = "#ff3b30"
+green = "#7a9ec4"
+yellow = "#c89a4e"
+blue = "#6c80b4"
+magenta = "#8c6cd0"
+cyan = "#a0a8d4"
+white = "#bcb8e5"
+
+[bright]
+black = "#5a527a"
+red = "#ff5c52"
+green = "#9cb4d8"
+yellow = "#dcb46e"
+blue = "#8c9cd0"
+magenta = "#b09ce8"
+cyan = "#c4a890"
+white = "#d8d4f0"

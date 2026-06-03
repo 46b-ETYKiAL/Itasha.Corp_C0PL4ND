@@ -1,0 +1,32 @@
+# Akira Redshift — ported from the SCR1B3 editor (heritage-alt line).
+# Akira (1988), Neo-Tokyo. OPT-IN ONLY: red-as-system-voice is a documented
+# exception to the alarm-only-red discipline (Akira IS red).
+name = "Akira Redshift"
+author = "Itasha.Corp"
+
+background = "#08060c"
+foreground = "#f0d8c0"
+cursor = "#ff2030"
+cursor_text = "#08060c"
+selection_background = "#2c1622"
+selection_foreground = "#f0d8c0"
+
+[normal]
+black = "#1a0a14"
+red = "#ff2030"
+green = "#3aafc8"
+yellow = "#ff9c3c"
+blue = "#3aafc8"
+magenta = "#ff649c"
+cyan = "#3aafc8"
+white = "#f0d8c0"
+
+[bright]
+black = "#5a3a4a"
+red = "#ff647c"
+green = "#5cc8e0"
+yellow = "#ffe648"
+blue = "#5cc8e0"
+magenta = "#ff8cb4"
+cyan = "#5cc8e0"
+white = "#fff0e0"

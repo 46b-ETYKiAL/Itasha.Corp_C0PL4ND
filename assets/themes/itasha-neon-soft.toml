@@ -1,0 +1,31 @@
+# Itasha Neon Soft — ported from the SCR1B3 editor (brand-signature line).
+# ~60% chroma; sits between the full neon and the pastel variants.
+name = "Itasha Neon Soft"
+author = "Itasha.Corp"
+
+background = "#070710"
+foreground = "#e8e8f0"
+cursor = "#5cffe5"
+cursor_text = "#070710"
+selection_background = "#191926"
+selection_foreground = "#e8e8f0"
+
+[normal]
+black = "#10101c"
+red = "#ff5a55"
+green = "#5cff9c"
+yellow = "#f2c068"
+blue = "#5560e8"
+magenta = "#e25cc4"
+cyan = "#5cffe5"
+white = "#e8e8f0"
+
+[bright]
+black = "#444452"
+red = "#ff7a78"
+green = "#62e85a"
+yellow = "#f7d094"
+blue = "#8b5cff"
+magenta = "#ff5a8c"
+cyan = "#8cfff0"
+white = "#ffffff"

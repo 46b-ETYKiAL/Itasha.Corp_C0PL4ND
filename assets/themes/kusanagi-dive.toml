@@ -1,0 +1,31 @@
+# Kusanagi Dive — ported from the SCR1B3 editor (heritage-alt line).
+# Ghost in the Shell (1995): cyan-on-deep-marine dive-sequence palette.
+name = "Kusanagi Dive"
+author = "Itasha.Corp"
+
+background = "#020a14"
+foreground = "#9ec8e0"
+cursor = "#34dce0"
+cursor_text = "#020a14"
+selection_background = "#0c1c30"
+selection_foreground = "#9ec8e0"
+
+[normal]
+black = "#06121f"
+red = "#e8483a"
+green = "#34e0a0"
+yellow = "#ffa848"
+blue = "#5e94c4"
+magenta = "#7eb8d8"
+cyan = "#34dce0"
+white = "#9ec8e0"
+
+[bright]
+black = "#324452"
+red = "#ff6a5a"
+green = "#5cf0c0"
+yellow = "#ffc070"
+blue = "#7eb0d8"
+magenta = "#9ec0d4"
+cyan = "#5cf0f0"
+white = "#c4e0f0"

@@ -1,0 +1,32 @@
+# Geocities BBS — ported from the SCR1B3 editor (heritage-alt line).
+# Web 1.0 16-colour cohort: hyperlink-blue accent, construction-yellow body
+# text on navy. Camp slot — a sticker, not for long sessions.
+name = "Geocities BBS"
+author = "Itasha.Corp"
+
+background = "#000080"
+foreground = "#ffff00"
+cursor = "#00ffff"
+cursor_text = "#000080"
+selection_background = "#1a1a9a"
+selection_foreground = "#ffff00"
+
+[normal]
+black = "#0a0a8c"
+red = "#ff0000"
+green = "#00aa00"
+yellow = "#ffaa00"
+blue = "#5050ff"
+magenta = "#9020a0"
+cyan = "#00ffff"
+white = "#aaaaaa"
+
+[bright]
+black = "#1a1a9a"
+red = "#ff5050"
+green = "#50ff50"
+yellow = "#ffd050"
+blue = "#7070ff"
+magenta = "#c050d0"
+cyan = "#80ffff"
+white = "#ffffff"
