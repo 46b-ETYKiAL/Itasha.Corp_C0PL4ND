@@ -38,7 +38,12 @@ const CATEGORIES: &[&str] = &[
     "Terminal",
     "Window",
     "Keybindings",
+    "Updates",
 ];
+
+/// The release channels the Updates section offers. Mirrors the channels the
+/// `c0pl4nd update` checker understands; a free choice list, not invented.
+const UPDATE_CHANNELS: &[&str] = &["stable", "beta", "nightly"];
 
 /// The terminal color themes that ship in `assets/themes/` (file stems). The
 /// theme combo offers these built-ins; a free text field below it accepts any
@@ -519,7 +524,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         sel,
         q,
         "Font",
-        &["family", "size", "line height", "ligatures"],
+        &["family", "size", "line height", "ligatures", "fallback"],
     ) {
         ui.heading("Font");
         help(ui, "Typeface, size, and text shaping.");
@@ -567,6 +572,38 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     .on_hover_text("Advanced text shaping; may break strict monospace alignment.")
                     .changed();
                 changed |= reset_to_default(ui, &mut config.ligatures, &def.ligatures);
+                ui.end_row();
+            }
+
+            // Ordered fallback families for glyphs the primary font lacks (CJK,
+            // Arabic, emoji). Edited as a comma-separated list and round-tripped
+            // to the `Vec<String>` config field — empty entries are dropped so a
+            // trailing comma never creates a blank family. Takes effect on the
+            // next launch (the renderer builds its font stack at startup), so the
+            // hover text says so.
+            if row_visible(q, "fallback fonts families cjk polyglot") {
+                ui.label("Fallback fonts").on_hover_text(
+                    "Comma-separated fallback families for glyphs the primary font \
+                     lacks (CJK, Arabic, emoji). Applies on restart.",
+                );
+                let mut joined = config.font.fallback.join(", ");
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut joined)
+                            .hint_text("Noto Sans JP, monospace")
+                            .desired_width(200.0),
+                    )
+                    .on_hover_text("Applies on the next launch.")
+                    .changed()
+                {
+                    config.font.fallback = joined
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    changed = true;
+                }
+                changed |= reset_to_default(ui, &mut config.font.fallback, &def.font.fallback);
                 ui.end_row();
             }
         });
@@ -703,11 +740,12 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
     }
 
     // -------------------------------------------------------------------- Window
-    if section_visible(sel, q, "Window", &["padding"]) {
+    if section_visible(sel, q, "Window", &["padding", "columns", "rows"]) {
         ui.heading("Window");
         help(
             ui,
-            "Inner padding. Geometry (size/position) is remembered automatically.",
+            "Inner padding and the initial grid size. Live size/position is \
+             remembered automatically.",
         );
         grid("window_grid").show(ui, |ui| {
             if row_visible(q, "padding inner margin") {
@@ -720,6 +758,45 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     )
                     .changed();
                 changed |= reset_to_default(ui, &mut config.window.padding, &def.window.padding);
+                ui.end_row();
+            }
+
+            // Initial terminal grid width at launch. The live window size is
+            // remembered separately (geometry persistence), so this is the
+            // first-launch / no-saved-geometry size; it takes effect on restart.
+            // Floor of 1 mirrors the core validator (cols/rows must be non-zero).
+            if row_visible(q, "columns cols initial width grid size") {
+                ui.label("Initial columns").on_hover_text(
+                    "Terminal width (columns) used on first launch / when no window \
+                     size is remembered. Applies on restart.",
+                );
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut config.window.cols)
+                            .range(1..=500)
+                            .suffix(" cols"),
+                    )
+                    .on_hover_text("Applies on the next launch.")
+                    .changed();
+                changed |= reset_to_default(ui, &mut config.window.cols, &def.window.cols);
+                ui.end_row();
+            }
+
+            // Initial terminal grid height at launch (see cols above).
+            if row_visible(q, "rows initial height grid size") {
+                ui.label("Initial rows").on_hover_text(
+                    "Terminal height (rows) used on first launch / when no window \
+                     size is remembered. Applies on restart.",
+                );
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut config.window.rows)
+                            .range(1..=300)
+                            .suffix(" rows"),
+                    )
+                    .on_hover_text("Applies on the next launch.")
+                    .changed();
+                changed |= reset_to_default(ui, &mut config.window.rows, &def.window.rows);
                 ui.end_row();
             }
         });
@@ -788,6 +865,72 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         group_gap(ui);
     }
 
+    // --------------------------------------------------------------------- Updates
+    if section_visible(
+        sel,
+        q,
+        "Updates",
+        &["check on launch", "channel", "stable", "beta", "nightly"],
+    ) {
+        ui.heading("Updates");
+        help(
+            ui,
+            "Local-first: C0PL4ND never contacts the network unless you opt in here.",
+        );
+        grid("updates_grid").show(ui, |ui| {
+            // Opt-in network check. This row only writes the config flag — the
+            // updater logic itself is owned elsewhere — so toggling it persists
+            // the preference; it takes effect on the next launch's check.
+            if row_visible(q, "check on launch update network opt-in") {
+                ui.label("Check on launch").on_hover_text(
+                    "Check GitHub Releases for a newer version when C0PL4ND starts. \
+                     Off by default — the only thing that lets C0PL4ND touch the network.",
+                );
+                changed |= ui
+                    .toggle_value(
+                        &mut config.update.check_on_launch,
+                        "Check for updates on launch",
+                    )
+                    .on_hover_text("Applies on the next launch.")
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.update.check_on_launch,
+                    &def.update.check_on_launch,
+                );
+                ui.end_row();
+            }
+
+            // Release channel to track. A ComboBox of the known channels; the
+            // updater reads this when it checks.
+            if row_visible(q, "channel release stable beta nightly") {
+                ui.add_enabled_ui(config.update.check_on_launch, |ui| {
+                    ui.label("Release channel")
+                        .on_hover_text("Which release line update checks follow.");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("c0pl4nd-update-channel")
+                            .selected_text(config.update.channel.clone())
+                            .show_ui(ui, |ui| {
+                                for chan in UPDATE_CHANNELS {
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut config.update.channel,
+                                            (*chan).to_string(),
+                                            *chan,
+                                        )
+                                        .changed();
+                                }
+                            });
+                        changed |=
+                            reset_to_default(ui, &mut config.update.channel, &def.update.channel);
+                    });
+                });
+                ui.end_row();
+            }
+        });
+        group_gap(ui);
+    }
+
     changed
 }
 
@@ -837,5 +980,36 @@ mod tests {
         assert_eq!(cursor_style_label(CursorStyle::Block), "block");
         assert_eq!(cursor_style_label(CursorStyle::Bar), "bar");
         assert_eq!(cursor_style_label(CursorStyle::Underline), "underline");
+    }
+
+    #[test]
+    fn updates_is_a_navigable_category() {
+        // The new Updates section must be reachable from the left nav.
+        assert!(
+            CATEGORIES.contains(&"Updates"),
+            "Updates must be a left-nav category so its rows are reachable"
+        );
+    }
+
+    #[test]
+    fn update_channels_include_the_default_channel() {
+        // The channel combo must offer the default channel, or selecting it back
+        // would be impossible.
+        assert!(
+            UPDATE_CHANNELS.contains(&Config::default().update.channel.as_str()),
+            "the default update channel must be one of the offered choices"
+        );
+    }
+
+    #[test]
+    fn updates_section_is_cross_category_searchable() {
+        // Searching for an Updates label reveals the section even when another
+        // tab is selected (proves the section's labels are wired into search).
+        assert!(section_visible(
+            "Appearance",
+            "channel",
+            "Updates",
+            &["check on launch", "channel"]
+        ));
     }
 }

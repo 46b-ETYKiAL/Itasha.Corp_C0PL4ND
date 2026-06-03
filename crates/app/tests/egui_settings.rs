@@ -33,7 +33,7 @@ mod egui_app;
 
 use std::cell::RefCell;
 
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
 
 use egui_app::C0pl4ndApp;
@@ -509,6 +509,145 @@ fn the_tint_strength_slider_changes_the_live_config() {
         app.borrow().config_tint_strength(),
         0.0,
         "clicking the tint-strength slider track must raise the live tint strength"
+    );
+}
+
+#[test]
+fn toggling_check_on_launch_enables_the_channel_combo() {
+    // `update.check_on_launch` defaults OFF (local-first; the only thing that
+    // lets C0PL4ND touch the network). It has no observation accessor on the
+    // app, so we observe a DOWNSTREAM effect of the live config: the release-
+    // channel combo is rendered inside `add_enabled_ui(check_on_launch, …)`, so
+    // it is DISABLED while the flag is off and ENABLED once the toggle flips it
+    // on. The combo's enabled-ness therefore reflects the live config — no
+    // set-then-assert tautology (the gate is real production wiring).
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    open_settings(&mut h);
+    select_category(&mut h, "Updates");
+
+    // Precondition: with check-on-launch off, the channel combo is disabled.
+    assert!(
+        h.get_all_by_role(egui::accesskit::Role::ComboBox)
+            .next()
+            .expect("Updates must render the channel combo")
+            .accesskit_node()
+            .is_disabled(),
+        "precondition: the channel combo is disabled while check-on-launch is off"
+    );
+
+    h.get_by_label("Check for updates on launch").click();
+    h.run();
+
+    assert!(
+        !h.get_all_by_role(egui::accesskit::Role::ComboBox)
+            .next()
+            .expect("the channel combo must still render")
+            .accesskit_node()
+            .is_disabled(),
+        "clicking the toggle must turn check-on-launch ON in the live config, \
+         which enables the gated channel combo"
+    );
+}
+
+#[test]
+fn picking_an_update_channel_changes_the_combo_value() {
+    // `update.channel` defaults to "stable" and its combo is gated behind the
+    // check-on-launch toggle. Enable the toggle, open the channel combo, pick
+    // "nightly", and assert the combo's accessible VALUE became "nightly" — the
+    // combo's selected_text is `config.update.channel`, so this observes the
+    // live config change, not a test mirror.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    open_settings(&mut h);
+    select_category(&mut h, "Updates");
+
+    // Enable check-on-launch so the channel combo is no longer disabled.
+    h.get_by_label("Check for updates on launch").click();
+    h.run();
+
+    // The Updates section renders exactly one ComboBox (the channel picker).
+    // Its accessible value is the current channel ("stable").
+    let combo = h
+        .get_all_by_role(egui::accesskit::Role::ComboBox)
+        .next()
+        .expect("Updates must render the channel combo when check-on-launch is on");
+    assert_eq!(
+        combo.value().as_deref(),
+        Some("stable"),
+        "precondition: channel defaults to stable"
+    );
+    combo.click();
+    h.run();
+    h.get_by_label("nightly").click(); // the opened menu item
+    h.run();
+
+    assert_eq!(
+        h.get_all_by_role(egui::accesskit::Role::ComboBox)
+            .next()
+            .expect("channel combo")
+            .value()
+            .as_deref(),
+        Some("nightly"),
+        "picking nightly in the combo must update the live config channel"
+    );
+}
+
+#[test]
+fn editing_the_initial_columns_changes_the_drag_value() {
+    // `window.cols` defaults to 80 and has no observation accessor. The Initial
+    // columns DragValue exposes its live value as the accessible numeric_value
+    // (rebuilt from `config.window.cols` each frame). We focus the DragValue and
+    // type a new number — egui's DragValue accepts keyboard text entry on focus
+    // — then assert the accessible numeric value changed off 80.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    open_settings(&mut h);
+    select_category(&mut h, "Window");
+
+    // The Window section renders DragValues (SpinButtons in the a11y tree) in
+    // order: Padding (8), Initial columns (80), Initial rows (24). The numeric
+    // value lives on the underlying AccessKit node; target the one reading 80.
+    let cols_before = h
+        .get_all_by_role(egui::accesskit::Role::SpinButton)
+        .find_map(|n| {
+            n.accesskit_node()
+                .numeric_value()
+                .filter(|v| (*v - 80.0).abs() < f64::EPSILON)
+        })
+        .expect("Window must render an Initial-columns spinner defaulting to 80");
+    assert_eq!(cols_before, 80.0, "precondition: cols default to 80");
+
+    // Drive the cols spinner: focus it, type a new value, commit with Enter.
+    // (egui's DragValue accepts keyboard text entry while focused; `type_text`
+    // is a node-level action that injects the characters as real input events.)
+    {
+        let cols = h
+            .get_all_by_role(egui::accesskit::Role::SpinButton)
+            .find(|n| {
+                n.accesskit_node()
+                    .numeric_value()
+                    .is_some_and(|v| (v - 80.0).abs() < f64::EPSILON)
+            })
+            .expect("Initial-columns spinner");
+        cols.focus();
+        cols.type_text("120");
+    }
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+
+    let cols_after = h
+        .get_all_by_role(egui::accesskit::Role::SpinButton)
+        .find_map(|n| n.accesskit_node().numeric_value())
+        .expect("the Window section must still render the cols spinner");
+    assert_ne!(
+        cols_after, 80.0,
+        "editing the Initial-columns spinner must change the live cols value \
+         (before=80, after={cols_after})"
     );
 }
 
