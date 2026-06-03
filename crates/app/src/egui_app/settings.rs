@@ -24,7 +24,7 @@
 
 use eframe::egui;
 
-use c0pl4nd_core::config::CursorStyle;
+use c0pl4nd_core::config::{CursorStyle, WindowMode};
 use c0pl4nd_core::Config;
 
 use super::theme::ChromeColors;
@@ -298,7 +298,13 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         "Appearance",
         &[
             "theme",
+            "transparency",
+            "mode",
             "opacity",
+            "glass",
+            "mica",
+            "vibrancy",
+            "tint",
             "acrylic",
             "scanlines",
             "chromatic aberration",
@@ -340,36 +346,138 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 ui.end_row();
             }
 
-            if row_visible(q, "opacity transparency") {
-                ui.label("Window opacity")
-                    .on_hover_text("Below 100% the desktop shows through (applies next launch).");
+            // ---- Transparency / glass (SCR1B3-parity model) ----
+            // Master on/off switch for the whole transparency system. Off by
+            // default: a solid window is fast and never leaves a DWM ghost on
+            // close. Live-applies the opacity/tint passes immediately; switching
+            // a native-blur backend (glass/mica/vibrancy) on/off needs a window
+            // re-init, so that part takes effect on restart (labelled below).
+            if row_visible(q, "transparency master enable glass") {
+                ui.label("Transparency")
+                    .on_hover_text("Master switch for the whole transparency system.");
                 changed |= ui
-                    .add(
-                        egui::Slider::new(&mut config.opacity, 0.30..=1.0)
-                            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                            .custom_parser(|s| {
-                                s.trim_end_matches('%')
-                                    .trim()
-                                    .parse::<f64>()
-                                    .ok()
-                                    .map(|v| v / 100.0)
-                            }),
+                    .toggle_value(
+                        &mut config.transparency_enabled,
+                        "Enable window transparency",
+                    )
+                    .on_hover_text(
+                        "Master switch. When off, the window is fully opaque \
+                         regardless of the mode below. Turn on to use transparent / \
+                         glass / mica / vibrancy.",
                     )
                     .changed();
-                changed |= reset_to_default(ui, &mut config.opacity, &def.opacity);
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.transparency_enabled,
+                    &def.transparency_enabled,
+                );
                 ui.end_row();
             }
 
-            if row_visible(q, "acrylic backdrop blur mica") {
-                ui.label("Acrylic backdrop");
-                changed |= ui
-                    .toggle_value(&mut config.acrylic, "Win11 acrylic / mica")
-                    .on_hover_text(
-                        "Translucent blurred backdrop (Windows 11; opacity must be \
-                         < 100%; applies next launch).",
-                    )
-                    .changed();
-                changed |= reset_to_default(ui, &mut config.acrylic, &def.acrylic);
+            if row_visible(q, "transparency mode glass mica vibrancy") {
+                ui.add_enabled_ui(config.transparency_enabled, |ui| {
+                    ui.label("Mode").on_hover_text(
+                        "Opaque · Transparent (portable) · Glass/Mica/Vibrancy \
+                         (OS blur — applies on restart).",
+                    );
+                    ui.horizontal(|ui| {
+                        let wmodes = [
+                            (WindowMode::Opaque, "opaque"),
+                            (WindowMode::Transparent, "transparent"),
+                            (WindowMode::Glass, "glass / acrylic"),
+                            (WindowMode::Mica, "mica (Win11)"),
+                            (WindowMode::Vibrancy, "vibrancy (macOS)"),
+                        ];
+                        egui::ComboBox::from_id_salt("c0pl4nd-window-mode")
+                            .selected_text(
+                                wmodes
+                                    .iter()
+                                    .find(|(m, _)| *m == config.window_mode)
+                                    .map(|(_, s)| *s)
+                                    .unwrap_or("opaque"),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (m, label) in wmodes {
+                                    changed |= ui
+                                        .selectable_value(&mut config.window_mode, m, label)
+                                        .changed();
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "Transparent applies live; Glass/Mica/Vibrancy switch \
+                                 the OS blur backend and apply on restart.",
+                            );
+                        changed |= reset_to_default(ui, &mut config.window_mode, &def.window_mode);
+                    });
+                });
+                ui.end_row();
+            }
+
+            if row_visible(q, "opacity transparency") {
+                ui.add_enabled_ui(
+                    config.transparency_enabled && config.window_mode.is_translucent(),
+                    |ui| {
+                        ui.label("Opacity").on_hover_text(
+                            "Surface opacity for translucent modes — below 100% the \
+                             desktop / blur shows through.",
+                        );
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(&mut config.opacity, 0.30..=1.0)
+                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                                    .custom_parser(|s| {
+                                        s.trim_end_matches('%')
+                                            .trim()
+                                            .parse::<f64>()
+                                            .ok()
+                                            .map(|v| v / 100.0)
+                                    }),
+                            )
+                            .changed();
+                        changed |= reset_to_default(ui, &mut config.opacity, &def.opacity);
+                    },
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "tint color overlay wash") {
+                ui.add_enabled_ui(config.transparency_enabled, |ui| {
+                    ui.label("Tint color")
+                        .on_hover_text("A #RRGGBB color washed over the window.");
+                    ui.horizontal(|ui| {
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut config.tint)
+                                    .hint_text("#121212")
+                                    .desired_width(96.0),
+                            )
+                            .changed();
+                        changed |= reset_to_default(ui, &mut config.tint, &def.tint);
+                    });
+                });
+                ui.end_row();
+            }
+
+            if row_visible(q, "tint strength wash overlay") {
+                ui.add_enabled_ui(config.transparency_enabled, |ui| {
+                    ui.label("Tint strength")
+                        .on_hover_text("0% = no tint .. 100% = strong color wash.");
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut config.tint_strength, 0.0..=1.0)
+                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                                .custom_parser(|s| {
+                                    s.trim_end_matches('%')
+                                        .trim()
+                                        .parse::<f64>()
+                                        .ok()
+                                        .map(|v| v / 100.0)
+                                }),
+                        )
+                        .changed();
+                    changed |= reset_to_default(ui, &mut config.tint_strength, &def.tint_strength);
+                });
                 ui.end_row();
             }
 

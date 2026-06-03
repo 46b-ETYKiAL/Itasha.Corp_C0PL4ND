@@ -48,7 +48,7 @@ egui = "0.34"
 egui-wgpu = "0.34"
 egui_tiles = "0.15"
 egui-phosphor = { version = "0.12", default-features = false, features = ["thin", "fill"] }
-window-vibrancy = "0.7"
+window-vibrancy = "=0.7.1" # OS glass/acrylic/mica/vibrancy (MIT/Apache-2.0); exact-pinned per dependency-management.md
 
 [profile.release]
 opt-level = 3
