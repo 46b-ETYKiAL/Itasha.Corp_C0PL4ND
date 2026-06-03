@@ -43,18 +43,43 @@ fn main() -> eframe::Result<()> {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }
 
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport,
         // Keep the wgpu backend (default via the `wgpu` feature); do NOT enable
         // glow — glyphon (Milestone 2) shares egui's wgpu device.
         ..Default::default()
     };
+    prefer_dx12_on_windows(&mut options);
 
     eframe::run_native(
         "C0PL4ND",
         options,
         Box::new(|cc| Ok(Box::new(egui_app::C0pl4ndApp::new(cc)))),
     )
+}
+
+/// Prefer the DX12 backend on Windows. eframe's default selects Vulkan first,
+/// but third-party Vulkan *overlay layers* (GPU/game overlays such as
+/// `GalaxyOverlayVkLayer`) inject into the Vulkan instance and corrupt the
+/// device — egui-wgpu then panics while allocating buffers ("Failed to create
+/// staging buffer for index data"), crashing the app mid-session. DX12 avoids
+/// the Vulkan layer path entirely and is the more stable Windows backend. A user
+/// can still force a specific backend with the `WGPU_BACKEND` env var, which is
+/// honoured here via `Backends::from_env()`. No-op on non-Windows platforms,
+/// where the default (Vulkan/Metal) is correct.
+fn prefer_dx12_on_windows(options: &mut eframe::NativeOptions) {
+    #[cfg(target_os = "windows")]
+    {
+        if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
+        {
+            setup.instance_descriptor.backends =
+                eframe::wgpu::Backends::from_env().unwrap_or(eframe::wgpu::Backends::DX12);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = options; // used on every platform; backend default is correct off Windows
+    }
 }
 
 /// Decode the embedded sigil PNG into an eframe window icon. Returns `None` on a
