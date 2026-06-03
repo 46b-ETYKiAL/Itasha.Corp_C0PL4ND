@@ -274,6 +274,15 @@ impl PaneTerm {
     pub fn background_rgb(&self) -> (u8, u8, u8) {
         c0pl4nd_core::theme::parse_hex(&self.theme.background).unwrap_or((18, 18, 18))
     }
+
+    /// Swap the pane's active colour theme. Existing panes hold their OWN theme
+    /// clone (both [`grid_spans`](Self::grid_spans) glyph colours AND
+    /// [`background_rgb`](Self::background_rgb) resolve from it), so a theme
+    /// change in settings must be propagated here for the live panes to repaint
+    /// in the new colours — otherwise the picker appears to do nothing.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +291,22 @@ mod tests {
 
     fn void_theme() -> Theme {
         Theme::builtin_void()
+    }
+
+    /// A theme change must reach a live pane's rendered colours. The pane holds
+    /// its own theme clone (background + glyphs resolve from it), so `set_theme`
+    /// must update `background_rgb` — this is the propagation that makes the
+    /// settings theme-picker visibly change the panes.
+    #[test]
+    fn set_theme_repaints_pane_background() {
+        let mut pane = PaneTerm::spawn(Theme::builtin_named("itasha-void").unwrap(), 80, 24);
+        let before = pane.background_rgb();
+        pane.set_theme(Theme::builtin_named("ghost-paper").unwrap());
+        let after = pane.background_rgb();
+        assert_ne!(
+            before, after,
+            "set_theme must change the pane's resolved background colour"
+        );
     }
 
     #[test]
