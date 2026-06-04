@@ -625,11 +625,18 @@ fn render_sections(
 
             if row_visible(q, "ligatures shaping") {
                 ui.label("Ligatures");
-                changed |= ui
-                    .toggle_value(&mut config.ligatures, "Programming ligatures (->, !=)")
-                    .on_hover_text("Advanced text shaping; may break strict monospace alignment.")
-                    .changed();
-                changed |= reset_to_default(ui, &mut config.ligatures, &def.ligatures);
+                // DISABLED: the egui native text painter draws the grid glyph-by-
+                // glyph (strict monospace cell fidelity) and does NOT run a shaping
+                // engine (HarfBuzz / cosmic-text), so programming ligatures can't
+                // be formed. Shown greyed with an honest tooltip rather than as a
+                // dead toggle that silently does nothing.
+                ui.add_enabled_ui(false, |ui| {
+                    ui.toggle_value(&mut config.ligatures, "Programming ligatures (->, !=)")
+                        .on_hover_text(
+                            "Not available: the GPU text renderer draws strict \
+                             monospace cells and does not do glyph shaping.",
+                        );
+                });
                 ui.end_row();
             }
 
@@ -773,11 +780,18 @@ fn render_sections(
 
             if row_visible(q, "copy on select clipboard") {
                 ui.label("Copy on select");
-                changed |= ui
-                    .toggle_value(&mut config.copy_on_select, "X11-style auto-copy")
-                    .on_hover_text("Copy a mouse selection to the clipboard when the drag ends.")
-                    .changed();
-                changed |= reset_to_default(ui, &mut config.copy_on_select, &def.copy_on_select);
+                // DISABLED: this depends on MOUSE TEXT-SELECTION (drag to select
+                // grid text), which the egui terminal surface does not implement
+                // yet — there is no selection for an auto-copy to act on. Greyed
+                // with an honest tooltip rather than a dead toggle. (When mouse
+                // selection lands, re-enable this and wire it to the drag-end.)
+                ui.add_enabled_ui(false, |ui| {
+                    ui.toggle_value(&mut config.copy_on_select, "X11-style auto-copy")
+                        .on_hover_text(
+                            "Not available yet: needs mouse text-selection (drag to \
+                             select), which this terminal does not support yet.",
+                        );
+                });
                 ui.end_row();
             }
 
