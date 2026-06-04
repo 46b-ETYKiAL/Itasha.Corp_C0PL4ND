@@ -17,6 +17,7 @@
 
 pub mod chrome;
 pub mod grid;
+pub mod hyperlink;
 pub mod pane_term;
 mod search_ui;
 mod settings;
@@ -105,6 +106,11 @@ pub struct C0pl4ndApp {
     /// pattern as [`Self::last_window_cmd`] (the PTY write itself is not
     /// observable in the headless harness).
     last_palette_run: Option<String>,
+    /// The most recent URL a Ctrl-click opened (most-recent-wins), or `None` if
+    /// none this session. Observable so an interaction test can assert that a
+    /// Ctrl-click on a URL in the grid opened it — the OS-opener side effect
+    /// (`ctx.open_url`) itself is not observable in the headless harness.
+    last_opened_url: Option<String>,
     /// Whether the in-terminal find overlay is open.
     search_open: bool,
     /// The find overlay's search query.
@@ -214,6 +220,7 @@ impl C0pl4ndApp {
             palette_query: String::new(),
             palette_sel: 0,
             last_palette_run: None,
+            last_opened_url: None,
             search_open: false,
             search_query: String::new(),
             search_regex: false,
@@ -493,6 +500,7 @@ impl C0pl4ndApp {
         cursor_cfg: c0pl4nd_core::config::CursorConfig,
         padding: f32,
         search: Option<SearchHighlight<'_>>,
+        links: &[(CellSpan, String)],
     ) -> PaneBodyOutcome {
         let (rect, resp) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -583,10 +591,42 @@ impl C0pl4ndApp {
             }
         }
 
+        // Ctrl-clickable hyperlinks. `links` is non-empty ONLY for the focused
+        // pane while Ctrl (or Cmd) is held — the caller gates it — so its mere
+        // presence means "the modifier is down this frame". Underline every URL,
+        // show a hand cursor over the one under the pointer, and open the one a
+        // click lands on. The pixel→cell mapping ([`cell_at_pos`]) and the span
+        // hit test ([`link_url_at_cell`]) are pure + unit-tested; only this thin
+        // wiring + the OS-opener side effect live here.
+        let mut opened_url = None;
+        if !links.is_empty() {
+            let (cw, ch) = monospace_cell_points(&painter, font_size);
+            let origin = grid_text_origin(rect, pad);
+            paint_link_underlines(&painter, origin, cw, ch, &pane_colors, links);
+            if let Some(hover) = resp.hover_pos() {
+                if let Some((r, c)) = cell_at_pos(hover, origin, cw, ch) {
+                    if link_url_at_cell(links, r, c).is_some() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                }
+            }
+            if resp.clicked() {
+                if let Some(click) = resp.interact_pointer_pos() {
+                    if let Some((r, c)) = cell_at_pos(click, origin, cw, ch) {
+                        if let Some(url) = link_url_at_cell(links, r, c) {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                            opened_url = Some(url.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
         PaneBodyOutcome {
             drag_started: resp.drag_started(),
             clicked: resp.clicked(),
             size: rect.size(),
+            opened_url,
         }
     }
 
@@ -712,6 +752,7 @@ impl C0pl4ndApp {
         let focused = self.focused_pane;
         let mut clicked: Option<PaneId> = None;
         let mut focused_size: Option<(f32, f32)> = None;
+        let mut opened_url: Option<String> = None;
 
         // The find overlay highlights the FOCUSED pane only, and only while open.
         // Build the cell spans HERE (before the disjoint-borrow block takes
@@ -724,6 +765,18 @@ impl C0pl4ndApp {
             Vec::new()
         };
         let search_sel = self.search_sel;
+
+        // Ctrl-clickable hyperlinks: only built while the modifier (Ctrl, or Cmd
+        // on macOS) is held, so URLs underline ON Ctrl-hover and a Ctrl-click
+        // opens one — a plain click stays a normal pane interaction. Built HERE
+        // (before the disjoint-borrow block) for the same reason as the search
+        // spans; `find_urls` reads the focused grid via `focused_search_lines`.
+        let link_modifier = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+        let link_spans: Vec<(CellSpan, String)> = if link_modifier {
+            self.cell_spans_for_hyperlinks()
+        } else {
+            Vec::new()
+        };
 
         // Snapshot BEFORE the frame so we can revert a drag that exceeds the cap.
         let pre = self.grid_tree.clone();
@@ -738,6 +791,8 @@ impl C0pl4ndApp {
             // before). `u16` config → f32 points for the painter.
             let padding = f32::from(self.config.window.padding);
             let search_spans = &search_spans;
+            let link_spans = &link_spans;
+            let empty_links: &[(CellSpan, String)] = &[];
             let mut render_body = |ui: &mut egui::Ui, pid: PaneId| -> bool {
                 let search = if pid == focused && !search_spans.is_empty() {
                     Some(SearchHighlight {
@@ -746,6 +801,13 @@ impl C0pl4ndApp {
                     })
                 } else {
                     None
+                };
+                // Hyperlinks are interactive on the FOCUSED pane only (the others
+                // get an empty slice → no underline, no hit test).
+                let links: &[(CellSpan, String)] = if pid == focused {
+                    link_spans
+                } else {
+                    empty_links
                 };
                 let outcome = Self::render_pane_body(
                     ui,
@@ -757,9 +819,13 @@ impl C0pl4ndApp {
                     cursor_cfg,
                     padding,
                     search,
+                    links,
                 );
                 if outcome.clicked {
                     clicked = Some(pid);
+                }
+                if let Some(url) = outcome.opened_url {
+                    opened_url = Some(url);
                 }
                 if pid == focused {
                     focused_size = Some((outcome.size.x, outcome.size.y));
@@ -775,6 +841,11 @@ impl C0pl4ndApp {
         }
         if let Some(s) = focused_size {
             self.last_focused_size = Some(s);
+        }
+        // Record a Ctrl-clicked URL (the browser open already fired in-render);
+        // most-recent-wins, observable for the interaction test.
+        if let Some(url) = opened_url {
+            self.last_opened_url = Some(url);
         }
 
         // Enforce the cap: a drag-to-split that pushed us over 6 reverts.
@@ -1055,6 +1126,29 @@ impl C0pl4ndApp {
         self.last_palette_run.clone()
     }
 
+    /// The most recent URL a Ctrl-click opened, or `None`. Observable accessor
+    /// for the hyperlink interaction test.
+    #[allow(dead_code)]
+    pub fn last_opened_url(&self) -> Option<String> {
+        self.last_opened_url.clone()
+    }
+
+    /// Activate the URL (if any) at grid cell `(row, col)` exactly as a real
+    /// Ctrl-click does — record it in [`Self::last_opened_url`] and return it.
+    /// This shares the SAME span-build + hit-test path the renderer uses
+    /// ([`Self::cell_spans_for_hyperlinks`] + [`link_url_at_cell`]); only the
+    /// pixel→cell mapping (unit-tested separately via [`cell_at_pos`]) and the
+    /// `ctx.open_url` OS side effect are omitted, neither of which is observable
+    /// in the headless harness. `pub` for the `#[path]`-included test binary;
+    /// inert in the shipping binary (which never calls it).
+    #[allow(dead_code)]
+    pub fn test_open_url_at_cell(&mut self, row: usize, col: usize) -> Option<String> {
+        let links = self.cell_spans_for_hyperlinks();
+        let url = link_url_at_cell(&links, row, col)?.to_string();
+        self.last_opened_url = Some(url.clone());
+        Some(url)
+    }
+
     /// Render the command-palette overlay: a centred window with an auto-focused
     /// fuzzy-search box over the command history and a selectable result list.
     /// Clicking a row runs it (same path as Enter). Navigation (↑/↓/Enter/Esc)
@@ -1295,6 +1389,31 @@ impl C0pl4ndApp {
                 })
             })
             .collect()
+    }
+
+    /// Every `http(s)://` URL in the FOCUSED pane's grid text, as `(CellSpan,
+    /// url)` pairs ready for the Ctrl-hover underline and the Ctrl-click hit
+    /// test. Built from [`Self::focused_search_lines`] (which honours the test
+    /// corpus) via [`hyperlink::find_urls`], converting each URL's BYTE span to
+    /// character columns with [`byte_to_col`] so a multi-byte glyph before the
+    /// URL never offsets the underline. Computed once per frame before the
+    /// disjoint-borrow render block (mirrors [`Self::cell_spans_for_search`]).
+    fn cell_spans_for_hyperlinks(&self) -> Vec<(CellSpan, String)> {
+        let lines = self.focused_search_lines();
+        let mut out = Vec::new();
+        for (row, line) in lines.iter().enumerate() {
+            for span in hyperlink::find_urls(line) {
+                out.push((
+                    CellSpan {
+                        line: row,
+                        col_start: byte_to_col(line, span.start),
+                        col_end: byte_to_col(line, span.end),
+                    },
+                    span.url,
+                ));
+            }
+        }
+        out
     }
 
     /// Render the find overlay (delegating to the [`search_ui`] free function so
@@ -1685,6 +1804,10 @@ struct PaneBodyOutcome {
     /// The pane's body size (points) this frame — used to pick the "+" split
     /// direction for the focused pane.
     size: egui::Vec2,
+    /// A URL the user Ctrl-clicked in this pane's grid this frame, if any. The
+    /// caller records it in [`C0pl4ndApp::last_opened_url`]; the OS-opener call
+    /// (`ctx.open_url`) already happened inside the render.
+    opened_url: Option<String>,
 }
 
 /// One find-overlay match converted to CELL coordinates: the visual row and the
@@ -1723,6 +1846,72 @@ fn byte_to_col(line: &str, byte: usize) -> usize {
     let b = byte.min(line.len());
     // Count chars up to the byte boundary; `char_indices` walks char starts.
     line.char_indices().take_while(|(i, _)| *i < b).count()
+}
+
+/// Map a pointer position (POINTS, in screen space) to the `(row, col)` grid
+/// cell under it, given the grid text `origin` (top-left of the first cell) and
+/// the cell size `(cw, ch)` in points. Returns `None` when the position is above
+/// or left of the grid (a negative cell index). Pure so the Ctrl-click hit test
+/// is unit-testable without an egui frame. Out-of-range high indices are NOT
+/// clamped here — the caller's span list simply won't contain a matching span.
+fn cell_at_pos(pos: egui::Pos2, origin: egui::Pos2, cw: f32, ch: f32) -> Option<(usize, usize)> {
+    if pos.x < origin.x || pos.y < origin.y || cw <= 0.0 || ch <= 0.0 {
+        return None;
+    }
+    let col = ((pos.x - origin.x) / cw).floor() as usize;
+    let row = ((pos.y - origin.y) / ch).floor() as usize;
+    Some((row, col))
+}
+
+/// The URL whose cell span covers grid cell `(row, col)`, or `None`. Scans the
+/// precomputed `(CellSpan, url)` links (built by
+/// [`C0pl4ndApp::cell_spans_for_hyperlinks`]); the column test is half-open
+/// `[col_start, col_end)`, matching how the spans were built.
+fn link_url_at_cell(links: &[(CellSpan, String)], row: usize, col: usize) -> Option<&str> {
+    links
+        .iter()
+        .find(|(s, _)| s.line == row && col >= s.col_start && col < s.col_end)
+        .map(|(_, url)| url.as_str())
+}
+
+/// Cell `(width, height)` in POINTS from a monospace probe `M` — the same metric
+/// `paint_grid_native`/`paint_search_highlight` use, so hyperlink underlines and
+/// the Ctrl-click hit test land exactly on the rendered glyph grid.
+fn monospace_cell_points(painter: &egui::Painter, font_size: f32) -> (f32, f32) {
+    let probe = painter.layout_job(egui::text::LayoutJob::single_section(
+        "M".to_string(),
+        egui::text::TextFormat {
+            font_id: egui::FontId::monospace(font_size),
+            ..Default::default()
+        },
+    ));
+    (probe.size().x.max(1.0), probe.size().y.max(1.0))
+}
+
+/// Underline every Ctrl-clickable URL span over the rendered grid (drawn only
+/// while the modifier is held — see the caller). A thin accent line under each
+/// span's cells signals "this is a link"; GPU-free (one `line_segment` per span).
+/// The painter's clip rect keeps an over-wide span inside the pane.
+fn paint_link_underlines(
+    painter: &egui::Painter,
+    origin: egui::Pos2,
+    cw: f32,
+    ch: f32,
+    colors: &theme::ChromeColors,
+    links: &[(CellSpan, String)],
+) {
+    for (s, _) in links {
+        let col_end = s.col_end.max(s.col_start + 1);
+        let x0 = origin.x + s.col_start as f32 * cw;
+        let x1 = origin.x + col_end as f32 * cw;
+        // Baseline-ish: 1px above the cell bottom so the rule reads as an
+        // underline rather than a row separator.
+        let y = origin.y + s.line as f32 * ch + ch - 1.0;
+        painter.line_segment(
+            [egui::pos2(x0, y), egui::pos2(x1, y)],
+            egui::Stroke::new(1.0, colors.accent),
+        );
+    }
 }
 
 /// Paint the find-overlay highlight over a pane's rendered grid: a dim tint
@@ -2306,6 +2495,77 @@ mod tests {
             grid_text_origin(rect, -5.0),
             rect.left_top(),
             "negative padding must clamp to zero inset (origin == pane top-left)"
+        );
+    }
+
+    #[test]
+    fn cell_at_pos_maps_pointer_to_grid_cell() {
+        // Origin (10,20), 8×16-point cells. A point inside cell (row 2, col 3)
+        // maps to it; a point above/left of the origin is off-grid → None.
+        let origin = egui::pos2(10.0, 20.0);
+        let (cw, ch) = (8.0, 16.0);
+        // Cell (2,3) spans x∈[34,42), y∈[52,68); pick a point inside.
+        assert_eq!(
+            cell_at_pos(egui::pos2(36.0, 60.0), origin, cw, ch),
+            Some((2, 3))
+        );
+        // Exactly on the origin → cell (0,0).
+        assert_eq!(cell_at_pos(origin, origin, cw, ch), Some((0, 0)));
+        // Left of / above the grid → off-grid.
+        assert_eq!(cell_at_pos(egui::pos2(9.0, 60.0), origin, cw, ch), None);
+        assert_eq!(cell_at_pos(egui::pos2(36.0, 19.0), origin, cw, ch), None);
+        // Degenerate cell size never divides by zero.
+        assert_eq!(cell_at_pos(egui::pos2(36.0, 60.0), origin, 0.0, ch), None);
+    }
+
+    #[test]
+    fn link_url_at_cell_matches_half_open_span() {
+        // One link on row 0 spanning cols [4, 25). A col inside hits; the
+        // exclusive end col does not; a different row does not.
+        let links = vec![(
+            CellSpan {
+                line: 0,
+                col_start: 4,
+                col_end: 25,
+            },
+            "https://example.com".to_string(),
+        )];
+        assert_eq!(link_url_at_cell(&links, 0, 4), Some("https://example.com"));
+        assert_eq!(link_url_at_cell(&links, 0, 24), Some("https://example.com"));
+        assert_eq!(
+            link_url_at_cell(&links, 0, 25),
+            None,
+            "end col is exclusive"
+        );
+        assert_eq!(link_url_at_cell(&links, 0, 3), None, "before the span");
+        assert_eq!(link_url_at_cell(&links, 1, 10), None, "wrong row");
+    }
+
+    #[test]
+    fn ctrl_click_on_a_seeded_url_records_it() {
+        // Drive the SAME span-build + hit-test path a real Ctrl-click uses, over a
+        // KNOWN seeded grid (PTY-independent). The URL "https://example.com" sits
+        // at byte 4 on row 0 → char cols [4, 23).
+        let mut app = C0pl4ndApp::bootstrap();
+        app.test_seed_focused_grid("see https://example.com here\nplain line, no link");
+        assert_eq!(app.last_opened_url(), None, "nothing opened yet");
+
+        // A cell inside the URL span opens it and records it.
+        let opened = app.test_open_url_at_cell(0, 8);
+        assert_eq!(opened.as_deref(), Some("https://example.com"));
+        assert_eq!(
+            app.last_opened_url().as_deref(),
+            Some("https://example.com"),
+            "a Ctrl-click on a URL must record it as opened"
+        );
+
+        // A cell on the no-link line opens nothing (and does not clobber the
+        // last-opened record).
+        assert_eq!(app.test_open_url_at_cell(1, 2), None);
+        assert_eq!(
+            app.last_opened_url().as_deref(),
+            Some("https://example.com"),
+            "clicking a non-URL cell must not open or change the record"
         );
     }
 
