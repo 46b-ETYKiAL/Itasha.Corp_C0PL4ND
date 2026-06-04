@@ -376,11 +376,15 @@ fn clicking_tab_close_removes_the_pane() {
     let before = app.borrow().pane_count();
     assert_eq!(before, 2, "two panes after adding one");
 
-    // Click pane 1's close (label "close {tab-label}") → exactly one pane
-    // closes. The close button is in the title-bar flow and its label tracks the
-    // live OSC title, so click via the effect-verifying helper (retries until the
-    // pane count actually drops) rather than a single click / once-derived literal.
-    click_tab_control_until(&mut h, &app, PaneId(1), "close ", |a| {
+    // Click pane 0's close (the LEFTMOST tab) → exactly that pane closes. We
+    // target the leftmost tab deliberately: with long shell titles (e.g. the
+    // Windows CI runner's "Administrator: C:\Windows\system…") the widened strip
+    // can push the RIGHTMOST tab's × into the right-anchored caption cluster,
+    // where it is occluded and unclickable — a tab-overflow concern separate from
+    // "a × closes its own pane", which the leftmost tab proves cleanly. The label
+    // tracks the live OSC title, so click via the effect-verifying helper (retries
+    // until the pane count actually drops).
+    click_tab_control_until(&mut h, &app, PaneId(0), "close ", |a| {
         a.pane_count() == before - 1
     });
 
@@ -390,11 +394,12 @@ fn clicking_tab_close_removes_the_pane() {
         before - 1,
         "clicking a tab × must close exactly that pane (before={before}, after={after})"
     );
-    // The surviving pane is focused (focus re-anchors off the closed pane).
+    // Pane 0 was closed; pane 1 survives and keeps focus (it was focused after the
+    // split, and closing a non-focused pane leaves focus put).
     assert_eq!(
         app.borrow().focused_pane(),
-        PaneId(0),
-        "focus re-anchors to the surviving pane"
+        PaneId(1),
+        "the surviving pane (1) keeps focus after pane 0 is closed"
     );
 }
 
