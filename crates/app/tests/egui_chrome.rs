@@ -271,29 +271,24 @@ fn clicking_maximize_caption_issues_a_maximize_command() {
 
 #[test]
 fn splitting_past_six_panes_is_refused() {
-    // Click + until the 6-pane cap, then once more, and assert the cap holds —
-    // the real cap logic in frame_tick, exercised by real clicks.
+    // The 6-pane cap is APP LOGIC (`split_focused` refuses above the cap). Drive
+    // it via the action path (`new_terminal`) directly rather than UI clicks: at
+    // high pane counts many (titled) tabs overflow the title-bar width and push
+    // the "+" button off-screen, where it can't be clicked — that tab-overflow
+    // reachability is a SEPARATE concern from the cap invariant under test. The
+    // `clicking_new_terminal_adds_a_pane` test already covers the real "+" click.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
-    let mut h = harness(&app);
+    assert_eq!(app.borrow().pane_count(), 1, "bootstrap opens one pane");
 
-    // bootstrap=1 pane; click "new terminal" five times to reach 6.
+    // Add until the 6-pane cap.
     for _ in 0..5 {
-        click_new_terminal(&mut h, &app);
+        app.borrow_mut().new_terminal();
     }
     assert_eq!(app.borrow().pane_count(), 6, "reached the 6-pane cap");
 
-    // One more must be refused (count stays 6). `click_new_terminal` can't be
-    // used here — it asserts the pane WAS added, which is exactly what the cap
-    // forbids. Click the "+" several times (settling the flow layout each time so
-    // a click actually lands on the button, not empty space left by a shifting
-    // tab strip); the app-side cap must hold regardless of how many land.
-    for _ in 0..8 {
-        h.run();
-        if let Some(btn) = h.query_by_label("new terminal") {
-            btn.click();
-        }
-        h.run();
-    }
+    // Further splits must be refused — the cap holds (count stays 6).
+    app.borrow_mut().new_terminal();
+    app.borrow_mut().new_terminal();
     assert_eq!(
         app.borrow().pane_count(),
         6,
