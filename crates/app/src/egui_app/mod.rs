@@ -256,21 +256,42 @@ impl C0pl4ndApp {
         self.pinned.contains(&pane_id)
     }
 
-    /// The exact tab label a pane currently renders — its live OSC title when
-    /// the running program set one, else the `pane {id}` fallback. This is the
-    /// SAME string [`chrome`](super::chrome) uses for the tab text AND for the
-    /// per-tab accessible labels (`pin {label}` / `close {label}`), so an
-    /// interaction test can look up a tab by `get_by_label(label)` without
-    /// hardcoding a value that the shell's window-title escape would change. The
-    /// label is dynamic precisely because the title feature makes it so — a real
-    /// shell sets its own title, so a fixed `"pane 0"` literal is no longer a
-    /// stable lookup key.
+    /// The pane's UNIQUE accessible tab label — the same string
+    /// [`chrome`](super::chrome) sets as the tab's accessible name AND the base
+    /// of its `pin`/`close` button labels, so an interaction test can look up a
+    /// tab by `get_by_label(label)` without hardcoding a value the shell's
+    /// window-title escape would change. The label is dynamic precisely because
+    /// the title feature makes it so — a real shell sets its own title, so a
+    /// fixed `"pane 0"` literal is no longer a stable lookup key.
     #[allow(dead_code)]
     pub fn tab_label_for_pane(&self, pane_id: PaneId) -> Option<String> {
         self.pane_titles()
             .into_iter()
             .find(|(id, _)| *id == pane_id)
-            .map(|(_, label)| label)
+            .map(|(id, label)| Self::tab_a11y_label(id, &label))
+    }
+
+    /// A pane's UNIQUE accessible tab label, derived from its displayed tab text.
+    ///
+    /// The VISIBLE tab text is just the title (or the `pane {id}` fallback), but
+    /// two shells launched in the same directory routinely set the SAME OSC
+    /// window title — so the visible text alone is NOT unique. An ambiguous
+    /// accessible name is a real defect: a screen reader cannot distinguish the
+    /// two tabs, and the accessibility tree has two nodes with one name (which
+    /// also makes `get_by_label` lookups ambiguous). This stable-by-construction
+    /// label fixes that by anchoring every label on the unique `pane {id}`:
+    ///
+    /// - untitled pane → `pane {id}` (already unique; no redundant suffix)
+    /// - titled pane   → `{title} (pane {id})` (title for context + id for
+    ///   uniqueness; the title is kept first so WCAG 2.5.3 "Label in Name" holds
+    ///   against the visible text)
+    fn tab_a11y_label(pane_id: PaneId, display: &str) -> String {
+        let fallback = format!("pane {}", pane_id.raw());
+        if display == fallback {
+            fallback
+        } else {
+            format!("{display} (pane {})", pane_id.raw())
+        }
     }
 
     /// The most recent caption command the user issued (min/max/close), or
@@ -1781,6 +1802,38 @@ mod tests {
         assert!(
             capped.ends_with('…') && capped.starts_with('b'),
             "the truncated title keeps the leading chars and ends with an ellipsis"
+        );
+    }
+
+    /// Two panes whose shells set the SAME OSC title still get DISTINCT
+    /// accessible tab labels. The visible tab text may collide (real terminals
+    /// allow two same-named tabs), but the accessibility tree — and the
+    /// `get_by_label` lookups the interaction tests rely on — must never have
+    /// two nodes sharing one name. Every label is anchored on the unique
+    /// `pane {id}`. Regression guard for the Windows-CI failure where both
+    /// bootstrap shells set the same cwd title and the tab lookup went ambiguous.
+    #[test]
+    fn tab_a11y_label_is_unique_even_when_titles_collide() {
+        // Identical display title for two different panes → distinct labels.
+        let a = C0pl4ndApp::tab_a11y_label(PaneId(0), "make");
+        let b = C0pl4ndApp::tab_a11y_label(PaneId(1), "make");
+        assert_ne!(
+            a, b,
+            "colliding titles must still yield distinct accessible labels"
+        );
+        assert_eq!(a, "make (pane 0)");
+        assert_eq!(b, "make (pane 1)");
+        // WCAG 2.5.3 "Label in Name": the visible title is a prefix of the label.
+        assert!(
+            a.starts_with("make"),
+            "the title leads the accessible label"
+        );
+        // The untitled fallback is already unique → not doubled into
+        // "pane 2 (pane 2)".
+        assert_eq!(
+            C0pl4ndApp::tab_a11y_label(PaneId(2), "pane 2"),
+            "pane 2",
+            "the bare pane-id fallback carries no redundant suffix"
         );
     }
 

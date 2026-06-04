@@ -93,12 +93,17 @@ impl C0pl4ndApp {
             for (pane_id, title) in tabs {
                 let selected = pane_id == self.focused_pane;
                 let is_pinned = self.pinned.contains(&pane_id);
-                // Per-tab accessible labels: the pin/× are glyph buttons, so each
-                // would otherwise expose the same name across tabs (ambiguous for
-                // screen readers AND `get_by_label` tests). Make them unique +
-                // descriptive per tab.
-                let pin_label = format!("{} {title}", if is_pinned { "unpin" } else { "pin" });
-                let close_label = format!("close {title}");
+                // Per-tab accessible labels. The pin/× glyph buttons AND the tab
+                // itself would otherwise expose a NON-unique name (the title),
+                // and two shells in the same directory routinely set the SAME OSC
+                // title — ambiguous for screen readers AND for `get_by_label`
+                // tests. Anchor every label on the unique `pane {id}` so each tab
+                // is distinguishable even when titles collide. The VISIBLE tab
+                // text stays the bare title; only the accessible name carries the
+                // id suffix.
+                let a11y = Self::tab_a11y_label(pane_id, &title);
+                let pin_label = format!("{} {a11y}", if is_pinned { "unpin" } else { "pin" });
+                let close_label = format!("close {a11y}");
                 ui.scope(|ui| {
                     // Tight spacing INSIDE a tab so title/pin/× read as one unit.
                     ui.spacing_mut().item_spacing.x = 3.0;
@@ -107,7 +112,14 @@ impl C0pl4ndApp {
                     } else {
                         colors.fg
                     });
-                    if ui.selectable_label(selected, label).clicked() {
+                    let tab = ui.selectable_label(selected, label);
+                    // Override the accessible name with the UNIQUE label so the
+                    // a11y tree never has two same-named tab nodes (the visible
+                    // text is unchanged — still just the title).
+                    tab.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::SelectableLabel, true, &a11y)
+                    });
+                    if tab.clicked() {
                         actions.focus_tab = Some(pane_id);
                     }
                     // Pinned → SOLID violet pin (Fill family); unpinned → thin
