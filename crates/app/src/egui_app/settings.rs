@@ -189,6 +189,11 @@ pub fn show(
     // button + Esc are the single, obvious dismiss path (the "two close buttons"
     // report). Closing flows through `keep_open` → `*open` exactly as before.
     egui::Window::new("settings")
+        // No egui title bar: it rendered a SECOND, redundant top bar (a centered
+        // lowercase "settings") above the in-content header that carries the
+        // "Settings" heading + the ✕ close button. The in-content header is the
+        // single titlebar; dragging still works via egui's window-frame drag.
+        .title_bar(false)
         .collapsible(false)
         .resizable(false)
         .movable(true)
@@ -202,7 +207,11 @@ pub fn show(
             // always-visible dismiss. Fixed-height — it does not eat the scroll
             // area's fill below.
             ui.horizontal(|ui| {
-                ui.heading(egui::RichText::new("Settings").color(colors.accent));
+                // The heading uses the bright theme FOREGROUND, not the accent:
+                // the accent (theme selection colour) read as low-contrast purple
+                // against the dark panel fill (the reported "hard to read" bug).
+                // fg is readable in both light and dark themes.
+                ui.heading(egui::RichText::new("Settings").color(colors.fg));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let close = ui
                         .button(egui::RichText::new(egui_phosphor::thin::X).size(16.0))

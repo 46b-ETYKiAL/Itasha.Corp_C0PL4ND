@@ -124,10 +124,17 @@ impl C0pl4ndApp {
                         ui.scope(|ui| {
                             // Tight spacing INSIDE a tab so title/pin/× read as one unit.
                             ui.spacing_mut().item_spacing.x = 3.0;
+                            // The selected tab is painted with the accent SELECTION
+                            // WASH (`visuals.selection.bg_fill` = accent @ ~38%), so
+                            // accent-coloured text on it is the same hue → unreadable
+                            // (the reported bug). Use the bright theme FOREGROUND for
+                            // the active tab (clearly readable on the wash in both
+                            // light and dark themes) and a MUTED tone for inactive
+                            // tabs — readability + a conventional active/inactive cue.
                             let label = RichText::new(&title).color(if selected {
-                                colors.accent
-                            } else {
                                 colors.fg
+                            } else {
+                                colors.muted
                             });
                             let tab = ui.selectable_label(selected, label);
                             // Override the accessible name with the UNIQUE label so the
@@ -217,11 +224,13 @@ impl C0pl4ndApp {
                     ui.separator();
                     let active = self.active_shell_label().to_owned();
                     for (i, profile) in self.shell_profiles().iter().enumerate() {
-                        let mut label = profile.label.clone();
-                        if profile.label == active {
-                            label.push_str("  ✓");
-                        }
-                        let item = ui.button(&label);
+                        let is_active = profile.label == active;
+                        // The active shell is shown via egui's SELECTABLE-LABEL
+                        // highlight — NOT an appended "✓", which rendered as a tofu
+                        // box (the glyph is absent from the menu font) AND wrapped
+                        // onto its own line. selectable_label keeps the marker
+                        // inline (it IS the row) and always renders.
+                        let item = ui.selectable_label(is_active, &profile.label);
                         item.widget_info(|| {
                             egui::WidgetInfo::labeled(
                                 egui::WidgetType::Button,
