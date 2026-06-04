@@ -197,20 +197,34 @@ fn clicking_a_pane_routes_typed_input_to_that_pane_only() {
     }
     let mut h = harness(&app);
 
-    // Focus pane 1 by clicking its tab (the real chrome path). The tab text is
-    // the pane's LIVE label — its OSC window title when its shell set one, else
-    // the `pane 1` fallback — so look it up by the label the app actually
-    // renders rather than a hardcoded literal the title escape would change.
-    let pane1_label = app
-        .borrow()
-        .tab_label_for_pane(PaneId(1))
-        .expect("pane 1 must have a tab label");
-    h.get_by_label(pane1_label.as_str()).click();
-    h.run();
+    // Focus pane 1 by clicking its tab (the real chrome path). The tab's
+    // accessible label tracks the pane's LIVE OSC window title, which lands
+    // ASYNCHRONOUSLY from the PTY reader thread — so re-derive the lookup key
+    // from the SAME post-`h.run()` app state each iteration (no intervening run)
+    // until the control resolves, then click it. A once-derived literal can
+    // desync from the rendered tree the moment the shell sets its title.
+    let mut clicked = false;
+    for _ in 0..240 {
+        h.run();
+        let label = app
+            .borrow()
+            .tab_label_for_pane(PaneId(1))
+            .expect("pane 1 must have a tab label");
+        if h.query_by_label(label.as_str()).is_some() {
+            h.get_by_label(label.as_str()).click();
+            h.run();
+            clicked = true;
+            break;
+        }
+    }
+    assert!(
+        clicked,
+        "pane 1's tab control never appeared in the a11y tree"
+    );
     assert_eq!(
         app.borrow().focused_pane(),
         PaneId(1),
-        "clicking pane 1's tab must focus pane 1 (tab label: {pane1_label:?})"
+        "clicking pane 1's tab must focus pane 1"
     );
 
     // Type a unique token; it must land in pane 1's grid.
