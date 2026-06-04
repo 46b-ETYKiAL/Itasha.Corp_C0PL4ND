@@ -180,6 +180,26 @@ impl PaneTerm {
         }
     }
 
+    /// The exit code of the focused program's most recently finished command,
+    /// derived from OSC 133 `D` command-end marks (shell prompt integration).
+    /// Locks the terminal briefly, mirroring [`title`](Self::title) /
+    /// [`mouse_mode`](Self::mouse_mode), and returns the core accessor's
+    /// double-`Option`:
+    ///
+    /// - outer `None` — no live session, the lock is poisoned, or no command
+    ///   has finished yet (so the status bar shows NO indicator);
+    /// - inner `Option` — the OSC-133-reported exit code (`Some(0)` success,
+    ///   `Some(code)` failure), or `None` when the shell reported no code.
+    ///
+    /// Cheap and non-panicking, so it is safe to call once per frame from the
+    /// status-bar paint.
+    pub fn last_command_exit_code(&self) -> Option<Option<i32>> {
+        let session = self.session.as_ref()?;
+        let term = session.terminal();
+        let guard = term.lock().ok()?;
+        guard.last_command_exit_code()
+    }
+
     /// Write raw bytes straight to the PTY (used for pasted text). Best-effort:
     /// a closed/dead session silently drops the write rather than panicking.
     pub fn write_bytes(&mut self, bytes: &[u8]) {
@@ -456,6 +476,43 @@ mod tests {
             pane.title(),
             Some("mytitle".to_string()),
             "after ESC]0;mytitle BEL the accessor must report the OSC title"
+        );
+    }
+
+    /// The status-bar exit-code indicator is driven by
+    /// [`PaneTerm::last_command_exit_code`]. A fresh pane has no finished
+    /// command (no OSC 133 `D` mark yet), so the accessor returns `None` (no
+    /// indicator). After the running shell emits `OSC 133 ; D ; <code>` the
+    /// accessor must reflect the latest code. Drives the shared terminal
+    /// directly — deterministic, no reliance on the async PTY reader or on a
+    /// real prompt-integrated shell.
+    #[test]
+    fn last_command_exit_code_reflects_osc133_command_end() {
+        let pane = PaneTerm::spawn(void_theme(), 80, 24);
+        // Default: no finished command → None (status bar shows no indicator).
+        assert_eq!(
+            pane.last_command_exit_code(),
+            None,
+            "a fresh pane must report no finished command (no indicator)"
+        );
+        // If the shell could not spawn on this box there is no terminal to
+        // drive; the None default above is still the meaningful assertion.
+        let Some(term) = pane.terminal_for_test() else {
+            return;
+        };
+        // The shell reports a successful command end (`OSC 133 ; D ; 0`).
+        term.lock().unwrap().advance(b"\x1b]133;D;0\x07");
+        assert_eq!(
+            pane.last_command_exit_code(),
+            Some(Some(0)),
+            "after ESC]133;D;0 BEL the accessor must report success (code 0)"
+        );
+        // A subsequent failing command end (`OSC 133 ; D ; 1`) supersedes it.
+        term.lock().unwrap().advance(b"\x1b]133;D;1\x07");
+        assert_eq!(
+            pane.last_command_exit_code(),
+            Some(Some(1)),
+            "the accessor must report the MOST RECENT command's exit code"
         );
     }
 

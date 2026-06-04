@@ -309,12 +309,76 @@ impl C0pl4ndApp {
                     );
                 }
             }
+            // Exit-code indicator: the FOCUSED pane's last finished command's
+            // OSC 133 `D` exit code. A green check for success (0), an X plus
+            // the code for a failure. Hidden entirely when no command has
+            // finished (a bare shell with no prompt integration never emits a
+            // `D` mark — the common case).
+            if let Some(term) = self.terms.get(&self.focused_pane) {
+                if let Some(indicator) = exit_code_indicator(term.last_command_exit_code()) {
+                    ui.separator();
+                    // Success uses the theme/brand green live-accent; a failure
+                    // uses the muted foreground (Akira-red #ff0040 is reserved
+                    // for alarms, not routine non-zero command exits).
+                    let color = if indicator.is_failure {
+                        colors.muted
+                    } else {
+                        brand::GREEN
+                    };
+                    ui.label(RichText::new(indicator.text).color(color))
+                        .on_hover_text(indicator.hover);
+                }
+            }
             if let Some(toast) = &self.toast {
                 ui.separator();
                 ui.label(RichText::new(toast).color(colors.accent));
             }
         });
     }
+}
+
+/// A rendered exit-code status-bar indicator: the glyph+code text, an
+/// accessible hover label, and whether it represents a failed command (so the
+/// caller picks the colour). Kept as a plain struct returned by a free function
+/// so the indicator-selection logic is unit-testable without an egui `Ui`.
+struct ExitCodeIndicator {
+    /// The status-bar text — a Phosphor glyph plus, for failures, the code.
+    text: String,
+    /// Accessible hover/description label (mirrors the mouse-mode badge).
+    hover: &'static str,
+    /// `true` for a non-zero exit code (drives the failure colour).
+    is_failure: bool,
+}
+
+/// Build the status-bar [`ExitCodeIndicator`] for a pane's
+/// [`last_command_exit_code`](super::pane_term::PaneTerm::last_command_exit_code)
+/// value, or `None` when no command has finished yet (no indicator shown).
+///
+/// - outer `None` → `None` (no finished command; the status bar shows nothing);
+/// - `Some(Some(0))` → green check, "success" (`is_failure = false`);
+/// - `Some(Some(code))` for `code != 0` → X + the code, "failed"
+///   (`is_failure = true`);
+/// - `Some(None)` → a check glyph with a "finished (no exit code reported)"
+///   label, treated as non-failure so it does not alarm.
+fn exit_code_indicator(exit: Option<Option<i32>>) -> Option<ExitCodeIndicator> {
+    let code = exit?;
+    Some(match code {
+        Some(0) => ExitCodeIndicator {
+            text: icon::CHECK_CIRCLE.to_string(),
+            hover: "Last command succeeded (exit code 0).",
+            is_failure: false,
+        },
+        Some(code) => ExitCodeIndicator {
+            text: format!("{} {code}", icon::X_CIRCLE),
+            hover: "Last command failed (non-zero exit code).",
+            is_failure: true,
+        },
+        None => ExitCodeIndicator {
+            text: icon::CHECK_CIRCLE.to_string(),
+            hover: "Last command finished (no exit code reported).",
+            is_failure: false,
+        },
+    })
 }
 
 /// The status-bar badge label for a mouse-reporting mode, or `None` when mouse
@@ -348,6 +412,47 @@ mod tests {
         assert_eq!(
             mouse_mode_badge_label(MouseMode::AnyEvent),
             Some("MOUSE: ANY")
+        );
+    }
+
+    #[test]
+    fn exit_code_indicator_hidden_when_no_finished_command() {
+        assert!(
+            exit_code_indicator(None).is_none(),
+            "no finished command must show no indicator"
+        );
+    }
+
+    #[test]
+    fn exit_code_indicator_success_is_not_a_failure() {
+        let ind = exit_code_indicator(Some(Some(0))).expect("success must show an indicator");
+        assert!(!ind.is_failure, "exit code 0 is a success, not a failure");
+        assert_eq!(
+            ind.text,
+            icon::CHECK_CIRCLE.to_string(),
+            "success shows a bare check glyph (no code)"
+        );
+    }
+
+    #[test]
+    fn exit_code_indicator_failure_shows_code() {
+        let ind = exit_code_indicator(Some(Some(127))).expect("failure must show an indicator");
+        assert!(ind.is_failure, "non-zero exit code is a failure");
+        assert_eq!(
+            ind.text,
+            format!("{} 127", icon::X_CIRCLE),
+            "failure shows the X glyph plus the exit code"
+        );
+    }
+
+    #[test]
+    fn exit_code_indicator_missing_code_is_neutral() {
+        // A finished command with no shell-reported code (`OSC 133 ; D`) shows
+        // a non-alarming indicator rather than being hidden.
+        let ind = exit_code_indicator(Some(None)).expect("finished command must show an indicator");
+        assert!(
+            !ind.is_failure,
+            "an absent exit code must not be treated as a failure"
         );
     }
 }

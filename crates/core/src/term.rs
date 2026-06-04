@@ -2600,6 +2600,35 @@ impl Terminal {
         &self.screen.command_marks
     }
 
+    /// The exit code of the most recently *finished* command, derived from the
+    /// captured OSC 133 `D` marks (C28). The shell only records these when its
+    /// prompt is integrated (`OSC 133 ; D [; exit_code]`), so a bare shell with
+    /// no prompt integration yields no command-end mark at all.
+    ///
+    /// The double `Option` distinguishes three states the status bar cares about:
+    ///
+    /// - `None` — no command has finished yet (no `D` mark): the host shows NO
+    ///   indicator.
+    /// - `Some(None)` — a command finished but the shell supplied no exit code
+    ///   (`OSC 133 ; D` with no third field): the host can show a neutral
+    ///   "done" indicator.
+    /// - `Some(Some(code))` — a command finished with the reported `code`:
+    ///   `0` is success, anything else is a failure with that code.
+    ///
+    /// Scans the captured marks from newest to oldest for the latest
+    /// [`osc::CommandMarkKind::CommandEnd`]; ignores [`osc::CommandMarkKind::OutputStart`]
+    /// (`C`) marks, which carry no exit code.
+    pub fn last_command_exit_code(&self) -> Option<Option<i32>> {
+        self.screen
+            .command_marks
+            .iter()
+            .rev()
+            .find_map(|mark| match mark.kind {
+                osc::CommandMarkKind::CommandEnd { exit_code } => Some(exit_code),
+                osc::CommandMarkKind::OutputStart => None,
+            })
+    }
+
     /// Returns the current indexed-palette color (0-255) as an `(r, g, b)`
     /// triple. Reflects OSC 4 sets and OSC 104 resets.
     pub fn palette_color(&self, index: u8) -> (u8, u8, u8) {
@@ -4819,6 +4848,58 @@ mod tests {
             t.command_marks().len(),
             0,
             "A is a prompt mark, not command"
+        );
+    }
+
+    #[test]
+    fn last_command_exit_code_none_when_no_command_finished() {
+        // A fresh terminal (or one that has only seen a `C` output-start mark)
+        // has no finished command — the accessor reports None so the status
+        // bar shows no indicator.
+        let mut t = Terminal::new(4, 20);
+        assert_eq!(t.last_command_exit_code(), None);
+        t.advance(b"\x1b]133;C\x07"); // output start only, no `D`
+        assert_eq!(
+            t.last_command_exit_code(),
+            None,
+            "a C (output-start) mark is not a finished command"
+        );
+    }
+
+    #[test]
+    fn last_command_exit_code_reports_latest_success_then_failure() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]133;D;0\x07"); // first command: success
+        assert_eq!(t.last_command_exit_code(), Some(Some(0)));
+        t.advance(b"\x1b]133;D;127\x07"); // second command: failure 127
+        assert_eq!(
+            t.last_command_exit_code(),
+            Some(Some(127)),
+            "the accessor must report the MOST RECENT command-end mark"
+        );
+    }
+
+    #[test]
+    fn last_command_exit_code_some_none_when_code_absent() {
+        // `OSC 133 ; D` with no third field: the command finished but the shell
+        // did not report a code — Some(None), distinct from the no-command None.
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]133;D\x07");
+        assert_eq!(t.last_command_exit_code(), Some(None));
+    }
+
+    #[test]
+    fn last_command_exit_code_ignores_trailing_output_start() {
+        // After a finished command (`D`), a new command's output begins (`C`)
+        // before it ends. The accessor must still report the LAST FINISHED
+        // command's code, ignoring the dangling `C`.
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]133;D;0\x07"); // command 1 finished, success
+        t.advance(b"\x1b]133;C\x07"); // command 2 output started, not finished
+        assert_eq!(
+            t.last_command_exit_code(),
+            Some(Some(0)),
+            "a dangling C must not mask the previous finished command's code"
         );
     }
 
