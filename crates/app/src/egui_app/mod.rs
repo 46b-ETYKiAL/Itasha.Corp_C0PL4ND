@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use eframe::egui;
 
 use grid::{count_panes, GridBehavior, Pane, PaneId, PaneIdAllocator};
-use pane_term::{CellMetrics, PaneTerm};
+use pane_term::{CellMetrics, ColorRun, PaneTerm};
 
 /// How many placeholder panes the shell opens with on first launch.
 const INITIAL_PANES: usize = 1;
@@ -165,6 +165,45 @@ pub struct C0pl4ndApp {
 const SPAWN_COLS: u16 = 80;
 /// See [`SPAWN_COLS`].
 const SPAWN_ROWS: u16 = 24;
+
+/// The `config.font.line_height` value (PIXELS) that maps to a row-pitch
+/// multiplier of exactly `1.0` — i.e. "natural" spacing (the rendered glyph's
+/// own galley height). The field is an absolute pixel line-height (default
+/// 20.0; settings slider 12..=48 px); this anchor turns it into a multiplier
+/// RELATIVE to the default so the default config reproduces the natural pitch
+/// (`20.0 / 20.0 == 1.0`) and raising the slider opens the rows up
+/// proportionally, lowering it tightens them — without breaking the existing
+/// absolute-px config field or its settings slider.
+const LINE_HEIGHT_ANCHOR_PX: f32 = 20.0;
+
+/// Convert the configured `config.font.line_height` (absolute px, default 20.0)
+/// into a row-pitch MULTIPLIER relative to the natural galley height. Pure +
+/// GPU-free so the pitch wiring is unit-testable.
+///
+/// * `line_height_px == LINE_HEIGHT_ANCHOR_PX` (the 20.0 default) → `1.0`
+///   (natural spacing).
+/// * A larger configured line-height → a multiplier `> 1.0` (looser rows).
+/// * A smaller one → a multiplier `< 1.0` (tighter rows).
+///
+/// Clamped to a sane `0.5..=4.0` band so a corrupt config can neither collapse
+/// rows onto each other nor scatter them across the pane.
+fn line_height_multiplier(line_height_px: f32) -> f32 {
+    if !line_height_px.is_finite() || line_height_px <= 0.0 {
+        return 1.0;
+    }
+    (line_height_px / LINE_HEIGHT_ANCHOR_PX).clamp(0.5, 4.0)
+}
+
+/// The effective terminal ROW PITCH (vertical advance per grid row) given the
+/// natural per-row galley height `natural_line_h` and the configured
+/// `line_height_px`. This single helper is the source of truth shared by the
+/// glyph painter, the cursor, the search highlight, the hyperlink hit-test, and
+/// the PTY `(cols, rows)` resize math, so every Y position stays aligned to the
+/// SAME pitch (the bug class where the cursor drifts off the text when the row
+/// pitch changes). Pure + GPU-free → unit-testable without an egui frame.
+fn effective_row_pitch(natural_line_h: f32, line_height_px: f32) -> f32 {
+    (natural_line_h * line_height_multiplier(line_height_px)).max(1.0)
+}
 
 impl C0pl4ndApp {
     /// Build the app inside eframe, applying the brand Visuals + window effect,
@@ -524,8 +563,11 @@ impl C0pl4ndApp {
         terms: &mut HashMap<PaneId, PaneTerm>,
         theme: &c0pl4nd_core::Theme,
         font_size: f32,
+        line_height_px: f32,
         cursor_cfg: c0pl4nd_core::config::CursorConfig,
+        effects: c0pl4nd_core::config::EffectsConfig,
         padding: f32,
+        bg_alpha: u8,
         search: Option<SearchHighlight<'_>>,
         links: &[(CellSpan, String)],
     ) -> PaneBodyOutcome {
@@ -536,10 +578,18 @@ impl C0pl4ndApp {
         // Cell metrics from the SAME monospace font the grid is drawn with, so
         // the PTY's `(cols, rows)` match the rendered glyph size. Measured via a
         // probe galley (`Painter::layout_job`); ppp scales points → physical px
-        // to match the `rect * ppp` resize math below.
-        let cell_metrics = monospace_cell_metrics(&painter, font_size, ppp);
+        // to match the `rect * ppp` resize math below. The configured
+        // Line-height folds into the row pitch here so the PTY reflows to the
+        // SAME pitch the painter draws at.
+        let cell_metrics = monospace_cell_metrics(&painter, font_size, ppp, line_height_px);
 
         // --- background quad (theme bg) + focus ring ---
+        // `bg_alpha` is 255 for an opaque window and the opacity-folded alpha
+        // when the window is effectively translucent — painting the pane fill
+        // non-opaque is what lets the OS acrylic/mica blur (or, in Transparent
+        // mode, the desktop) show THROUGH the grid. An opaque fill here would
+        // cover the transparent clear-color and defeat the whole DWM backdrop,
+        // which is exactly why transparency "did nothing" before.
         let bg = terms
             .get(&pane_id)
             .map(PaneTerm::background_rgb)
@@ -547,7 +597,7 @@ impl C0pl4ndApp {
         painter.rect_filled(
             rect,
             egui::CornerRadius::same(4),
-            egui::Color32::from_rgb(bg.0, bg.1, bg.2),
+            egui::Color32::from_rgba_unmultiplied(bg.0, bg.1, bg.2, bg_alpha),
         );
         // Focus ring + bezel follow the active theme (accent on focus, bezel
         // otherwise) so the grid chrome matches the rest of the themed UI.
@@ -588,13 +638,30 @@ impl C0pl4ndApp {
                 // black inside `egui_tiles` panes live while passing the wgpu
                 // test harness.
                 paint_grid_native(
-                    &painter, rect, term, font_size, theme, focused, cursor_cfg, pad,
+                    &painter,
+                    rect,
+                    term,
+                    font_size,
+                    line_height_px,
+                    theme,
+                    focused,
+                    cursor_cfg,
+                    effects,
+                    pad,
                 );
                 // Find-overlay highlight: tint every match span (and outline the
                 // active one) over the rendered grid. Only the focused pane while
                 // the overlay is open carries a `SearchHighlight`.
                 if let Some(hl) = search {
-                    paint_search_highlight(&painter, rect, font_size, pad, &pane_colors, hl);
+                    paint_search_highlight(
+                        &painter,
+                        rect,
+                        font_size,
+                        line_height_px,
+                        pad,
+                        &pane_colors,
+                        hl,
+                    );
                 }
             }
             Some(term) => {
@@ -627,7 +694,7 @@ impl C0pl4ndApp {
         // wiring + the OS-opener side effect live here.
         let mut opened_url = None;
         if !links.is_empty() {
-            let (cw, ch) = monospace_cell_points(&painter, font_size);
+            let (cw, ch) = monospace_cell_points(&painter, font_size, line_height_px);
             let origin = grid_text_origin(rect, pad);
             paint_link_underlines(&painter, origin, cw, ch, &pane_colors, links);
             if let Some(hover) = resp.hover_pos() {
@@ -812,7 +879,20 @@ impl C0pl4ndApp {
             let terms = &mut self.terms;
             let theme = &self.theme;
             let font_size = self.config.font.size;
+            // Read the line-height LIVE from the config so a Settings change
+            // reflows the row pitch (and the PTY rows/cursor/highlight) without a
+            // relaunch. Folded into the row pitch by [`effective_row_pitch`].
+            let line_height_px = self.config.font.line_height;
             let cursor_cfg = self.config.cursor;
+            // CRT scanlines + chromatic aberration, read LIVE so toggling them in
+            // Settings takes effect this frame; both are zero-cost when off/zero.
+            let effects = self.config.effects;
+            // Pane background alpha: full when opaque, opacity-folded when the
+            // window is effectively translucent — painting the pane fill
+            // non-opaque is what lets the OS blur / desktop show through (the
+            // transparency fix). Read LIVE so the opacity slider applies without
+            // a relaunch.
+            let bg_alpha = pane_bg_alpha(&self.config);
             // Read the inner padding LIVE from the config so a Settings change
             // moves the grid inset without a relaunch (it was a hardcoded 4px
             // before). `u16` config → f32 points for the painter.
@@ -843,8 +923,11 @@ impl C0pl4ndApp {
                     terms,
                     theme,
                     font_size,
+                    line_height_px,
                     cursor_cfg,
+                    effects,
                     padding,
+                    bg_alpha,
                     search,
                     links,
                 );
@@ -1757,9 +1840,21 @@ impl C0pl4ndApp {
             .frame(egui::Frame::new().fill(colors.panel).inner_margin(4.0))
             .show(ctx, |ui| self.status_bar(ui, colors));
 
-        // 3) the pane grid (egui_tiles) — LIVE terminal panes (Milestone 2)
+        // 3) the pane grid (egui_tiles) — LIVE terminal panes (Milestone 2). The
+        //    central-panel fill carries the SAME opacity-folded alpha the pane
+        //    quads use when the window is effectively translucent, so the gap
+        //    between/around panes also lets the OS blur (or desktop) show through
+        //    — an opaque central fill here would cover the transparent clear
+        //    color before the pane quads ever painted. Fully opaque otherwise.
+        let central_alpha = pane_bg_alpha(&self.config);
+        let central_fill = egui::Color32::from_rgba_unmultiplied(
+            colors.bg.r(),
+            colors.bg.g(),
+            colors.bg.b(),
+            central_alpha,
+        );
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(colors.bg))
+            .frame(egui::Frame::new().fill(central_fill))
             .show(ctx, |ui| self.grid_ui(ui));
 
         // Apply chrome actions AFTER the panels close (no mid-borrow mutation).
@@ -1855,9 +1950,17 @@ impl C0pl4ndApp {
 /// Cell metrics (physical px) derived from egui's monospace font at `font_size`
 /// — the same font [`paint_grid_native`] draws the grid with — so the PTY's
 /// `(cols, rows)` match the rendered glyph size. Width is the advance of `'M'`;
-/// height is the font's row height; both scaled to physical pixels by the
-/// context's `pixels_per_point`.
-fn monospace_cell_metrics(painter: &egui::Painter, font_size: f32, ppp: f32) -> CellMetrics {
+/// height is the EFFECTIVE row pitch ([`effective_row_pitch`] of the font's
+/// natural row height and the configured `line_height_px`), so a Line-height
+/// change reflows the PTY to the SAME pitch the glyph painter draws at — rows
+/// never overlap or leave a gap the resize math is unaware of. Both are scaled
+/// to physical pixels by the context's `pixels_per_point`.
+fn monospace_cell_metrics(
+    painter: &egui::Painter,
+    font_size: f32,
+    ppp: f32,
+    line_height_px: f32,
+) -> CellMetrics {
     let probe = egui::text::LayoutJob::single_section(
         "M".to_string(),
         egui::text::TextFormat {
@@ -1866,9 +1969,10 @@ fn monospace_cell_metrics(painter: &egui::Painter, font_size: f32, ppp: f32) -> 
         },
     );
     let size = painter.layout_job(probe).size();
+    let pitch = effective_row_pitch(size.y, line_height_px);
     CellMetrics {
         advance_w: (size.x * ppp).max(1.0),
-        line_h: (size.y * ppp).max(1.0),
+        line_h: (pitch * ppp).max(1.0),
     }
 }
 
@@ -1951,18 +2055,28 @@ fn link_url_at_cell(links: &[(CellSpan, String)], row: usize, col: usize) -> Opt
         .map(|(_, url)| url.as_str())
 }
 
-/// Cell `(width, height)` in POINTS from a monospace probe `M` — the same metric
-/// `paint_grid_native`/`paint_search_highlight` use, so hyperlink underlines and
-/// the Ctrl-click hit test land exactly on the rendered glyph grid.
-fn monospace_cell_points(painter: &egui::Painter, font_size: f32) -> (f32, f32) {
-    let probe = painter.layout_job(egui::text::LayoutJob::single_section(
-        "M".to_string(),
-        egui::text::TextFormat {
-            font_id: egui::FontId::monospace(font_size),
-            ..Default::default()
-        },
-    ));
-    (probe.size().x.max(1.0), probe.size().y.max(1.0))
+/// Cell `(width, height)` in POINTS for the terminal grid: the width is the
+/// monospace `M` advance; the height is the EFFECTIVE row pitch
+/// ([`effective_row_pitch`] of the natural galley height and the configured
+/// `line_height_px`) — the SAME pitch `paint_grid_native` draws rows at, so
+/// hyperlink underlines, the Ctrl-click hit test, and the search highlight all
+/// land exactly on the rendered glyph grid regardless of the Line-height
+/// setting.
+fn monospace_cell_points(
+    painter: &egui::Painter,
+    font_size: f32,
+    line_height_px: f32,
+) -> (f32, f32) {
+    let size = painter
+        .layout_job(egui::text::LayoutJob::single_section(
+            "M".to_string(),
+            egui::text::TextFormat {
+                font_id: egui::FontId::monospace(font_size),
+                ..Default::default()
+            },
+        ))
+        .size();
+    (size.x.max(1.0), effective_row_pitch(size.y, line_height_px))
 }
 
 /// Underline every Ctrl-clickable URL span over the rendered grid (drawn only
@@ -2001,6 +2115,7 @@ fn paint_search_highlight(
     painter: &egui::Painter,
     rect: egui::Rect,
     font_size: f32,
+    line_height_px: f32,
     padding: f32,
     colors: &theme::ChromeColors,
     hl: SearchHighlight<'_>,
@@ -2008,16 +2123,10 @@ fn paint_search_highlight(
     if hl.spans.is_empty() {
         return;
     }
-    // Cell size in POINTS from a monospace probe 'M' — identical to the cursor's
-    // metric so the highlight aligns with the glyphs.
-    let probe = painter.layout_job(egui::text::LayoutJob::single_section(
-        "M".to_string(),
-        egui::text::TextFormat {
-            font_id: egui::FontId::monospace(font_size),
-            ..Default::default()
-        },
-    ));
-    let (cw, ch) = (probe.size().x.max(1.0), probe.size().y.max(1.0));
+    // Cell size in POINTS — identical to the cursor's/grid's metric (the `M`
+    // advance for width, the effective row pitch for height) so the highlight
+    // aligns with the glyphs at any Line-height setting.
+    let (cw, ch) = monospace_cell_points(painter, font_size, line_height_px);
     let origin = grid_text_origin(rect, padding);
 
     for (idx, s) in hl.spans.iter().enumerate() {
@@ -2049,6 +2158,96 @@ fn term_default_fg(theme: &c0pl4nd_core::Theme) -> (u8, u8, u8) {
     c0pl4nd_core::theme::parse_hex(&theme.foreground).unwrap_or((232, 230, 240))
 }
 
+// ---- CRT / chromatic-aberration painter effects (research §2) -------------
+//
+// eframe 0.34 owns the wgpu surface + render loop, so a TRUE fullscreen
+// post-process shader over the whole composited UI is infeasible without
+// dropping eframe for a raw egui-winit + egui-wgpu host (research §2 verdict).
+// These are the STABLE painter-based approximations the research recommends:
+// scanlines + vignette drawn over the grid with `egui::Painter`, and a
+// per-glyph RGB ghost at the text-draw site. Both are GPU-free and ZERO-cost
+// when the setting is off/zero (the caller gates on `crt_scanlines` /
+// `chromatic_aberration > 0`).
+
+/// The vertical gap (POINTS) between CRT scanlines. A faithful CRT reads as
+/// thin dark lines every ~3 points; pure so the spacing is unit-testable.
+const CRT_SCANLINE_GAP: f32 = 3.0;
+/// Per-line darkening alpha (0..=255) for a scanline. Subtle — the lines must
+/// dim the phosphor, not black the text out.
+const CRT_SCANLINE_ALPHA: u8 = 28;
+
+/// The horizontal RGB ghost offset (POINTS) for a chromatic-aberration
+/// `intensity` (the `config.effects.chromatic_aberration` value). The red ghost
+/// draws at `-offset`, the blue ghost at `+offset`; `intensity == 0` ⇒ offset
+/// `0` (off). Capped at a small `2.0` px so a wild config value cannot smear the
+/// text into illegibility. Pure → unit-testable without a GPU.
+fn chromatic_offset(intensity: f32) -> f32 {
+    if !intensity.is_finite() || intensity <= 0.0 {
+        return 0.0;
+    }
+    intensity.clamp(0.0, 2.0)
+}
+
+/// The alpha (0..=255) of each RGB ghost for a chromatic-aberration
+/// `intensity`. Scales gently with intensity so a faint ghost at low intensity
+/// grows to a stronger (but never opaque) fringe; capped at 120 so the crisp
+/// main glyph always dominates. `intensity == 0` ⇒ alpha `0` (no ghost).
+fn chromatic_ghost_alpha(intensity: f32) -> u8 {
+    let i = chromatic_offset(intensity); // reuse the same 0..=2 clamp
+    if i <= 0.0 {
+        return 0;
+    }
+    // 60 at intensity 1.0, up to 120 at the 2.0 cap.
+    (60.0 * i).clamp(0.0, 120.0).round() as u8
+}
+
+/// Paint the CRT scanline + vignette overlay over a pane's grid `rect` (research
+/// §2 option (a)). Translucent horizontal lines every [`CRT_SCANLINE_GAP`]
+/// points dim alternate rows like a phosphor tube; a soft 4-edge vignette sells
+/// the curved-glass falloff. GPU-free (egui primitives only) and only invoked
+/// by the caller when `crt_scanlines` is on, so it is strictly zero-cost when
+/// the effect is disabled. The painter's clip rect keeps every line inside the
+/// pane.
+fn paint_crt_scanlines(painter: &egui::Painter, rect: egui::Rect) {
+    let line_col = egui::Color32::from_rgba_unmultiplied(0, 0, 0, CRT_SCANLINE_ALPHA);
+    let mut y = rect.top();
+    while y < rect.bottom() {
+        painter.hline(rect.x_range(), y, egui::Stroke::new(1.0, line_col));
+        y += CRT_SCANLINE_GAP;
+    }
+    // Vignette: four edge bands darkening toward the pane border. Cheap stand-in
+    // for a radial falloff — enough to read as a curved tube on a dark grid.
+    let vig = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 22);
+    let band = (rect.width().min(rect.height()) * 0.06).clamp(2.0, 24.0);
+    // Top + bottom + left + right inset bands.
+    painter.rect_filled(
+        egui::Rect::from_min_size(rect.left_top(), egui::vec2(rect.width(), band)),
+        0.0,
+        vig,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_size(
+            egui::pos2(rect.left(), rect.bottom() - band),
+            egui::vec2(rect.width(), band),
+        ),
+        0.0,
+        vig,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_size(rect.left_top(), egui::vec2(band, rect.height())),
+        0.0,
+        vig,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_size(
+            egui::pos2(rect.right() - band, rect.top()),
+            egui::vec2(band, rect.height()),
+        ),
+        0.0,
+        vig,
+    );
+}
+
 /// The top-left point at which a pane's terminal grid text is drawn, given the
 /// pane's body `rect` and the configurable inner `padding` (points). Pure +
 /// GPU-free so the padding live-apply wiring is unit-testable: the origin must
@@ -2075,80 +2274,99 @@ fn grid_text_origin(rect: egui::Rect, padding: f32) -> egui::Pos2 {
 /// visual line and is clipped at the pane edge by the caller's `painter_at`
 /// clip rect, so row alignment is preserved.
 ///
-/// The argument list is a bundle of per-frame render inputs (font size, theme,
-/// focus, cursor config, padding) threaded from the single call site in
-/// [`C0pl4ndApp::render_pane_body`]; the `too_many_arguments` allow matches that
-/// sibling free function for the same reason.
+/// The argument list is a bundle of per-frame render inputs (font size,
+/// line-height, theme, focus, cursor config, effects, padding) threaded from the
+/// single call site in [`C0pl4ndApp::render_pane_body`]; the
+/// `too_many_arguments` allow matches that sibling free function for the same
+/// reason.
+///
+/// Rows are painted ONE GALLEY PER ROW at the effective row pitch
+/// ([`effective_row_pitch`] of the natural galley height and the configured
+/// `line_height_px`) rather than as a single multi-row galley — egui's combined
+/// galley uses the font's own line spacing, which the Line-height setting could
+/// not influence. Per-row positioning makes the row pitch the live, configurable
+/// thing the cursor / search / hit-test all share.
 #[allow(clippy::too_many_arguments)]
 fn paint_grid_native(
     painter: &egui::Painter,
     rect: egui::Rect,
     term: &PaneTerm,
     font_size: f32,
+    line_height_px: f32,
     theme: &c0pl4nd_core::Theme,
     focused: bool,
     cursor_cfg: c0pl4nd_core::config::CursorConfig,
+    effects: c0pl4nd_core::config::EffectsConfig,
     padding: f32,
 ) {
     let default_fg = term_default_fg(theme);
-    let mut job = egui::text::LayoutJob::default();
-    job.wrap.max_width = f32::INFINITY;
     let font = egui::FontId::monospace(font_size);
-    match term.grid_spans() {
-        Some(runs) if !runs.is_empty() => {
-            for (text, (r, g, b)) in runs {
-                job.append(
-                    &text,
-                    0.0,
-                    egui::text::TextFormat {
-                        font_id: font.clone(),
-                        color: egui::Color32::from_rgb(r, g, b),
-                        ..Default::default()
-                    },
-                );
-            }
-        }
+    // Inset the grid by the configurable window padding (points), read live from
+    // `config.window.padding` each frame (threaded down from `grid_ui`). Pure
+    // [`grid_text_origin`] helper so the live-apply wiring is unit-testable.
+    let origin = grid_text_origin(rect, padding);
+    // Cell size in POINTS: `M` advance for width, the effective row pitch for the
+    // vertical advance per grid row. This is the SAME `(cw, ch)` the cursor,
+    // search highlight, and hyperlink hit-test use, so every Y stays aligned.
+    let (cw, ch) = monospace_cell_points(painter, font_size, line_height_px);
+
+    // Group the per-cell colour runs into ROWS (the `grid_spans` stream ends each
+    // row with a `"\n"` run). Each row becomes one galley, painted at
+    // `origin.y + row_idx * ch`.
+    let rows: Vec<Vec<ColorRun>> = match term.grid_spans() {
+        Some(runs) if !runs.is_empty() => split_runs_into_rows(runs),
         _ => {
             // No colour runs (e.g. dead session mid-frame): mono fallback so the
-            // pane is never blank.
-            job.append(
-                &term.grid_text().unwrap_or_default(),
-                0.0,
-                egui::text::TextFormat {
-                    font_id: font.clone(),
-                    color: egui::Color32::from_rgb(default_fg.0, default_fg.1, default_fg.2),
-                    ..Default::default()
-                },
+            // pane is never blank. One row per text line, all in the default fg.
+            term.grid_text()
+                .unwrap_or_default()
+                .lines()
+                .map(|line| vec![(line.to_string(), default_fg)])
+                .collect()
+        }
+    };
+
+    let ghost_offset = chromatic_offset(effects.chromatic_aberration);
+    let ghost_alpha = chromatic_ghost_alpha(effects.chromatic_aberration);
+    for (row_idx, runs) in rows.iter().enumerate() {
+        let row_origin = egui::pos2(origin.x, origin.y + row_idx as f32 * ch);
+        // --- faux chromatic aberration (research §2): re-draw the row's glyphs
+        // with R/B ghosts at ±offset BEHIND the crisp pass. Zero-cost when the
+        // setting is 0.0 (offset == 0 ⇒ skipped entirely).
+        if ghost_offset > 0.0 {
+            paint_row_galley(
+                painter,
+                row_origin + egui::vec2(-ghost_offset, 0.0),
+                runs,
+                &font,
+                Some(egui::Color32::from_rgba_unmultiplied(
+                    255,
+                    40,
+                    40,
+                    ghost_alpha,
+                )),
+                default_fg,
+            );
+            paint_row_galley(
+                painter,
+                row_origin + egui::vec2(ghost_offset, 0.0),
+                runs,
+                &font,
+                Some(egui::Color32::from_rgba_unmultiplied(
+                    40,
+                    80,
+                    255,
+                    ghost_alpha,
+                )),
+                default_fg,
             );
         }
+        // Crisp main pass in the runs' real colours, on top of any ghosts.
+        paint_row_galley(painter, row_origin, runs, &font, None, default_fg);
     }
-    let galley = painter.layout_job(job);
-    // Inset the grid by the configurable window padding (points). This is read
-    // live from `config.window.padding` each frame (threaded down from
-    // `grid_ui`), so changing Padding in settings moves the text origin without
-    // a relaunch — the previously-hardcoded 4px is now the default value of the
-    // setting, not a constant. The origin is computed by the pure
-    // [`grid_text_origin`] helper so the live-apply wiring is unit-testable
-    // without a GPU.
-    let origin = grid_text_origin(rect, padding);
-    painter.galley(
-        origin,
-        galley,
-        egui::Color32::from_rgb(default_fg.0, default_fg.1, default_fg.2),
-    );
 
     // --- terminal cursor ---
     if let Some((row, col)) = term.cursor_cell() {
-        // Cell size in POINTS from the same monospace font the grid uses (a
-        // probe-galley 'M' advance), so the caret lands on the cell grid.
-        let probe = painter.layout_job(egui::text::LayoutJob::single_section(
-            "M".to_string(),
-            egui::text::TextFormat {
-                font_id: egui::FontId::monospace(font_size),
-                ..Default::default()
-            },
-        ));
-        let (cw, ch) = (probe.size().x.max(1.0), probe.size().y.max(1.0));
         let cell_min = origin + egui::vec2(col as f32 * cw, row as f32 * ch);
         let cell = egui::Rect::from_min_size(cell_min, egui::vec2(cw, ch));
         let cur = c0pl4nd_core::theme::parse_hex(&theme.cursor).unwrap_or((0, 255, 144));
@@ -2190,6 +2408,81 @@ fn paint_grid_native(
             }
         }
     }
+
+    // --- CRT scanlines + vignette (research §2): the LAST thing painted over
+    // this pane's grid, so the lines dim the glyphs + cursor uniformly. Drawn
+    // only when the setting is on (strictly zero-cost otherwise).
+    if effects.crt_scanlines {
+        paint_crt_scanlines(painter, rect);
+    }
+}
+
+/// Split a flat colour-run stream (as produced by [`PaneTerm::grid_spans`],
+/// which terminates each grid row with a `"\n"` run) into per-row run lists. The
+/// newline marker runs are dropped; an embedded newline inside a run's text
+/// (defensive — `grid_spans` does not produce these, but a fallback might) also
+/// splits the row. Pure → unit-testable without a painter.
+fn split_runs_into_rows(runs: Vec<ColorRun>) -> Vec<Vec<ColorRun>> {
+    let mut rows: Vec<Vec<ColorRun>> = vec![Vec::new()];
+    for (text, color) in runs {
+        // A run is usually either a pure `"\n"` row terminator or newline-free
+        // glyph text; handle the general case by splitting on '\n'.
+        let mut parts = text.split('\n').peekable();
+        while let Some(part) = parts.next() {
+            if !part.is_empty() {
+                rows.last_mut()
+                    .expect("seeded with one row")
+                    .push((part.to_string(), color));
+            }
+            // Every '\n' boundary (i.e. every gap BETWEEN parts) starts a new row.
+            if parts.peek().is_some() {
+                rows.push(Vec::new());
+            }
+        }
+    }
+    // A trailing newline leaves an empty final row; drop it so a blank line at
+    // the end does not add phantom vertical space.
+    if rows.last().is_some_and(Vec::is_empty) {
+        rows.pop();
+    }
+    rows
+}
+
+/// Paint one grid row's colour runs as a single galley at `pos`. When
+/// `override_color` is `Some`, every run is drawn in that colour (the R/B
+/// chromatic-aberration ghost passes); when `None`, each run keeps its real SGR
+/// colour (the crisp main pass). `default_fg` is the galley's fallback colour.
+fn paint_row_galley(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    runs: &[ColorRun],
+    font: &egui::FontId,
+    override_color: Option<egui::Color32>,
+    default_fg: (u8, u8, u8),
+) {
+    if runs.is_empty() {
+        return;
+    }
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = f32::INFINITY;
+    for (text, (r, g, b)) in runs {
+        let color = override_color.unwrap_or_else(|| egui::Color32::from_rgb(*r, *g, *b));
+        job.append(
+            text,
+            0.0,
+            egui::text::TextFormat {
+                font_id: font.clone(),
+                color,
+                ..Default::default()
+            },
+        );
+    }
+    let galley = painter.layout_job(job);
+    painter.galley(
+        pos,
+        galley,
+        egui::Color32::from_rgb(default_fg.0, default_fg.1, default_fg.2),
+    );
 }
 
 /// Map an `egui::Key` (+ modifiers) onto the engine-agnostic [`LogicalKey`] for
@@ -2339,6 +2632,28 @@ fn install_chrome_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// The alpha (0..=255) to paint the pane grid background (and the central panel
+/// fill) with, for the current config:
+///
+/// * **Opaque** (master toggle off, or `Opaque` mode): `255` — a solid fill so
+///   the desktop never bleeds through. The unchanged, safe default.
+/// * **Translucent** (`effective_translucent()`): the `opacity` slider folded
+///   into a 0..=255 alpha (clamped to the same `0.30` floor `window_clear_color`
+///   uses for `Transparent` mode), so the pane fill is non-opaque and the OS
+///   acrylic/mica blur — or, in `Transparent` mode, the desktop — shows THROUGH
+///   the grid. An opaque pane fill here is exactly why transparency previously
+///   "did nothing": it covered the transparent clear-color and the DWM backdrop.
+///
+/// Pure (`&Config`) so the transparency wiring is unit-testable without a
+/// window. Mirrors SCR1B3's translucent-panel pattern (research §1c).
+fn pane_bg_alpha(config: &c0pl4nd_core::Config) -> u8 {
+    if !config.effective_translucent() {
+        return 255;
+    }
+    let a = config.opacity.clamp(0.30, 1.0);
+    (a * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
 /// The frameless-window clear color for the current config + theme.
 ///
 /// * **Opaque** (master off, or `Opaque` mode): the theme background at full
@@ -2418,6 +2733,18 @@ fn tint_rgba(hex: &str, alpha: u8) -> Option<(u8, u8, u8, u8)> {
 /// when the master transparency toggle is on AND the mode wants a non-opaque
 /// surface (`Config::effective_translucent`), so an opaque window never gets a
 /// layered surface (no ghost-on-close risk).
+///
+/// LIVE-APPLY VERDICT (research §1): this is invoked ONCE at startup in
+/// [`C0pl4ndApp::new`] because it needs the `eframe::CreationContext`'s raw
+/// window handle, which `frame_tick` (driven only by `&egui::Context`) does not
+/// expose — eframe 0.34 gives no stable cross-platform way to re-apply a DWM
+/// backdrop class to the live window from inside the frame loop. So switching
+/// the transparency MODE (Glass⇄Mica⇄Transparent) or toggling the master switch
+/// at runtime needs a RELAUNCH for the DWM backdrop class to change. What IS
+/// live: the PANEL/grid translucency — [`pane_bg_alpha`] reads `opacity` +
+/// `effective_translucent()` from the config EVERY frame, so the opacity slider
+/// and the pane see-through (the main visible lever) take effect immediately
+/// without a relaunch.
 fn apply_window_effect(
     cc: &eframe::CreationContext<'_>,
     mode: c0pl4nd_core::config::WindowMode,
@@ -2874,5 +3201,177 @@ mod tests {
         let cfg = cfg_mode(false, c0pl4nd_core::config::WindowMode::Glass);
         let [_, _, _, a] = window_clear_color(&cfg, &app.theme);
         assert_eq!(a, 1.0, "master off forces an opaque clear even for Glass");
+    }
+
+    // ---- Line-height row pitch ----
+
+    #[test]
+    fn line_height_multiplier_anchors_default_to_one() {
+        // The 20.0-px default maps to a 1.0 multiplier (natural spacing), so the
+        // default config reproduces the pre-feature row pitch exactly.
+        assert!(
+            (line_height_multiplier(LINE_HEIGHT_ANCHOR_PX) - 1.0).abs() < 1e-6,
+            "the default line-height must yield a 1.0 (natural) pitch multiplier"
+        );
+        // A larger configured line-height opens the rows up (> 1.0); a smaller
+        // one tightens them (< 1.0).
+        assert!(line_height_multiplier(40.0) > 1.0, "40px loosens the pitch");
+        assert!(
+            line_height_multiplier(12.0) < 1.0,
+            "12px tightens the pitch"
+        );
+    }
+
+    #[test]
+    fn line_height_multiplier_clamps_and_guards_bad_values() {
+        // A degenerate / non-finite config can neither collapse rows nor scatter
+        // them: the multiplier is clamped to a sane band, and 0 / negative /
+        // non-finite fall back to the natural 1.0.
+        assert_eq!(line_height_multiplier(0.0), 1.0, "zero → natural");
+        assert_eq!(line_height_multiplier(-5.0), 1.0, "negative → natural");
+        assert_eq!(line_height_multiplier(f32::NAN), 1.0, "NaN → natural");
+        assert!(
+            (line_height_multiplier(1000.0) - 4.0).abs() < 1e-6,
+            "a huge line-height clamps to the 4.0 ceiling"
+        );
+        assert!(
+            (line_height_multiplier(1.0) - 0.5).abs() < 1e-6,
+            "a tiny line-height clamps to the 0.5 floor"
+        );
+    }
+
+    #[test]
+    fn effective_row_pitch_scales_natural_height_by_the_multiplier() {
+        // At the default line-height the pitch equals the natural galley height;
+        // doubling the line-height (40px) doubles the pitch; the pitch is never
+        // below 1px (a degenerate natural height still yields a drawable row).
+        let natural = 16.0;
+        assert!(
+            (effective_row_pitch(natural, LINE_HEIGHT_ANCHOR_PX) - natural).abs() < 1e-6,
+            "default line-height keeps the natural pitch"
+        );
+        assert!(
+            (effective_row_pitch(natural, 40.0) - natural * 2.0).abs() < 1e-3,
+            "40px (2× the 20px anchor) doubles the row pitch"
+        );
+        assert!(
+            effective_row_pitch(0.0, LINE_HEIGHT_ANCHOR_PX) >= 1.0,
+            "the pitch floors at 1px so a row is always drawable"
+        );
+    }
+
+    // ---- Grid run → row grouping (per-row galley positioning) ----
+
+    #[test]
+    fn split_runs_into_rows_groups_on_newline_terminators() {
+        // `grid_spans` ends each row with a "\n" run; the splitter drops those
+        // markers and keeps each row's colour runs together.
+        let runs = vec![
+            ("ab".to_string(), (1, 2, 3)),
+            ("cd".to_string(), (4, 5, 6)),
+            ("\n".to_string(), (0, 0, 0)),
+            ("ef".to_string(), (7, 8, 9)),
+            ("\n".to_string(), (0, 0, 0)),
+        ];
+        let rows = split_runs_into_rows(runs);
+        assert_eq!(rows.len(), 2, "two newline-terminated rows");
+        assert_eq!(rows[0].len(), 2, "first row keeps both colour runs");
+        assert_eq!(rows[0][0].0, "ab");
+        assert_eq!(rows[0][1].0, "cd");
+        assert_eq!(rows[1][0].0, "ef");
+    }
+
+    #[test]
+    fn split_runs_into_rows_handles_embedded_newline_and_no_trailing_phantom() {
+        // A run carrying an embedded '\n' (defensive) splits into two rows; a
+        // trailing newline must NOT leave a phantom empty final row.
+        let runs = vec![
+            ("foo\nbar".to_string(), (1, 1, 1)),
+            ("\n".to_string(), (0, 0, 0)),
+        ];
+        let rows = split_runs_into_rows(runs);
+        assert_eq!(rows.len(), 2, "embedded newline splits into two rows");
+        assert_eq!(rows[0][0].0, "foo");
+        assert_eq!(rows[1][0].0, "bar");
+        assert!(
+            rows.last().is_some_and(|r| !r.is_empty()),
+            "a trailing newline must not leave an empty phantom row"
+        );
+    }
+
+    // ---- CRT / chromatic-aberration helpers ----
+
+    #[test]
+    fn chromatic_offset_is_zero_when_off_and_clamps_when_wild() {
+        // 0.0 (the default) → no ghost offset at all (the OFF fast-path).
+        assert_eq!(chromatic_offset(0.0), 0.0, "0 intensity = no aberration");
+        assert_eq!(chromatic_offset(-1.0), 0.0, "negative = off");
+        assert_eq!(chromatic_offset(f32::NAN), 0.0, "NaN = off");
+        // A moderate intensity passes through; a wild value clamps to the 2px cap
+        // so the text can never smear into illegibility.
+        assert!((chromatic_offset(1.0) - 1.0).abs() < 1e-6);
+        assert!(
+            (chromatic_offset(99.0) - 2.0).abs() < 1e-6,
+            "clamped to 2px"
+        );
+    }
+
+    #[test]
+    fn chromatic_ghost_alpha_scales_with_intensity_and_is_zero_when_off() {
+        // OFF → no ghost alpha (so no ghost passes are even drawn).
+        assert_eq!(chromatic_ghost_alpha(0.0), 0, "0 intensity = no ghost");
+        // Grows with intensity but is capped so the crisp main glyph dominates.
+        assert_eq!(chromatic_ghost_alpha(1.0), 60, "intensity 1.0 → alpha 60");
+        assert_eq!(
+            chromatic_ghost_alpha(99.0),
+            120,
+            "alpha is capped at 120 even for a wild intensity"
+        );
+        assert!(
+            chromatic_ghost_alpha(0.5) < chromatic_ghost_alpha(1.0),
+            "ghost alpha grows with intensity"
+        );
+    }
+
+    // ---- Translucent pane background alpha (the transparency fix) ----
+
+    #[test]
+    fn pane_bg_alpha_is_opaque_by_default_and_when_master_off() {
+        // The default (transparency off) paints the pane fill fully opaque so the
+        // desktop never bleeds through — the safe, unchanged default.
+        let app = C0pl4ndApp::bootstrap();
+        assert_eq!(
+            pane_bg_alpha(&app.config),
+            255,
+            "default pane fill is opaque"
+        );
+        // A translucent MODE with the master toggle off is still opaque.
+        let cfg = cfg_mode(false, c0pl4nd_core::config::WindowMode::Glass);
+        assert_eq!(pane_bg_alpha(&cfg), 255, "master off keeps the pane opaque");
+    }
+
+    #[test]
+    fn pane_bg_alpha_folds_opacity_when_translucent() {
+        // Enabling transparency + a translucent mode makes the pane fill
+        // non-opaque, folding the opacity slider into the alpha so the OS blur /
+        // desktop shows through at the chosen strength (this is the lever that
+        // made transparency visibly "do something").
+        let mut cfg = cfg_mode(true, c0pl4nd_core::config::WindowMode::Glass);
+        cfg.opacity = 0.6;
+        let a = pane_bg_alpha(&cfg);
+        assert_eq!(
+            a,
+            (0.6 * 255.0_f32).round() as u8,
+            "alpha tracks the opacity slider"
+        );
+        assert!(a < 255, "a translucent pane fill must be non-opaque");
+        // The 0.30 floor is honoured so a near-zero opacity can't make the grid
+        // invisible.
+        cfg.opacity = 0.05;
+        assert_eq!(
+            pane_bg_alpha(&cfg),
+            (0.30 * 255.0_f32).round() as u8,
+            "alpha is clamped to the 0.30 floor"
+        );
     }
 }
