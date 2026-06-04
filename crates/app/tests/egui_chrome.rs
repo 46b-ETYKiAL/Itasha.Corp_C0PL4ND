@@ -85,6 +85,23 @@ fn click_tab_control(h: &mut Harness<'_>, app: &RefCell<C0pl4ndApp>, pane: PaneI
     );
 }
 
+/// Whether a per-tab control (`""` bare tab, `"close "`, `"pin "`, `"unpin "`)
+/// is CURRENTLY present in the accessibility tree, derived race-free: the tree
+/// is rebuilt (`h.run()`) and the lookup key derived from the SAME post-run app
+/// state, so an async OSC-title landing can never desync the key from the tree.
+/// Use this for presence/absence assertions where `click_tab_control`'s
+/// click-and-return contract does not fit.
+fn tab_control_present(
+    h: &mut Harness<'_>,
+    app: &RefCell<C0pl4ndApp>,
+    pane: PaneId,
+    prefix: &str,
+) -> bool {
+    h.run();
+    let label = format!("{prefix}{}", tab_label(app, pane));
+    h.query_by_label(label.as_str()).is_some()
+}
+
 #[test]
 fn clicking_new_terminal_adds_a_pane() {
     // Bootstrap opens ONE pane; the single "+" button adds another.
@@ -295,31 +312,17 @@ fn clicking_tab_pin_toggles_pinned() {
     let mut h = harness(&app);
 
     // Click pane 0's pin (accessible label "pin {tab-label}") → it becomes
-    // pinned. The tab label is the pane's live OSC title when the shell set one,
-    // so derive the pin label from the rendered tab label rather than hardcoding
-    // "pin pane 0" (which only holds for an untitled pane).
-    let pin_label = format!(
-        "pin {}",
-        app.borrow()
-            .tab_label_for_pane(PaneId(0))
-            .expect("pane 0 must have a tab label")
-    );
-    h.get_by_label(pin_label.as_str()).click();
-    h.run();
+    // pinned. The tab label is the pane's live OSC title, which lands
+    // asynchronously, so click via the race-tolerant helper rather than a
+    // once-derived literal the shell's title escape could change mid-test.
+    click_tab_control(&mut h, &app, PaneId(0), "pin ");
     assert!(
         app.borrow().is_pinned(PaneId(0)),
-        "clicking the tab pin must pin the pane (pin label: {pin_label:?})"
+        "clicking the tab pin must pin the pane"
     );
 
     // The pin relabels to "unpin {tab-label}"; clicking it unpins.
-    let unpin_label = format!(
-        "unpin {}",
-        app.borrow()
-            .tab_label_for_pane(PaneId(0))
-            .expect("pane 0 must have a tab label")
-    );
-    h.get_by_label(unpin_label.as_str()).click();
-    h.run();
+    click_tab_control(&mut h, &app, PaneId(0), "unpin ");
     assert!(
         !app.borrow().is_pinned(PaneId(0)),
         "clicking the pin again must unpin the pane"
@@ -337,11 +340,10 @@ fn clicking_tab_close_removes_the_pane() {
     assert_eq!(before, 2, "two panes after adding one");
 
     // Click pane 1's close (label "close {tab-label}") → exactly one pane
-    // closes. The tab label is the pane's live OSC title when its shell set one,
-    // so derive the close label from the rendered tab label.
-    let close1 = format!("close {}", tab_label(&app, PaneId(1)));
-    h.get_by_label(close1.as_str()).click();
-    h.run();
+    // closes. The tab label is the pane's live OSC title, which lands
+    // asynchronously, so click via the race-tolerant helper rather than a
+    // once-derived literal.
+    click_tab_control(&mut h, &app, PaneId(1), "close ");
 
     let after = app.borrow().pane_count();
     assert_eq!(
@@ -367,28 +369,26 @@ fn pinned_tab_has_no_close_button() {
     h.run();
 
     // Per-tab close/pin accessible labels are derived from each pane's LIVE tab
-    // label (its OSC title when the shell set one), so resolve them from the app
-    // rather than hardcoding "close pane N" (which only holds for untitled panes).
-    let close0 = format!("close {}", tab_label(&app, PaneId(0)));
-    let pin0 = format!("pin {}", tab_label(&app, PaneId(0)));
-    let close1 = format!("close {}", tab_label(&app, PaneId(1)));
+    // label (its OSC title when the shell set one), which lands asynchronously —
+    // so resolve presence via the race-tolerant helper (rebuilds the tree and
+    // derives the lookup key from the SAME post-run state) rather than a
+    // once-derived literal that the shell's title escape could desync.
 
     // Both tabs start with a close button.
     assert!(
-        h.query_by_label(close0.as_str()).is_some(),
-        "an unpinned tab exposes a close button (label: {close0:?})"
+        tab_control_present(&mut h, &app, PaneId(0), "close "),
+        "an unpinned tab exposes a close button"
     );
 
     // Pin pane 0; its close button disappears, pane 1's remains.
-    h.get_by_label(pin0.as_str()).click();
-    h.run();
+    click_tab_control(&mut h, &app, PaneId(0), "pin ");
     assert!(
-        h.query_by_label(close0.as_str()).is_none(),
-        "a pinned tab must NOT expose a close button (label: {close0:?})"
+        !tab_control_present(&mut h, &app, PaneId(0), "close "),
+        "a pinned tab must NOT expose a close button"
     );
     assert!(
-        h.query_by_label(close1.as_str()).is_some(),
-        "the still-unpinned tab keeps its close button (label: {close1:?})"
+        tab_control_present(&mut h, &app, PaneId(1), "close "),
+        "the still-unpinned tab keeps its close button"
     );
 }
 
