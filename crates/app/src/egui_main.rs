@@ -16,6 +16,8 @@
 
 #[path = "egui_app/mod.rs"]
 mod egui_app;
+#[path = "update.rs"]
+mod update;
 
 use eframe::egui;
 
@@ -27,6 +29,34 @@ fn main() -> eframe::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .try_init();
+
+    let args: Vec<String> = std::env::args().collect();
+
+    // `c0pl4nd --version` — print and exit (no window).
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("{} {}", c0pl4nd_core::PRODUCT_NAME, c0pl4nd_core::version());
+        return Ok(());
+    }
+
+    // `c0pl4nd update` — explicit, user-initiated update check (no window). Reads
+    // the configured channel from the persisted config, defaulting to stable.
+    if args.iter().any(|a| a == "update") {
+        let channel = c0pl4nd_core::Config::default_path()
+            .filter(|p| p.exists())
+            .and_then(|p| {
+                std::fs::read_to_string(&p)
+                    .ok()
+                    .and_then(|s| c0pl4nd_core::Config::from_toml(&s, &p).ok())
+            })
+            .map(|c| c.update.channel)
+            .unwrap_or_else(|| "stable".to_string());
+        // `run_update` is offline-graceful and only prints; surface any hard
+        // error to stderr but still exit 0 (a failed check is not a crash).
+        if let Err(e) = update::run_update(&channel) {
+            eprintln!("c0pl4nd update: {e}");
+        }
+        return Ok(());
+    }
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1100.0, 720.0])
@@ -54,7 +84,26 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "C0PL4ND",
         options,
-        Box::new(|cc| Ok(Box::new(egui_app::C0pl4ndApp::new(cc)))),
+        Box::new(|cc| {
+            let mut app = egui_app::C0pl4ndApp::new(cc);
+            // Opt-in, local-first launch update check. The ONE network call runs
+            // on a background thread so startup never blocks; the app polls the
+            // channel each frame and surfaces a found update as a toast. Off by
+            // default — only when the user enabled `[update] check_on_launch`.
+            let (check_on_launch, channel) = app.update_check_config();
+            if check_on_launch {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let ctx = cc.egui_ctx.clone();
+                std::thread::spawn(move || {
+                    if let Some(notice) = update::check_for_update(&channel) {
+                        let _ = tx.send(notice);
+                        ctx.request_repaint(); // wake the UI to show the toast
+                    }
+                });
+                app.attach_update_check(rx);
+            }
+            Ok(Box::new(app))
+        }),
     )
 }
 
