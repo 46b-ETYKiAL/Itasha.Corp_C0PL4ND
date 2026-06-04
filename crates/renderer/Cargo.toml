@@ -6,8 +6,9 @@ license.workspace = true
 repository.workspace = true
 description = "C0PL4ND GPU renderer: glyph-atlas text rendering, damage tracking, render-on-input."
 
+# No dependencies: this crate currently exposes only the pure `FramePolicy`
+# frame-scheduling contract. The GPU backend (which would pull in core + the
+# error/log stack) is not implemented — the shipping app renders the grid with
+# egui's native text painter — so the previously-declared c0pl4nd-core / anyhow /
+# thiserror / tracing deps were unused (flagged by cargo-machete) and removed.
 [dependencies]
-c0pl4nd-core = { path = "../core" }
-anyhow.workspace = true
-thiserror.workspace = true
-tracing.workspace = true

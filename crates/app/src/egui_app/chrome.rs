@@ -86,80 +86,110 @@ impl C0pl4ndApp {
             // [title] [pin] [×]. Pinned tabs sort first and carry a violet pin;
             // their × is hidden (unpin to close) so they can't be shut by
             // accident. Clicking the title focuses the pane; × closes it.
-            let mut tabs = self.pane_titles();
-            // Stable sort: pinned first, original visual order preserved within
-            // each group (`sort_by_key` is stable).
-            tabs.sort_by_key(|(pid, _)| !self.pinned.contains(pid));
-            for (pane_id, title) in tabs {
-                let selected = pane_id == self.focused_pane;
-                let is_pinned = self.pinned.contains(&pane_id);
-                // Per-tab accessible labels. The pin/× glyph buttons AND the tab
-                // itself would otherwise expose a NON-unique name (the title),
-                // and two shells in the same directory routinely set the SAME OSC
-                // title — ambiguous for screen readers AND for `get_by_label`
-                // tests. Anchor every label on the unique `pane {id}` so each tab
-                // is distinguishable even when titles collide. The VISIBLE tab
-                // text stays the bare title; only the accessible name carries the
-                // id suffix.
-                let a11y = Self::tab_a11y_label(pane_id, &title);
-                let pin_label = format!("{} {a11y}", if is_pinned { "unpin" } else { "pin" });
-                let close_label = format!("close {a11y}");
-                ui.scope(|ui| {
-                    // Tight spacing INSIDE a tab so title/pin/× read as one unit.
-                    ui.spacing_mut().item_spacing.x = 3.0;
-                    let label = RichText::new(&title).color(if selected {
-                        colors.accent
-                    } else {
-                        colors.fg
-                    });
-                    let tab = ui.selectable_label(selected, label);
-                    // Override the accessible name with the UNIQUE label so the
-                    // a11y tree never has two same-named tab nodes (the visible
-                    // text is unchanged — still just the title).
-                    tab.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::SelectableLabel, true, &a11y)
-                    });
-                    if tab.clicked() {
-                        actions.focus_tab = Some(pane_id);
-                    }
-                    // Pinned → SOLID violet pin (Fill family); unpinned → thin
-                    // muted pin. The fill glyph makes "pinned" read at a glance.
-                    let pin_text = if is_pinned {
-                        RichText::new(egui_phosphor::fill::PUSH_PIN)
-                            .family(egui::FontFamily::Name("phosphor-fill".into()))
-                            .size(13.0)
-                            .color(brand::PURPLE)
-                    } else {
-                        RichText::new(icon::PUSH_PIN).size(13.0).color(colors.muted)
-                    };
-                    let pin = ui
-                        .add(egui::Button::new(pin_text).frame(false))
-                        .on_hover_text(&pin_label);
-                    pin.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &pin_label)
-                    });
-                    if pin.clicked() {
-                        actions.pin_tab = Some(pane_id);
-                    }
-                    if !is_pinned {
-                        let close = ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(icon::X).size(13.0).color(colors.muted),
+            //
+            // The strip is a horizontally-scrollable region whose width RESERVES
+            // space for the right-pinned caption cluster (close/max/min/settings)
+            // and the trailing "+"/"▾" controls. This stops many wide (OSC-titled)
+            // tabs from growing UNDER the caption — which previously occluded the
+            // rightmost tab's pin/× (drawn beneath the caption buttons → those
+            // controls became unclickable). `auto_shrink([true, false])` keeps the
+            // common case pixel-identical: with few tabs the region shrinks to its
+            // content and "+" sits immediately after the last tab; only an
+            // overflowing strip scrolls instead of bleeding under the caption.
+            let tabs_max_w = tab_strip_max_width(ui.available_width());
+            egui::ScrollArea::horizontal()
+                .id_salt("tab_strip")
+                .max_width(tabs_max_w)
+                .auto_shrink([true, false])
+                .show(ui, |ui| {
+                    let mut tabs = self.pane_titles();
+                    // Stable sort: pinned first, original visual order preserved
+                    // within each group (`sort_by_key` is stable).
+                    tabs.sort_by_key(|(pid, _)| !self.pinned.contains(pid));
+                    for (pane_id, title) in tabs {
+                        let selected = pane_id == self.focused_pane;
+                        let is_pinned = self.pinned.contains(&pane_id);
+                        // Per-tab accessible labels. The pin/× glyph buttons AND the tab
+                        // itself would otherwise expose a NON-unique name (the title),
+                        // and two shells in the same directory routinely set the SAME OSC
+                        // title — ambiguous for screen readers AND for `get_by_label`
+                        // tests. Anchor every label on the unique `pane {id}` so each tab
+                        // is distinguishable even when titles collide. The VISIBLE tab
+                        // text stays the bare title; only the accessible name carries the
+                        // id suffix.
+                        let a11y = Self::tab_a11y_label(pane_id, &title);
+                        let pin_label =
+                            format!("{} {a11y}", if is_pinned { "unpin" } else { "pin" });
+                        let close_label = format!("close {a11y}");
+                        ui.scope(|ui| {
+                            // Tight spacing INSIDE a tab so title/pin/× read as one unit.
+                            ui.spacing_mut().item_spacing.x = 3.0;
+                            let label = RichText::new(&title).color(if selected {
+                                colors.accent
+                            } else {
+                                colors.fg
+                            });
+                            let tab = ui.selectable_label(selected, label);
+                            // Override the accessible name with the UNIQUE label so the
+                            // a11y tree never has two same-named tab nodes (the visible
+                            // text is unchanged — still just the title).
+                            tab.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::SelectableLabel,
+                                    true,
+                                    &a11y,
                                 )
-                                .frame(false),
-                            )
-                            .on_hover_text(&close_label);
-                        close.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &close_label)
+                            });
+                            if tab.clicked() {
+                                actions.focus_tab = Some(pane_id);
+                            }
+                            // Pinned → SOLID violet pin (Fill family); unpinned → thin
+                            // muted pin. The fill glyph makes "pinned" read at a glance.
+                            let pin_text = if is_pinned {
+                                RichText::new(egui_phosphor::fill::PUSH_PIN)
+                                    .family(egui::FontFamily::Name("phosphor-fill".into()))
+                                    .size(13.0)
+                                    .color(brand::PURPLE)
+                            } else {
+                                RichText::new(icon::PUSH_PIN).size(13.0).color(colors.muted)
+                            };
+                            let pin = ui
+                                .add(egui::Button::new(pin_text).frame(false))
+                                .on_hover_text(&pin_label);
+                            pin.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    &pin_label,
+                                )
+                            });
+                            if pin.clicked() {
+                                actions.pin_tab = Some(pane_id);
+                            }
+                            if !is_pinned {
+                                let close = ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new(icon::X).size(13.0).color(colors.muted),
+                                        )
+                                        .frame(false),
+                                    )
+                                    .on_hover_text(&close_label);
+                                close.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Button,
+                                        true,
+                                        &close_label,
+                                    )
+                                });
+                                if close.clicked() {
+                                    actions.close_tab = Some(pane_id);
+                                }
+                            }
                         });
-                        if close.clicked() {
-                            actions.close_tab = Some(pane_id);
-                        }
+                        ui.separator();
                     }
                 });
-                ui.separator();
-            }
 
             // Single "+" new-terminal button: opens a new pane and lets the host
             // expand the grid logically (it splits the focused pane along its
@@ -393,6 +423,19 @@ fn mouse_mode_badge_label(mode: MouseMode) -> Option<&'static str> {
     }
 }
 
+/// Maximum width (points) of the scrollable tab strip for a titlebar of
+/// `available_width`. Reserves [`TAB_STRIP_RIGHT_RESERVE`] on the right for the
+/// absolute-positioned caption cluster (close/max/min/settings) plus the
+/// trailing "+"/"▾" controls, so the strip can never grow under them; floored at
+/// a small minimum so a very narrow window still shows a sliver of tabs (which
+/// then scroll) rather than collapsing to zero. Pure so the reserve invariant is
+/// unit-testable without an egui frame.
+fn tab_strip_max_width(available_width: f32) -> f32 {
+    /// Caption cluster (~176pt: 4 × 42 + inset) + the "+"/"▾" flow controls.
+    const TAB_STRIP_RIGHT_RESERVE: f32 = 300.0;
+    (available_width - TAB_STRIP_RIGHT_RESERVE).max(80.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +443,33 @@ mod tests {
     #[test]
     fn mouse_mode_badge_hidden_when_off() {
         assert_eq!(mouse_mode_badge_label(MouseMode::Off), None);
+    }
+
+    #[test]
+    fn tab_strip_reserves_caption_space_and_floors() {
+        // A roomy titlebar leaves width for tabs after reserving the caption
+        // cluster + "+"/"▾" controls, so the strip never grows under them.
+        let wide = tab_strip_max_width(1100.0);
+        assert!(
+            wide < 1100.0 - 200.0,
+            "the strip must reserve a substantial right margin for the caption \
+             cluster (got {wide} for a 1100pt bar)"
+        );
+        assert!(wide > 0.0);
+        // A very narrow window floors the strip to a scrollable sliver rather
+        // than collapsing to zero (or going negative).
+        assert_eq!(
+            tab_strip_max_width(100.0),
+            80.0,
+            "a narrow titlebar floors the tab strip width (it then scrolls)"
+        );
+        assert_eq!(
+            tab_strip_max_width(0.0),
+            80.0,
+            "a degenerate zero width still floors, never negative"
+        );
+        // Reserve is monotonic: more titlebar width → more (or equal) tab width.
+        assert!(tab_strip_max_width(1600.0) > tab_strip_max_width(900.0));
     }
 
     #[test]

@@ -554,11 +554,9 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "c0pl4nd-core",
- "c0pl4nd-renderer",
  "eframe",
  "egui",
  "egui-phosphor",
- "egui-wgpu",
  "egui_kittest",
  "egui_tiles",
  "glyphon",
@@ -598,12 +596,6 @@ dependencies = [
 [[package]]
 name = "c0pl4nd-renderer"
 version = "0.3.0"
-dependencies = [
- "anyhow",
- "c0pl4nd-core",
- "thiserror 2.0.18",
- "tracing",
-]
 
 [[package]]
 name = "calloop"
