@@ -18,6 +18,7 @@
 pub mod chrome;
 pub mod grid;
 pub mod pane_term;
+mod search_ui;
 mod settings;
 pub mod shells;
 mod theme;
@@ -104,6 +105,30 @@ pub struct C0pl4ndApp {
     /// pattern as [`Self::last_window_cmd`] (the PTY write itself is not
     /// observable in the headless harness).
     last_palette_run: Option<String>,
+    /// Whether the in-terminal find overlay is open.
+    search_open: bool,
+    /// The find overlay's search query.
+    search_query: String,
+    /// Whether the find query is treated as a regular expression.
+    search_regex: bool,
+    /// Whether find matching is case-SENSITIVE (the core option speaks
+    /// `case_insensitive`, so this is its inverse — the UI label is "Case").
+    search_case_sensitive: bool,
+    /// The matches found this frame for `search_query` over the focused pane's
+    /// grid text, recomputed by [`Self::recompute_search`] whenever the query or
+    /// a toggle changes (and once on open). Kept on `self` so the cycle keys
+    /// (Enter / F3 / Shift+F3) and the highlight pass both read the same set.
+    search_matches: Vec<c0pl4nd_core::search::SearchMatch>,
+    /// Index of the currently-selected match in `search_matches` (0-based).
+    /// Meaningful only when `search_matches` is non-empty.
+    search_sel: usize,
+    /// TEST-ONLY corpus override for the find overlay. When `Some`, the matcher
+    /// searches these lines instead of the live PTY grid. The live PTY's
+    /// `grid_text()` is async + platform-dependent (a CI box may have no usable
+    /// shell), so the headless find tests seed a KNOWN corpus here to assert the
+    /// search wiring deterministically. `None` in the shipping binary — the real
+    /// focused-pane grid text is searched. Set via `test_seed_focused_grid`.
+    search_test_corpus: Option<String>,
     /// A transient status-bar message (e.g. "max 6 panes").
     toast: Option<String>,
     /// The most recent caption command issued (minimize/maximize/close). Set in
@@ -189,6 +214,13 @@ impl C0pl4ndApp {
             palette_query: String::new(),
             palette_sel: 0,
             last_palette_run: None,
+            search_open: false,
+            search_query: String::new(),
+            search_regex: false,
+            search_case_sensitive: false,
+            search_matches: Vec::new(),
+            search_sel: 0,
+            search_test_corpus: None,
             toast: None,
             last_window_cmd: None,
             live_window: false,
@@ -460,6 +492,7 @@ impl C0pl4ndApp {
         font_size: f32,
         cursor_cfg: c0pl4nd_core::config::CursorConfig,
         padding: f32,
+        search: Option<SearchHighlight<'_>>,
     ) -> PaneBodyOutcome {
         let (rect, resp) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -522,6 +555,12 @@ impl C0pl4ndApp {
                 paint_grid_native(
                     &painter, rect, term, font_size, theme, focused, cursor_cfg, pad,
                 );
+                // Find-overlay highlight: tint every match span (and outline the
+                // active one) over the rendered grid. Only the focused pane while
+                // the overlay is open carries a `SearchHighlight`.
+                if let Some(hl) = search {
+                    paint_search_highlight(&painter, rect, font_size, pad, &pane_colors, hl);
+                }
             }
             Some(term) => {
                 // Failed spawn: show the error, never panic.
@@ -674,6 +713,18 @@ impl C0pl4ndApp {
         let mut clicked: Option<PaneId> = None;
         let mut focused_size: Option<(f32, f32)> = None;
 
+        // The find overlay highlights the FOCUSED pane only, and only while open.
+        // Build the cell spans HERE (before the disjoint-borrow block takes
+        // `&mut self.terms`), since `cell_spans_for_search` reads `self` via
+        // `focused_grid_text`. Owned `Vec` + a copied index, so the render
+        // closure borrows them disjointly from `self.grid_tree`.
+        let search_spans: Vec<CellSpan> = if self.search_open {
+            self.cell_spans_for_search()
+        } else {
+            Vec::new()
+        };
+        let search_sel = self.search_sel;
+
         // Snapshot BEFORE the frame so we can revert a drag that exceeds the cap.
         let pre = self.grid_tree.clone();
         {
@@ -686,7 +737,16 @@ impl C0pl4ndApp {
             // moves the grid inset without a relaunch (it was a hardcoded 4px
             // before). `u16` config → f32 points for the painter.
             let padding = f32::from(self.config.window.padding);
+            let search_spans = &search_spans;
             let mut render_body = |ui: &mut egui::Ui, pid: PaneId| -> bool {
+                let search = if pid == focused && !search_spans.is_empty() {
+                    Some(SearchHighlight {
+                        spans: search_spans,
+                        selected: search_sel,
+                    })
+                } else {
+                    None
+                };
                 let outcome = Self::render_pane_body(
                     ui,
                     pid,
@@ -696,6 +756,7 @@ impl C0pl4ndApp {
                     font_size,
                     cursor_cfg,
                     padding,
+                    search,
                 );
                 if outcome.clicked {
                     clicked = Some(pid);
@@ -1056,6 +1117,210 @@ impl C0pl4ndApp {
             self.run_palette_selection();
         }
     }
+
+    // ---- in-terminal find overlay (Ctrl+F) -------------------------------
+    //
+    // The overlay searches the FOCUSED pane's visible/scrollback grid text via
+    // the shared core matcher (`c0pl4nd_core::search::find`). It is opened with
+    // Ctrl+F (handled in `frame_tick`), filters as you type, shows a live match
+    // count, cycles matches with Enter / F3 / Shift+F3, and closes with Esc. The
+    // Regex + Case toggles map onto `search::SearchOptions`. These methods are the
+    // production logic `frame_tick` calls — the interaction tests drive them
+    // THROUGH the real frame loop, not as a test-only mirror.
+
+    /// The lines of the focused pane's grid text, one `String` per visual row —
+    /// the slice handed to [`c0pl4nd_core::search::find`]. Empty when the focused
+    /// pane has no live terminal (the matcher then yields no matches).
+    fn focused_search_lines(&self) -> Vec<String> {
+        // A seeded test corpus (headless find tests) takes precedence so the
+        // search wiring can be asserted without a live PTY; otherwise the real
+        // focused-pane grid text is searched.
+        if let Some(corpus) = &self.search_test_corpus {
+            return corpus.lines().map(str::to_string).collect();
+        }
+        self.focused_grid_text()
+            .map(|t| t.lines().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    /// The current [`SearchOptions`](c0pl4nd_core::search::SearchOptions) derived
+    /// from the two UI toggles. `case_sensitive` is the inverse of the core's
+    /// `case_insensitive` field.
+    fn search_options(&self) -> c0pl4nd_core::search::SearchOptions {
+        c0pl4nd_core::search::SearchOptions {
+            regex: self.search_regex,
+            case_insensitive: !self.search_case_sensitive,
+        }
+    }
+
+    /// Recompute `search_matches` for the current query + options over the
+    /// focused pane's grid text, and clamp `search_sel` into range. Called on
+    /// open, on every query/toggle change, and each frame the overlay is open
+    /// (the live PTY grid scrolls, so the match set is not static). An invalid
+    /// regex yields an empty set — surfaced calmly as "no matches", never a
+    /// panic (the core matcher swallows the regex-compile error).
+    fn recompute_search(&mut self) {
+        let lines = self.focused_search_lines();
+        self.search_matches =
+            c0pl4nd_core::search::find(&lines, &self.search_query, self.search_options());
+        if self.search_matches.is_empty() {
+            self.search_sel = 0;
+        } else if self.search_sel >= self.search_matches.len() {
+            self.search_sel = self.search_matches.len() - 1;
+        }
+    }
+
+    /// Toggle the find overlay. Opening it resets the selection to the first
+    /// match and recomputes the match set for whatever is already on screen;
+    /// closing it leaves the query intact (so reopening resumes the last search).
+    fn toggle_search(&mut self) {
+        self.search_open = !self.search_open;
+        if self.search_open {
+            self.search_sel = 0;
+            self.recompute_search();
+        }
+    }
+
+    /// Advance the selected match by `delta` (wrapping), a no-op when there are
+    /// no matches. Enter / F3 step +1; Shift+F3 steps −1. Wrapping mirrors every
+    /// real editor's find-next behaviour (the last match's "next" is the first).
+    fn search_cycle(&mut self, delta: i64) {
+        let n = self.search_matches.len();
+        if n == 0 {
+            self.search_sel = 0;
+            return;
+        }
+        let n_i = n as i64;
+        let cur = self.search_sel as i64;
+        self.search_sel = (((cur + delta) % n_i + n_i) % n_i) as usize;
+    }
+
+    /// Whether the find overlay is currently open. Observation accessor for the
+    /// interaction tests (asserts Ctrl+F toggled it through the real frame loop).
+    #[allow(dead_code)]
+    pub fn search_is_open(&self) -> bool {
+        self.search_open
+    }
+
+    /// The number of matches the find overlay found this frame. Observation
+    /// accessor for the interaction tests (asserts typing filters the grid).
+    #[allow(dead_code)]
+    pub fn search_match_count(&self) -> usize {
+        self.search_matches.len()
+    }
+
+    /// The 0-based index of the currently-selected match. Observation accessor
+    /// for the cycle tests (asserts F3 / Shift+F3 / Enter move the selection).
+    #[allow(dead_code)]
+    pub fn search_selected(&self) -> usize {
+        self.search_sel
+    }
+
+    /// Whether the find query is currently treated as a regex. Observation
+    /// accessor for the regex-toggle test.
+    #[allow(dead_code)]
+    pub fn search_regex_enabled(&self) -> bool {
+        self.search_regex
+    }
+
+    /// Whether find matching is currently case-SENSITIVE. Observation accessor
+    /// for the case-toggle test.
+    #[allow(dead_code)]
+    pub fn search_case_sensitive_enabled(&self) -> bool {
+        self.search_case_sensitive
+    }
+
+    // ---- find-overlay test-support surface --------------------------------
+    //
+    // These let the headless interaction tests drive the find overlay against a
+    // KNOWN corpus and flip the option toggles deterministically — the live PTY
+    // grid is async + platform-dependent, so a CI box with no usable shell could
+    // not otherwise exercise the matcher. They are `pub` (consumed by the
+    // `#[path]`-included test binary) but operate ONLY on the test-corpus
+    // override / option flags; they never touch the live PTY, so they are inert
+    // in the shipping binary (which never calls them).
+
+    /// Seed the find overlay's search corpus with a known multi-line string, so
+    /// the headless tests can assert the matcher wiring without a live PTY. The
+    /// shipping binary never calls this (`search_test_corpus` stays `None`).
+    /// Recomputes the match set immediately if the overlay is already open.
+    #[allow(dead_code)]
+    pub fn test_seed_focused_grid(&mut self, corpus: &str) {
+        self.search_test_corpus = Some(corpus.to_string());
+        if self.search_open {
+            self.recompute_search();
+        }
+    }
+
+    /// Flip the regex option and recompute matches — the production effect of
+    /// clicking the Regex toggle, exposed for the headless test (which cannot
+    /// reliably click the overlay's flow buttons).
+    #[allow(dead_code)]
+    pub fn test_set_regex(&mut self, on: bool) {
+        self.search_regex = on;
+        if self.search_open {
+            self.recompute_search();
+        }
+    }
+
+    /// Flip the case-sensitivity option and recompute matches — the production
+    /// effect of clicking the Case toggle, exposed for the headless test.
+    #[allow(dead_code)]
+    pub fn test_set_case_sensitive(&mut self, on: bool) {
+        self.search_case_sensitive = on;
+        if self.search_open {
+            self.recompute_search();
+        }
+    }
+
+    /// The current match set converted to CELL spans over the focused pane's
+    /// grid text, ready for the highlight painter. Converts each match's BYTE
+    /// span to character columns via [`byte_to_col`] against the matched line, so
+    /// a multi-byte glyph before the match never offsets the highlight. A match
+    /// whose `line` exceeds the visible rows (the grid scrolled since the set was
+    /// computed) is dropped.
+    fn cell_spans_for_search(&self) -> Vec<CellSpan> {
+        if self.search_matches.is_empty() {
+            return Vec::new();
+        }
+        let lines = self.focused_search_lines();
+        self.search_matches
+            .iter()
+            .filter_map(|m| {
+                let line = lines.get(m.line)?;
+                Some(CellSpan {
+                    line: m.line,
+                    col_start: byte_to_col(line, m.start),
+                    col_end: byte_to_col(line, m.end),
+                })
+            })
+            .collect()
+    }
+
+    /// Render the find overlay (delegating to the [`search_ui`] free function so
+    /// it never fights `self`'s borrow), then recompute the match set when the
+    /// query or a toggle changed this frame. The `current` readout is the 1-based
+    /// selection index when on a match, else 0.
+    fn search_window(&mut self, ctx: &egui::Context) {
+        let colors = theme::ChromeColors::from_theme(&self.theme);
+        let match_count = self.search_matches.len();
+        let current = if match_count == 0 {
+            0
+        } else {
+            self.search_sel + 1
+        };
+        let outcome = {
+            let state = search_ui::SearchState {
+                query: &mut self.search_query,
+                regex: &mut self.search_regex,
+                case_sensitive: &mut self.search_case_sensitive,
+            };
+            search_ui::show(ctx, state, match_count, current, colors)
+        };
+        if outcome.changed {
+            self.recompute_search();
+        }
+    }
 }
 
 impl eframe::App for C0pl4ndApp {
@@ -1163,6 +1428,31 @@ impl C0pl4ndApp {
             self.toggle_palette();
         }
 
+        // 0a') find overlay: Ctrl+F (Cmd+F on macOS) toggles it. The matching
+        //      key-press is removed from the event stream so it never reaches the
+        //      PTY — without this, on the close frame (overlay already open) the
+        //      `F` would fall through to `forward_input_to_focused` and be encoded
+        //      as the Ctrl+F control byte (0x06, the shell's forward-char). The
+        //      ctrl-OR-command match is done explicitly (not via `consume_key`) so
+        //      it is unambiguous on every platform — the same discipline the
+        //      palette chord uses above.
+        let toggle_search = ctx.input_mut(|i| {
+            let mut found = false;
+            i.events.retain(|ev| {
+                let hit = matches!(
+                    ev,
+                    egui::Event::Key { key: egui::Key::F, pressed: true, modifiers, .. }
+                    if (modifiers.ctrl || modifiers.command) && !modifiers.shift && !modifiers.alt
+                );
+                found |= hit;
+                !hit
+            });
+            found
+        });
+        if toggle_search {
+            self.toggle_search();
+        }
+
         // 0b) route this frame's input. When the palette is open, its navigation
         //     keys (↑/↓/Enter/Esc) are consumed here and the typed query is
         //     captured by the palette's focused TextEdit — NOT forwarded to the
@@ -1190,6 +1480,43 @@ impl C0pl4ndApp {
             }
             if enter {
                 self.run_palette_selection();
+            }
+        } else if self.search_open {
+            // The find overlay owns input while open: its TextEdit captures the
+            // typed query (it auto-focuses each frame), and the navigation keys
+            // (Enter / F3 / Shift+F3 cycle, Esc close) are consumed HERE so they
+            // never reach the PTY. F3 is consumed in BOTH shift states so the
+            // shell never sees the F3 escape sequence while finding. Typed text
+            // is deliberately NOT forwarded to the PTY this branch — the overlay
+            // is modal over keyboard input, like the palette.
+            // Consume Shift+F3 BEFORE plain F3: `consume_key` matches the most
+            // specific modifier set, and consuming the SHIFT variant first means
+            // a Shift+F3 press cannot also satisfy the bare-F3 consume (which
+            // would step forward instead of back).
+            let (enter, esc, f3_shift, f3) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                    i.consume_key(egui::Modifiers::SHIFT, egui::Key::F3),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::F3),
+                )
+            });
+            if esc {
+                self.search_open = false;
+            } else {
+                // Enter and F3 step to the next match; Shift+F3 steps to the
+                // previous. The match set is recomputed each frame below so a
+                // scrolling PTY keeps the cycle honest.
+                if enter || f3 {
+                    self.search_cycle(1);
+                }
+                if f3_shift {
+                    self.search_cycle(-1);
+                }
+                // The live grid scrolls under the overlay, so refresh the match
+                // set every open frame (cheap: a substring/regex scan of the
+                // visible rows) before the highlight pass reads it.
+                self.recompute_search();
             }
         } else {
             self.forward_input_to_focused(ctx);
@@ -1302,6 +1629,13 @@ impl C0pl4ndApp {
             self.command_palette_window(ctx);
         }
 
+        // 5b) the find overlay, if open (floats above the grid; its nav keys
+        //     were handled in step 0b). Recomputes matches on a query/toggle edit
+        //     inside the window closure.
+        if self.search_open {
+            self.search_window(ctx);
+        }
+
         // 6) window color-tint overlay (a subtle full-window wash). Only painted
         //    when the window is effectively translucent AND the user dialled in
         //    a tint strength — mirrors SCR1B3. A solid (opaque) window never
@@ -1351,6 +1685,96 @@ struct PaneBodyOutcome {
     /// The pane's body size (points) this frame — used to pick the "+" split
     /// direction for the focused pane.
     size: egui::Vec2,
+}
+
+/// One find-overlay match converted to CELL coordinates: the visual row and the
+/// `[col_start, col_end)` character columns the match spans. Built in
+/// [`C0pl4ndApp::cell_spans_for_search`] from the byte spans the core matcher
+/// returns, so the painter never re-derives columns from bytes.
+#[derive(Clone, Copy)]
+struct CellSpan {
+    /// Visual row (line index into the pane's grid text).
+    line: usize,
+    /// First character column of the match (inclusive).
+    col_start: usize,
+    /// One-past-the-last character column of the match (exclusive).
+    col_end: usize,
+}
+
+/// The find-overlay highlight inputs for ONE pane render: the cell spans to tint
+/// plus the index of the active (selected) span. Borrowed from a per-frame
+/// `Vec<CellSpan>` for the focused pane only while the overlay is open.
+#[derive(Clone, Copy)]
+struct SearchHighlight<'a> {
+    /// Every match span in CELL coordinates over the pane's grid text.
+    spans: &'a [CellSpan],
+    /// Index into `spans` of the currently-selected match (the one Enter / F3
+    /// cycles to); drawn with an outline so it stands out from the dim tints.
+    selected: usize,
+}
+
+/// The byte offset `byte` within `line` converted to a CHARACTER column (the
+/// terminal grid is monospace, so one char == one cell). The core matcher
+/// returns BYTE spans (`str::find` / `Regex::find` offsets); a multi-byte glyph
+/// before the match would otherwise over-count the column if bytes were used
+/// directly. Clamps to the line length so a stale span (the grid scrolled since
+/// the match was computed) can never index past the row.
+fn byte_to_col(line: &str, byte: usize) -> usize {
+    let b = byte.min(line.len());
+    // Count chars up to the byte boundary; `char_indices` walks char starts.
+    line.char_indices().take_while(|(i, _)| *i < b).count()
+}
+
+/// Paint the find-overlay highlight over a pane's rendered grid: a dim tint
+/// quad behind every match span and an accent outline around the active one.
+/// Cell geometry is derived from the SAME monospace probe-galley the cursor
+/// uses, so the quads land on the cell grid. GPU-free (egui rects only). A
+/// match whose `line` exceeds the visible row count is skipped (the grid may
+/// have scrolled since the match set was computed mid-frame).
+fn paint_search_highlight(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    font_size: f32,
+    padding: f32,
+    colors: &theme::ChromeColors,
+    hl: SearchHighlight<'_>,
+) {
+    if hl.spans.is_empty() {
+        return;
+    }
+    // Cell size in POINTS from a monospace probe 'M' — identical to the cursor's
+    // metric so the highlight aligns with the glyphs.
+    let probe = painter.layout_job(egui::text::LayoutJob::single_section(
+        "M".to_string(),
+        egui::text::TextFormat {
+            font_id: egui::FontId::monospace(font_size),
+            ..Default::default()
+        },
+    ));
+    let (cw, ch) = (probe.size().x.max(1.0), probe.size().y.max(1.0));
+    let origin = grid_text_origin(rect, padding);
+
+    for (idx, s) in hl.spans.iter().enumerate() {
+        // Spans are already in cell coordinates (built by `cell_spans_for_search`
+        // via `byte_to_col`). The painter's clip rect keeps any over-wide quad
+        // inside the pane, so no extra bounds math is needed.
+        let col_end = s.col_end.max(s.col_start + 1);
+        let x0 = origin.x + s.col_start as f32 * cw;
+        let w = (col_end - s.col_start) as f32 * cw;
+        let y0 = origin.y + s.line as f32 * ch;
+        let span = egui::Rect::from_min_size(egui::pos2(x0, y0), egui::vec2(w, ch));
+        // Dim accent tint behind every match.
+        painter.rect_filled(span, 1.0, colors.accent.gamma_multiply(0.30));
+        // The active match also gets a crisp outline so it reads as "current".
+        if idx == hl.selected {
+            painter.rect_stroke(
+                span,
+                1.0,
+                egui::Stroke::new(1.5, colors.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
 }
 
 /// The theme's default foreground as an `(r,g,b)` triple — the glyph colour for
