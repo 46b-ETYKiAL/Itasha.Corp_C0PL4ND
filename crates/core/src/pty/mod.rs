@@ -62,6 +62,7 @@ impl PtyProcess {
         for a in args {
             cmd.arg(a);
         }
+        apply_prompt_env(&mut cmd, program);
         // Prefer the requested cwd when it exists; else fall back to home.
         let dir = cwd
             .map(std::path::PathBuf::from)
@@ -141,6 +142,53 @@ impl Drop for PtyProcess {
     }
 }
 
+/// The default `PROMPT` we inject for a `cmd.exe`-family shell so there is a
+/// single space between the prompt and the cursor.
+///
+/// `cmd.exe`'s built-in default prompt is `$P$G` — the path followed by `>`
+/// with NO trailing space — so the cursor renders flush against the `>`
+/// (`C:\Users\.46b_>`). Setting `PROMPT=$P$G ` (note the trailing space) makes
+/// cmd render `C:\Users\.46b_> ` with the cursor one cell clear of the `>`.
+/// PowerShell and POSIX shells (bash/zsh/fish) already end their default prompt
+/// with a space via their own `prompt` function / `PS1`, so they need no env.
+#[cfg(windows)]
+const CMD_PROMPT_WITH_TRAILING_SPACE: &str = "$P$G ";
+
+/// Whether `program` names a `cmd.exe`-family shell (case-insensitive on the
+/// file stem). Matches `cmd`, `cmd.exe`, and an absolute/relative path ending in
+/// one of those (e.g. `C:\Windows\System32\cmd.exe`). Does NOT match
+/// `powershell.exe`, `pwsh.exe`, `wsl.exe`, or `bash` — those carry their own
+/// space-terminated default prompt and must not be touched.
+#[cfg(windows)]
+fn is_cmd_shell(program: &str) -> bool {
+    std::path::Path::new(program)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("cmd"))
+}
+
+/// Inject the default `PROMPT` for a `cmd.exe`-family shell when the user has
+/// NOT already set one.
+///
+/// This is the minimal, non-invasive fix for "no space between the shell prompt
+/// and the cursor": cmd reads its prompt from the `PROMPT` environment variable
+/// and defaults to `$P$G` (no trailing space) when it is unset. We only set the
+/// variable when:
+///   * the spawned program is a cmd-family shell, AND
+///   * `PROMPT` is not already present in the (inherited) environment —
+///     so a user who customised `PROMPT` keeps their value untouched.
+///
+/// On non-Windows targets this is a no-op (POSIX shells own their `PS1`).
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn apply_prompt_env(cmd: &mut CommandBuilder, program: &str) {
+    #[cfg(windows)]
+    {
+        if is_cmd_shell(program) && std::env::var_os("PROMPT").is_none() {
+            cmd.env("PROMPT", CMD_PROMPT_WITH_TRAILING_SPACE);
+        }
+    }
+}
+
 fn dirs_home() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
     {
@@ -169,9 +217,130 @@ pub fn default_shell() -> String {
 mod tests {
     use super::*;
 
+    /// Serializes the `apply_prompt_env_*` tests: they mutate the process-wide
+    /// `PROMPT` env var, so they must not run concurrently with each other.
+    /// `Mutex<()>` poisons if a test panics while holding it; the helper below
+    /// recovers the guard so one assertion failure does not cascade into
+    /// `PoisonError` failures in the sibling tests.
+    #[cfg(windows)]
+    static PROMPT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Lock `PROMPT_ENV_LOCK`, ignoring a prior panic's poison (we only use the
+    /// lock to serialise, not to protect invariant state).
+    #[cfg(windows)]
+    fn lock_prompt_env() -> std::sync::MutexGuard<'static, ()> {
+        PROMPT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The `PROMPT` value `apply_prompt_env` INJECTED (i.e. set via `env()`),
+    /// independent of any inherited base-environment `PROMPT`. `None` means no
+    /// injection happened. `CommandBuilder::new` seeds the base env with the
+    /// parent's vars, so `get_env` would also report an inherited `PROMPT`;
+    /// `iter_extra_env_as_str` reports ONLY caller-set vars, which is exactly
+    /// what we want to assert here.
+    #[cfg(windows)]
+    fn injected_prompt(cmd: &CommandBuilder) -> Option<String> {
+        cmd.iter_extra_env_as_str()
+            .find(|(k, _)| k.eq_ignore_ascii_case("PROMPT"))
+            .map(|(_, v)| v.to_string())
+    }
+
     #[test]
     fn default_shell_is_nonempty() {
         assert!(!default_shell().is_empty());
+    }
+
+    /// `is_cmd_shell` matches the cmd-family by file stem (case-insensitive),
+    /// including a full path, and rejects the space-terminated-prompt shells.
+    #[cfg(windows)]
+    #[test]
+    fn is_cmd_shell_matches_only_cmd_family() {
+        assert!(super::is_cmd_shell("cmd"));
+        assert!(super::is_cmd_shell("cmd.exe"));
+        assert!(super::is_cmd_shell("CMD.EXE"));
+        assert!(super::is_cmd_shell(r"C:\Windows\System32\cmd.exe"));
+        // These shells already end their default prompt with a space — never touch.
+        assert!(!super::is_cmd_shell("powershell.exe"));
+        assert!(!super::is_cmd_shell("pwsh.exe"));
+        assert!(!super::is_cmd_shell("wsl.exe"));
+        assert!(!super::is_cmd_shell("bash"));
+        assert!(!super::is_cmd_shell("command.com"));
+    }
+
+    /// The reported bug: a cmd shell spawned with no user `PROMPT` must carry the
+    /// injected `PROMPT=$P$G ` (trailing space) so the cursor clears the `>`.
+    /// We guard the env var so the assertion is deterministic regardless of how
+    /// the test runner was launched.
+    #[cfg(windows)]
+    #[test]
+    fn apply_prompt_env_sets_trailing_space_prompt_for_cmd_when_unset() {
+        let _guard = lock_prompt_env();
+        let saved = std::env::var_os("PROMPT");
+        // SAFETY: serialized by PROMPT_ENV_LOCK; we restore the prior value.
+        unsafe { std::env::remove_var("PROMPT") };
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        super::apply_prompt_env(&mut cmd, "cmd.exe");
+        let got = injected_prompt(&cmd);
+        // Restore before asserting so a failure cannot leak state.
+        if let Some(v) = saved {
+            unsafe { std::env::set_var("PROMPT", v) };
+        }
+        assert_eq!(
+            got.as_deref(),
+            Some(super::CMD_PROMPT_WITH_TRAILING_SPACE),
+            "cmd with no user PROMPT must get PROMPT=$P$G with a trailing space"
+        );
+        assert!(
+            super::CMD_PROMPT_WITH_TRAILING_SPACE.ends_with(' '),
+            "the injected prompt MUST end with a space (this is the whole fix)"
+        );
+    }
+
+    /// A user who customised `PROMPT` keeps their value — we are non-invasive.
+    #[cfg(windows)]
+    #[test]
+    fn apply_prompt_env_respects_an_existing_user_prompt() {
+        let _guard = lock_prompt_env();
+        let saved = std::env::var_os("PROMPT");
+        // SAFETY: serialized by PROMPT_ENV_LOCK; we restore the prior value.
+        unsafe { std::env::set_var("PROMPT", "$P$_$G") };
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        super::apply_prompt_env(&mut cmd, "cmd.exe");
+        // No caller-set override: the user's inherited PROMPT stands untouched.
+        let injected = injected_prompt(&cmd);
+        match saved {
+            Some(v) => unsafe { std::env::set_var("PROMPT", v) },
+            None => unsafe { std::env::remove_var("PROMPT") },
+        }
+        assert_eq!(
+            injected, None,
+            "an existing user PROMPT must be left untouched (no override injected)"
+        );
+    }
+
+    /// PowerShell / WSL must NOT receive a `PROMPT` injection — they own their
+    /// own space-terminated prompt.
+    #[cfg(windows)]
+    #[test]
+    fn apply_prompt_env_does_not_touch_non_cmd_shells() {
+        let _guard = lock_prompt_env();
+        let saved = std::env::var_os("PROMPT");
+        // SAFETY: serialized by PROMPT_ENV_LOCK; we restore the prior value.
+        unsafe { std::env::remove_var("PROMPT") };
+        let injected: Vec<_> = ["powershell.exe", "pwsh.exe", "wsl.exe"]
+            .into_iter()
+            .map(|prog| {
+                let mut cmd = CommandBuilder::new(prog);
+                super::apply_prompt_env(&mut cmd, prog);
+                (prog, injected_prompt(&cmd))
+            })
+            .collect();
+        if let Some(v) = saved {
+            unsafe { std::env::set_var("PROMPT", v) };
+        }
+        for (prog, got) in injected {
+            assert_eq!(got, None, "{prog} must not get a PROMPT injection");
+        }
     }
 
     /// `kill()` must actually terminate an otherwise-forever-running interactive
