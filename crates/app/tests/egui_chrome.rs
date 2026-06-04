@@ -57,32 +57,64 @@ fn tab_label(app: &RefCell<C0pl4ndApp>, pane: PaneId) -> String {
         .unwrap_or_else(|| panic!("pane {} must have a tab label", pane.0))
 }
 
-/// Click a per-tab control whose accessible label is built from the pane's LIVE
-/// tab label (`""` → the bare label itself; `"pin "` / `"close "` → the prefixed
-/// pin/close button). The tab label is the shell's OSC window title, which lands
-/// ASYNCHRONOUSLY from the PTY reader thread — so the label the app renders can
-/// flip from `pane {id}` to the title between any two frames. This helper closes
-/// that race by re-reading the CURRENT label and rebuilding the accessibility
-/// tree (`h.run()`) in lock-step until the derived control is present, then
-/// clicking it — so the lookup key always matches the tree that was just built.
-fn click_tab_control(h: &mut Harness<'_>, app: &RefCell<C0pl4ndApp>, pane: PaneId, prefix: &str) {
+/// Click a per-tab control (`""` → the bare tab, `"pin "` / `"unpin "` / `"close "`
+/// → the prefixed button) and RETRY until the observable effect `done(app)` lands.
+///
+/// Two independent sources of non-determinism make a single click unreliable, and
+/// BOTH stem from the OSC window title landing ASYNCHRONOUSLY from the PTY reader
+/// thread:
+///   1. the accessible label flips from `pane {id}` to the title between frames
+///      (so the lookup key must be re-derived from the SAME post-`h.run()` state);
+///   2. a title landing RESIZES the tab strip, and every tab control lives in the
+///      title-bar FLOW, so the control's on-screen rect shifts between the rect
+///      capture and the hit-test — a click can land on empty space and miss.
+///
+/// Re-deriving the key AND verifying the effect (re-clicking until `done` holds)
+/// closes both races. The right-side caption cluster (close/max/min/settings) is
+/// absolute-positioned and needs none of this — only the flow-region controls do.
+fn click_tab_control_until(
+    h: &mut Harness<'_>,
+    app: &RefCell<C0pl4ndApp>,
+    pane: PaneId,
+    prefix: &str,
+    done: impl Fn(&C0pl4ndApp) -> bool,
+) {
     for _ in 0..240 {
-        // Build the accessibility tree FIRST, THEN derive the lookup key from
-        // the SAME app state that tree was rendered from — no intervening run,
-        // so the key cannot drift from the tree it is matched against.
         h.run();
         let label = format!("{prefix}{}", tab_label(app, pane));
-        if h.query_by_label(label.as_str()).is_some() {
-            h.get_by_label(label.as_str()).click();
+        if let Some(node) = h.query_by_label(label.as_str()) {
+            node.click();
             h.run();
-            return;
+            if done(&app.borrow()) {
+                return;
+            }
         }
     }
     panic!(
-        "tab control {prefix:?}+<label> for pane {} never appeared (current label: {:?})",
+        "tab control {prefix:?} for pane {} never produced its effect (current label: {:?})",
         pane.0,
         tab_label(app, pane)
     );
+}
+
+/// Click the "+" new-terminal button until a pane is actually added. The button
+/// sits in the title-bar flow AFTER the variable-width tab strip, so a tab whose
+/// width changes (an async OSC title landing) shifts the button between the rect
+/// capture and the hit-test — a single click can miss. Re-find and re-click (each
+/// after an `h.run()` that settles the layout) until `pane_count` grows.
+fn click_new_terminal(h: &mut Harness<'_>, app: &RefCell<C0pl4ndApp>) {
+    let before = app.borrow().pane_count();
+    for _ in 0..240 {
+        h.run();
+        if let Some(btn) = h.query_by_label("new terminal") {
+            btn.click();
+        }
+        h.run();
+        if app.borrow().pane_count() > before {
+            return;
+        }
+    }
+    panic!("clicking the '+' new-terminal button never added a pane");
 }
 
 /// Whether a per-tab control (`""` bare tab, `"close "`, `"pin "`, `"unpin "`)
@@ -110,8 +142,7 @@ fn clicking_new_terminal_adds_a_pane() {
     assert_eq!(before, 1, "app opens with a single terminal");
     let mut h = harness(&app);
 
-    h.get_by_label("new terminal").click();
-    h.run();
+    click_new_terminal(&mut h, &app);
 
     let after = app.borrow().pane_count();
     assert_eq!(
@@ -133,19 +164,20 @@ fn clicking_a_tab_changes_the_focused_pane() {
     let mut h = harness(&app);
 
     // Add a second terminal → focus moves to the new pane (id 1).
-    h.get_by_label("new terminal").click();
-    h.run();
+    click_new_terminal(&mut h, &app);
     assert_eq!(
         app.borrow().focused_pane(),
         PaneId(1),
         "a new terminal takes focus"
     );
 
-    // Click pane 0's tab → focus moves back to pane 0. The tab text is the
-    // pane's LIVE label (its OSC window title when the shell set one, else the
-    // `pane 0` fallback), so click it via the title-race-tolerant helper rather
-    // than a hardcoded literal the shell's title escape would change.
-    click_tab_control(&mut h, &app, PaneId(0), "");
+    // Click pane 0's tab → focus moves back to pane 0. The tab control lives in
+    // the title-bar flow and its label tracks the live OSC title, so click it
+    // via the effect-verifying helper (retries until focus actually lands on
+    // pane 0) rather than a single click at a possibly-shifted rect.
+    click_tab_control_until(&mut h, &app, PaneId(0), "", |a| {
+        a.focused_pane() == PaneId(0)
+    });
     assert_eq!(
         app.borrow().focused_pane(),
         PaneId(0),
@@ -246,18 +278,26 @@ fn splitting_past_six_panes_is_refused() {
 
     // bootstrap=1 pane; click "new terminal" five times to reach 6.
     for _ in 0..5 {
-        h.get_by_label("new terminal").click();
-        h.run();
+        click_new_terminal(&mut h, &app);
     }
     assert_eq!(app.borrow().pane_count(), 6, "reached the 6-pane cap");
 
-    // One more must be refused (count stays 6).
-    h.get_by_label("new terminal").click();
-    h.run();
+    // One more must be refused (count stays 6). `click_new_terminal` can't be
+    // used here — it asserts the pane WAS added, which is exactly what the cap
+    // forbids. Click the "+" several times (settling the flow layout each time so
+    // a click actually lands on the button, not empty space left by a shifting
+    // tab strip); the app-side cap must hold regardless of how many land.
+    for _ in 0..8 {
+        h.run();
+        if let Some(btn) = h.query_by_label("new terminal") {
+            btn.click();
+        }
+        h.run();
+    }
     assert_eq!(
         app.borrow().pane_count(),
         6,
-        "the 6-pane cap must hold against a 7th split"
+        "the 6-pane cap must hold against further splits"
     );
 }
 
@@ -312,17 +352,20 @@ fn clicking_tab_pin_toggles_pinned() {
     let mut h = harness(&app);
 
     // Click pane 0's pin (accessible label "pin {tab-label}") → it becomes
-    // pinned. The tab label is the pane's live OSC title, which lands
-    // asynchronously, so click via the race-tolerant helper rather than a
-    // once-derived literal the shell's title escape could change mid-test.
-    click_tab_control(&mut h, &app, PaneId(0), "pin ");
+    // pinned. The pin button is in the title-bar flow and its label tracks the
+    // live OSC title, so click via the effect-verifying helper (retries until the
+    // pane is actually pinned) rather than a single click at a possibly-shifted
+    // rect / a once-derived literal.
+    click_tab_control_until(&mut h, &app, PaneId(0), "pin ", |a| a.is_pinned(PaneId(0)));
     assert!(
         app.borrow().is_pinned(PaneId(0)),
         "clicking the tab pin must pin the pane"
     );
 
     // The pin relabels to "unpin {tab-label}"; clicking it unpins.
-    click_tab_control(&mut h, &app, PaneId(0), "unpin ");
+    click_tab_control_until(&mut h, &app, PaneId(0), "unpin ", |a| {
+        !a.is_pinned(PaneId(0))
+    });
     assert!(
         !app.borrow().is_pinned(PaneId(0)),
         "clicking the pin again must unpin the pane"
@@ -334,16 +377,17 @@ fn clicking_tab_close_removes_the_pane() {
     // Open a second terminal so there are two panes (0, 1) to close one of.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let mut h = harness(&app);
-    h.get_by_label("new terminal").click();
-    h.run();
+    click_new_terminal(&mut h, &app);
     let before = app.borrow().pane_count();
     assert_eq!(before, 2, "two panes after adding one");
 
     // Click pane 1's close (label "close {tab-label}") → exactly one pane
-    // closes. The tab label is the pane's live OSC title, which lands
-    // asynchronously, so click via the race-tolerant helper rather than a
-    // once-derived literal.
-    click_tab_control(&mut h, &app, PaneId(1), "close ");
+    // closes. The close button is in the title-bar flow and its label tracks the
+    // live OSC title, so click via the effect-verifying helper (retries until the
+    // pane count actually drops) rather than a single click / once-derived literal.
+    click_tab_control_until(&mut h, &app, PaneId(1), "close ", |a| {
+        a.pane_count() == before - 1
+    });
 
     let after = app.borrow().pane_count();
     assert_eq!(
@@ -365,8 +409,7 @@ fn pinned_tab_has_no_close_button() {
     // Open a second terminal so pane 1's close button is present to compare.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let mut h = harness(&app);
-    h.get_by_label("new terminal").click();
-    h.run();
+    click_new_terminal(&mut h, &app);
 
     // Per-tab close/pin accessible labels are derived from each pane's LIVE tab
     // label (its OSC title when the shell set one), which lands asynchronously —
@@ -381,7 +424,7 @@ fn pinned_tab_has_no_close_button() {
     );
 
     // Pin pane 0; its close button disappears, pane 1's remains.
-    click_tab_control(&mut h, &app, PaneId(0), "pin ");
+    click_tab_control_until(&mut h, &app, PaneId(0), "pin ", |a| a.is_pinned(PaneId(0)));
     assert!(
         !tab_control_present(&mut h, &app, PaneId(0), "close "),
         "a pinned tab must NOT expose a close button"
@@ -437,7 +480,7 @@ fn pane_keeps_its_content_after_adding_a_terminal() {
 
     // Add a terminal → splits + resizes pane 0. Run several frames so the
     // debounced resize + reflow settle.
-    h.get_by_label("new terminal").click();
+    click_new_terminal(&mut h, &app);
     // Settle: poll up to ~2s for the resize/reflow (+ any ConPTY repaint).
     let rd = Instant::now() + Duration::from_secs(2);
     while Instant::now() < rd {
@@ -471,11 +514,23 @@ fn shell_menu_opens_a_new_terminal() {
     let before = app.borrow().pane_count();
     let mut h = harness(&app);
 
-    // Open the ▾ menu, then click the "Default shell" item.
-    h.get_by_label("shell menu").click();
-    h.run();
-    h.get_by_label("open shell Default shell").click();
-    h.run();
+    // Open the ▾ menu, then click the "Default shell" item — retrying until a new
+    // pane appears. The ▾ button is in the title-bar flow after the variable-width
+    // tab strip, so an async OSC title can shift it and a single click can miss;
+    // when the menu item is visible click it, otherwise (re)open the menu.
+    for _ in 0..240 {
+        h.run();
+        if app.borrow().pane_count() > before {
+            break;
+        }
+        if let Some(item) = h.query_by_label("open shell Default shell") {
+            item.click();
+            h.run();
+        } else if let Some(menu) = h.query_by_label("shell menu") {
+            menu.click();
+            h.run();
+        }
+    }
 
     assert_eq!(
         app.borrow().pane_count(),
