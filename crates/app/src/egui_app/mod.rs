@@ -137,6 +137,16 @@ pub struct C0pl4ndApp {
     search_test_corpus: Option<String>,
     /// A transient status-bar message (e.g. "max 6 panes").
     toast: Option<String>,
+    /// Receiver for an opt-in launch update check spawned by the binary entry
+    /// point (`egui_main`). The background thread sends a one-line "newer
+    /// version available" notice exactly once; `frame_tick` polls this and
+    /// surfaces it as a toast. `None` in the headless harness (tests never attach
+    /// a check), so no network ever runs under test.
+    update_rx: Option<std::sync::mpsc::Receiver<String>>,
+    /// The most recent update notice surfaced (most-recent-wins), observable so
+    /// an interaction test can assert the launch-check → toast wiring without a
+    /// network call.
+    last_update_notice: Option<String>,
     /// The most recent caption command issued (minimize/maximize/close). Set in
     /// [`Self::frame_tick`] alongside the real `ViewportCommand`, so interaction
     /// tests can assert that clicking a caption button had its real effect (the
@@ -163,7 +173,10 @@ impl C0pl4ndApp {
     /// the per-frame repaint pump runs.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_chrome_fonts(&cc.egui_ctx);
-        let mut app = Self::bootstrap();
+        // Load persisted settings from disk so a user's saved theme / opacity /
+        // font / cursor / update prefs take effect across launches. The headless
+        // `bootstrap()` path keeps `Config::default()` for deterministic tests.
+        let mut app = Self::bootstrap_with(load_config());
         // Apply the OS glass/acrylic/mica/vibrancy effect — ONLY when the master
         // transparency toggle is on AND the chosen mode wants a non-opaque
         // surface (`effective_translucent`). Otherwise the window is a normal
@@ -190,8 +203,20 @@ impl C0pl4ndApp {
     /// headless `egui_kittest` tests (which run without a window). Spawns a live
     /// [`PaneTerm`] for each initial pane (a failed spawn degrades to an error
     /// label, never a panic).
+    /// Default-config constructor used by the headless `egui_kittest` test
+    /// binaries (the real app uses [`Self::new`], which loads the persisted
+    /// config). `#[allow(dead_code)]` because it is unused in the shipping
+    /// `c0pl4nd` binary itself — only the `#[path]`-including test bins call it.
+    #[allow(dead_code)]
     pub fn bootstrap() -> Self {
-        let config = c0pl4nd_core::Config::default();
+        Self::bootstrap_with(c0pl4nd_core::Config::default())
+    }
+
+    /// Construct the app state from an EXPLICIT config — the shared body of
+    /// [`Self::bootstrap`] (which passes `Config::default()`, used by the
+    /// headless tests) and [`Self::new`] (which passes the config loaded from
+    /// disk so persisted settings take effect across launches).
+    pub fn bootstrap_with(config: c0pl4nd_core::Config) -> Self {
         let theme = load_terminal_theme(&config);
         let mut pane_alloc = PaneIdAllocator::default();
         let initial: Vec<PaneId> = (0..INITIAL_PANES).map(|_| pane_alloc.next()).collect();
@@ -229,6 +254,8 @@ impl C0pl4ndApp {
             search_sel: 0,
             search_test_corpus: None,
             toast: None,
+            update_rx: None,
+            last_update_notice: None,
             last_window_cmd: None,
             live_window: false,
         }
@@ -1149,6 +1176,53 @@ impl C0pl4ndApp {
         Some(url)
     }
 
+    /// `(check_on_launch, channel)` from the loaded config — read by the binary
+    /// entry point to decide whether to spawn the opt-in launch update check and
+    /// which release channel to query. Kept here so the check lives outside the
+    /// `egui_app` module (whose update *logic* dependency the test binaries do
+    /// not carry) — the entry point owns the network call.
+    #[allow(dead_code)]
+    pub fn update_check_config(&self) -> (bool, String) {
+        (
+            self.config.update.check_on_launch,
+            self.config.update.channel.clone(),
+        )
+    }
+
+    /// Attach the receiver for a background launch update check. The entry point
+    /// spawns the check (the only network surface) and hands the app the channel;
+    /// [`Self::frame_tick`] polls it and surfaces a found update as a toast.
+    #[allow(dead_code)]
+    pub fn attach_update_check(&mut self, rx: std::sync::mpsc::Receiver<String>) {
+        self.update_rx = Some(rx);
+    }
+
+    /// Surface an update notice: show it as a transient toast and record it
+    /// (most-recent-wins) for the interaction test. Shared by the launch-check
+    /// poll and the test, so both exercise one path.
+    fn apply_update_notice(&mut self, notice: String) {
+        self.toast = Some(notice.clone());
+        self.last_update_notice = Some(notice);
+    }
+
+    /// The most recent update notice surfaced, or `None`. Observable accessor for
+    /// the launch-check interaction test.
+    #[allow(dead_code)]
+    pub fn last_update_notice(&self) -> Option<String> {
+        self.last_update_notice.clone()
+    }
+
+    /// Poll the launch-check channel (if attached) and surface a received notice
+    /// as a toast. Non-blocking; the background thread sends at most one notice.
+    fn poll_update_check(&mut self) {
+        if let Some(rx) = &self.update_rx {
+            if let Ok(notice) = rx.try_recv() {
+                self.apply_update_notice(notice);
+                self.update_rx = None; // one-shot: stop polling after the notice
+            }
+        }
+    }
+
     /// Render the command-palette overlay: a centred window with an auto-focused
     /// fuzzy-search box over the command history and a selectable result list.
     /// Clicking a row runs it (same path as Enter). Navigation (↑/↓/Enter/Esc)
@@ -1523,6 +1597,9 @@ impl C0pl4ndApp {
             install_chrome_fonts(ctx);
             self.fonts_installed = true;
         }
+        // Surface an opt-in launch update check result (if one arrived) as a
+        // toast. No-op when no check was attached (every headless test).
+        self.poll_update_check();
         // 0a) command palette: Ctrl+Shift+P (Cmd+Shift+P on macOS) toggles it. The
         //     matching key-press is removed from the event stream so it never
         //     reaches the PTY — without this, on the close frame (palette already
@@ -2178,6 +2255,26 @@ fn egui_key_to_logical(
     Some(lk)
 }
 
+/// Load the persisted user config from its canonical path, falling back to
+/// defaults when it is absent or unreadable. Without this the egui app started
+/// from `Config::default()` every launch, so on-disk settings (theme, opacity,
+/// font, cursor, transparency, update prefs) the settings panel WROTE never
+/// took effect across launches — the same bug the legacy binary's `main` had
+/// already fixed for itself. Pure `core` APIs, so it is available in every
+/// binary that includes this module (incl. the `#[path]`-included test bins).
+fn load_config() -> c0pl4nd_core::Config {
+    match c0pl4nd_core::Config::default_path().filter(|p| p.exists()) {
+        Some(p) => std::fs::read_to_string(&p)
+            .map_err(|e| e.to_string())
+            .and_then(|s| c0pl4nd_core::Config::from_toml(&s, &p).map_err(|e| e.to_string()))
+            .unwrap_or_else(|e| {
+                eprintln!("c0pl4nd: failed to load config {p:?}: {e}; using defaults");
+                c0pl4nd_core::Config::default()
+            }),
+        None => c0pl4nd_core::Config::default(),
+    }
+}
+
 /// Load the terminal colour theme named by `config.theme` from the bundled
 /// themes dir (next to the binary or in the source tree during development),
 /// falling back to the built-in Itasha.Corp void theme when the file is absent.
@@ -2566,6 +2663,50 @@ mod tests {
             app.last_opened_url().as_deref(),
             Some("https://example.com"),
             "clicking a non-URL cell must not open or change the record"
+        );
+    }
+
+    #[test]
+    fn update_notice_surfaces_as_a_toast_and_is_recorded() {
+        let mut app = C0pl4ndApp::bootstrap();
+        assert_eq!(app.last_update_notice(), None, "no notice at start");
+        assert!(app.toast.is_none(), "no toast at start");
+        app.apply_update_notice("C0PL4ND 9.9.9 is available".to_string());
+        assert_eq!(
+            app.last_update_notice().as_deref(),
+            Some("C0PL4ND 9.9.9 is available"),
+            "the notice is recorded (observable)"
+        );
+        assert_eq!(
+            app.toast.as_deref(),
+            Some("C0PL4ND 9.9.9 is available"),
+            "the notice is shown as a transient status-bar toast"
+        );
+    }
+
+    #[test]
+    fn launch_check_channel_polls_into_a_toast_then_stops() {
+        // Simulates the background launch check: a notice sent on the attached
+        // channel is picked up by `poll_update_check` (called each frame) and
+        // surfaced; the channel is then dropped (one-shot).
+        let mut app = C0pl4ndApp::bootstrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.attach_update_check(rx);
+        assert!(app.update_rx.is_some(), "channel attached");
+        // Nothing sent yet → poll is a no-op.
+        app.poll_update_check();
+        assert_eq!(app.last_update_notice(), None);
+        // The background thread finds an update and sends one notice.
+        tx.send("C0PL4ND 2.0.0 is available".to_string()).unwrap();
+        app.poll_update_check();
+        assert_eq!(
+            app.last_update_notice().as_deref(),
+            Some("C0PL4ND 2.0.0 is available"),
+            "a received notice surfaces via the per-frame poll"
+        );
+        assert!(
+            app.update_rx.is_none(),
+            "the check is one-shot: the receiver is dropped after delivery"
         );
     }
 

@@ -34,11 +34,6 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // `c0pl4nd update` — explicit, user-initiated upgrade via package manager.
-    if args.iter().any(|a| a == "update") {
-        return update::run_update();
-    }
-
     // Load the user config from its canonical path, falling back to defaults
     // when it is absent or unreadable. Previously this was Config::default()
     // unconditionally, so on-disk settings (theme, opacity, font, cursor,
@@ -58,6 +53,12 @@ fn main() -> Result<()> {
         None => Config::default(),
     };
 
+    // `c0pl4nd update` — explicit, user-initiated update check against the
+    // public GitHub Releases API for the configured channel.
+    if args.iter().any(|a| a == "update") {
+        return update::run_update(&config.update.channel);
+    }
+
     // `c0pl4nd --screenshot <path.png>` — headless render for README/CI media.
     if let Some(pos) = args.iter().position(|a| a == "--screenshot") {
         let out = args
@@ -75,7 +76,9 @@ fn main() -> Result<()> {
 
     // Opt-in, local-first launch version check (off by default).
     if config.update.check_on_launch {
-        update::notify_if_outdated();
+        if let Some(notice) = update::check_for_update(&config.update.channel) {
+            eprintln!("{notice}");
+        }
     }
 
     // Windowed GPU mode is provided by the app-shell window module.
