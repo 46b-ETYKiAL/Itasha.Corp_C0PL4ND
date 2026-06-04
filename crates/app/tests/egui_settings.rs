@@ -513,67 +513,66 @@ fn the_tint_strength_slider_changes_the_live_config() {
 }
 
 #[test]
-fn toggling_check_on_launch_enables_the_channel_combo() {
-    // `update.check_on_launch` defaults OFF (local-first; the only thing that
-    // lets C0PL4ND touch the network). It has no observation accessor on the
-    // app, so we observe a DOWNSTREAM effect of the live config: the release-
-    // channel combo is rendered inside `add_enabled_ui(check_on_launch, …)`, so
-    // it is DISABLED while the flag is off and ENABLED once the toggle flips it
-    // on. The combo's enabled-ness therefore reflects the live config — no
-    // set-then-assert tautology (the gate is real production wiring).
+fn mode_off_disables_the_channel_combo() {
+    // The Updates page renders TWO combos: [0] = update Mode (off/notify/manual/
+    // auto), [1] = release channel. The channel combo is rendered inside
+    // `add_enabled_ui(mode != Off, …)`, so its enabled-ness reflects the LIVE
+    // Mode — no set-then-assert tautology. The default Mode is Manual (networked),
+    // so the channel combo starts ENABLED; switching Mode to "off" (fully offline)
+    // DISABLES it.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let mut h = harness(&app);
 
     open_settings(&mut h);
     select_category(&mut h, "Updates");
 
-    // Precondition: with check-on-launch off, the channel combo is disabled.
+    // Precondition: default Mode = Manual (networked) → channel combo enabled.
     assert!(
-        h.get_all_by_role(egui::accesskit::Role::ComboBox)
-            .next()
+        !h.get_all_by_role(egui::accesskit::Role::ComboBox)
+            .nth(1)
             .expect("Updates must render the channel combo")
             .accesskit_node()
             .is_disabled(),
-        "precondition: the channel combo is disabled while check-on-launch is off"
+        "precondition: the channel combo is enabled while Mode is manual"
     );
 
-    h.get_by_label("Check for updates on launch").click();
+    // Open the Mode combo (the first one) and pick "off".
+    h.get_all_by_role(egui::accesskit::Role::ComboBox)
+        .next()
+        .expect("Updates must render the Mode combo")
+        .click();
+    h.run();
+    h.get_by_label("off").click();
     h.run();
 
     assert!(
-        !h.get_all_by_role(egui::accesskit::Role::ComboBox)
-            .next()
+        h.get_all_by_role(egui::accesskit::Role::ComboBox)
+            .nth(1)
             .expect("the channel combo must still render")
             .accesskit_node()
             .is_disabled(),
-        "clicking the toggle must turn check-on-launch ON in the live config, \
-         which enables the gated channel combo"
+        "setting Mode to off makes the app fully offline, disabling the channel combo"
     );
 }
 
 #[test]
 fn picking_an_update_channel_changes_the_combo_value() {
-    // `update.channel` defaults to "stable" and its combo is gated behind the
-    // check-on-launch toggle. Enable the toggle, open the channel combo, pick
-    // "nightly", and assert the combo's accessible VALUE became "nightly" — the
-    // combo's selected_text is `config.update.channel`, so this observes the
-    // live config change, not a test mirror.
+    // `update.channel` defaults to "stable"; its combo ([1]) is enabled whenever
+    // Mode != Off (default Mode = Manual, so it is enabled at open). Open the
+    // channel combo, pick "nightly", and assert the combo's accessible VALUE
+    // became "nightly" — its selected_text is `config.update.channel`, so this
+    // observes the live config change, not a test mirror.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let mut h = harness(&app);
 
     open_settings(&mut h);
     select_category(&mut h, "Updates");
 
-    // Enable check-on-launch so the channel combo is no longer disabled.
-    h.get_by_label("Check for updates on launch").click();
-    h.run();
-
-    // The Updates section renders exactly one ComboBox (the channel picker).
-    // Its accessible value is the current channel ("stable").
+    // [1] is the channel combo (after [0] = Mode). Its value is the live channel.
     let combo = h
         .get_all_by_role(egui::accesskit::Role::ComboBox)
-        .next()
-        .expect("Updates must render the channel combo when check-on-launch is on");
+        .nth(1)
+        .expect("Updates must render the channel combo");
     assert_eq!(
         combo.value().as_deref(),
         Some("stable"),
@@ -586,7 +585,7 @@ fn picking_an_update_channel_changes_the_combo_value() {
 
     assert_eq!(
         h.get_all_by_role(egui::accesskit::Role::ComboBox)
-            .next()
+            .nth(1)
             .expect("channel combo")
             .value()
             .as_deref(),

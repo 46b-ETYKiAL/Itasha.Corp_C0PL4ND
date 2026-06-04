@@ -39,6 +39,20 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # terminal text (right-to-left scripts). Already in the lock graph transitively.
 unicode-bidi = "0.3"
 
+# --- In-app verified self-updater (Settings → Updates) ---
+# Telemetry-free download + SHA-256/minisign verify-before-swap + atomic
+# self-replace, mirroring the SCR1B3 editor. Exact-pinned per
+# dependency-management.md (production, security-sensitive). All pure-Rust,
+# maintained; pass cargo-deny / cargo-audit.
+serde_json = "=1.0.150"                                   # parse the GitHub Releases API response (serde is already a dep above)
+semver = "=1.0.28"                                        # release version compare (tolerant leading `v`)
+sha2 = "=0.10.8"                                          # artifact checksum (catches corruption)
+minisign-verify = "=0.2.5"                                # ed25519 signature verify (catches tampering); zero-dep
+self-replace = "=1.5.0"                                   # atomic running-exe swap (Windows rename-aside)
+flate2 = "=1.1.9"                                         # gunzip the Unix `.tar.gz` release archive
+tar = { version = "=0.4.46", default-features = false }   # untar the binary from the Unix archive
+zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }  # unzip the Windows `.zip` archive
+
 # --- egui chrome bundle (Milestone 1) ---
 eframe.workspace = true
 egui.workspace = true
@@ -50,6 +64,12 @@ window-vibrancy.workspace = true
 # Headless egui UI tests (kittest = AccessKit-driven). State-assertion tests run
 # everywhere; pixel snapshots are deliberately kept out of CI for now (recon §7).
 egui_kittest = { version = "0.34", features = ["wgpu", "snapshot", "eframe"] }
+
+# Updater test fixtures: `minisign` SIGNS test artifacts (the production path
+# only VERIFIES via the zero-dep `minisign-verify`); `tempfile` provides
+# scratch dirs for the download/extract/install round-trip tests.
+minisign = "0.9"
+tempfile = "3"
 
 # Embeds the sigil icon + version resource into the exe (build.rs). Windows-only
 # build dependency; uses the MSVC resource compiler. Pinned exact per dep policy.

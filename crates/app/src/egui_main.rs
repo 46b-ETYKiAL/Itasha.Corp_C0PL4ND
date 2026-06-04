@@ -16,7 +16,7 @@
 
 #[path = "egui_app/mod.rs"]
 mod egui_app;
-#[path = "update.rs"]
+#[path = "update/mod.rs"]
 mod update;
 
 use eframe::egui;
@@ -89,9 +89,12 @@ fn main() -> eframe::Result<()> {
             // Opt-in, local-first launch update check. The ONE network call runs
             // on a background thread so startup never blocks; the app polls the
             // channel each frame and surfaces a found update as a toast. Off by
-            // default — only when the user enabled `[update] check_on_launch`.
-            let (check_on_launch, channel) = app.update_check_config();
-            if check_on_launch {
+            // default — fires only for the network-on-launch update modes
+            // (`notify`/`auto`) OR the legacy `check_on_launch` flag. The Updates
+            // settings page owns the richer in-app download/install flow; this
+            // launch path is the lightweight "a newer version exists" notice.
+            let (should_check, channel) = launch_check_config();
+            if should_check {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let ctx = cc.egui_ctx.clone();
                 std::thread::spawn(move || {
@@ -105,6 +108,24 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(app))
         }),
     )
+}
+
+/// Decide whether to run the lightweight on-launch update check and which
+/// release channel to query. Reads the persisted config directly (the same
+/// load path the `c0pl4nd update` CLI subcommand uses) so the decision honours
+/// the canonical `[update] mode` (`notify`/`auto` check on launch) as well as
+/// the legacy `check_on_launch` flag, without depending on the host app's
+/// accessor. Defaults to (false, "stable") when no config exists — local-first.
+fn launch_check_config() -> (bool, String) {
+    c0pl4nd_core::Config::default_path()
+        .filter(|p| p.exists())
+        .and_then(|p| {
+            std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|s| c0pl4nd_core::Config::from_toml(&s, &p).ok())
+        })
+        .map(|c| (c.update.checks_on_launch(), c.update.channel))
+        .unwrap_or_else(|| (false, "stable".to_string()))
 }
 
 /// Prefer the DX12 backend on Windows. eframe's default selects Vulkan first,

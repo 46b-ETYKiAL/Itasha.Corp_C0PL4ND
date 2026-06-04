@@ -22,12 +22,27 @@
 //! ([`super::C0pl4ndApp::settings_window`]) calls [`show`] with `&mut config` and
 //! reacts to the returned [`Outcome`] (persist + re-apply theme).
 
+use std::sync::{Arc, Mutex};
+
 use eframe::egui;
 
-use c0pl4nd_core::config::{CursorStyle, WindowMode};
+use c0pl4nd_core::config::{CursorStyle, UpdateMode, WindowMode};
 use c0pl4nd_core::Config;
 
 use super::theme::ChromeColors;
+
+// The in-app self-updater backend (download + SHA-256/minisign verify + atomic
+// self-replace) and its egui state machine. Declared here via `#[path]` so the
+// Updates settings page is fully self-contained: it resolves identically in the
+// shipping `c0pl4nd` binary AND in the `egui_kittest` integration test binaries
+// (which `#[path]`-include `egui_app/mod.rs` but not the crate-root `update`
+// module). The shipping binary also declares a crate-root `update` for the CLI
+// (`c0pl4nd update`) + launch-check; this second view is private to `settings`
+// and never shares a type across that boundary, so the two coexist cleanly.
+#[path = "../update_engine/mod.rs"]
+mod update_engine;
+
+use update_engine::updater::{LaunchKind, UpdateState, Updater};
 
 /// Left-nav categories, in display order. Each maps to a section rendered by
 /// [`render_sections`].
@@ -168,6 +183,18 @@ pub fn show(
     // host reloads the terminal color theme only when this differs).
     let theme_before = config.theme.clone();
 
+    // The in-app self-updater state machine. Held across frames in `ctx`
+    // temp-data as an `Arc<Mutex<Updater>>` (Arc is Clone, which egui temp-data
+    // requires; the `Updater` itself holds a non-Clone mpsc Receiver). This
+    // keeps `show` a free function with the host's fixed signature — the host
+    // (mod.rs) never has to know the updater exists. We poll it every frame so
+    // background-worker messages advance the state machine even while the
+    // Updates page is not the visible tab.
+    let updater = get_updater(ctx);
+    if let Ok(mut u) = updater.lock() {
+        u.poll(ctx);
+    }
+
     // Center the window the first time it opens via a one-time default position.
     // `.anchor()` is deliberately NOT used: an anchored egui window is re-pinned
     // to its anchor every frame and is therefore IMMOVABLE — that was the root
@@ -261,7 +288,7 @@ pub fn show(
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            changed |= render_sections(ui, config, sel, &q);
+                            changed |= render_sections(ui, config, &updater, sel, &q);
                         });
                 });
             });
@@ -287,7 +314,13 @@ pub fn show(
 /// query. The single most impactful "un-cramp" change is setting
 /// `item_spacing` to 8 px vertical (vs egui's default 3 px) at the top; section
 /// gaps add a further 14 px of breathing room.
-fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -> bool {
+fn render_sections(
+    ui: &mut egui::Ui,
+    config: &mut Config,
+    updater: &Arc<Mutex<Updater>>,
+    sel: &str,
+    q: &str,
+) -> bool {
     let mut changed = false;
     // Un-cramp every row + give buttons comfier hit targets (the load-bearing
     // spacing fix the user asked for).
@@ -901,68 +934,285 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         sel,
         q,
         "Updates",
-        &["check on launch", "channel", "stable", "beta", "nightly"],
+        &[
+            "update", "mode", "off", "notify", "manual", "auto", "check", "interval", "channel",
+            "stable", "beta", "nightly", "install", "download", "releases",
+        ],
     ) {
+        // Width-fence the Updates page so it fits the FIXED 720px settings window
+        // and never sets a wider content min-width than the other pages. The
+        // page's long help line + the inline status row otherwise pushed the
+        // content's min width past the window, making this one page render WIDER
+        // than the rest (the reported per-page width drift — same root cause and
+        // same `set_max_width(min(...))` fix the SCR1B3 Toolbar page uses).
+        ui.set_max_width(ui.available_width().min(480.0));
         ui.heading("Updates");
+        ui.label(
+            egui::RichText::new(format!(
+                "You are running v{}.",
+                update_engine::updater::current_version()
+            ))
+            .weak()
+            .small(),
+        );
         help(
             ui,
-            "Local-first: C0PL4ND never contacts the network unless you opt in here.",
+            "Local-first: a check reads only the public GitHub Releases API and \
+             sends no identifiers. off and manual never touch the network on \
+             their own; notify and auto check once per launch.",
         );
         grid("updates_grid").show(ui, |ui| {
-            // Opt-in network check. This row only writes the config flag — the
-            // updater logic itself is owned elsewhere — so toggling it persists
-            // the preference; it takes effect on the next launch's check.
-            if row_visible(q, "check on launch update network opt-in") {
-                ui.label("Check on launch").on_hover_text(
-                    "Check GitHub Releases for a newer version when C0PL4ND starts. \
-                     Off by default — the only thing that lets C0PL4ND touch the network.",
+            // ---- Mode: off / notify / manual / auto ----
+            // off    = never check, never touch the network
+            // notify = check on launch (when due), passive toast if newer
+            // manual = check only when the button below is pressed (default)
+            // auto   = check on launch (when due), download + apply when found
+            if row_visible(q, "update mode off notify manual auto network") {
+                let modes = [
+                    (UpdateMode::Off, "off"),
+                    (UpdateMode::Notify, "notify"),
+                    (UpdateMode::Manual, "manual"),
+                    (UpdateMode::Auto, "auto"),
+                ];
+                ui.label("Mode").on_hover_text(
+                    "When C0PL4ND checks for updates: off (never), manual (only when \
+                     you press Check for updates), notify (check once per launch, show \
+                     a notice if newer), auto (check once per launch, download + install \
+                     a verified update). A check reads only the public GitHub Releases \
+                     API and sends no identifiers.",
                 );
-                changed |= ui
-                    .toggle_value(
-                        &mut config.update.check_on_launch,
-                        "Check for updates on launch",
+                egui::ComboBox::from_id_salt("c0pl4nd-update-mode")
+                    .selected_text(
+                        modes
+                            .iter()
+                            .find(|(m, _)| *m == config.update.mode)
+                            .map(|(_, s)| *s)
+                            .unwrap_or("manual"),
                     )
-                    .on_hover_text("Applies on the next launch.")
-                    .changed();
+                    .show_ui(ui, |ui| {
+                        for (m, label) in modes {
+                            changed |= ui
+                                .selectable_value(&mut config.update.mode, m, label)
+                                .changed();
+                        }
+                    });
+                changed |= reset_to_default(ui, &mut config.update.mode, &def.update.mode);
+                ui.end_row();
+            }
+
+            // ---- Check interval (hours) — only relevant for notify/auto ----
+            if row_visible(q, "check interval hours") {
+                let on_launch = matches!(config.update.mode, UpdateMode::Notify | UpdateMode::Auto);
+                ui.add_enabled_ui(on_launch, |ui| {
+                    ui.label("Check interval (hours)").on_hover_text(
+                        "How often, in hours, an on-launch check (notify/auto) is due \
+                         (1–168). Ignored for off and manual.",
+                    );
+                });
+                ui.add_enabled_ui(on_launch, |ui| {
+                    changed |= ui
+                        .add(egui::Slider::new(
+                            &mut config.update.check_interval_hours,
+                            1..=168,
+                        ))
+                        .changed();
+                });
                 changed |= reset_to_default(
                     ui,
-                    &mut config.update.check_on_launch,
-                    &def.update.check_on_launch,
+                    &mut config.update.check_interval_hours,
+                    &def.update.check_interval_hours,
                 );
                 ui.end_row();
             }
 
-            // Release channel to track. A ComboBox of the known channels; the
-            // updater reads this when it checks.
+            // ---- Release channel ----
             if row_visible(q, "channel release stable beta nightly") {
-                ui.add_enabled_ui(config.update.check_on_launch, |ui| {
+                let networked = config.update.mode != UpdateMode::Off;
+                ui.add_enabled_ui(networked, |ui| {
                     ui.label("Release channel")
                         .on_hover_text("Which release line update checks follow.");
-                    ui.horizontal(|ui| {
-                        egui::ComboBox::from_id_salt("c0pl4nd-update-channel")
-                            .selected_text(config.update.channel.clone())
-                            .show_ui(ui, |ui| {
-                                for chan in UPDATE_CHANNELS {
-                                    changed |= ui
-                                        .selectable_value(
-                                            &mut config.update.channel,
-                                            (*chan).to_string(),
-                                            *chan,
-                                        )
-                                        .changed();
-                                }
-                            });
-                        changed |=
-                            reset_to_default(ui, &mut config.update.channel, &def.update.channel);
-                    });
                 });
+                ui.add_enabled_ui(networked, |ui| {
+                    egui::ComboBox::from_id_salt("c0pl4nd-update-channel")
+                        .selected_text(config.update.channel.clone())
+                        .show_ui(ui, |ui| {
+                            for chan in UPDATE_CHANNELS {
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut config.update.channel,
+                                        (*chan).to_string(),
+                                        *chan,
+                                    )
+                                    .changed();
+                            }
+                        });
+                });
+                changed |= reset_to_default(ui, &mut config.update.channel, &def.update.channel);
                 ui.end_row();
             }
         });
+
+        // ---- Check for updates + inline status + action buttons ----
+        if row_visible(q, "check for updates now install download update") {
+            ui.add_space(6.0);
+            // The check / update buttons NEVER open a browser — they drive the
+            // in-app updater state machine (download + verify + apply in place).
+            let networked = config.update.mode != UpdateMode::Off;
+            ui.horizontal_wrapped(|ui| {
+                let busy = updater.lock().map(|u| u.is_busy()).unwrap_or(false);
+                if ui
+                    .add_enabled(networked && !busy, egui::Button::new("Check for updates"))
+                    .on_hover_text(if networked {
+                        "Ask the public GitHub Releases API whether a newer version \
+                         exists. No identifiers are sent. Stays in-app — no browser."
+                    } else {
+                        "Set Mode to manual/notify/auto to enable update checks."
+                    })
+                    .clicked()
+                {
+                    // The configured Mode decides what a found update does: in
+                    // `auto` it downloads + installs without a further click; in
+                    // `notify`/`manual` it surfaces the inline "Download & install"
+                    // button. Pressing the button always performs the check now.
+                    let kind = match config.update.mode {
+                        UpdateMode::Auto => LaunchKind::Auto,
+                        UpdateMode::Notify => LaunchKind::Notify,
+                        UpdateMode::Off | UpdateMode::Manual => LaunchKind::Manual,
+                    };
+                    if let Ok(mut u) = updater.lock() {
+                        u.start_check(ui.ctx(), kind);
+                    }
+                }
+                render_update_status(ui, updater);
+            });
+            ui.add_space(4.0);
+            // The releases LINK is the ONE deliberate browser hand-off (changelog
+            // / manual download); the check + update buttons above never browse.
+            if ui
+                .link("View all releases on GitHub")
+                .on_hover_text("Open the C0PL4ND releases page in your browser.")
+                .clicked()
+            {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(format!(
+                    "https://github.com/{}/{}/releases",
+                    update_engine::UPDATE_OWNER,
+                    update_engine::UPDATE_REPO
+                )));
+            }
+        }
         group_gap(ui);
     }
 
     changed
+}
+
+/// Retrieve (or lazily create) the shared in-app updater held across frames in
+/// `ctx` temp-data. Wrapped in `Arc<Mutex<_>>` because egui temp-data requires
+/// `Clone + Send + Sync + 'static` and the `Updater` owns a non-Clone mpsc
+/// `Receiver`. The `Arc` clone is cheap; one `Updater` instance persists for the
+/// app's lifetime under this id.
+fn get_updater(ctx: &egui::Context) -> Arc<Mutex<Updater>> {
+    let id = egui::Id::new("c0pl4nd_in_app_updater");
+    ctx.data_mut(|d| {
+        d.get_temp::<Arc<Mutex<Updater>>>(id).unwrap_or_else(|| {
+            let u = Arc::new(Mutex::new(Updater::default()));
+            d.insert_temp(id, u.clone());
+            u
+        })
+    })
+}
+
+/// Render the inline update status + action buttons next to the "Check for
+/// updates" button, driven by the [`UpdateState`] machine. Mutating calls
+/// (start download, apply, recheck) are deferred past the immutable state
+/// borrow so the borrow checker is satisfied. The buttons here NEVER open a
+/// browser — they download + verify + apply in place.
+fn render_update_status(ui: &mut egui::Ui, updater: &Arc<Mutex<Updater>>) {
+    enum Act {
+        Download(update_engine::net::ReleaseInfo),
+        Apply,
+        Recheck,
+    }
+    let mut act: Option<Act> = None;
+
+    // Snapshot the state under a short-lived lock so the render closure does not
+    // hold the lock across the deferred mutating calls below.
+    let state = match updater.lock() {
+        Ok(u) => u.state.clone(),
+        Err(_) => return,
+    };
+
+    match &state {
+        UpdateState::Idle => {}
+        UpdateState::Checking => {
+            ui.spinner();
+            ui.label("Checking…");
+        }
+        UpdateState::UpToDate => {
+            ui.label(
+                egui::RichText::new(format!(
+                    "You're on the latest version (v{}).",
+                    update_engine::updater::current_version()
+                ))
+                .weak(),
+            );
+        }
+        UpdateState::Available(info) => {
+            ui.label(format!("v{} is available.", info.version));
+            if ui
+                .button("Download & install")
+                .on_hover_text(
+                    "Download the verified release, check its SHA-256 + signature, and \
+                     stage it for install. Stays in-app — no browser.",
+                )
+                .clicked()
+            {
+                act = Some(Act::Download(info.clone()));
+            }
+        }
+        UpdateState::Downloading { received, total } => {
+            let frac = if *total > 0 {
+                *received as f32 / *total as f32
+            } else {
+                0.0
+            };
+            ui.add(
+                egui::ProgressBar::new(frac)
+                    .show_percentage()
+                    .desired_width(150.0),
+            );
+        }
+        UpdateState::ReadyToApply { version, .. } => {
+            ui.label(format!("v{version} downloaded + verified."));
+            if ui
+                .button("Restart to finish update")
+                .on_hover_text("Replace the running C0PL4ND with the new version and relaunch.")
+                .clicked()
+            {
+                act = Some(Act::Apply);
+            }
+        }
+        UpdateState::Applied { version } => {
+            ui.label(format!("Updated to v{version} — restarting…"));
+        }
+        UpdateState::Failed(e) => {
+            let err = ui.visuals().error_fg_color;
+            ui.colored_label(err, format!("Update failed: {e}"));
+            if ui.button("Retry").clicked() {
+                act = Some(Act::Recheck);
+            }
+        }
+    }
+
+    if let Some(act) = act {
+        if let Ok(mut u) = updater.lock() {
+            match act {
+                Act::Download(info) => u.start_download(ui.ctx(), info),
+                Act::Apply => u.apply_and_restart(ui.ctx()),
+                Act::Recheck => u.start_check(ui.ctx(), LaunchKind::Manual),
+            }
+        }
+    }
 }
 
 /// Human label for a cursor style (used by the combo's selected-text + items).
