@@ -15,6 +15,17 @@
 //! user to the signed GitHub release is the safe, honest path. The decision
 //! logic here ([`parse_tag`], [`pick_channel_tag`], [`is_newer`]) is pure and
 //! unit-tested without any network.
+//!
+//! ## In-app verified self-updater
+//!
+//! The CLI surface in THIS module is the legacy, browser-pointing path. The
+//! richer **verify-before-swap** in-app updater (download + SHA-256/minisign
+//! verify + atomic `self-replace`, mirroring the SCR1B3 editor) lives in the
+//! sibling `update_engine/` module, which the Settings → Updates page drives.
+//! It is kept separate so the egui-only updater backend (and its `eframe`
+//! dependency) is compiled exactly once — by the egui app + the egui test
+//! binaries — without forcing it onto the legacy winit `c0pl4nd-legacy` binary
+//! that also uses this CLI module.
 
 use anyhow::{Context, Result};
 

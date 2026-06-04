@@ -406,6 +406,42 @@ jobs:
           ( cd release && cat *.sha256 > SHA256SUMS 2>/dev/null || true )
           ls -la release
 
+      - name: Sign release archives (minisign)
+        # Sign every downloadable archive so the IN-APP updater (Settings →
+        # Updates) can verify-before-swap: it checks SHA-256 THEN minisign against
+        # the public key embedded in the binary, and REFUSES to install anything
+        # that fails. Each `<archive>` gets a `<archive>.minisig` sibling (the
+        # `.sha256` siblings already exist from the build job); `files: release/*`
+        # below uploads them.
+        #
+        # ACTIVATION (one-time, by the repo owner): generate an UNENCRYPTED
+        # minisign keypair (the public half is already embedded in
+        # `update_engine/verify.rs`; the secret half was written to
+        # `.s4f3-data/c0pl4nd-minisign-secret.key`), then add that secret-key file
+        # CONTENTS as the `MINISIGN_SECRET_KEY` Actions secret. Until then this
+        # step is a NO-OP and releases publish UNSIGNED — the updater then simply
+        # reports "no verified update" rather than installing anything unsigned.
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_KEY:-}" ]; then
+            echo "MINISIGN_SECRET_KEY not set — skipping signing (unsigned release)."
+            exit 0
+          fi
+          sudo apt-get update && sudo apt-get install -y minisign
+          keyfile="$RUNNER_TEMP/minisign.key"
+          printf '%s\n' "$MINISIGN_KEY" > "$keyfile"
+          for f in release/*.tar.gz release/*.zip; do
+            [ -e "$f" ] || continue
+            # `</dev/null`: fail fast (never hang) if the key were password-
+            # protected — CI signing requires an unencrypted key.
+            minisign -S -s "$keyfile" -x "$f.minisig" -m "$f" -c "c0pl4nd release" -t "c0pl4nd $GITHUB_REF_NAME" </dev/null
+            echo "signed $f -> $f.minisig"
+          done
+          rm -f "$keyfile"
+          ls -la release
+
       - name: Create GitHub Release
         # softprops/action-gh-release@v2.6.2
         # zizmor: ignore[superfluous-actions]

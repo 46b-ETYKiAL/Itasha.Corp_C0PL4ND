@@ -45,12 +45,42 @@ impl Default for FontConfig {
     }
 }
 
-/// Opt-in update behaviour. Local-first: OFF by default — C0PL4ND never
-/// contacts the network unless the user enables this or runs `c0pl4nd update`.
+/// When (and whether) C0PL4ND checks for updates. Local-first: the default is
+/// [`UpdateMode::Manual`] — the app makes NO automatic network connection; the
+/// user checks on demand from Settings. `notify`/`auto` are explicit opt-ins to
+/// an on-launch GitHub-Releases version check (a check reads only the public
+/// GitHub Releases API and sends zero identifiers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateMode {
+    /// Never check, never touch the network for updates.
+    Off,
+    /// Check once per launch (when due); show a passive toast if newer exists.
+    Notify,
+    /// Default: check only when the user presses "Check for updates".
+    #[default]
+    Manual,
+    /// Check once per launch (when due); download + apply a verified update when
+    /// one is found.
+    Auto,
+}
+
+/// Opt-in update behaviour. Local-first: the default mode is `manual`, so
+/// C0PL4ND never contacts the network unless the user presses "Check for
+/// updates", runs `c0pl4nd update`, or opts into `notify`/`auto`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UpdateConfig {
-    /// Check GitHub Releases for a newer version on launch (opt-in).
+    /// When the app checks for updates (`off`/`notify`/`manual`/`auto`).
+    pub mode: UpdateMode,
+    /// How often, in hours, an on-launch check (`notify`/`auto`) is due (1–168).
+    /// Ignored for `off`/`manual`.
+    pub check_interval_hours: u32,
+    /// Legacy on-launch toggle, retained so older config files keep loading. The
+    /// canonical control is now [`UpdateConfig::mode`]; `mode == Off|Manual`
+    /// means "no on-launch network", `mode == Notify|Auto` means "check on
+    /// launch". The launch path treats `check_on_launch == true` OR a
+    /// network-on-launch `mode` as "check".
     pub check_on_launch: bool,
     /// Release channel to track.
     pub channel: String,
@@ -59,9 +89,20 @@ pub struct UpdateConfig {
 impl Default for UpdateConfig {
     fn default() -> Self {
         UpdateConfig {
+            mode: UpdateMode::Manual,
+            check_interval_hours: 24,
             check_on_launch: false,
             channel: "stable".to_string(),
         }
+    }
+}
+
+impl UpdateConfig {
+    /// Whether an on-launch (background) update check should run: true for the
+    /// network-on-launch modes (`notify`/`auto`), OR when the legacy
+    /// `check_on_launch` flag is set (so old config files keep their behaviour).
+    pub fn checks_on_launch(&self) -> bool {
+        matches!(self.mode, UpdateMode::Notify | UpdateMode::Auto) || self.check_on_launch
     }
 }
 
