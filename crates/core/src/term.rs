@@ -2767,6 +2767,15 @@ impl Terminal {
         self.screen.view_offset
     }
 
+    /// The active scroll region `(top, bottom)` rows (0-based, inclusive) on the
+    /// current grid. A full-screen region is `(0, rows-1)`. Exposed for the
+    /// resize-region regression test (the blank-pane-on-split guard): growing the
+    /// grid past the spawn height must keep a full-screen region full-screen.
+    #[cfg(test)]
+    pub(crate) fn scroll_region(&self) -> (usize, usize) {
+        (self.screen.scroll_top, self.screen.scroll_bottom)
+    }
+
     /// Scroll the view up by `n` lines (toward history), clamped.
     pub fn scroll_up_view(&mut self, n: usize) {
         let max = self.screen.history.len();
@@ -2838,6 +2847,18 @@ impl Terminal {
         let cols = cols.max(1);
         let old_cols = self.screen.grid.cols();
 
+        // Whether the scroll region was full-screen RELATIVE TO THE OLD HEIGHT —
+        // captured BEFORE the grid is resized. This is load-bearing for the
+        // grow-resize case: a default full-screen region (e.g. 0..=23 on the
+        // 80x24 spawn) must be recognised as full-screen and EXPANDED to the new
+        // height. Testing `scroll_bottom + 1 >= grid.rows()` AFTER the grid has
+        // already grown (line below) mis-classifies that full region as a
+        // *custom* one and freezes it at the old bottom — which then makes a
+        // multi-line shell redraw scroll all content out of the restricted
+        // region, leaving the pane blank. (The blank-pane-on-split bug: spawn at
+        // 24 rows, grow past 24, conhost's resize-redraw scrolls within 0..=23.)
+        let region_was_full = self.screen.region_is_full();
+
         // C16 — reflow on resize. When the column count changes on the PRIMARY
         // screen, re-wrap soft-wrapped logical lines to the new width instead of
         // truncating (the lossy `Grid::resize` path). The alternate screen holds
@@ -2854,8 +2875,14 @@ impl Terminal {
         }
 
         // A full-screen scroll region tracks the new height; a custom region is
-        // clamped and reset if it no longer fits.
-        if self.screen.scroll_bottom + 1 >= self.screen.grid.rows()
+        // clamped and reset if it no longer fits. The `region_was_full` capture
+        // above (against the OLD height) is what catches a grow-resize: a region
+        // that was full-screen before stays full-screen after, regardless of
+        // whether the grid grew or shrank. We still also accept a region that is
+        // full relative to the NEW height (covers a shrink that lands exactly on
+        // the old bottom) and the degenerate `scroll_bottom == 0` case.
+        if region_was_full
+            || self.screen.scroll_bottom + 1 >= self.screen.grid.rows()
             || self.screen.scroll_bottom == 0
         {
             self.screen.scroll_top = 0;
@@ -4376,6 +4403,74 @@ mod tests {
         assert!(t.alt_screen_active());
         assert_eq!(t.grid().rows(), 6);
         assert_eq!(t.grid().cols(), 10);
+    }
+
+    #[test]
+    fn growing_grid_expands_full_screen_scroll_region() {
+        // ROOT CAUSE of the blank-pane-on-split bug. A terminal spawned at 24
+        // rows has a full-screen scroll region of `0..=23`. Growing the grid to
+        // 38 rows must EXPAND the region to `0..=37` — a full-screen region stays
+        // full-screen across a grow-resize. The pre-fix code tested
+        // `scroll_bottom + 1 >= grid.rows()` AFTER the grid had already grown
+        // (24 < 38 → mis-classified as a CUSTOM region → frozen at 23), which let
+        // a shell's multi-line resize-redraw scroll all content out of the
+        // restricted 0..=23 region, blanking the pane.
+        let mut t = Terminal::new(24, 80);
+        assert_eq!(
+            t.scroll_region(),
+            (0, 23),
+            "fresh 24-row spawn is full-screen"
+        );
+        t.resize(38, 80);
+        assert_eq!(
+            t.scroll_region(),
+            (0, 37),
+            "growing the grid must expand the full-screen scroll region to the new height"
+        );
+        // And it must do so for a grow-AND-narrow in one step (the real split path).
+        let mut t2 = Terminal::new(24, 80);
+        t2.resize(38, 57);
+        assert_eq!(t2.scroll_region(), (0, 37));
+    }
+
+    #[test]
+    fn growing_grid_then_full_redraw_keeps_content_visible() {
+        // The end-to-end shape of the blank-pane-on-split bug, deterministic.
+        // Spawn at 24 rows (default), grow to 38 rows + narrow, then apply a
+        // shell-style full-screen redraw (cursor-home + one line per row, the
+        // trailing rows blank `ESC[K\r\n`). With the scroll-region-grow fix the
+        // content stays on screen; without it the 38-line redraw scrolls it all
+        // out of the frozen 0..=23 region and the grid goes blank.
+        let mut t = Terminal::new(24, 80);
+        t.advance(b"line-one\r\nline-two\r\nC:\\Users\\x>");
+        t.resize(38, 57);
+        // A 38-row redraw: 3 content rows then blank ESC[K rows, each ESC[K\r\n
+        // except the last (exactly as a Windows shell emits on resize).
+        let mut redraw = String::from("\x1b[?25l\x1b[H");
+        let content = ["line-one", "line-two", "C:\\Users\\x>"];
+        for r in 0..38 {
+            if r < content.len() {
+                redraw.push_str(content[r]);
+            }
+            redraw.push_str("\x1b[K");
+            if r < 37 {
+                redraw.push_str("\r\n");
+            }
+        }
+        redraw.push_str("\x1b[?25h");
+        t.advance(redraw.as_bytes());
+        let nonblank = t
+            .grid()
+            .to_text()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        assert!(
+            nonblank >= 3,
+            "after a grow-resize + full redraw the grid must keep its content \
+             visible (blank-pane-on-split regression), got {nonblank} nonblank rows:\n{}",
+            t.grid().to_text()
+        );
     }
 
     // ============================================================
