@@ -324,7 +324,11 @@ impl C0pl4ndApp {
     /// along its LONGER axis so panes stay balanced: a wide pane splits
     /// left|right, a tall pane splits top/bottom. This gives a "logical" grid
     /// expansion without asking the user to pick a direction.
-    fn new_terminal(&mut self) {
+    ///
+    /// `pub` so the headless interaction tests can drive the split path directly
+    /// (the same path the "+" button triggers) — the blank-pane-on-split
+    /// regression test exercises this.
+    pub fn new_terminal(&mut self) {
         let (w, h) = self.last_focused_size.unwrap_or((16.0, 9.0));
         let dir = if w >= h {
             egui_tiles::LinearDir::Horizontal // wide → side-by-side

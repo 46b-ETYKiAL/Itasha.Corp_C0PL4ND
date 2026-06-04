@@ -90,6 +90,64 @@ fn poll_focused_contains(
         .is_some_and(|t| t.contains(needle))
 }
 
+/// REGRESSION (blank-pane-on-split): opening a second terminal splits the
+/// focused pane and GROWS the first pane's PTY past its 24-row spawn height,
+/// then a narrowing reflow follows. The shell answers the resize with a
+/// full-screen redraw (cursor-home + one line per row). If a *full-screen*
+/// scroll region is not recognised as full-screen after the grid grows past
+/// the spawn height, it stays frozen at the old bottom (row 23) — and the
+/// multi-line redraw then scrolls every content line out of the restricted
+/// `0..=23` region, leaving the pane an all-spaces grid.
+///
+/// This test drives the REAL split path (`new_terminal`) and asserts pane 0 is
+/// NON-BLANK afterwards. It must PASS with the `Terminal::resize` fix (capture
+/// `region_is_full` against the OLD height before resizing the grid). Guarded
+/// with the no-live-PTY skip AFTER building the harness, since the deferred
+/// real spawn happens on the first frame.
+#[test]
+fn opening_a_new_terminal_does_not_blank_the_first_pane() {
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    {
+        let a = app.borrow();
+        let focused = a.focused_pane();
+        if a.pane_grid_text(focused).is_none() {
+            eprintln!("no live PTY on this platform; skipping blank-pane-on-split");
+            return;
+        }
+    }
+    let mut h = harness(&app);
+
+    let first = app.borrow().focused_pane();
+
+    // Put a marker on the first pane and confirm it lands (so we KNOW the pane
+    // had content before the split — otherwise a blank assertion is vacuous).
+    let token = "c0pl4nd_split_marker";
+    type_text(&mut h, &format!("echo {token}"));
+    press_enter(&mut h);
+    let seen = poll_focused_contains(&mut h, &app, token, Duration::from_secs(8));
+    assert!(
+        seen,
+        "pre-condition: the marker must reach pane 0's grid before the split"
+    );
+
+    // Open a second terminal: splits the focused pane and resizes pane 0's PTY
+    // (grow rows past 24, then narrow cols). This is the "+"-button path.
+    app.borrow_mut().new_terminal();
+
+    // Let the resize + the shell's redraw settle across several frames.
+    for _ in 0..12 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(40));
+    }
+
+    let text = app.borrow().pane_grid_text(first).unwrap_or_default();
+    assert!(
+        !text.trim().is_empty(),
+        "pane 0 must NOT be blank after opening a new terminal (blank-pane-on-split \
+         regression) — grid was:\n{text}"
+    );
+}
+
 /// THE load-bearing test: type a command into the focused pane and assert the
 /// echoed/executed output lands in that pane's REAL terminal grid. This proves
 /// keystrokes reach the PTY AND the grid updates — the "typing does nothing"
