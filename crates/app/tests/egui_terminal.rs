@@ -197,14 +197,32 @@ fn clicking_a_pane_routes_typed_input_to_that_pane_only() {
     }
     let mut h = harness(&app);
 
-    // Focus pane 1 by clicking its tab (the real chrome path).
-    h.get_by_label("pane 1").click();
-    h.run();
-    assert_eq!(
-        app.borrow().focused_pane(),
-        PaneId(1),
-        "clicking 'pane 1' must focus pane 1"
-    );
+    // Focus pane 1 by clicking its tab (the real chrome path), retrying until
+    // focus ACTUALLY lands on pane 1. The tab's accessible label tracks the
+    // pane's LIVE OSC window title, which lands ASYNCHRONOUSLY from the PTY reader
+    // thread — so (a) re-derive the lookup key from the SAME post-`h.run()` state
+    // each iteration, and (b) a title landing also RESIZES the tab strip, shifting
+    // the tab's rect between capture and hit-test, so a single click can miss.
+    // Verifying the effect (focused_pane == 1) and re-clicking closes both races.
+    // (egui_chrome's click_tab_control_until is the shared form; integration test
+    // binaries don't share helpers, so it's inlined here.)
+    let mut focused = false;
+    for _ in 0..240 {
+        h.run();
+        let label = app
+            .borrow()
+            .tab_label_for_pane(PaneId(1))
+            .expect("pane 1 must have a tab label");
+        if let Some(node) = h.query_by_label(label.as_str()) {
+            node.click();
+            h.run();
+            if app.borrow().focused_pane() == PaneId(1) {
+                focused = true;
+                break;
+            }
+        }
+    }
+    assert!(focused, "clicking pane 1's tab never moved focus to pane 1");
 
     // Type a unique token; it must land in pane 1's grid.
     let token = "c0pl4nd_pane1_only";

@@ -162,6 +162,24 @@ impl PaneTerm {
             .unwrap_or(MouseMode::Off)
     }
 
+    /// The terminal's current window title, as set by the running program via
+    /// an OSC 0/2 escape (`ESC ] 0 ; <title> BEL`). Locks the terminal briefly,
+    /// mirroring [`app_cursor`](Self::app_cursor) / [`mouse_mode`](Self::mouse_mode),
+    /// and returns the trimmed title when non-empty. Returns `None` when there is
+    /// no live session, the lock is poisoned, or the program has not set a title
+    /// yet (empty) — so the tab strip can fall back to its `pane {id}` label.
+    pub fn title(&self) -> Option<String> {
+        let session = self.session.as_ref()?;
+        let term = session.terminal();
+        let guard = term.lock().ok()?;
+        let title = guard.title().trim();
+        if title.is_empty() {
+            None
+        } else {
+            Some(title.to_string())
+        }
+    }
+
     /// Write raw bytes straight to the PTY (used for pasted text). Best-effort:
     /// a closed/dead session silently drops the write rather than panicking.
     pub fn write_bytes(&mut self, bytes: &[u8]) {
@@ -410,6 +428,34 @@ mod tests {
             pane.mouse_mode(),
             MouseMode::Off,
             "after ?1003l the accessor must report Off (badge hidden)"
+        );
+    }
+
+    /// The tab strip is driven by [`PaneTerm::title`]. A fresh pane has no
+    /// program-set title yet, so the accessor returns `None` (the strip falls
+    /// back to `pane {id}`); after the running program emits an OSC 0 title
+    /// (`ESC ] 0 ; <title> BEL`) the accessor must reflect it. Drives the shared
+    /// terminal directly — deterministic, no reliance on the async PTY reader.
+    #[test]
+    fn title_reflects_osc_set_title() {
+        let pane = PaneTerm::spawn(void_theme(), 80, 24);
+        // Default: no program-set title → None (tab falls back to "pane {id}").
+        assert_eq!(
+            pane.title(),
+            None,
+            "a fresh pane must report no title (tab strip uses the pane-id fallback)"
+        );
+        // If the shell could not spawn on this box there is no terminal to
+        // drive; the None default above is still the meaningful assertion.
+        let Some(term) = pane.terminal_for_test() else {
+            return;
+        };
+        // The program sets its window title via OSC 0 (BEL-terminated).
+        term.lock().unwrap().advance(b"\x1b]0;mytitle\x07");
+        assert_eq!(
+            pane.title(),
+            Some("mytitle".to_string()),
+            "after ESC]0;mytitle BEL the accessor must report the OSC title"
         );
     }
 

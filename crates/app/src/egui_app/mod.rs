@@ -256,6 +256,44 @@ impl C0pl4ndApp {
         self.pinned.contains(&pane_id)
     }
 
+    /// The pane's UNIQUE accessible tab label — the same string
+    /// [`chrome`](super::chrome) sets as the tab's accessible name AND the base
+    /// of its `pin`/`close` button labels, so an interaction test can look up a
+    /// tab by `get_by_label(label)` without hardcoding a value the shell's
+    /// window-title escape would change. The label is dynamic precisely because
+    /// the title feature makes it so — a real shell sets its own title, so a
+    /// fixed `"pane 0"` literal is no longer a stable lookup key.
+    #[allow(dead_code)]
+    pub fn tab_label_for_pane(&self, pane_id: PaneId) -> Option<String> {
+        self.pane_titles()
+            .into_iter()
+            .find(|(id, _)| *id == pane_id)
+            .map(|(id, label)| Self::tab_a11y_label(id, &label))
+    }
+
+    /// A pane's UNIQUE accessible tab label, derived from its displayed tab text.
+    ///
+    /// The VISIBLE tab text is just the title (or the `pane {id}` fallback), but
+    /// two shells launched in the same directory routinely set the SAME OSC
+    /// window title — so the visible text alone is NOT unique. An ambiguous
+    /// accessible name is a real defect: a screen reader cannot distinguish the
+    /// two tabs, and the accessibility tree has two nodes with one name (which
+    /// also makes `get_by_label` lookups ambiguous). This stable-by-construction
+    /// label fixes that by anchoring every label on the unique `pane {id}`:
+    ///
+    /// - untitled pane → `pane {id}` (already unique; no redundant suffix)
+    /// - titled pane   → `{title} (pane {id})` (title for context + id for
+    ///   uniqueness; the title is kept first so WCAG 2.5.3 "Label in Name" holds
+    ///   against the visible text)
+    fn tab_a11y_label(pane_id: PaneId, display: &str) -> String {
+        let fallback = format!("pane {}", pane_id.raw());
+        if display == fallback {
+            fallback
+        } else {
+            format!("{display} (pane {})", pane_id.raw())
+        }
+    }
+
     /// The most recent caption command the user issued (min/max/close), or
     /// `None` if no caption button has been clicked this session.
     #[allow(dead_code)]
@@ -292,17 +330,51 @@ impl C0pl4ndApp {
         self.pane_titles().into_iter().map(|(id, _)| id).collect()
     }
 
+    /// Maximum displayed length of an OSC-derived tab title before it is
+    /// truncated with an ellipsis. A program can set an arbitrarily long title
+    /// (e.g. a full `user@host: /deep/path` string); the tab strip caps it so
+    /// one verbose pane cannot blow out the whole strip.
+    const MAX_TAB_TITLE: usize = 32;
+
     /// `(pane_id, title)` for every pane in the grid, in STABLE visual order
     /// (left→right, top→bottom). Built by walking the tree from the root via
     /// [`grid::panes_in_visual_order`] — NOT by iterating the `ahash::HashMap`
     /// storage, whose order changes every process launch (the "tab order
     /// reshuffles between launches" bug). The tab strip and every consumer of
     /// this list therefore stay in a fixed, on-screen-matching order.
+    ///
+    /// Each tab label is the running program's live OSC 0/2 title (trimmed and
+    /// capped to [`Self::MAX_TAB_TITLE`] chars, with a `…` suffix when longer)
+    /// when the program has set one — like every real terminal. Panes that have
+    /// no title yet (a fresh shell, or one whose program never set a title) fall
+    /// back to the generic `pane {id}` label, so untitled panes read identically
+    /// to before.
     fn pane_titles(&self) -> Vec<(PaneId, String)> {
         grid::panes_in_visual_order(&self.grid_tree)
             .into_iter()
-            .map(|pane_id| (pane_id, format!("pane {}", pane_id.raw())))
+            .map(|pane_id| {
+                let label = self
+                    .terms
+                    .get(&pane_id)
+                    .and_then(PaneTerm::title)
+                    .map(|t| Self::cap_tab_title(&t))
+                    .unwrap_or_else(|| format!("pane {}", pane_id.raw()));
+                (pane_id, label)
+            })
             .collect()
+    }
+
+    /// Trim a raw OSC title and cap it to [`Self::MAX_TAB_TITLE`] CHARACTERS
+    /// (not bytes — a multi-byte glyph is never split), appending `…` when the
+    /// title was actually shortened.
+    fn cap_tab_title(raw: &str) -> String {
+        let trimmed = raw.trim();
+        if trimmed.chars().count() <= Self::MAX_TAB_TITLE {
+            trimmed.to_string()
+        } else {
+            let kept: String = trimmed.chars().take(Self::MAX_TAB_TITLE).collect();
+            format!("{kept}…")
+        }
     }
 
     /// Split the focused pane, allocating a fresh placeholder pane. Refused (with
@@ -1700,6 +1772,87 @@ mod tests {
         let app = C0pl4ndApp::bootstrap();
         assert_eq!(app.pane_count(), INITIAL_PANES);
         assert!(!app.settings_is_open());
+    }
+
+    /// A short title passes through unchanged (trimmed); a title longer than the
+    /// cap is shortened to exactly `MAX_TAB_TITLE` chars plus a `…` suffix, so a
+    /// verbose program title cannot blow out the tab strip.
+    #[test]
+    fn cap_tab_title_trims_and_truncates() {
+        assert_eq!(
+            C0pl4ndApp::cap_tab_title("  vim  "),
+            "vim",
+            "a short title is trimmed and passed through verbatim"
+        );
+        // Exactly at the cap → no ellipsis.
+        let at_cap: String = "a".repeat(C0pl4ndApp::MAX_TAB_TITLE);
+        assert_eq!(
+            C0pl4ndApp::cap_tab_title(&at_cap),
+            at_cap,
+            "a title exactly at the cap is not truncated"
+        );
+        // One over the cap → truncated to MAX_TAB_TITLE chars + ellipsis.
+        let over_cap: String = "b".repeat(C0pl4ndApp::MAX_TAB_TITLE + 5);
+        let capped = C0pl4ndApp::cap_tab_title(&over_cap);
+        assert_eq!(
+            capped.chars().count(),
+            C0pl4ndApp::MAX_TAB_TITLE + 1,
+            "an over-length title keeps MAX_TAB_TITLE chars plus one ellipsis char"
+        );
+        assert!(
+            capped.ends_with('…') && capped.starts_with('b'),
+            "the truncated title keeps the leading chars and ends with an ellipsis"
+        );
+    }
+
+    /// Two panes whose shells set the SAME OSC title still get DISTINCT
+    /// accessible tab labels. The visible tab text may collide (real terminals
+    /// allow two same-named tabs), but the accessibility tree — and the
+    /// `get_by_label` lookups the interaction tests rely on — must never have
+    /// two nodes sharing one name. Every label is anchored on the unique
+    /// `pane {id}`. Regression guard for the Windows-CI failure where both
+    /// bootstrap shells set the same cwd title and the tab lookup went ambiguous.
+    #[test]
+    fn tab_a11y_label_is_unique_even_when_titles_collide() {
+        // Identical display title for two different panes → distinct labels.
+        let a = C0pl4ndApp::tab_a11y_label(PaneId(0), "make");
+        let b = C0pl4ndApp::tab_a11y_label(PaneId(1), "make");
+        assert_ne!(
+            a, b,
+            "colliding titles must still yield distinct accessible labels"
+        );
+        assert_eq!(a, "make (pane 0)");
+        assert_eq!(b, "make (pane 1)");
+        // WCAG 2.5.3 "Label in Name": the visible title is a prefix of the label.
+        assert!(
+            a.starts_with("make"),
+            "the title leads the accessible label"
+        );
+        // The untitled fallback is already unique → not doubled into
+        // "pane 2 (pane 2)".
+        assert_eq!(
+            C0pl4ndApp::tab_a11y_label(PaneId(2), "pane 2"),
+            "pane 2",
+            "the bare pane-id fallback carries no redundant suffix"
+        );
+    }
+
+    /// A pane whose running program has not set an OSC title falls back to the
+    /// generic `pane {id}` label — so untitled panes read exactly as before this
+    /// feature, keeping the visual-order tab strip stable. (A fresh bootstrap
+    /// shell has not emitted a title escape, so every label is the fallback.)
+    #[test]
+    fn pane_titles_fall_back_to_pane_id_without_osc_title() {
+        let app = C0pl4ndApp::bootstrap();
+        let titles = app.pane_titles();
+        assert_eq!(titles.len(), app.pane_count());
+        for (id, label) in titles {
+            assert_eq!(
+                label,
+                format!("pane {}", id.raw()),
+                "an untitled pane must use the pane-id fallback label"
+            );
+        }
     }
 
     #[test]
