@@ -132,9 +132,12 @@ fn reset_to_default<T: PartialEq + Clone>(ui: &mut egui::Ui, cur: &mut T, def: &
     false
 }
 
-/// A dim one-line helper label under a heading (SCR1B3's `weak().small()` idiom).
+/// A dim helper label under a heading (SCR1B3's `weak().small()` idiom). WRAPS
+/// to the available width — a long single-line help string (e.g. the Updates
+/// page's) otherwise sets the content's min width and forced the whole settings
+/// window WIDER on that page than the others (the reported per-page width drift).
 fn help(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).weak().small());
+    ui.add(egui::Label::new(egui::RichText::new(text).weak().small()).wrap());
     ui.add_space(2.0);
 }
 
@@ -455,18 +458,23 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 ui.end_row();
             }
 
-            if row_visible(q, "tint color overlay wash") {
+            if row_visible(q, "tint color overlay wash picker") {
                 ui.add_enabled_ui(config.transparency_enabled, |ui| {
                     ui.label("Tint color")
-                        .on_hover_text("A #RRGGBB color washed over the window.");
+                        .on_hover_text("Color washed over the window (strength below).");
                     ui.horizontal(|ui| {
-                        changed |= ui
-                            .add(
-                                egui::TextEdit::singleline(&mut config.tint)
-                                    .hint_text("#121212")
-                                    .desired_width(96.0),
-                            )
-                            .changed();
+                        // A real color PICKER (swatch button → palette popup) over
+                        // the `#RRGGBB` config string, instead of raw hex entry.
+                        // parse the stored hex → swatch; on pick, write hex back.
+                        let (r, g, b) =
+                            c0pl4nd_core::theme::parse_hex(&config.tint).unwrap_or((18, 18, 18));
+                        let mut rgb = [r, g, b];
+                        if ui.color_edit_button_srgb(&mut rgb).changed() {
+                            config.tint = format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]);
+                            changed = true;
+                        }
+                        // Compact hex readout so the exact value is visible/copyable.
+                        ui.monospace(&config.tint);
                         changed |= reset_to_default(ui, &mut config.tint, &def.tint);
                     });
                 });
