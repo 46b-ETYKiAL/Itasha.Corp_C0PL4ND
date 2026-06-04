@@ -256,6 +256,23 @@ impl C0pl4ndApp {
         self.pinned.contains(&pane_id)
     }
 
+    /// The exact tab label a pane currently renders — its live OSC title when
+    /// the running program set one, else the `pane {id}` fallback. This is the
+    /// SAME string [`chrome`](super::chrome) uses for the tab text AND for the
+    /// per-tab accessible labels (`pin {label}` / `close {label}`), so an
+    /// interaction test can look up a tab by `get_by_label(label)` without
+    /// hardcoding a value that the shell's window-title escape would change. The
+    /// label is dynamic precisely because the title feature makes it so — a real
+    /// shell sets its own title, so a fixed `"pane 0"` literal is no longer a
+    /// stable lookup key.
+    #[allow(dead_code)]
+    pub fn tab_label_for_pane(&self, pane_id: PaneId) -> Option<String> {
+        self.pane_titles()
+            .into_iter()
+            .find(|(id, _)| *id == pane_id)
+            .map(|(_, label)| label)
+    }
+
     /// The most recent caption command the user issued (min/max/close), or
     /// `None` if no caption button has been clicked this session.
     #[allow(dead_code)]
@@ -292,17 +309,51 @@ impl C0pl4ndApp {
         self.pane_titles().into_iter().map(|(id, _)| id).collect()
     }
 
+    /// Maximum displayed length of an OSC-derived tab title before it is
+    /// truncated with an ellipsis. A program can set an arbitrarily long title
+    /// (e.g. a full `user@host: /deep/path` string); the tab strip caps it so
+    /// one verbose pane cannot blow out the whole strip.
+    const MAX_TAB_TITLE: usize = 32;
+
     /// `(pane_id, title)` for every pane in the grid, in STABLE visual order
     /// (left→right, top→bottom). Built by walking the tree from the root via
     /// [`grid::panes_in_visual_order`] — NOT by iterating the `ahash::HashMap`
     /// storage, whose order changes every process launch (the "tab order
     /// reshuffles between launches" bug). The tab strip and every consumer of
     /// this list therefore stay in a fixed, on-screen-matching order.
+    ///
+    /// Each tab label is the running program's live OSC 0/2 title (trimmed and
+    /// capped to [`Self::MAX_TAB_TITLE`] chars, with a `…` suffix when longer)
+    /// when the program has set one — like every real terminal. Panes that have
+    /// no title yet (a fresh shell, or one whose program never set a title) fall
+    /// back to the generic `pane {id}` label, so untitled panes read identically
+    /// to before.
     fn pane_titles(&self) -> Vec<(PaneId, String)> {
         grid::panes_in_visual_order(&self.grid_tree)
             .into_iter()
-            .map(|pane_id| (pane_id, format!("pane {}", pane_id.raw())))
+            .map(|pane_id| {
+                let label = self
+                    .terms
+                    .get(&pane_id)
+                    .and_then(PaneTerm::title)
+                    .map(|t| Self::cap_tab_title(&t))
+                    .unwrap_or_else(|| format!("pane {}", pane_id.raw()));
+                (pane_id, label)
+            })
             .collect()
+    }
+
+    /// Trim a raw OSC title and cap it to [`Self::MAX_TAB_TITLE`] CHARACTERS
+    /// (not bytes — a multi-byte glyph is never split), appending `…` when the
+    /// title was actually shortened.
+    fn cap_tab_title(raw: &str) -> String {
+        let trimmed = raw.trim();
+        if trimmed.chars().count() <= Self::MAX_TAB_TITLE {
+            trimmed.to_string()
+        } else {
+            let kept: String = trimmed.chars().take(Self::MAX_TAB_TITLE).collect();
+            format!("{kept}…")
+        }
     }
 
     /// Split the focused pane, allocating a fresh placeholder pane. Refused (with
@@ -1700,6 +1751,55 @@ mod tests {
         let app = C0pl4ndApp::bootstrap();
         assert_eq!(app.pane_count(), INITIAL_PANES);
         assert!(!app.settings_is_open());
+    }
+
+    /// A short title passes through unchanged (trimmed); a title longer than the
+    /// cap is shortened to exactly `MAX_TAB_TITLE` chars plus a `…` suffix, so a
+    /// verbose program title cannot blow out the tab strip.
+    #[test]
+    fn cap_tab_title_trims_and_truncates() {
+        assert_eq!(
+            C0pl4ndApp::cap_tab_title("  vim  "),
+            "vim",
+            "a short title is trimmed and passed through verbatim"
+        );
+        // Exactly at the cap → no ellipsis.
+        let at_cap: String = "a".repeat(C0pl4ndApp::MAX_TAB_TITLE);
+        assert_eq!(
+            C0pl4ndApp::cap_tab_title(&at_cap),
+            at_cap,
+            "a title exactly at the cap is not truncated"
+        );
+        // One over the cap → truncated to MAX_TAB_TITLE chars + ellipsis.
+        let over_cap: String = "b".repeat(C0pl4ndApp::MAX_TAB_TITLE + 5);
+        let capped = C0pl4ndApp::cap_tab_title(&over_cap);
+        assert_eq!(
+            capped.chars().count(),
+            C0pl4ndApp::MAX_TAB_TITLE + 1,
+            "an over-length title keeps MAX_TAB_TITLE chars plus one ellipsis char"
+        );
+        assert!(
+            capped.ends_with('…') && capped.starts_with('b'),
+            "the truncated title keeps the leading chars and ends with an ellipsis"
+        );
+    }
+
+    /// A pane whose running program has not set an OSC title falls back to the
+    /// generic `pane {id}` label — so untitled panes read exactly as before this
+    /// feature, keeping the visual-order tab strip stable. (A fresh bootstrap
+    /// shell has not emitted a title escape, so every label is the fallback.)
+    #[test]
+    fn pane_titles_fall_back_to_pane_id_without_osc_title() {
+        let app = C0pl4ndApp::bootstrap();
+        let titles = app.pane_titles();
+        assert_eq!(titles.len(), app.pane_count());
+        for (id, label) in titles {
+            assert_eq!(
+                label,
+                format!("pane {}", id.raw()),
+                "an untitled pane must use the pane-id fallback label"
+            );
+        }
     }
 
     #[test]

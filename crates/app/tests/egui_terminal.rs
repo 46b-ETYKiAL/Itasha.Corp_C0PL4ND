@@ -197,13 +197,20 @@ fn clicking_a_pane_routes_typed_input_to_that_pane_only() {
     }
     let mut h = harness(&app);
 
-    // Focus pane 1 by clicking its tab (the real chrome path).
-    h.get_by_label("pane 1").click();
+    // Focus pane 1 by clicking its tab (the real chrome path). The tab text is
+    // the pane's LIVE label — its OSC window title when its shell set one, else
+    // the `pane 1` fallback — so look it up by the label the app actually
+    // renders rather than a hardcoded literal the title escape would change.
+    let pane1_label = app
+        .borrow()
+        .tab_label_for_pane(PaneId(1))
+        .expect("pane 1 must have a tab label");
+    h.get_by_label(pane1_label.as_str()).click();
     h.run();
     assert_eq!(
         app.borrow().focused_pane(),
         PaneId(1),
-        "clicking 'pane 1' must focus pane 1"
+        "clicking pane 1's tab must focus pane 1 (tab label: {pane1_label:?})"
     );
 
     // Type a unique token; it must land in pane 1's grid.
