@@ -363,6 +363,15 @@ impl C0pl4ndApp {
         self.settings_open
     }
 
+    /// The current pane shell layout (`Grid` or `Tabs`) from the live config —
+    /// the value the titlebar view-toggle button flips and that `grid_ui` reads
+    /// each frame to decide whether to render the egui_tiles tree or a single
+    /// full-size pane. Observation accessor for the view-toggle interaction test.
+    #[allow(dead_code)]
+    pub fn view_mode(&self) -> c0pl4nd_core::config::ViewMode {
+        self.config.view_mode
+    }
+
     /// Number of live terminal sessions currently held. Observation accessor for
     /// the fast-shutdown test: after [`prepare_shutdown`](Self::prepare_shutdown)
     /// this MUST be zero (every `PaneTerm` dropped → every PTY child killed, no
@@ -895,6 +904,11 @@ impl C0pl4ndApp {
             Vec::new()
         };
 
+        // The active pane shell layout (#30), read LIVE so the titlebar toggle
+        // takes effect this frame. Captured before the disjoint-borrow block
+        // (which takes `&mut self.terms`).
+        let view_mode = self.config.view_mode;
+
         // Snapshot BEFORE the frame so we can revert a drag that exceeds the cap.
         let pre = self.grid_tree.clone();
         {
@@ -965,12 +979,31 @@ impl C0pl4ndApp {
                 }
                 outcome.drag_started
             };
-            let mut behavior = GridBehavior {
-                titles: &titles,
-                render_body: &mut render_body,
-                close_requests: &mut closes,
-            };
-            self.grid_tree.ui(&mut behavior, ui);
+            // Pane shell layout (#30):
+            // - Grid: drive the egui_tiles tree → every pane visible.
+            // - Tabs: render ONLY the focused pane, full-size, in the content
+            //   area. The tab strip (in the titlebar) stays the pane switcher;
+            //   the multi-pane egui_tiles layout is skipped entirely this frame.
+            //   The grid tree is NOT mutated, so flipping back to Grid restores
+            //   the exact prior layout.
+            if view_mode == c0pl4nd_core::config::ViewMode::Tabs {
+                // The focused pane must exist in the tree; if it somehow does not
+                // (defensive — focus is always re-anchored to a live pane), fall
+                // back to the first pane so the content area is never blank.
+                let show = if grid::tile_of_pane(&pre, focused).is_some() {
+                    focused
+                } else {
+                    titles.first().map(|(id, _)| *id).unwrap_or(focused)
+                };
+                render_body(ui, show);
+            } else {
+                let mut behavior = GridBehavior {
+                    titles: &titles,
+                    render_body: &mut render_body,
+                    close_requests: &mut closes,
+                };
+                self.grid_tree.ui(&mut behavior, ui);
+            }
         }
         if let Some(s) = focused_size {
             self.last_focused_size = Some(s);
@@ -2063,6 +2096,15 @@ impl C0pl4ndApp {
             self.forward_input_to_focused(ctx);
         }
 
+        // 0c) Frameless window edge/corner RESIZE (#24). The decorations are off,
+        //     so the OS gives no resize border — we synthesize one: hint the
+        //     matching resize cursor over an edge band, and on a primary press
+        //     there (when no widget wants the pointer) start an OS resize via
+        //     ViewportCommand::BeginResize. Run early, BEFORE the panels, so an
+        //     edge grab wins; the `!wants_pointer_input()` guard still lets a
+        //     widget sitting at the very edge get its click.
+        handle_frameless_resize(ctx);
+
         // Theme-derived chrome surface palette — the titlebar / tab strip /
         // status bar / central pane / settings window all follow the active
         // terminal theme through these (a light theme flips the whole chrome
@@ -2152,6 +2194,18 @@ impl C0pl4ndApp {
         if actions.toggle_settings {
             self.settings_open = !self.settings_open;
         }
+        // View-mode toggle (#30): flip the pane shell layout (Grid ⇄ Tabs) and
+        // persist it. The disk write is real-window-only (the headless harness
+        // observes the in-memory flip; persisting there would pollute the user's
+        // real config.toml — the same discipline `settings_window` follows).
+        if actions.toggle_view_mode {
+            self.config.view_mode = self.config.view_mode.toggled();
+            if self.live_window {
+                if let Some(path) = c0pl4nd_core::Config::default_path() {
+                    let _ = self.config.save_to(&path);
+                }
+            }
+        }
         // Caption command: issue the REAL OS viewport command AND record it so an
         // interaction test can assert the click had its effect.
         if let Some(cmd) = actions.window_cmd {
@@ -2214,6 +2268,109 @@ impl C0pl4ndApp {
         if self.live_window {
             ctx.request_repaint();
         }
+    }
+}
+
+/// Width of the 4 edge resize zones, in logical px. Slim so they only intercept
+/// pointer events right at the window border (#24).
+const RESIZE_EDGE_PX: f32 = 8.0;
+/// Side length of the 4 corner resize zones, in logical px. Slightly larger than
+/// the edges so diagonal grabs are forgiving (#24).
+const RESIZE_CORNER_PX: f32 = 12.0;
+
+/// Which window-edge resize direction (if any) the pointer `p` is over, given
+/// the window `rect` and the edge/corner band widths. Corners (within `corner`
+/// of two sides) take priority over straight edges; the interior returns `None`.
+/// Pure + unit-tested so the frameless-resize hit-testing can't silently regress
+/// into eating clicks meant for the tabs / caption buttons / panes (#24).
+fn resize_dir_at(
+    p: egui::Pos2,
+    rect: egui::Rect,
+    edge: f32,
+    corner: f32,
+) -> Option<egui::ResizeDirection> {
+    use egui::ResizeDirection as D;
+    let (l, r, t, b) = (
+        p.x - rect.left(),
+        rect.right() - p.x,
+        p.y - rect.top(),
+        rect.bottom() - p.y,
+    );
+    // Outside the window → not a resize zone.
+    if l < 0.0 || r < 0.0 || t < 0.0 || b < 0.0 {
+        return None;
+    }
+    let (w, e, n, s) = (l <= edge, r <= edge, t <= edge, b <= edge);
+    let (nw, ne, nn, ns) = (l <= corner, r <= corner, t <= corner, b <= corner);
+    if (n && nw) || (w && nn) {
+        Some(D::NorthWest)
+    } else if (n && ne) || (e && nn) {
+        Some(D::NorthEast)
+    } else if (s && nw) || (w && ns) {
+        Some(D::SouthWest)
+    } else if (s && ne) || (e && ns) {
+        Some(D::SouthEast)
+    } else if n {
+        Some(D::North)
+    } else if s {
+        Some(D::South)
+    } else if w {
+        Some(D::West)
+    } else if e {
+        Some(D::East)
+    } else {
+        None
+    }
+}
+
+/// Frameless window edge-resize, the no-Area way (#24). Each frame: if the
+/// pointer is over an edge band, hint the matching resize cursor; on a primary
+/// press there — and only when egui isn't already using the pointer for a
+/// widget — start an OS resize via `ViewportCommand::BeginResize`. No persistent
+/// `Order::Foreground` Areas, so it never swallows clicks meant for the tabs /
+/// caption buttons / panes, and it works on every resize, not just the first.
+fn handle_frameless_resize(ctx: &egui::Context) {
+    use egui::{CursorIcon as C, ResizeDirection as D, ViewportCommand};
+    let Some(p) = ctx.pointer_latest_pos() else {
+        return;
+    };
+    // Hit-test against the FULL window surface (viewport_rect), NOT content_rect:
+    // egui 0.34 split the old `screen_rect` into `viewport_rect()` (the whole
+    // inner window) and `content_rect()` (the area inside the panels). We need
+    // the whole window — content_rect excludes the top titlebar / bottom status
+    // panels, which would push the resize bands inward off the real window edges
+    // so the user couldn't grab them. `viewport_rect()` is the non-deprecated
+    // successor for the whole-window surface the SCR1B3 reference used.
+    let Some(dir) = resize_dir_at(p, ctx.viewport_rect(), RESIZE_EDGE_PX, RESIZE_CORNER_PX) else {
+        return;
+    };
+    ctx.set_cursor_icon(match dir {
+        D::North => C::ResizeNorth,
+        D::South => C::ResizeSouth,
+        D::West => C::ResizeWest,
+        D::East => C::ResizeEast,
+        D::NorthWest => C::ResizeNorthWest,
+        D::NorthEast => C::ResizeNorthEast,
+        D::SouthWest => C::ResizeSouthWest,
+        D::SouthEast => C::ResizeSouthEast,
+    });
+    // Start the OS resize only if egui isn't consuming the press for a widget
+    // (so a button / tab sitting at the very edge still gets its click).
+    // `egui_wants_pointer_input` is the non-deprecated rename of
+    // `wants_pointer_input` in egui 0.34.
+    if ctx.input(|i| i.pointer.primary_pressed()) && !ctx.egui_wants_pointer_input() {
+        ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
+        // The OS now owns the drag. winit's modal resize loop swallows the
+        // button-up, so egui can be left believing a drag is still in progress —
+        // which makes `wants_pointer_input()` return true forever and blocks
+        // EVERY subsequent resize (the "works once, then never" bug). Clearing
+        // egui's drag bookkeeping here unsticks that state so resize re-arms.
+        ctx.stop_dragging();
+    }
+    // Belt-and-suspenders: with no button held there can be no legitimate drag,
+    // so proactively clear any phantom drag the OS resize loop may have orphaned.
+    if !ctx.input(|i| i.pointer.any_down()) {
+        ctx.stop_dragging();
     }
 }
 
@@ -3179,6 +3336,81 @@ fn apply_window_effect(
         // native blur). Opaque: no effect at all.
         c0pl4nd_core::config::WindowMode::Transparent
         | c0pl4nd_core::config::WindowMode::Opaque => {}
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    //! Regression guard for the frameless edge-resize hit-testing (#24). The
+    //! interior MUST NOT be a resize zone (that is what would make the resize
+    //! overlay eat tab / caption / pane clicks); edges/corners must map to the
+    //! right direction. Pure, so it runs every CI build and pins the geometry
+    //! across window sizes. Ported from the SCR1B3 sibling app. The OS resize
+    //! itself (`BeginResize` + `stop_dragging`) is OS-level and not headless-
+    //! testable; this pins the pure hit-test that drives it.
+    use super::resize_dir_at;
+    use egui::{pos2, Rect, ResizeDirection as D};
+
+    fn win() -> Rect {
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 700.0))
+    }
+
+    #[test]
+    fn interior_is_never_a_resize_zone() {
+        assert_eq!(resize_dir_at(pos2(500.0, 350.0), win(), 6.0, 12.0), None);
+        // A representative titlebar position — must NOT be grabbed as a resize.
+        assert_eq!(resize_dir_at(pos2(574.0, 48.0), win(), 6.0, 12.0), None);
+    }
+
+    #[test]
+    fn edges_map_to_their_direction() {
+        assert_eq!(
+            resize_dir_at(pos2(500.0, 1.0), win(), 6.0, 12.0),
+            Some(D::North)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(500.0, 699.0), win(), 6.0, 12.0),
+            Some(D::South)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(1.0, 350.0), win(), 6.0, 12.0),
+            Some(D::West)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(999.0, 350.0), win(), 6.0, 12.0),
+            Some(D::East)
+        );
+    }
+
+    #[test]
+    fn corners_take_priority_over_edges() {
+        assert_eq!(
+            resize_dir_at(pos2(2.0, 2.0), win(), 6.0, 12.0),
+            Some(D::NorthWest)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(998.0, 2.0), win(), 6.0, 12.0),
+            Some(D::NorthEast)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(2.0, 698.0), win(), 6.0, 12.0),
+            Some(D::SouthWest)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(998.0, 698.0), win(), 6.0, 12.0),
+            Some(D::SouthEast)
+        );
+        // On the top edge but within the corner band of the left side → NW.
+        assert_eq!(
+            resize_dir_at(pos2(8.0, 1.0), win(), 6.0, 12.0),
+            Some(D::NorthWest)
+        );
+    }
+
+    #[test]
+    fn outside_the_window_is_none() {
+        assert_eq!(resize_dir_at(pos2(-5.0, 350.0), win(), 6.0, 12.0), None);
+        assert_eq!(resize_dir_at(pos2(500.0, 800.0), win(), 6.0, 12.0), None);
     }
 }
 

@@ -43,6 +43,7 @@ eframe = { version = "0.34", default-features = false, features = [
     "accesskit",     # a11y tree (also what egui_kittest queries in tests)
     "wayland",
     "x11",
+    "persistence",   # native window pos+size restore (#24/#25) + App::save() firing on exit/interval — ron state stored under the with_app_id folder
 ] }
 egui = "0.34"
 egui-wgpu = "0.34"

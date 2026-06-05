@@ -28,6 +28,7 @@ use std::cell::RefCell;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
+use c0pl4nd_core::config::ViewMode;
 use egui_app::grid::PaneId;
 use egui_app::{C0pl4ndApp, WindowCmd};
 
@@ -536,6 +537,102 @@ fn shell_menu_opens_a_new_terminal() {
         app.borrow().pane_count(),
         before + 1,
         "picking a shell from the ▾ menu must open exactly one new terminal"
+    );
+}
+
+/// Click the view-mode toggle button until the live `view_mode()` reaches
+/// `want`. The button sits in the title-bar flow AFTER the variable-width tab
+/// strip (like "+"/"▾"), so an async OSC title landing can shift it between the
+/// rect capture and the hit-test and a single click can miss — so re-find and
+/// re-click (each after an `h.run()` that settles the layout) until the observed
+/// mode flips. Idempotent on the target: if already at `want`, returns at once.
+fn click_view_toggle_until(h: &mut Harness<'_>, app: &RefCell<C0pl4ndApp>, want: ViewMode) {
+    for _ in 0..240 {
+        h.run();
+        if app.borrow().view_mode() == want {
+            return;
+        }
+        if let Some(btn) = h.query_by_label("toggle view: grid/tabs") {
+            btn.click();
+        }
+        h.run();
+        if app.borrow().view_mode() == want {
+            return;
+        }
+    }
+    panic!(
+        "the view-mode toggle never reached {want:?} (current: {:?})",
+        app.borrow().view_mode()
+    );
+}
+
+#[test]
+fn clicking_view_toggle_flips_grid_and_tabs() {
+    // #30: the titlebar view button flips the pane shell between the egui_tiles
+    // GRID and the single-pane TABS view. Bootstrap defaults to Grid.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    assert_eq!(
+        app.borrow().view_mode(),
+        ViewMode::Grid,
+        "the shell opens in grid view by default"
+    );
+    let mut h = harness(&app);
+
+    // Clicking the real button flips Grid → Tabs (observable via view_mode()).
+    click_view_toggle_until(&mut h, &app, ViewMode::Tabs);
+    assert_eq!(
+        app.borrow().view_mode(),
+        ViewMode::Tabs,
+        "clicking the view toggle must switch to tabs view"
+    );
+
+    // Clicking it again flips Tabs → Grid (the toggle is an involution).
+    click_view_toggle_until(&mut h, &app, ViewMode::Grid);
+    assert_eq!(
+        app.borrow().view_mode(),
+        ViewMode::Grid,
+        "clicking the view toggle again must switch back to grid view"
+    );
+}
+
+#[test]
+fn tab_strip_still_switches_panes_in_tabs_view() {
+    // #30: in TABS view only the focused pane renders, but the tab strip must
+    // STILL switch the active pane (its raison d'être). Open a second terminal,
+    // flip to tabs view, then click pane 0's tab and prove focus moved.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    // Two panes (0, 1); the new terminal takes focus (id 1).
+    click_new_terminal(&mut h, &app);
+    assert_eq!(
+        app.borrow().focused_pane(),
+        PaneId(1),
+        "a new terminal takes focus"
+    );
+
+    // Flip to tabs view — only the focused pane renders now.
+    click_view_toggle_until(&mut h, &app, ViewMode::Tabs);
+    assert_eq!(app.borrow().view_mode(), ViewMode::Tabs);
+
+    // The tab strip (in the titlebar) is unaffected by the view mode — clicking
+    // pane 0's tab must still move focus to pane 0, which is what makes the
+    // single-pane tabs view usable.
+    click_tab_control_until(&mut h, &app, PaneId(0), "", |a| {
+        a.focused_pane() == PaneId(0)
+    });
+    assert_eq!(
+        app.borrow().focused_pane(),
+        PaneId(0),
+        "clicking a tab in tabs view must switch the active pane"
+    );
+
+    // And both panes are still alive — switching panes in tabs view does not
+    // close the hidden one.
+    assert_eq!(
+        app.borrow().pane_count(),
+        2,
+        "tabs view hides non-focused panes but keeps them alive"
     );
 }
 
