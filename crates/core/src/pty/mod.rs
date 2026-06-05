@@ -167,24 +167,43 @@ fn is_cmd_shell(program: &str) -> bool {
         .is_some_and(|stem| stem.eq_ignore_ascii_case("cmd"))
 }
 
-/// Inject the default `PROMPT` for a `cmd.exe`-family shell when the user has
-/// NOT already set one.
+/// Guarantee the `cmd.exe`-family prompt ends with a trailing space, so the
+/// cursor always sits one cell clear of the `>`.
 ///
-/// This is the minimal, non-invasive fix for "no space between the shell prompt
-/// and the cursor": cmd reads its prompt from the `PROMPT` environment variable
-/// and defaults to `$P$G` (no trailing space) when it is unset. We only set the
-/// variable when:
-///   * the spawned program is a cmd-family shell, AND
-///   * `PROMPT` is not already present in the (inherited) environment —
-///     so a user who customised `PROMPT` keeps their value untouched.
+/// cmd reads its prompt from the `PROMPT` environment variable and defaults to
+/// `$P$G` (no trailing space) when it is unset. The first fix only injected our
+/// spaced prompt when `PROMPT` was *unset* — but many environments INHERIT a
+/// bare `PROMPT=$P$G` (set by the system, a parent shell, or a prior session),
+/// which is not None, so the injection was skipped and the prompt rendered with
+/// no space (the reported "cursor directly next to `>`"). We now normalise the
+/// effective prompt instead of conditioning on presence:
+///   * cmd-family shell only (PowerShell/pwsh/WSL/bash own their space-terminated
+///     prompt and are never touched), AND
+///   * unset / empty → use `$P$G ` (default with the space), OR
+///   * inherited value already ending in whitespace → kept verbatim, OR
+///   * inherited value without a trailing space → a single space is appended
+///     (preserves a customised prompt's content while guaranteeing the space).
 ///
 /// On non-Windows targets this is a no-op (POSIX shells own their `PS1`).
 #[cfg_attr(not(windows), allow(unused_variables))]
 fn apply_prompt_env(cmd: &mut CommandBuilder, program: &str) {
     #[cfg(windows)]
     {
-        if is_cmd_shell(program) && std::env::var_os("PROMPT").is_none() {
-            cmd.env("PROMPT", CMD_PROMPT_WITH_TRAILING_SPACE);
+        if is_cmd_shell(program) {
+            let prompt = match std::env::var_os("PROMPT") {
+                Some(v) => {
+                    let s = v.to_string_lossy();
+                    if s.is_empty() {
+                        CMD_PROMPT_WITH_TRAILING_SPACE.to_string()
+                    } else if s.ends_with([' ', '\t']) {
+                        s.into_owned()
+                    } else {
+                        format!("{s} ")
+                    }
+                }
+                None => CMD_PROMPT_WITH_TRAILING_SPACE.to_string(),
+            };
+            cmd.env("PROMPT", prompt);
         }
     }
 }
@@ -296,25 +315,44 @@ mod tests {
         );
     }
 
-    /// A user who customised `PROMPT` keeps their value — we are non-invasive.
+    /// An inherited `PROMPT` that already ends in a space is kept verbatim
+    /// (content preserved), but one WITHOUT a trailing space gets a single space
+    /// appended — the bare inherited `$P$G` (the reported bug) is normalised so
+    /// the cursor still sits one cell clear of the `>`.
     #[cfg(windows)]
     #[test]
-    fn apply_prompt_env_respects_an_existing_user_prompt() {
+    fn apply_prompt_env_guarantees_trailing_space_on_inherited_prompt() {
         let _guard = lock_prompt_env();
         let saved = std::env::var_os("PROMPT");
+
+        // Case 1: inherited bare "$P$G" (no trailing space) — the exact reported
+        // failure — must be normalised to "$P$G ".
         // SAFETY: serialized by PROMPT_ENV_LOCK; we restore the prior value.
-        unsafe { std::env::set_var("PROMPT", "$P$_$G") };
-        let mut cmd = CommandBuilder::new("cmd.exe");
-        super::apply_prompt_env(&mut cmd, "cmd.exe");
-        // No caller-set override: the user's inherited PROMPT stands untouched.
-        let injected = injected_prompt(&cmd);
+        unsafe { std::env::set_var("PROMPT", "$P$G") };
+        let mut cmd1 = CommandBuilder::new("cmd.exe");
+        super::apply_prompt_env(&mut cmd1, "cmd.exe");
+        let got1 = injected_prompt(&cmd1);
+
+        // Case 2: an inherited prompt that already ends in a space is untouched.
+        unsafe { std::env::set_var("PROMPT", "$P$_$G ") };
+        let mut cmd2 = CommandBuilder::new("cmd.exe");
+        super::apply_prompt_env(&mut cmd2, "cmd.exe");
+        let got2 = injected_prompt(&cmd2);
+
+        // Restore before asserting so a failure cannot leak state.
         match saved {
             Some(v) => unsafe { std::env::set_var("PROMPT", v) },
             None => unsafe { std::env::remove_var("PROMPT") },
         }
         assert_eq!(
-            injected, None,
-            "an existing user PROMPT must be left untouched (no override injected)"
+            got1.as_deref(),
+            Some("$P$G "),
+            "inherited bare $P$G must gain a trailing space (the whole fix)"
+        );
+        assert_eq!(
+            got2.as_deref(),
+            Some("$P$_$G "),
+            "an inherited prompt already ending in a space is preserved verbatim"
         );
     }
 
