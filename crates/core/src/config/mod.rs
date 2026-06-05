@@ -106,6 +106,17 @@ impl UpdateConfig {
     }
 }
 
+/// Which side a popout panel docks to. Used by the command-history sidebar
+/// (`#21`): the user prefers a popout sidebar over a dropdown, and can dock it
+/// left or right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PanelSide {
+    Left,
+    #[default]
+    Right,
+}
+
 /// User-rebindable key bindings (action name -> key combo string).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -119,6 +130,8 @@ pub struct Keybindings {
     pub split_down: String,
     pub search: String,
     pub command_palette: String,
+    /// Toggle the command-history quick-run sidebar (`#21`).
+    pub history_sidebar: String,
     pub increase_font: String,
     pub decrease_font: String,
 }
@@ -137,6 +150,7 @@ impl Default for Keybindings {
             split_down: "mod+shift+e".into(),
             search: "mod+shift+f".into(),
             command_palette: "mod+shift+p".into(),
+            history_sidebar: "mod+shift+h".into(),
             increase_font: "mod+plus".into(),
             decrease_font: "mod+minus".into(),
         }
@@ -307,6 +321,10 @@ pub struct Config {
     pub effects: EffectsConfig,
     pub keybindings: Keybindings,
     pub update: UpdateConfig,
+    /// Which side the command-history quick-run sidebar (`#21`) docks to when
+    /// opened. Default [`PanelSide::Right`].
+    #[serde(default)]
+    pub history_sidebar_side: PanelSide,
     /// Show the neofetch-style startup panel (logo + system info) on launch.
     pub startup_panel: bool,
     /// Override shell program; `None` = use the platform default shell.
@@ -348,6 +366,7 @@ impl Default for Config {
             effects: EffectsConfig::default(),
             keybindings: Keybindings::default(),
             update: UpdateConfig::default(),
+            history_sidebar_side: PanelSide::Right,
             startup_panel: true,
             shell: None,
             ligatures: false,
