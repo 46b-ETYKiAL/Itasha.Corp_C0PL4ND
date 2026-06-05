@@ -39,6 +39,11 @@ pub struct ChromeActions {
     pub open_shell: Option<usize>,
     /// User toggled the settings window.
     pub toggle_settings: bool,
+    /// User clicked the view-mode button; flip the pane shell layout between the
+    /// `egui_tiles` grid and the single-pane tabs view (`#30`). Routed through the
+    /// action struct (like [`new_terminal`](Self::new_terminal)) so the host
+    /// applies the `config.view_mode` flip after the panel closure returns.
+    pub toggle_view_mode: bool,
     /// User clicked a caption button (minimize / maximize / close). Routed
     /// through the action struct (instead of sending the `ViewportCommand`
     /// inline) so `frame_tick` is the single place that issues the real OS
@@ -210,6 +215,35 @@ impl C0pl4ndApp {
             });
             if new_term.clicked() {
                 actions.new_terminal = true;
+            }
+
+            // View-mode toggle (#30): flip the pane shell between the multi-pane
+            // egui_tiles GRID and the single-pane TABS view. The glyph reflects
+            // the CURRENT mode (a 4-cell grid icon while in Grid, a single-card
+            // icon while in Tabs) and the tooltip names the action it performs.
+            // Clicking routes through the action struct so the host flips
+            // `config.view_mode` after the panel closes.
+            let in_tabs = self.config.view_mode == c0pl4nd_core::config::ViewMode::Tabs;
+            let view_glyph = if in_tabs {
+                icon::CARDS
+            } else {
+                icon::GRID_FOUR
+            };
+            let view_hover = if in_tabs {
+                "switch to grid view (show all panes)"
+            } else {
+                "switch to tabs view (one pane at a time)"
+            };
+            let view_btn = ui
+                .button(RichText::new(view_glyph).size(16.0).color(colors.muted))
+                .on_hover_text(view_hover);
+            // Stable accessible label for the a11y tree + the interaction test —
+            // the visible content is a glyph, so the semantic name is set here.
+            view_btn.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "toggle view: grid/tabs")
+            });
+            if view_btn.clicked() {
+                actions.toggle_view_mode = true;
             }
 
             // Shell switcher (▾): lists the shells detected on this machine.
@@ -440,8 +474,9 @@ fn mouse_mode_badge_label(mode: MouseMode) -> Option<&'static str> {
 /// then scroll) rather than collapsing to zero. Pure so the reserve invariant is
 /// unit-testable without an egui frame.
 fn tab_strip_max_width(available_width: f32) -> f32 {
-    /// Caption cluster (~176pt: 4 × 42 + inset) + the "+"/"▾" flow controls.
-    const TAB_STRIP_RIGHT_RESERVE: f32 = 300.0;
+    /// Caption cluster (~176pt: 4 × 42 + inset) + the "+"/view-toggle/"▾" flow
+    /// controls.
+    const TAB_STRIP_RIGHT_RESERVE: f32 = 330.0;
     (available_width - TAB_STRIP_RIGHT_RESERVE).max(80.0)
 }
 

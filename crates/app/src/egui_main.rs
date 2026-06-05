@@ -58,6 +58,10 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // The window position + size are persisted natively by eframe via the
+    // `persistence` feature + `NativeOptions.persist_window` below (ron state
+    // stored under the stable `with_app_id` folder). We set only the FIRST-RUN
+    // default size here; eframe restores the user's last size on later launches.
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1100.0, 720.0])
         .with_min_inner_size([520.0, 360.0])
@@ -75,6 +79,14 @@ fn main() -> eframe::Result<()> {
 
     let mut options = eframe::NativeOptions {
         viewport,
+        // Persist native window position + size across restarts (#24/#25): pairs
+        // with the eframe `persistence` feature + the stable `with_app_id` above.
+        // eframe stores the geometry (and any `App`-saved state) as ron under the
+        // app_id folder and restores it on the next launch; it also fires
+        // `App::save()` on exit/interval once persistence is on. The settings
+        // `egui::Window` (a resizable Window with a stable Id) likewise has its
+        // size persisted automatically by this feature — no hand-rolled plumbing.
+        persist_window: true,
         // Keep the wgpu backend (default via the `wgpu` feature); do NOT enable
         // glow — glyphon (Milestone 2) shares egui's wgpu device.
         ..Default::default()

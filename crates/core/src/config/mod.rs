@@ -243,6 +243,31 @@ impl WindowMode {
     }
 }
 
+/// How the pane shell lays out terminals: the multi-pane `egui_tiles` grid, or
+/// a single full-size pane with the existing tab strip switching between them.
+/// One shell layout is active at a time; the titlebar view-toggle button flips
+/// between them, and the choice persists across restarts. Mirrors the
+/// split-view vs tabs-view affordance common to modern terminals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewMode {
+    /// The `egui_tiles` tiling grid — every pane visible side-by-side/stacked.
+    #[default]
+    Grid,
+    /// Only the focused pane is shown full-size; the tab strip switches panes.
+    Tabs,
+}
+
+impl ViewMode {
+    /// The mode reached by toggling this one (Grid ⇄ Tabs).
+    pub fn toggled(self) -> ViewMode {
+        match self {
+            ViewMode::Grid => ViewMode::Tabs,
+            ViewMode::Tabs => ViewMode::Grid,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EffectsConfig {
@@ -325,6 +350,11 @@ pub struct Config {
     /// opened. Default [`PanelSide::Right`].
     #[serde(default)]
     pub history_sidebar_side: PanelSide,
+    /// Pane shell layout: the multi-pane `egui_tiles` grid (default) or a single
+    /// full-size pane with the tab strip switching panes. Toggled by the titlebar
+    /// view button; persisted so the choice survives a relaunch.
+    #[serde(default)]
+    pub view_mode: ViewMode,
     /// Show the neofetch-style startup panel (logo + system info) on launch.
     pub startup_panel: bool,
     /// Override shell program; `None` = use the platform default shell.
@@ -367,6 +397,7 @@ impl Default for Config {
             keybindings: Keybindings::default(),
             update: UpdateConfig::default(),
             history_sidebar_side: PanelSide::Right,
+            view_mode: ViewMode::default(),
             startup_panel: true,
             shell: None,
             ligatures: false,
@@ -579,6 +610,30 @@ mod tests {
         let c = Config::from_toml("ligatures = true\n", &p).unwrap();
         assert!(c.ligatures);
         // Untouched fields keep their defaults.
+        assert_eq!(c.theme, "itasha-corp");
+    }
+
+    #[test]
+    fn view_mode_defaults_to_grid() {
+        assert_eq!(Config::default().view_mode, ViewMode::Grid);
+    }
+
+    #[test]
+    fn view_mode_toggles_between_grid_and_tabs() {
+        assert_eq!(ViewMode::Grid.toggled(), ViewMode::Tabs);
+        assert_eq!(ViewMode::Tabs.toggled(), ViewMode::Grid);
+        // Two toggles return to the start (involution).
+        assert_eq!(ViewMode::Grid.toggled().toggled(), ViewMode::Grid);
+    }
+
+    #[test]
+    fn view_mode_round_trips_through_toml() {
+        // A config that only sets view_mode parses via serde(default), and the
+        // lowercase rename matches the serialized form.
+        let p = PathBuf::from("test.toml");
+        let c = Config::from_toml("view_mode = \"tabs\"\n", &p).unwrap();
+        assert_eq!(c.view_mode, ViewMode::Tabs);
+        // Default theme untouched.
         assert_eq!(c.theme, "itasha-corp");
     }
 
