@@ -16,6 +16,7 @@
 //! eframe owns the event loop; no winit plumbing here.
 
 pub mod chrome;
+pub mod fonts;
 pub mod grid;
 pub mod hyperlink;
 pub mod pane_term;
@@ -85,6 +86,12 @@ pub struct C0pl4ndApp {
     /// tests built via `bootstrap()`), so referencing the `phosphor-fill` family
     /// can never hit an unregistered-family panic.
     fonts_installed: bool,
+    /// The font-stack key (family + fallbacks folded into one string by
+    /// [`font_apply_key`]) that was LAST installed into egui. Compared each frame
+    /// against the live config so a Family/Fallback change in settings triggers a
+    /// single live re-install of the font stack — and the (expensive) system-font
+    /// load runs ONLY on an actual change, never per frame.
+    applied_font_family: String,
     /// Whether the settings window is open.
     settings_open: bool,
     /// Recently-run commands, surfaced by the command palette for quick
@@ -96,6 +103,13 @@ pub struct C0pl4ndApp {
     input_line: String,
     /// Whether the command palette overlay is open.
     palette_open: bool,
+    /// Whether the command-history quick-run sidebar (`#21`) is open. A docked
+    /// `egui::SidePanel` (side from `config.history_sidebar_side`) that lists the
+    /// history newest-first with a filter box; clicking a row re-runs it in the
+    /// focused pane via the SAME path as the command palette.
+    history_open: bool,
+    /// The history sidebar's filter query (substring/fuzzy over the history).
+    history_filter: String,
     /// The palette's fuzzy-search query.
     palette_query: String,
     /// The palette's selected row (index into the filtered results).
@@ -211,11 +225,17 @@ impl C0pl4ndApp {
     /// font the grid is actually drawn with). Marks the app as a live window so
     /// the per-frame repaint pump runs.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        install_chrome_fonts(&cc.egui_ctx);
         // Load persisted settings from disk so a user's saved theme / opacity /
         // font / cursor / update prefs take effect across launches. The headless
         // `bootstrap()` path keeps `Config::default()` for deterministic tests.
         let mut app = Self::bootstrap_with(load_config());
+        // Install the chrome icon fonts AND the user's configured monospace
+        // family + fallbacks (loaded from the system font DB and prepended to
+        // `FontFamily::Monospace`), so the very first frame already renders the
+        // grid in the chosen font. Done after the config load so `app.config.font`
+        // is the source of truth.
+        install_chrome_fonts(&cc.egui_ctx, &app.config.font);
+        app.applied_font_family = font_apply_key(&app.config.font);
         // Apply the OS glass/acrylic/mica/vibrancy effect — ONLY when the master
         // transparency toggle is on AND the chosen mode wants a non-opaque
         // surface (`effective_translucent`). Otherwise the window is a normal
@@ -277,10 +297,13 @@ impl C0pl4ndApp {
             shell_profiles: shells::detect_profiles(),
             active_shell: 0,
             fonts_installed: false,
+            applied_font_family: String::new(),
             settings_open: false,
             cmd_history: c0pl4nd_core::command_history::CommandHistory::default(),
             input_line: String::new(),
             palette_open: false,
+            history_open: false,
+            history_filter: String::new(),
             palette_query: String::new(),
             palette_sel: 0,
             last_palette_run: None,
@@ -1069,6 +1092,30 @@ impl C0pl4ndApp {
         self.config.font.size
     }
 
+    /// The current primary font family from the live config. Observation accessor
+    /// for the Font-family dropdown interaction test.
+    #[allow(dead_code)]
+    pub fn config_font_family(&self) -> String {
+        self.config.font.family.clone()
+    }
+
+    /// The current ordered fallback font families from the live config.
+    /// Observation accessor for the Fallback dropdown interaction test.
+    #[allow(dead_code)]
+    pub fn config_font_fallback(&self) -> Vec<String> {
+        self.config.font.fallback.clone()
+    }
+
+    /// The font-stack key (family + fallbacks) most recently INSTALLED into egui.
+    /// Observation accessor for the live-apply interaction test: after a family
+    /// change is driven through the real frame loop, this MUST reflect the new
+    /// family (proving the font was actually re-installed, not just stored in
+    /// config). Mirrors [`font_apply_key`].
+    #[allow(dead_code)]
+    pub fn applied_font_key(&self) -> String {
+        self.applied_font_family.clone()
+    }
+
     /// The current cursor blink flag from the live config.
     #[allow(dead_code)]
     pub fn config_cursor_blink(&self) -> bool {
@@ -1201,16 +1248,193 @@ impl C0pl4ndApp {
     fn run_palette_selection(&mut self) -> Option<String> {
         let cmd = self.palette_results().get(self.palette_sel).cloned();
         if let Some(ref c) = cmd {
-            if let Some(term) = self.terms.get_mut(&self.focused_pane) {
-                term.write_bytes(c.as_bytes());
-                term.write_bytes(b"\r");
-            }
-            // Re-running moves the command to the front (no duplicate).
-            self.cmd_history.record(c.clone());
+            self.run_command_in_focused(c);
         }
         self.last_palette_run = cmd.clone();
         self.palette_open = false;
         cmd
+    }
+
+    /// Write `cmd` followed by a carriage return (what the shell sees for Enter)
+    /// to the focused pane's PTY, and move `cmd` to the front of the history (no
+    /// duplicate). The single run path shared by the command palette
+    /// ([`Self::run_palette_selection`]) and the history sidebar
+    /// ([`Self::run_history_command`]) so both surfaces re-run a command
+    /// identically.
+    fn run_command_in_focused(&mut self, cmd: &str) {
+        if let Some(term) = self.terms.get_mut(&self.focused_pane) {
+            term.write_bytes(cmd.as_bytes());
+            term.write_bytes(b"\r");
+        }
+        // Re-running moves the command to the front (no duplicate).
+        self.cmd_history.record(cmd.to_string());
+    }
+
+    // ---- command-history quick-run sidebar (#21) -------------------------
+    //
+    // A toggleable docked `egui::SidePanel` (side from `config.history_sidebar_
+    // side`) listing the command history newest-first with a filter box. Clicking
+    // a row re-runs it in the focused pane via the SAME `run_command_in_focused`
+    // path the command palette uses. Opened/closed with Ctrl+Shift+H (handled in
+    // `frame_tick`, with the chord filtered out of the PTY input stream).
+
+    /// Toggle the command-history sidebar. Opening it clears the stale filter so
+    /// the full history shows first.
+    fn toggle_history_sidebar(&mut self) {
+        self.history_open = !self.history_open;
+        if self.history_open {
+            self.history_filter.clear();
+        }
+    }
+
+    /// Run `cmd` from the history sidebar: the same focused-pane run + history
+    /// re-order path the palette uses, recorded in `last_palette_run` so an
+    /// interaction test can assert the click ran the real command (reusing the
+    /// palette's observable). Closes the sidebar after a run.
+    fn run_history_command(&mut self, cmd: &str) {
+        self.run_command_in_focused(cmd);
+        self.last_palette_run = Some(cmd.to_string());
+        self.history_open = false;
+    }
+
+    /// Whether the command-history sidebar is currently open. Observation
+    /// accessor for the toggle interaction test.
+    #[allow(dead_code)]
+    pub fn history_sidebar_open(&self) -> bool {
+        self.history_open
+    }
+
+    /// Which side the history sidebar docks to (from the live config).
+    /// Observation accessor for the side-preference test.
+    #[allow(dead_code)]
+    pub fn history_sidebar_side(&self) -> c0pl4nd_core::config::PanelSide {
+        self.config.history_sidebar_side
+    }
+
+    /// The history rows the sidebar would show for the current filter — every
+    /// entry (most-recent-first) when the filter is empty, fuzzy-filtered
+    /// otherwise. Pure read shared by the render and the click test.
+    fn history_sidebar_rows(&self) -> Vec<String> {
+        let f = self.history_filter.trim();
+        if f.is_empty() {
+            self.cmd_history.entries().map(str::to_string).collect()
+        } else {
+            self.cmd_history.search(f)
+        }
+    }
+
+    /// Render the command-history quick-run sidebar as a docked, resizable
+    /// `egui::SidePanel` on the configured side. Only called when `history_open`
+    /// — a closed sidebar is NOT `.show`n, so the central terminal reflows to the
+    /// full width (the "true popout" behaviour). A filter box sits at the top;
+    /// below it the history is listed newest-first as clickable rows (failed
+    /// vs ok styling is out of scope — the history holds commands, not exit
+    /// codes). Clicking a row runs it via [`Self::run_history_command`].
+    // egui 0.34 deprecated the top-level `SidePanel::show(ctx, …)` form in favour
+    // of `show_inside(ui, …)`, but this frameless app shows its panels straight
+    // from the `ctx` in `frame_tick` (there is no parent `&mut Ui` at this level
+    // — same rationale as the titlebar/status TopBottomPanels). Allow it here as
+    // those panels do.
+    #[allow(deprecated)]
+    fn history_sidebar(&mut self, ctx: &egui::Context, colors: theme::ChromeColors) {
+        let rows = self.history_sidebar_rows();
+        let history_empty = self.cmd_history.is_empty();
+        let mut clicked: Option<String> = None;
+        let mut close_requested = false;
+
+        let mut body = |ui: &mut egui::Ui, filter: &mut String| {
+            ui.horizontal(|ui| {
+                ui.heading(egui::RichText::new("History").color(colors.fg));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(egui::RichText::new(egui_phosphor::thin::X).size(14.0))
+                        .on_hover_text("Close history (Ctrl+Shift+H)")
+                        .clicked()
+                    {
+                        close_requested = true;
+                    }
+                });
+            });
+            ui.add(
+                egui::TextEdit::singleline(filter)
+                    .hint_text("filter…")
+                    .desired_width(f32::INFINITY),
+            );
+            ui.separator();
+            if rows.is_empty() {
+                ui.weak(if history_empty {
+                    "No commands run yet."
+                } else {
+                    "No matches."
+                });
+            } else {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for cmd in &rows {
+                            // A full-width clickable row in the chosen font; click
+                            // re-runs it in the focused pane.
+                            let resp = ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(cmd)
+                                        .color(colors.fg)
+                                        .family(egui::FontFamily::Monospace),
+                                )
+                                .sense(egui::Sense::click())
+                                .wrap(),
+                            );
+                            if resp.clicked() {
+                                clicked = Some(cmd.clone());
+                            }
+                            resp.on_hover_text("Run in the focused pane");
+                        }
+                    });
+            }
+            ui.add_space(4.0);
+            ui.weak("Ctrl+Shift+H toggles · click a row to run");
+        };
+
+        let frame = egui::Frame::new().fill(colors.panel).inner_margin(8.0);
+        // Snapshot the filter into a local so the panel closure's `&mut filter`
+        // (the TextEdit) does not collide with the immutable `rows`/`self` reads.
+        let mut filter = std::mem::take(&mut self.history_filter);
+        match self.config.history_sidebar_side {
+            c0pl4nd_core::config::PanelSide::Left => {
+                egui::SidePanel::left("c0pl4nd_history")
+                    .resizable(true)
+                    .default_width(260.0)
+                    .frame(frame)
+                    .show(ctx, |ui| body(ui, &mut filter));
+            }
+            c0pl4nd_core::config::PanelSide::Right => {
+                egui::SidePanel::right("c0pl4nd_history")
+                    .resizable(true)
+                    .default_width(260.0)
+                    .frame(frame)
+                    .show(ctx, |ui| body(ui, &mut filter));
+            }
+        }
+        self.history_filter = filter;
+
+        if close_requested {
+            self.history_open = false;
+        }
+        if let Some(cmd) = clicked {
+            self.run_history_command(&cmd);
+        }
+    }
+
+    /// Run the history entry at `index` (newest-first) exactly as a real click
+    /// does — through [`Self::run_history_command`]. `pub` for the
+    /// `#[path]`-included interaction test (which seeds the history then drives a
+    /// row "click"); inert in the shipping binary, which runs rows via real
+    /// pointer clicks. Returns the command run, or `None` when `index` is out of
+    /// range.
+    #[allow(dead_code)]
+    pub fn test_run_history_row(&mut self, index: usize) -> Option<String> {
+        let cmd = self.history_sidebar_rows().get(index).cloned()?;
+        self.run_history_command(&cmd);
+        Some(cmd)
     }
 
     /// Whether the command palette is currently open. Observation accessor for
@@ -1677,8 +1901,22 @@ impl C0pl4ndApp {
         // frame 1 (otherwise the pinned tab's `FontFamily::Name("phosphor-fill")`
         // would panic on an unregistered family).
         if !self.fonts_installed {
-            install_chrome_fonts(ctx);
+            install_chrome_fonts(ctx, &self.config.font);
+            self.applied_font_family = font_apply_key(&self.config.font);
             self.fonts_installed = true;
+        }
+        // Live font apply: when the user changes the Family (or a Fallback) in
+        // settings, the configured font stack changed since the last install —
+        // re-install it THIS frame so the new typeface shows without a relaunch.
+        // The `applied_font_family` key folds the family + fallbacks into one
+        // string so the (expensive) re-install runs ONLY on an actual change,
+        // never every frame.
+        else {
+            let want = font_apply_key(&self.config.font);
+            if want != self.applied_font_family {
+                install_chrome_fonts(ctx, &self.config.font);
+                self.applied_font_family = want;
+            }
         }
         // Surface an opt-in launch update check result (if one arrived) as a
         // toast. No-op when no check was attached (every headless test).
@@ -1730,6 +1968,30 @@ impl C0pl4ndApp {
         });
         if toggle_search {
             self.toggle_search();
+        }
+
+        // 0a'') history sidebar: Ctrl+Shift+H (Cmd+Shift+H on macOS) toggles the
+        //       command-history quick-run sidebar. The matching key-press is
+        //       removed from the event stream so it never reaches the PTY — the
+        //       same chord-leak discipline the palette + find chords use above
+        //       (without this, `H` would fall through to the PTY as the Ctrl+H
+        //       control byte = backspace). Done explicitly (not `consume_key`) so
+        //       the ctrl-OR-command match is unambiguous on every platform.
+        let toggle_history = ctx.input_mut(|i| {
+            let mut found = false;
+            i.events.retain(|ev| {
+                let hit = matches!(
+                    ev,
+                    egui::Event::Key { key: egui::Key::H, pressed: true, modifiers, .. }
+                    if modifiers.shift && (modifiers.ctrl || modifiers.command)
+                );
+                found |= hit;
+                !hit
+            });
+            found
+        });
+        if toggle_history {
+            self.toggle_history_sidebar();
         }
 
         // 0b) route this frame's input. When the palette is open, its navigation
@@ -1839,6 +2101,14 @@ impl C0pl4ndApp {
         egui::TopBottomPanel::bottom("status")
             .frame(egui::Frame::new().fill(colors.panel).inner_margin(4.0))
             .show(ctx, |ui| self.status_bar(ui, colors));
+
+        // 2b) command-history quick-run sidebar (#21), if open. Rendered as a
+        //     docked SidePanel BEFORE the CentralPanel so the terminal grid
+        //     reflows around it (and reclaims the full width when it closes — the
+        //     panel is simply NOT shown when `history_open == false`).
+        if self.history_open {
+            self.history_sidebar(ctx, colors);
+        }
 
         // 3) the pane grid (egui_tiles) — LIVE terminal panes (Milestone 2). The
         //    central-panel fill carries the SAME opacity-folded alpha the pane
@@ -2600,12 +2870,13 @@ fn load_terminal_theme(config: &c0pl4nd_core::Config) -> c0pl4nd_core::Theme {
     c0pl4nd_core::Theme::builtin_void()
 }
 
-/// Install the Phosphor icon font into egui's font set so the chrome's caption
-/// glyphs (close/maximize/minimize/gear, split-right/down) render as crisp icons
-/// instead of the default-font missing-glyph tofu boxes. Phosphor is merged into
-/// BOTH the proportional and monospace families so a chrome button using either
-/// font resolves the icon codepoint. Called once at startup.
-fn install_chrome_fonts(ctx: &egui::Context) {
+/// Build egui's base font set: the Phosphor icon font merged into BOTH the
+/// proportional and monospace families (so the chrome's caption glyphs —
+/// close/maximize/minimize/gear, split-right/down — render as crisp icons
+/// instead of tofu), plus the SOLID `phosphor-fill` family used by a pinned
+/// tab's pin. This is the icon-only base; [`install_chrome_fonts`] layers the
+/// user's configured monospace family on top.
+fn base_font_definitions() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     // Thin = the default chrome icon weight (registered as "phosphor").
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Thin);
@@ -2629,7 +2900,53 @@ fn install_chrome_fonts(ctx: &egui::Context) {
             mono.push("phosphor".to_owned());
         }
     }
-    ctx.set_fonts(fonts);
+    fonts
+}
+
+/// Install the chrome icon fonts AND the user's configured monospace family +
+/// fallbacks into egui's font set. The configured family (and each fallback,
+/// in order) is loaded from the system font DB and PREPENDED to
+/// `FontFamily::Monospace`, so the terminal grid and every monospace UI surface
+/// render in the chosen font; egui's default monospace + the Phosphor icons stay
+/// at the END as the ultimate fallback. A family that is the built-in label, is
+/// "(none)", or is simply not installed is skipped gracefully (no panic) and the
+/// built-in monospace remains in use.
+///
+/// Loading the system font DB is slow (100s of ms), so it runs ONLY when the
+/// config names at least one real (non-built-in) family to load — the common
+/// "built-in mono" path pays nothing. Called from `new()` and from the
+/// first-frame gate in `frame_tick`, and re-run live by [`C0pl4ndApp::frame_tick`]
+/// when the user changes the family/fallback in settings.
+fn install_chrome_fonts(ctx: &egui::Context, font: &c0pl4nd_core::config::FontConfig) {
+    let base = base_font_definitions();
+    // Fast path: nothing custom to load (default config / built-in choice) — set
+    // the icon base and skip the expensive system-font enumeration entirely.
+    let needs_load = !fonts::is_builtin_family(&font.family)
+        || font.fallback.iter().any(|f| !fonts::is_builtin_family(f));
+    if !needs_load {
+        ctx.set_fonts(base);
+        return;
+    }
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    let (defs, _loaded) = fonts::build_font_definitions(base, &db, &font.family, &font.fallback);
+    ctx.set_fonts(defs);
+}
+
+/// Fold a [`FontConfig`](c0pl4nd_core::config::FontConfig)'s family + ordered
+/// fallbacks into a single stable key. Two configs produce the same key iff they
+/// install the SAME monospace font stack, so the frame loop can re-install the
+/// egui fonts ONLY when this key actually changes (the live-apply gate). Pure +
+/// GPU-free so the gate is unit-testable. Size / line-height are deliberately
+/// excluded — they do not change which font FILE is loaded, only how it is
+/// drawn.
+fn font_apply_key(font: &c0pl4nd_core::config::FontConfig) -> String {
+    let mut key = font.family.trim().to_string();
+    for f in &font.fallback {
+        key.push('\u{1f}'); // unit-separator: cannot appear in a family name
+        key.push_str(f.trim());
+    }
+    key
 }
 
 /// The alpha (0..=255) to paint the pane grid background (and the central panel

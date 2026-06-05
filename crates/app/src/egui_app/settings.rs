@@ -122,6 +122,55 @@ fn row_visible(q: &str, label: &str) -> bool {
     q.is_empty() || label.to_lowercase().contains(q)
 }
 
+/// The label to show in the Font Family combo for the stored config value. A
+/// stored value that resolves to egui's built-in monospace (empty, the synthetic
+/// label, or the generic "monospace") is shown as the built-in label so the combo
+/// reads cleanly; any other (installed-family) value is shown verbatim.
+fn family_display(family: &str) -> String {
+    if super::fonts::is_builtin_family(family) {
+        super::fonts::BUILTIN_MONOSPACE_LABEL.to_string()
+    } else {
+        family.to_string()
+    }
+}
+
+/// The value to STORE in `config.font.family` for a chosen combo entry. The
+/// built-in label is stored verbatim (it round-trips through `family_display` and
+/// is recognised by `fonts::is_builtin_family`, so no custom face is loaded); an
+/// installed family name is stored as-is.
+fn family_value(choice: &str) -> String {
+    choice.to_string()
+}
+
+/// One Fallback-slot ComboBox over the installed monospace families plus the
+/// "(none)" sentinel. Mutates `slot` in place and returns whether it changed.
+/// Factored out so the two slots share one widget definition.
+fn fallback_combo(ui: &mut egui::Ui, id_salt: &str, choices: &[String], slot: &mut String) -> bool {
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(slot.clone())
+        .width(220.0)
+        .show_ui(ui, |ui| {
+            // "(none)" first so an empty slot is the obvious default choice.
+            changed |= ui
+                .selectable_value(
+                    slot,
+                    super::fonts::NONE_LABEL.to_string(),
+                    super::fonts::NONE_LABEL,
+                )
+                .changed();
+            for fam in choices {
+                // The built-in label is not a meaningful FALLBACK (it is already
+                // the ultimate fallback), so offer only real installed families.
+                if fam == super::fonts::BUILTIN_MONOSPACE_LABEL {
+                    continue;
+                }
+                changed |= ui.selectable_value(slot, fam.clone(), fam).changed();
+            }
+        });
+    changed
+}
+
 /// A per-setting "restore default" affordance. Renders a small ↺ button that is
 /// enabled only when `cur != def`; clicking it resets the field and returns
 /// `true` so the caller marks settings dirty. Placed as the last cell of a Grid
@@ -581,17 +630,25 @@ fn render_sections(
         grid("font_grid").show(ui, |ui| {
             if row_visible(q, "family typeface") {
                 ui.label("Family").on_hover_text(
-                    "Primary monospace typeface. Applies on restart — the font \
-                     atlas is built at launch.",
+                    "Primary monospace typeface, picked from the fonts installed \
+                     on this system. Applies live.",
                 );
-                changed |= ui
-                    .add(
-                        egui::TextEdit::singleline(&mut config.font.family)
-                            .hint_text("Monaspace Neon")
-                            .desired_width(200.0),
-                    )
-                    .on_hover_text("Applies on the next launch.")
-                    .changed();
+                // The installed monospace families (enumerated once + cached) plus
+                // the built-in label. A ComboBox so the user picks a real font
+                // that the app actually loads — not free text that did nothing.
+                let choices = super::fonts::monospace_family_choices();
+                let selected = family_display(&config.font.family);
+                egui::ComboBox::from_id_salt("c0pl4nd-font-family")
+                    .selected_text(selected)
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for fam in choices {
+                            let value = family_value(fam);
+                            changed |= ui
+                                .selectable_value(&mut config.font.family, value, fam)
+                                .changed();
+                        }
+                    });
                 changed |= reset_to_default(ui, &mut config.font.family, &def.font.family);
                 ui.end_row();
             }
@@ -640,31 +697,50 @@ fn render_sections(
                 ui.end_row();
             }
 
-            // Ordered fallback families for glyphs the primary font lacks (CJK,
-            // Arabic, emoji). Edited as a comma-separated list and round-tripped
-            // to the `Vec<String>` config field — empty entries are dropped so a
-            // trailing comma never creates a blank family. Takes effect on the
-            // next launch (the renderer builds its font stack at startup), so the
-            // hover text says so.
+            // Two ORDERED fallback slots for glyphs the primary font lacks (CJK,
+            // Arabic, emoji). Each slot is a ComboBox over the installed
+            // monospace families + a "(none)" choice; the picks are round-tripped
+            // into the `Vec<String>` config field (a "(none)" slot is dropped, so
+            // an empty earlier slot never leaves a blank family before a later
+            // one). Applies live alongside the primary family.
             if row_visible(q, "fallback fonts families cjk polyglot") {
                 ui.label("Fallback fonts").on_hover_text(
-                    "Comma-separated fallback families for glyphs the primary font \
-                     lacks (CJK, Arabic, emoji). Applies on restart.",
+                    "Up to two fallback families for glyphs the primary font lacks \
+                     (CJK, Arabic, emoji). Applies live.",
                 );
-                let mut joined = config.font.fallback.join(", ");
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut joined)
-                            .hint_text("Noto Sans JP, monospace")
-                            .desired_width(200.0),
-                    )
-                    .on_hover_text("Applies on the next launch.")
-                    .changed()
-                {
-                    config.font.fallback = joined
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
+                // The two current slots (padded with "(none)" so both combos
+                // always render even when the config has 0 or 1 fallbacks).
+                let mut slot0 = config
+                    .font
+                    .fallback
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| super::fonts::NONE_LABEL.to_string());
+                let mut slot1 = config
+                    .font
+                    .fallback
+                    .get(1)
+                    .cloned()
+                    .unwrap_or_else(|| super::fonts::NONE_LABEL.to_string());
+                let choices = super::fonts::monospace_family_choices();
+                let mut slots_changed = false;
+                ui.vertical(|ui| {
+                    slots_changed |=
+                        fallback_combo(ui, "c0pl4nd-font-fallback-0", choices, &mut slot0);
+                    slots_changed |=
+                        fallback_combo(ui, "c0pl4nd-font-fallback-1", choices, &mut slot1);
+                });
+                if slots_changed {
+                    // Rebuild the ordered vec, dropping the "(none)" sentinel and
+                    // the built-in label (neither is a real fallback face), and
+                    // collapsing a hole so [none, "Noto"] becomes ["Noto"].
+                    config.font.fallback = [slot0, slot1]
+                        .into_iter()
+                        .filter(|s| {
+                            !s.trim().is_empty()
+                                && s != super::fonts::NONE_LABEL
+                                && s != super::fonts::BUILTIN_MONOSPACE_LABEL
+                        })
                         .collect();
                     changed = true;
                 }

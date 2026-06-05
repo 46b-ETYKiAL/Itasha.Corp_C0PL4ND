@@ -578,6 +578,7 @@ dependencies = [
  "egui_kittest",
  "egui_tiles",
  "flate2",
+ "fontdb",
  "glyphon",
  "image",
  "minisign",
