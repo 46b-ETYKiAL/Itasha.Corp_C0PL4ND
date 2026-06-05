@@ -16,13 +16,14 @@ use sha2::{Digest, Sha256};
 /// (the `MINISIGN_SECRET_KEY` GitHub Actions secret, never committed) can
 /// produce an accepted signature.
 ///
-/// Generated 2026-06-04 with the `minisign` crate
-/// (`KeyPair::generate_unencrypted_keypair`); the secret key was written to a
-/// gitignored path OUTSIDE the repo and is added to CI as a repository secret.
-/// Until a signed release is cut, verification has no signed artifact to accept
-/// and the UI reports "no verified update available" — it NEVER installs an
-/// unsigned binary.
-pub const EMBEDDED_PUBLIC_KEY: &str = "untrusted comment: minisign public key: 60CD20108A3E5032\nRWQyUD6KECDNYB1zCxbNZlBbwugXLk6ooEgwxaQaJI6+Z0aMxzSdr2R5";
+/// Generated 2026-06-04 with `rsign generate -W` (rsign2 — the SAME tool the
+/// release workflow signs with, mirroring the sibling SCR1B3 editor's
+/// `packaging/signing.md`). The passwordless secret key was written to a
+/// gitignored path OUTSIDE the repo and is added to CI as the
+/// `MINISIGN_SECRET_KEY` repository secret. Until a signed release is cut,
+/// verification has no signed artifact to accept and the UI reports "no
+/// verified update available" — it NEVER installs an unsigned binary.
+pub const EMBEDDED_PUBLIC_KEY: &str = "untrusted comment: minisign public key: A8D869E2B4DD3FD9\nRWTZP9204mnYqKT/TK6OfYG70QwFoHF5WuuxODg8tgPU+WdLRJYt6iNN";
 
 /// Hex-encoded SHA-256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {

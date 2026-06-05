@@ -406,40 +406,45 @@ jobs:
           ( cd release && cat *.sha256 > SHA256SUMS 2>/dev/null || true )
           ls -la release
 
-      - name: Sign release archives (minisign)
-        # Sign every downloadable archive so the IN-APP updater (Settings →
-        # Updates) can verify-before-swap: it checks SHA-256 THEN minisign against
-        # the public key embedded in the binary, and REFUSES to install anything
-        # that fails. Each `<archive>` gets a `<archive>.minisig` sibling (the
-        # `.sha256` siblings already exist from the build job); `files: release/*`
-        # below uploads them.
+      - name: Sign release artifacts (rsign2, when key provisioned)
+        # Sign every release asset with minisign (via rsign2 — the same tool the
+        # key was generated with; its signatures verify against the embedded key
+        # through the app's `minisign-verify` crate). Mirrors the sibling SCR1B3
+        # editor's release-signing step verbatim (see SCR1B3 packaging/signing.md)
+        # so both Itasha apps share ONE in-app-update signing convention. The
+        # in-app updater (Settings → Updates) checks SHA-256 THEN minisign and
+        # REFUSES to install anything that fails; each `<asset>` gets a
+        # `<asset>.minisig` sibling (the `.sha256` siblings already exist from the
+        # build job) and `files: release/*` below uploads them.
         #
-        # ACTIVATION (one-time, by the repo owner): generate an UNENCRYPTED
-        # minisign keypair (the public half is already embedded in
-        # `update_engine/verify.rs`; the secret half was written to
-        # `.s4f3-data/c0pl4nd-minisign-secret.key`), then add that secret-key file
-        # CONTENTS as the `MINISIGN_SECRET_KEY` Actions secret. Until then this
-        # step is a NO-OP and releases publish UNSIGNED — the updater then simply
-        # reports "no verified update" rather than installing anything unsigned.
+        # ACTIVATION (one-time, repo owner): a passwordless rsign2 keypair was
+        # generated (`rsign generate -W`); the public half is embedded in
+        # `update_engine/verify.rs` and the secret half written to
+        # `.s4f3-data/c0pl4nd-minisign-secret.key` (OUTSIDE the repo). Add that
+        # secret-key file's CONTENTS as the `MINISIGN_SECRET_KEY` Actions secret.
+        # Absent → this step is a NO-OP (artifacts ship checksummed but UNSIGNED;
+        # the updater then rejects them — fail-closed). The in-script guard avoids
+        # the secrets-in-`if` evaluation gotcha and fails safe.
         env:
-          MINISIGN_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "${MINISIGN_KEY:-}" ]; then
-            echo "MINISIGN_SECRET_KEY not set — skipping signing (unsigned release)."
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::warning::MINISIGN_SECRET_KEY not set — shipping checksummed but UNSIGNED artifacts (auto-update will reject them)."
             exit 0
           fi
-          sudo apt-get update && sudo apt-get install -y minisign
-          keyfile="$RUNNER_TEMP/minisign.key"
-          printf '%s\n' "$MINISIGN_KEY" > "$keyfile"
-          for f in release/*.tar.gz release/*.zip; do
-            [ -e "$f" ] || continue
-            # `</dev/null`: fail fast (never hang) if the key were password-
-            # protected — CI signing requires an unencrypted key.
-            minisign -S -s "$keyfile" -x "$f.minisig" -m "$f" -c "c0pl4nd release" -t "c0pl4nd $GITHUB_REF_NAME" </dev/null
-            echo "signed $f -> $f.minisig"
-          done
-          rm -f "$keyfile"
+          cargo install rsign2 --locked --version "^0.6"
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > sk.key
+          count=0
+          # Sign every release asset except the signatures themselves (matches the
+          # in-app updater, which fetches each archive's `.minisig` sibling).
+          while IFS= read -r f; do
+            rsign sign -W -s sk.key -x "$f.minisig" "$f"
+            count=$((count + 1))
+          done < <(find release -type f ! -name '*.minisig')
+          shred -u sk.key 2>/dev/null || rm -f sk.key
+          echo "signed $count release artifact(s)"
           ls -la release
 
       - name: Create GitHub Release
