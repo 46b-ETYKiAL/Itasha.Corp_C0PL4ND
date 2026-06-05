@@ -2440,82 +2440,100 @@ fn term_default_fg(theme: &c0pl4nd_core::Theme) -> (u8, u8, u8) {
 // `chromatic_aberration > 0`).
 
 /// The vertical gap (POINTS) between CRT scanlines. A faithful CRT reads as
-/// thin dark lines every ~3 points; pure so the spacing is unit-testable.
+/// thin dark lines every ~2-3 points; pure so the spacing is unit-testable.
 const CRT_SCANLINE_GAP: f32 = 3.0;
 /// Per-line darkening alpha (0..=255) for a scanline. Subtle — the lines must
-/// dim the phosphor, not black the text out.
-const CRT_SCANLINE_ALPHA: u8 = 28;
+/// dim the phosphor, not black the text out — but visible enough to read as a
+/// real scanned tube (≈0.22, up from the near-invisible old 0.11; #28).
+const CRT_SCANLINE_ALPHA: u8 = 56;
+
+/// The maximum horizontal RGB ghost offset (POINTS) — capped small so a wild
+/// config value can never smear the text into illegibility.
+const CHROMATIC_MAX_OFFSET: f32 = 3.0;
+/// The minimum visible ghost offset (POINTS) once aberration is ON, so the
+/// fringing actually READS as RGB separation rather than vanishing (issue #28:
+/// "does nothing visible"). At least one whole pixel of separation.
+const CHROMATIC_MIN_OFFSET: f32 = 1.0;
 
 /// The horizontal RGB ghost offset (POINTS) for a chromatic-aberration
 /// `intensity` (the `config.effects.chromatic_aberration` value). The red ghost
 /// draws at `-offset`, the blue ghost at `+offset`; `intensity == 0` ⇒ offset
-/// `0` (off). Capped at a small `2.0` px so a wild config value cannot smear the
-/// text into illegibility. Pure → unit-testable without a GPU.
+/// `0` (off). When ON it is floored at [`CHROMATIC_MIN_OFFSET`] (≥1px so the
+/// fringe is visible) and capped at [`CHROMATIC_MAX_OFFSET`]. Pure →
+/// unit-testable without a GPU.
 fn chromatic_offset(intensity: f32) -> f32 {
     if !intensity.is_finite() || intensity <= 0.0 {
         return 0.0;
     }
-    intensity.clamp(0.0, 2.0)
+    intensity.clamp(CHROMATIC_MIN_OFFSET, CHROMATIC_MAX_OFFSET)
 }
 
 /// The alpha (0..=255) of each RGB ghost for a chromatic-aberration
-/// `intensity`. Scales gently with intensity so a faint ghost at low intensity
-/// grows to a stronger (but never opaque) fringe; capped at 120 so the crisp
-/// main glyph always dominates. `intensity == 0` ⇒ alpha `0` (no ghost).
+/// `intensity`. Scales with intensity so a faint ghost at low intensity grows
+/// to a stronger (but never opaque) fringe — bumped to the 100..=140 band
+/// (issue #28: the old 60..=120 was too faint to see) so the fringing is
+/// clearly visible while the crisp main glyph still dominates. `intensity == 0`
+/// ⇒ alpha `0` (no ghost).
 fn chromatic_ghost_alpha(intensity: f32) -> u8 {
-    let i = chromatic_offset(intensity); // reuse the same 0..=2 clamp
+    let i = chromatic_offset(intensity);
     if i <= 0.0 {
         return 0;
     }
-    // 60 at intensity 1.0, up to 120 at the 2.0 cap.
-    (60.0 * i).clamp(0.0, 120.0).round() as u8
+    // 100 at the 1.0 floor, scaling to 140 at the 3.0 cap.
+    let t = (i - CHROMATIC_MIN_OFFSET) / (CHROMATIC_MAX_OFFSET - CHROMATIC_MIN_OFFSET);
+    (100.0 + 40.0 * t).clamp(0.0, 140.0).round() as u8
 }
 
-/// Paint the CRT scanline + vignette overlay over a pane's grid `rect` (research
-/// §2 option (a)). Translucent horizontal lines every [`CRT_SCANLINE_GAP`]
-/// points dim alternate rows like a phosphor tube; a soft 4-edge vignette sells
-/// the curved-glass falloff. GPU-free (egui primitives only) and only invoked
-/// by the caller when `crt_scanlines` is on, so it is strictly zero-cost when
-/// the effect is disabled. The painter's clip rect keeps every line inside the
-/// pane.
+/// Edge-weight a base chromatic-aberration `offset` (points) by a glyph's
+/// horizontal position, so the RGB fringing is stronger toward the screen
+/// edges and near-zero at the centre — the authentic lens-style falloff a real
+/// CRT shows (research §2(b): "edge-weighted aberration looks more authentic
+/// than uniform"). `x` is the glyph's x; `[left, right]` the content span. The
+/// normalised distance from centre (0 at centre, 1 at either edge) scales the
+/// offset between 40% (centre) and 100% (edge), so the centre still shows a
+/// faint fringe (never fully crisp) while the edges separate strongly. Pure →
+/// unit-testable.
+fn chromatic_edge_weighted_offset(offset: f32, x: f32, left: f32, right: f32) -> f32 {
+    let span = right - left;
+    if offset <= 0.0 || !span.is_finite() || span <= 0.0 {
+        return offset.max(0.0);
+    }
+    let centre = left + span * 0.5;
+    // 0 at centre → 1 at either edge.
+    let dist = ((x - centre).abs() / (span * 0.5)).clamp(0.0, 1.0);
+    offset * (0.4 + 0.6 * dist)
+}
+
+/// The number of evenly-spaced [`CRT_SCANLINE_GAP`]-point dark scan lines that
+/// fill a content `rect` of the given `height`. Pure and GPU-free so the line
+/// geometry is unit-testable without a painter: the line at index `i` sits at
+/// `top + i * CRT_SCANLINE_GAP`, and the count is exactly the number of those
+/// that fall inside `[top, bottom)`. Issue #28: the prior implementation painted
+/// a tinted vignette BOX around the frame instead of real scan lines across the
+/// whole content; this is the geometry for the real horizontal lines.
+fn scanline_count(height: f32) -> usize {
+    if !height.is_finite() || height <= 0.0 {
+        return 0;
+    }
+    // Lines at y = 0, GAP, 2*GAP, … strictly below `height`.
+    (height / CRT_SCANLINE_GAP).ceil() as usize
+}
+
+/// Paint REAL CRT scan lines across the WHOLE pane content `rect` (issue #28).
+/// Thin (1px) dark translucent horizontal rows every [`CRT_SCANLINE_GAP`]
+/// points dim the phosphor like a scanned tube — drawn over the entire content,
+/// NOT as a vignette box around the frame (the old wrong behaviour). GPU-free
+/// (egui `hline` primitives only) and only invoked by the caller when
+/// `crt_scanlines` is on, so it is strictly zero-cost when the effect is
+/// disabled. The caller's `painter_at(rect)` clip keeps every line inside the
+/// pane. A 1080p pane is ~360 thin lines — one cheap primitive batch.
 fn paint_crt_scanlines(painter: &egui::Painter, rect: egui::Rect) {
     let line_col = egui::Color32::from_rgba_unmultiplied(0, 0, 0, CRT_SCANLINE_ALPHA);
-    let mut y = rect.top();
-    while y < rect.bottom() {
+    let lines = scanline_count(rect.height());
+    for i in 0..lines {
+        let y = rect.top() + i as f32 * CRT_SCANLINE_GAP;
         painter.hline(rect.x_range(), y, egui::Stroke::new(1.0, line_col));
-        y += CRT_SCANLINE_GAP;
     }
-    // Vignette: four edge bands darkening toward the pane border. Cheap stand-in
-    // for a radial falloff — enough to read as a curved tube on a dark grid.
-    let vig = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 22);
-    let band = (rect.width().min(rect.height()) * 0.06).clamp(2.0, 24.0);
-    // Top + bottom + left + right inset bands.
-    painter.rect_filled(
-        egui::Rect::from_min_size(rect.left_top(), egui::vec2(rect.width(), band)),
-        0.0,
-        vig,
-    );
-    painter.rect_filled(
-        egui::Rect::from_min_size(
-            egui::pos2(rect.left(), rect.bottom() - band),
-            egui::vec2(rect.width(), band),
-        ),
-        0.0,
-        vig,
-    );
-    painter.rect_filled(
-        egui::Rect::from_min_size(rect.left_top(), egui::vec2(band, rect.height())),
-        0.0,
-        vig,
-    );
-    painter.rect_filled(
-        egui::Rect::from_min_size(
-            egui::pos2(rect.right() - band, rect.top()),
-            egui::vec2(band, rect.height()),
-        ),
-        0.0,
-        vig,
-    );
 }
 
 /// The top-left point at which a pane's terminal grid text is drawn, given the
@@ -2600,13 +2618,19 @@ fn paint_grid_native(
     let ghost_alpha = chromatic_ghost_alpha(effects.chromatic_aberration);
     for (row_idx, runs) in rows.iter().enumerate() {
         let row_origin = egui::pos2(origin.x, origin.y + row_idx as f32 * ch);
-        // --- faux chromatic aberration (research §2): re-draw the row's glyphs
-        // with R/B ghosts at ±offset BEHIND the crisp pass. Zero-cost when the
+        // --- chromatic aberration (research §2 + §2(b) edge-weighting): re-draw
+        // the row's glyphs with R/B ghosts at ±offset BEHIND the crisp pass.
+        // The offset is EDGE-WEIGHTED by the row's vertical position so the
+        // fringing is stronger toward the top/bottom of the pane and near-zero
+        // at the middle — the authentic CRT lens falloff. Zero-cost when the
         // setting is 0.0 (offset == 0 ⇒ skipped entirely).
         if ghost_offset > 0.0 {
+            let row_y = row_origin.y;
+            let off =
+                chromatic_edge_weighted_offset(ghost_offset, row_y, rect.top(), rect.bottom());
             paint_row_galley(
                 painter,
-                row_origin + egui::vec2(-ghost_offset, 0.0),
+                row_origin + egui::vec2(-off, 0.0),
                 runs,
                 &font,
                 Some(egui::Color32::from_rgba_unmultiplied(
@@ -2619,7 +2643,7 @@ fn paint_grid_native(
             );
             paint_row_galley(
                 painter,
-                row_origin + egui::vec2(ghost_offset, 0.0),
+                row_origin + egui::vec2(off, 0.0),
                 runs,
                 &font,
                 Some(egui::Color32::from_rgba_unmultiplied(
@@ -2949,17 +2973,53 @@ fn font_apply_key(font: &c0pl4nd_core::config::FontConfig) -> String {
     key
 }
 
+/// The minimum translucent panel alpha (fraction). Below this the grid text
+/// would be unreadable; matches SCR1B3's `0.05` slider floor so the full
+/// opacity-slider travel is live (the old `0.30` floor was a dead band that
+/// made low opacities "just dim" instead of going see-through — issue #27).
+const TRANSLUCENT_ALPHA_FLOOR: f32 = 0.05;
+
+/// Per-mode CEILING (fraction) on the translucent panel alpha for the native
+/// DWM-backdrop modes (Glass / Mica / Vibrancy). This is the load-bearing fix
+/// for "all the modes look identical / nothing is see-through" (#27): the
+/// window's clear-color is already a transparent hole (`window_clear_color`
+/// returns `[0,0,0,0]` for these modes), but the pane + central panel fills
+/// were painted at the raw `opacity` alpha — and the DEFAULT opacity is `1.0`,
+/// so every native-blur mode re-filled the hole with a fully OPAQUE quad and
+/// collapsed to a flat tint. Capping the fill alpha guarantees the backdrop
+/// shows through even at opacity 1.0, and each mode's distinct ceiling makes
+/// them visibly different: Acrylic (Glass) blurs strongly through the biggest
+/// hole, Mica tints the wallpaper through a subtle one, Vibrancy is a plain
+/// reduced-alpha see-through. Research §3 (the Win11 backdrop table). `None`
+/// (Transparent / Opaque) means "no extra ceiling — the opacity slider alone
+/// drives the alpha", because Transparent has no DWM hole to preserve.
+fn translucent_alpha_ceiling(mode: c0pl4nd_core::config::WindowMode) -> Option<f32> {
+    use c0pl4nd_core::config::WindowMode;
+    match mode {
+        // Acrylic: the strong live-blur backdrop — keep the largest hole.
+        WindowMode::Glass => Some(0.35),
+        // Mica: subtle wallpaper tint — a small hole reads as a faint wash.
+        WindowMode::Mica => Some(0.45),
+        // Vibrancy: plain reduced-alpha see-through, no DWM blur — a mid hole.
+        WindowMode::Vibrancy => Some(0.55),
+        // Transparent (portable, no DWM backdrop) + Opaque: slider-only.
+        WindowMode::Transparent | WindowMode::Opaque => None,
+    }
+}
+
 /// The alpha (0..=255) to paint the pane grid background (and the central panel
 /// fill) with, for the current config:
 ///
 /// * **Opaque** (master toggle off, or `Opaque` mode): `255` — a solid fill so
 ///   the desktop never bleeds through. The unchanged, safe default.
 /// * **Translucent** (`effective_translucent()`): the `opacity` slider folded
-///   into a 0..=255 alpha (clamped to the same `0.30` floor `window_clear_color`
-///   uses for `Transparent` mode), so the pane fill is non-opaque and the OS
-///   acrylic/mica blur — or, in `Transparent` mode, the desktop — shows THROUGH
-///   the grid. An opaque pane fill here is exactly why transparency previously
-///   "did nothing": it covered the transparent clear-color and the DWM backdrop.
+///   into a 0..=255 alpha (floored at [`TRANSLUCENT_ALPHA_FLOOR`] so the grid
+///   stays readable), then CAPPED by the per-mode
+///   [`translucent_alpha_ceiling`] for the native-blur modes so the DWM
+///   backdrop hole is never re-filled opaque. An opaque pane fill here is
+///   exactly why transparency previously "did nothing" / "looked identical
+///   across modes": at the default opacity `1.0` it covered the transparent
+///   clear-color and the DWM backdrop (#27).
 ///
 /// Pure (`&Config`) so the transparency wiring is unit-testable without a
 /// window. Mirrors SCR1B3's translucent-panel pattern (research §1c).
@@ -2967,7 +3027,10 @@ fn pane_bg_alpha(config: &c0pl4nd_core::Config) -> u8 {
     if !config.effective_translucent() {
         return 255;
     }
-    let a = config.opacity.clamp(0.30, 1.0);
+    let mut a = config.opacity.clamp(TRANSLUCENT_ALPHA_FLOOR, 1.0);
+    if let Some(ceiling) = translucent_alpha_ceiling(config.window_mode) {
+        a = a.min(ceiling);
+    }
     (a * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
@@ -2996,11 +3059,13 @@ fn window_clear_color(config: &c0pl4nd_core::Config, theme: &c0pl4nd_core::Theme
         c0pl4nd_core::config::WindowMode::Glass
         | c0pl4nd_core::config::WindowMode::Mica
         | c0pl4nd_core::config::WindowMode::Vibrancy => [0.0, 0.0, 0.0, 0.0],
-        // Portable see-through: theme background, alpha = opacity slider.
+        // Portable see-through: theme background, alpha = opacity slider. Floored
+        // at the shared TRANSLUCENT_ALPHA_FLOOR (0.05) so the slider's full travel
+        // is live (the old 0.30 floor was a dead band — #27).
         c0pl4nd_core::config::WindowMode::Transparent => {
             let (r, g, b) =
                 c0pl4nd_core::theme::parse_hex(&theme.background).unwrap_or((0x12, 0x12, 0x12));
-            let a = config.opacity.clamp(0.30, 1.0);
+            let a = config.opacity.clamp(TRANSLUCENT_ALPHA_FLOOR, 1.0);
             [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a]
         }
         // Unreachable: effective_translucent() ruled Opaque out above.
@@ -3501,12 +3566,13 @@ mod tests {
             "Transparent mode alpha must equal the opacity slider (got {a})"
         );
 
-        // The 0.30 floor is honoured even if a lower opacity slips through.
-        cfg.opacity = 0.1;
+        // The 0.05 floor (down from the old 0.30 dead band — #27) is honoured
+        // even if a lower opacity slips through, so the slider's travel is live.
+        cfg.opacity = 0.01;
         let [_, _, _, a2] = window_clear_color(&cfg, &app.theme);
         assert!(
-            (a2 - 0.30).abs() < 1e-6,
-            "alpha is clamped to the 0.30 floor"
+            (a2 - TRANSLUCENT_ALPHA_FLOOR).abs() < 1e-6,
+            "alpha is clamped to the 0.05 floor"
         );
     }
 
@@ -3624,12 +3690,20 @@ mod tests {
         assert_eq!(chromatic_offset(0.0), 0.0, "0 intensity = no aberration");
         assert_eq!(chromatic_offset(-1.0), 0.0, "negative = off");
         assert_eq!(chromatic_offset(f32::NAN), 0.0, "NaN = off");
-        // A moderate intensity passes through; a wild value clamps to the 2px cap
-        // so the text can never smear into illegibility.
-        assert!((chromatic_offset(1.0) - 1.0).abs() < 1e-6);
+        // ON → floored at the visible 1px minimum (#28: the fringe must be
+        // visible), and a wild value clamps to the 3px cap so the text can never
+        // smear into illegibility.
         assert!(
-            (chromatic_offset(99.0) - 2.0).abs() < 1e-6,
-            "clamped to 2px"
+            (chromatic_offset(0.3) - CHROMATIC_MIN_OFFSET).abs() < 1e-6,
+            "a low intensity floors at the 1px visible minimum"
+        );
+        assert!(
+            (chromatic_offset(2.0) - 2.0).abs() < 1e-6,
+            "mid passes through"
+        );
+        assert!(
+            (chromatic_offset(99.0) - CHROMATIC_MAX_OFFSET).abs() < 1e-6,
+            "clamped to the 3px cap"
         );
     }
 
@@ -3637,17 +3711,67 @@ mod tests {
     fn chromatic_ghost_alpha_scales_with_intensity_and_is_zero_when_off() {
         // OFF → no ghost alpha (so no ghost passes are even drawn).
         assert_eq!(chromatic_ghost_alpha(0.0), 0, "0 intensity = no ghost");
-        // Grows with intensity but is capped so the crisp main glyph dominates.
-        assert_eq!(chromatic_ghost_alpha(1.0), 60, "intensity 1.0 → alpha 60");
+        // ON → visible 100..=140 band (#28: the old 60..=120 was too faint).
+        assert_eq!(
+            chromatic_ghost_alpha(1.0),
+            100,
+            "intensity 1.0 → alpha 100 (visible floor)"
+        );
         assert_eq!(
             chromatic_ghost_alpha(99.0),
-            120,
-            "alpha is capped at 120 even for a wild intensity"
+            140,
+            "alpha is capped at 140 even for a wild intensity"
         );
         assert!(
-            chromatic_ghost_alpha(0.5) < chromatic_ghost_alpha(1.0),
+            chromatic_ghost_alpha(1.0) <= chromatic_ghost_alpha(2.5),
             "ghost alpha grows with intensity"
         );
+        // Every visible ghost is firmly in the readable 100..=140 band.
+        for i in [0.5_f32, 1.0, 2.0, 3.0, 9.0] {
+            let a = chromatic_ghost_alpha(i);
+            assert!((100..=140).contains(&a), "alpha {a} in the visible band");
+        }
+    }
+
+    #[test]
+    fn chromatic_edge_weight_is_zero_at_centre_and_full_at_edge() {
+        // Edge-weighting: a glyph at the vertical centre fringes faintly (40% of
+        // the base offset), the edges fringe at the full base offset (#28 / §2b).
+        let base = 2.0;
+        let (lo, hi) = (0.0, 100.0);
+        let centre = chromatic_edge_weighted_offset(base, 50.0, lo, hi);
+        let edge = chromatic_edge_weighted_offset(base, 100.0, lo, hi);
+        assert!(
+            (centre - base * 0.4).abs() < 1e-4,
+            "centre keeps 40% of the offset (a faint fringe, never fully crisp)"
+        );
+        assert!(
+            (edge - base).abs() < 1e-4,
+            "the edge gets the full base offset"
+        );
+        assert!(edge > centre, "the edge separates more than the centre");
+        // OFF / degenerate span → no offset, never NaN.
+        assert_eq!(chromatic_edge_weighted_offset(0.0, 5.0, 0.0, 100.0), 0.0);
+        assert_eq!(chromatic_edge_weighted_offset(2.0, 5.0, 10.0, 10.0), 2.0);
+    }
+
+    #[test]
+    fn scanline_count_fills_the_whole_rect_and_is_zero_for_empty() {
+        // Real scan lines (#28): the lines fill the WHOLE content height every
+        // CRT_SCANLINE_GAP points — not a vignette box. A 300px pane at a 3px
+        // gap yields 100 lines.
+        assert_eq!(
+            scanline_count(300.0),
+            (300.0_f32 / CRT_SCANLINE_GAP).ceil() as usize
+        );
+        assert!(
+            scanline_count(300.0) >= 90,
+            "a tall pane is covered by many lines, not a 4-edge box"
+        );
+        // Degenerate heights paint nothing (no panic, no negative loop).
+        assert_eq!(scanline_count(0.0), 0, "empty rect → no lines");
+        assert_eq!(scanline_count(-5.0), 0, "negative → no lines");
+        assert_eq!(scanline_count(f32::NAN), 0, "NaN → no lines");
     }
 
     // ---- Translucent pane background alpha (the transparency fix) ----
@@ -3669,11 +3793,13 @@ mod tests {
 
     #[test]
     fn pane_bg_alpha_folds_opacity_when_translucent() {
+        use c0pl4nd_core::config::WindowMode;
         // Enabling transparency + a translucent mode makes the pane fill
         // non-opaque, folding the opacity slider into the alpha so the OS blur /
         // desktop shows through at the chosen strength (this is the lever that
-        // made transparency visibly "do something").
-        let mut cfg = cfg_mode(true, c0pl4nd_core::config::WindowMode::Glass);
+        // made transparency visibly "do something"). Use Transparent mode (no
+        // per-mode ceiling) so the slider value passes straight through.
+        let mut cfg = cfg_mode(true, WindowMode::Transparent);
         cfg.opacity = 0.6;
         let a = pane_bg_alpha(&cfg);
         assert_eq!(
@@ -3682,13 +3808,85 @@ mod tests {
             "alpha tracks the opacity slider"
         );
         assert!(a < 255, "a translucent pane fill must be non-opaque");
-        // The 0.30 floor is honoured so a near-zero opacity can't make the grid
-        // invisible.
-        cfg.opacity = 0.05;
+        // The 0.05 floor (down from the old 0.30 dead band) is honoured so a
+        // near-zero opacity can't make the grid invisible (#27).
+        cfg.opacity = 0.0;
         assert_eq!(
             pane_bg_alpha(&cfg),
-            (0.30 * 255.0_f32).round() as u8,
-            "alpha is clamped to the 0.30 floor"
+            (TRANSLUCENT_ALPHA_FLOOR * 255.0_f32).round() as u8,
+            "alpha is clamped to the 0.05 floor"
         );
+    }
+
+    #[test]
+    fn native_blur_modes_cap_alpha_so_the_backdrop_is_never_re_filled_opaque() {
+        use c0pl4nd_core::config::WindowMode;
+        // The #27 root cause: the default opacity is 1.0, so without a per-mode
+        // ceiling every native-blur mode painted a FULLY OPAQUE pane fill over
+        // the transparent DWM hole — collapsing every mode to a flat tint. Each
+        // native-blur mode must cap its fill alpha well below 255 even at
+        // opacity 1.0 so the backdrop shows through.
+        for mode in [WindowMode::Glass, WindowMode::Mica, WindowMode::Vibrancy] {
+            let mut cfg = cfg_mode(true, mode);
+            cfg.opacity = 1.0; // the default — the worst case for occlusion
+            let a = pane_bg_alpha(&cfg);
+            assert!(
+                a < 255,
+                "{mode:?} must NOT paint an opaque fill at opacity 1.0 (it would \
+                 occlude the DWM backdrop and look identical to every other mode)"
+            );
+            let ceiling = translucent_alpha_ceiling(mode).expect("native mode has a ceiling");
+            assert_eq!(
+                a,
+                (ceiling * 255.0_f32).round() as u8,
+                "{mode:?} alpha is capped at its per-mode ceiling"
+            );
+        }
+    }
+
+    #[test]
+    fn native_blur_mode_ceilings_make_the_modes_visibly_distinct() {
+        use c0pl4nd_core::config::WindowMode;
+        // The distinct per-mode ceilings are what make Glass/Mica/Vibrancy look
+        // DIFFERENT (the user-visible bug was "they all look identical"). At the
+        // default opacity 1.0 each mode resolves to a different fill alpha.
+        let alpha = |mode| {
+            let mut cfg = cfg_mode(true, mode);
+            cfg.opacity = 1.0;
+            pane_bg_alpha(&cfg)
+        };
+        let glass = alpha(WindowMode::Glass);
+        let mica = alpha(WindowMode::Mica);
+        let vibrancy = alpha(WindowMode::Vibrancy);
+        // Glass keeps the biggest hole (lowest fill alpha) for the strong blur;
+        // Vibrancy the smallest. All three differ.
+        assert!(
+            glass < mica && mica < vibrancy,
+            "the three native-blur modes must have distinct fill alphas \
+             (glass {glass} < mica {mica} < vibrancy {vibrancy})"
+        );
+    }
+
+    #[test]
+    fn opaque_pane_fill_is_byte_identical_regardless_of_mode() {
+        use c0pl4nd_core::config::WindowMode;
+        // The opaque path must be untouched: master-off, any mode, any opacity →
+        // a fully opaque 255 fill (premultiplied == unmultiplied at 255, so the
+        // rendered Color32 is byte-identical to the pre-change default).
+        for mode in [
+            WindowMode::Opaque,
+            WindowMode::Glass,
+            WindowMode::Mica,
+            WindowMode::Vibrancy,
+            WindowMode::Transparent,
+        ] {
+            let mut cfg = cfg_mode(false, mode); // master OFF
+            cfg.opacity = 0.2;
+            assert_eq!(
+                pane_bg_alpha(&cfg),
+                255,
+                "master-off {mode:?} stays fully opaque"
+            );
+        }
     }
 }
