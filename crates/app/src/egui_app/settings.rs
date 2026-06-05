@@ -249,8 +249,16 @@ pub fn show(
     // to its anchor every frame and is therefore IMMOVABLE — that was the root
     // cause of the "settings can't be dragged" report. `.default_pos` places it
     // once, then the title bar drags freely.
-    let win_size = egui::vec2(720.0, 560.0);
-    let default_pos = ctx.content_rect().center() - win_size * 0.5;
+    //
+    // The window is now edge/corner RESIZABLE (#25): `.resizable(true)` +
+    // `.default_size` (first-open size) + `.min_size` (a floor so it can't be
+    // shrunk to uselessness). The stable Id is still derived from the "settings"
+    // name (unchanged), so once eframe `persistence` lands the size will be
+    // remembered automatically — that is a SEPARATE PR; we only make it
+    // resizable here.
+    let default_size = egui::vec2(720.0, 560.0);
+    let min_size = egui::vec2(560.0, 420.0);
+    let default_pos = ctx.content_rect().center() - default_size * 0.5;
 
     // Esc dismisses settings (in addition to the title-bar ✕ and the in-content
     // Close button) — the conventional overlay-dismiss key.
@@ -274,12 +282,34 @@ pub fn show(
         // single titlebar; dragging still works via egui's window-frame drag.
         .title_bar(false)
         .collapsible(false)
-        .resizable(false)
+        // Edge/corner resizable (#25). `default_size` is the first-open size;
+        // `min_size` is a sensible floor. The window keeps its stable Id (from
+        // the "settings" name) so a future `persistence` PR remembers the size.
+        .resizable(true)
+        .default_size(default_size)
+        .min_size(min_size)
         .movable(true)
-        .fixed_size(win_size)
         .default_pos(default_pos)
         .frame(egui::Frame::window(&ctx.global_style()).fill(colors.panel))
         .show(ctx, |ui| {
+            // ---- Width discipline (#26) ----
+            // egui's window auto-sizing measures content DESIRED width with an
+            // effectively unbounded available width (~f32::MAX). Any child that
+            // returns `available_width()` (e.g. a `horizontal` row) or
+            // `f32::INFINITY` (the search box below) as its desired size would
+            // therefore demand a near-infinite width and push the whole window
+            // WIDER on the page that has it — and by a DIFFERENT amount per page
+            // (the reported "every page is a different width + content runs past
+            // the ✕" bug). The robust fix (proven on the sibling SCR1B3 editor)
+            // is to clamp the content `Ui` to the window's current inner width up
+            // front: no page can then demand more than that, so EVERY page
+            // renders at the same width and content can never exceed the window
+            // (so it can't draw past the ✕). When the user widens the window,
+            // `available_width()` grows and every page uses the extra width
+            // equally; overflow always goes to the vertical ScrollArea, never to
+            // horizontal growth.
+            let content_w = ui.available_width();
+            ui.set_max_width(content_w);
             // In-content header: title + an unmissable Close ✕. The egui
             // title-bar ✕ can read as low-contrast against the dark custom
             // frame (the "can't close it" report), so this is a clear,
@@ -319,12 +349,27 @@ pub fn show(
 
                 // ---- Searchable, internally-scrolling content pane ----
                 ui.vertical(|ui| {
+                    // Clamp the content pane to the width left after the fixed
+                    // 168px nav + separator. This makes the pane width identical
+                    // on every page (the grids below size to THIS width, not to
+                    // their own desired width), and gives the search box a finite
+                    // width to fill. Without this clamp the pane would size to the
+                    // widest page's content and the `f32::INFINITY` search box
+                    // would demand near-infinite width during measurement.
+                    let pane_w = ui.available_width();
+                    ui.set_max_width(pane_w);
                     ui.horizontal(|ui| {
                         ui.label(egui_phosphor::thin::MAGNIFYING_GLASS);
+                        // A bounded width (was `f32::INFINITY`): leave room for the
+                        // magnifier glyph + the clear ✕ so the box fills the pane
+                        // WITHOUT demanding more than the pane is wide. The 56px
+                        // reserve covers the glyph + the optional clear button +
+                        // inter-item spacing; `max(0.0)` guards a tiny pane.
+                        let search_w = (pane_w - 56.0).max(0.0);
                         ui.add(
                             egui::TextEdit::singleline(&mut query)
                                 .hint_text("search settings")
-                                .desired_width(f32::INFINITY),
+                                .desired_width(search_w),
                         );
                         if !query.is_empty() && ui.button("✕").clicked() {
                             query.clear();
@@ -1029,13 +1074,14 @@ fn render_sections(
             "stable", "beta", "nightly", "install", "download", "releases",
         ],
     ) {
-        // Width-fence the Updates page so it fits the FIXED 720px settings window
-        // and never sets a wider content min-width than the other pages. The
-        // page's long help line + the inline status row otherwise pushed the
-        // content's min width past the window, making this one page render WIDER
-        // than the rest (the reported per-page width drift — same root cause and
-        // same `set_max_width(min(...))` fix the SCR1B3 Toolbar page uses).
-        ui.set_max_width(ui.available_width().min(480.0));
+        // NOTE: the prior per-page `set_max_width(min(480.0))` band-aid is GONE.
+        // The real root cause (a page demanding more width than the window) is
+        // now fixed once, at the top of the window's content closure, by clamping
+        // the whole content `Ui` to the window's inner width — so EVERY page
+        // (this one included) is bounded to the same width, and the long help
+        // line below wraps via `help`'s `.wrap()` instead of widening the page.
+        // Clamping THIS page narrower than its siblings would make it the one
+        // odd-width page — exactly the drift we are removing.
         ui.heading("Updates");
         ui.label(
             egui::RichText::new(format!(

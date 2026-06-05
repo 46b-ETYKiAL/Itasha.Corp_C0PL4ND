@@ -720,6 +720,114 @@ fn editing_the_padding_changes_the_live_grid_text_origin() {
     );
 }
 
+/// Select a category, then return the screen-space right edge (x) of the
+/// "close settings" ✕ button. Because that button sits at the right edge of the
+/// settings window's header row (a `right_to_left` layout), its `rect().right()`
+/// is a faithful proxy for the window's right inner edge — measured from the
+/// REAL AccessKit geometry, not from screenshot pixels (the documented
+/// wgpu-luminance trap). Used to prove every category page renders at the SAME
+/// window width (#26).
+fn close_button_right_on_page(h: &mut Harness<'_>, category: &str) -> f32 {
+    select_category(h, category);
+    h.get_by_label("close settings").rect().right()
+}
+
+/// Return the right edge (x) of the search box on the current page — a second
+/// width proxy taken from inside the content pane. If the content pane width
+/// drifted per page, this would move with it; it must not.
+fn search_box_right(h: &mut Harness<'_>) -> f32 {
+    h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .next()
+        .expect("the settings pane must render a search box")
+        .rect()
+        .right()
+}
+
+#[test]
+fn every_settings_page_has_the_same_window_width() {
+    // #26: "Different settings pages resize the settings menu differently and
+    // all of them make the resizing extend to the right beyond the close
+    // button." The fix clamps the content `Ui` to the window's inner width up
+    // front, so no page's controls can demand more width than any other. This
+    // test proves it from REAL geometry: the ✕ close button's right edge (the
+    // window's right inner edge) must be the SAME x (within 1px) on EVERY page —
+    // Appearance, Font, Updates (the page that historically drifted widest via
+    // its long help line + status row), and Keybindings (wide monospace combo
+    // fields). NEVER measured by screenshot pixels (the wgpu-luminance trap).
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+    open_settings(&mut h);
+
+    let appearance = close_button_right_on_page(&mut h, "Appearance");
+    let font = close_button_right_on_page(&mut h, "Font");
+    let updates = close_button_right_on_page(&mut h, "Updates");
+    let keybindings = close_button_right_on_page(&mut h, "Keybindings");
+
+    // All four right edges must agree within 1px — a stable-width window.
+    for (name, x) in [
+        ("Font", font),
+        ("Updates", updates),
+        ("Keybindings", keybindings),
+    ] {
+        assert!(
+            (x - appearance).abs() <= 1.0,
+            "the settings window right edge must be identical on every page; \
+             Appearance={appearance}, {name}={x} (drift {})",
+            (x - appearance).abs()
+        );
+    }
+}
+
+#[test]
+fn content_never_extends_past_the_close_button() {
+    // #26 (overflow half): content must NEVER draw past the window's right inner
+    // edge (the ✕). The search box (whose width was the unbounded `f32::INFINITY`
+    // offender) is the widest content element in the pane; its right edge must
+    // sit at-or-inside the ✕ button's right edge on EVERY page. We check the two
+    // pages most prone to overflow: Updates (long help) and Keybindings (wide
+    // monospace fields).
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+    open_settings(&mut h);
+
+    for category in ["Appearance", "Updates", "Keybindings"] {
+        select_category(&mut h, category);
+        let close_right = h.get_by_label("close settings").rect().right();
+        let content_right = search_box_right(&mut h);
+        assert!(
+            content_right <= close_right + 1.0,
+            "on the {category} page the content (search box right={content_right}) \
+             must not extend past the window's right inner edge \
+             (close button right={close_right})"
+        );
+    }
+}
+
+#[test]
+fn widening_the_window_keeps_pages_equal_width() {
+    // #25 + #26 interaction: making the window resizable must NOT reintroduce the
+    // per-page width drift. After the window is laid out (and at whatever width
+    // egui resolved for the resizable window), pages must STILL be equal-width to
+    // each other. We assert the invariant holds across pages at the live window
+    // size — the same equal-width guarantee, now under a resizable window. (A
+    // true drag-resize is a windowing-server action egui_kittest does not
+    // simulate; the load-bearing property — equal width across pages at any given
+    // window size — is what we verify, and it is exactly what the content clamp
+    // guarantees because every page clamps to the SAME available width.)
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+    open_settings(&mut h);
+
+    let cursor = close_button_right_on_page(&mut h, "Cursor");
+    let terminal = close_button_right_on_page(&mut h, "Terminal");
+    let window = close_button_right_on_page(&mut h, "Window");
+    assert!(
+        (cursor - terminal).abs() <= 1.0 && (cursor - window).abs() <= 1.0,
+        "resizable window must keep pages equal-width: \
+         Cursor={cursor}, Terminal={terminal}, Window={window}"
+    );
+}
+
 #[test]
 fn pressing_escape_dismisses_settings() {
     // Esc is the conventional overlay-dismiss key; the window must honour it.
