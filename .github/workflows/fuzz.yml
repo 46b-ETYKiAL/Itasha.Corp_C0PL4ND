@@ -77,16 +77,20 @@ jobs:
         # Compiles every registered fuzz target with the sanitizer-instrumented
         # nightly build. Failure here means a fuzz target stopped compiling
         # against the current public API of c0pl4nd-core.
-        run: cargo fuzz build
+        # `+nightly` is REQUIRED: cargo-fuzz passes `-Zsanitizer=address` which
+        # only the nightly compiler accepts. The toolchain step installs nightly
+        # but does not make it the default (a repo rust-toolchain pin would win),
+        # so the channel is selected explicitly here.
+        run: cargo +nightly fuzz build
 
       - name: cargo fuzz smoke run (a few seconds per target)
         # A short, bounded run per target: catches an immediately-reproducible
         # crash on the empty/seed corpus without making the gate time-unbounded.
         run: |
           set -euo pipefail
-          for target in $(cargo fuzz list); do
+          for target in $(cargo +nightly fuzz list); do
             echo "== smoke fuzzing ${target} for 10s =="
-            cargo fuzz run "${target}" -- -max_total_time=10 -runs=200000
+            cargo +nightly fuzz run "${target}" -- -max_total_time=10 -runs=200000
           done
 
   # Aggregating gate so a skipped/cancelled build cannot pass as a required check.
