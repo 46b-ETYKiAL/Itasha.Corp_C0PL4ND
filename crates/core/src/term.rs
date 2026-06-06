@@ -9,6 +9,7 @@
 use crate::grid::{Cell, CellFlags, Color, Grid, UnderlineStyle};
 use std::collections::VecDeque;
 use vte::{Params, Parser, Perform};
+use zeroize::{Zeroize, Zeroizing};
 
 pub mod keys;
 pub mod osc;
@@ -551,7 +552,7 @@ impl Screen {
                     if spec.trim() == "?" {
                         let reply = format_color_reply(self.palette[idx as usize]);
                         let resp = format!("\x1b]4;{};{}\x07", idx, reply);
-                        self.pty_response.extend_from_slice(resp.as_bytes());
+                        self.push_pty_response(resp.as_bytes());
                     } else if let Some(rgb) = parse_color_spec(&spec) {
                         self.palette[idx as usize] = rgb;
                         self.pending_color_sets
@@ -581,7 +582,7 @@ impl Screen {
                 DynamicColor::Cursor => 12,
             };
             let resp = format!("\x1b]{};{}\x07", code, format_color_reply(current));
-            self.pty_response.extend_from_slice(resp.as_bytes());
+            self.push_pty_response(resp.as_bytes());
         } else if let Some(rgb) = parse_color_spec(&spec) {
             match which {
                 DynamicColor::Foreground => self.dynamic_fg = rgb,
@@ -670,6 +671,12 @@ impl Screen {
         }
 
         if let Some(decoded) = base64_decode(payload) {
+            // Wipe the transient decoded byte buffer on drop (P-V3): it holds
+            // the plaintext clipboard payload before it is re-encoded into the
+            // `ClipboardWrite` (which itself zeroizes on drop). Without this the
+            // intermediate `Vec<u8>` would leave the plaintext in a freed
+            // allocation recoverable from a crash dump / pagefile.
+            let decoded = Zeroizing::new(decoded);
             let text = String::from_utf8_lossy(&decoded).into_owned();
             self.pending_clipboard_writes
                 .push(ClipboardWrite { selection, text });
@@ -951,7 +958,7 @@ impl Screen {
             return;
         }
         let seq: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
-        self.pty_response.extend_from_slice(seq);
+        self.push_pty_response(seq);
     }
 
     /// C16 — reflow the scrollback + visible grid to a new column width without
@@ -1244,6 +1251,26 @@ impl Screen {
             self.prompt_marks.clear();
             self.command_marks.clear();
             self.hyperlinks.clear();
+            // Wipe any still-pending OSC 52 clipboard write payloads on a hard
+            // reset (P-V3): each `ClipboardWrite` zeroizes its `text` on drop,
+            // so explicitly clearing the queue here scrubs sensitive plaintext
+            // that the app had not yet drained.
+            self.clear_pending_clipboard_writes();
+        }
+    }
+
+    /// Zeroize and drop every pending OSC 52 clipboard write (P-V3). Each
+    /// [`ClipboardWrite`] wipes its `text` on drop, and dropping the drained
+    /// `Vec` runs those `Drop` impls; resetting the `Vec` to empty afterwards
+    /// frees its backing capacity. Sensitive plaintext never lingers in the
+    /// freed allocation.
+    fn clear_pending_clipboard_writes(&mut self) {
+        // `drain(..)` yields owned `ClipboardWrite`s; dropping each at the end
+        // of the loop body wipes its `text`. `Vec::clear()` would do the same
+        // (it drops in place), but draining makes the wipe-on-consume contract
+        // explicit and is robust to future field additions.
+        for mut w in self.pending_clipboard_writes.drain(..) {
+            w.zeroize();
         }
     }
 
@@ -1413,7 +1440,7 @@ impl Screen {
         };
         let lead = if private { "?" } else { "" };
         let resp = format!("\x1b[{lead}{ps};{value}$y");
-        self.pty_response.extend_from_slice(resp.as_bytes());
+        self.push_pty_response(resp.as_bytes());
     }
 
     /// XTGETTCAP reply (C30): the DCS `q` payload is a space-separated list of
@@ -1452,7 +1479,7 @@ impl Screen {
                     format!("\x1bP0+r{name_hex}\x1b\\")
                 }
             };
-            self.pty_response.extend_from_slice(resp.as_bytes());
+            self.push_pty_response(resp.as_bytes());
         }
     }
 
@@ -1817,12 +1844,12 @@ impl Perform for Screen {
                 // `>` intermediate selects secondary DA (terminal id + version).
                 if intermediates.contains(&b'>') {
                     // Secondary DA: CSI > 0 ; 0 ; 0 c  (VT100-family, no firmware).
-                    self.pty_response.extend_from_slice(b"\x1b[>0;0;0c");
+                    self.push_pty_response(b"\x1b[>0;0;0c");
                 } else {
                     // Primary DA: VT220 with 132-col (1), selective erase (6),
                     // ANSI color (22). Capability-probing apps need a reply or
                     // they hang.
-                    self.pty_response.extend_from_slice(b"\x1b[?62;1;6;22c");
+                    self.push_pty_response(b"\x1b[?62;1;6;22c");
                 }
             }
             'n' => {
@@ -2255,6 +2282,21 @@ impl Screen {
     const PROMPT_MARKS_MAX: usize = 4096;
     /// Max retained OSC 133 command marks (oldest dropped on overflow).
     const COMMAND_MARKS_MAX: usize = 8192;
+    /// Max bytes of a single OSC 8 hyperlink URI we retain (S-7). A real
+    /// hyperlink is a short URL; an escape sequence that stuffs a multi-megabyte
+    /// "URI" is a memory-amplification / phishing-obfuscation vector. URIs over
+    /// this cap are skipped (not truncated — a truncated URL is itself a
+    /// spoofing risk). 2 KiB comfortably covers legitimate links.
+    const HYPERLINK_URI_MAX_BYTES: usize = 2 * 1024;
+    /// Hard cap on the total bytes queued in `pty_response` between drains
+    /// (S-7). Every device-status / DA / DSR / DECRQM / XTGETTCAP reply is a
+    /// fixed, bounded format, but a hostile program can issue an unbounded
+    /// *stream* of queries to amplify our reply bytes (a write-amplification
+    /// DoS). Once the queue reaches this cap, further replies are dropped until
+    /// the app drains it — the queries themselves are still parsed, only the
+    /// reply emission is bounded. 64 KiB is far above any legitimate burst of
+    /// query replies for one frame.
+    const PTY_RESPONSE_MAX: usize = 64 * 1024;
 
     /// Append an inline image, then enforce the count + byte caps by dropping
     /// the oldest entries (ring-buffer). The single push path for both Sixel
@@ -2271,11 +2313,59 @@ impl Screen {
         }
     }
 
+    /// Queue bytes to be written back to the PTY, bounded by
+    /// [`Self::PTY_RESPONSE_MAX`] (S-7). This is the single sink every device
+    /// reply (DA / DSR / CPR / DECRQM / XTGETTCAP / OSC color / OSC 52 read)
+    /// flows through, so the write-amplification cap is enforced uniformly. A
+    /// reply that would push the queue past the cap is dropped wholesale (never
+    /// truncated mid-sequence, which would emit a malformed escape) until the
+    /// app drains the queue via `take_pty_response`.
+    fn push_pty_response(&mut self, bytes: &[u8]) {
+        if self.pty_response.len().saturating_add(bytes.len()) > Self::PTY_RESPONSE_MAX {
+            // Drop the reply rather than emit a partial escape sequence. The
+            // query was still parsed; only the (bounded) reply is suppressed.
+            return;
+        }
+        self.pty_response.extend_from_slice(bytes);
+    }
+
     /// Append an OSC 8 hyperlink, then drop the oldest until under the cap.
+    ///
+    /// Two S-7 bounds gate the URI before it is stored: (1) a length cap — a URI
+    /// over [`Self::HYPERLINK_URI_MAX_BYTES`] is skipped (an over-long "URI" is
+    /// a memory-amplification / obfuscation vector, and a *truncated* URL is a
+    /// spoofing risk, so we drop it rather than store a clipped form); (2) a
+    /// scheme allow-list — only `http`/`https`/`file` URIs are captured. Other
+    /// schemes (`javascript:`, `data:`, `vbscript:`, …) are the OSC 8 phishing
+    /// surface and are rejected. The existing capture-not-auto-activate posture
+    /// is preserved: stored links are surfaced for the user to inspect, never
+    /// auto-opened.
     fn push_hyperlink(&mut self, uri: String) {
+        if uri.len() > Self::HYPERLINK_URI_MAX_BYTES {
+            return;
+        }
+        if !Self::is_allowed_hyperlink_scheme(&uri) {
+            return;
+        }
         self.hyperlinks.push(uri);
         while self.hyperlinks.len() > Self::HYPERLINKS_MAX {
             self.hyperlinks.remove(0);
+        }
+    }
+
+    /// Whether an OSC 8 URI carries an allowed scheme (`http`/`https`/`file`,
+    /// case-insensitive). A bare-relative URI (no `scheme:` prefix) is rejected
+    /// — OSC 8 links are expected to be absolute. The scheme is the substring
+    /// before the first `:`; anything else (`javascript:`, `data:`, …) is the
+    /// phishing / code-exec surface and is denied.
+    fn is_allowed_hyperlink_scheme(uri: &str) -> bool {
+        match uri.split_once(':') {
+            Some((scheme, _)) => {
+                scheme.eq_ignore_ascii_case("http")
+                    || scheme.eq_ignore_ascii_case("https")
+                    || scheme.eq_ignore_ascii_case("file")
+            }
+            None => false,
         }
     }
 
@@ -3772,6 +3862,54 @@ mod tests {
         assert_eq!(w.selection, ClipboardSelection::Clipboard);
         assert_eq!(w.text, "hello");
         assert!(t.take_clipboard_write().is_none(), "drained once");
+    }
+
+    #[test]
+    fn osc52_clipboard_write_text_zeroized_on_demand() {
+        // P-V3: a drained ClipboardWrite's sensitive `text` is wiped by
+        // `zeroize()` — the buffer becomes empty AND its previously-occupied
+        // backing bytes are scrubbed (verified via the raw heap pointer, the
+        // canonical zeroize test). This is the same buffer the app drops after
+        // copying to the OS clipboard, so the Drop impl scrubs it identically.
+        let mut t = Terminal::new(4, 20);
+        // "s3cr3t-token" base64.
+        t.advance(b"\x1b]52;c;czNjcjN0LXRva2Vu\x07");
+        let mut w = t.take_clipboard_write().expect("clipboard write");
+        assert_eq!(w.text, "s3cr3t-token");
+
+        let ptr = w.text.as_ptr();
+        let len = w.text.len();
+        assert!(len > 0);
+
+        w.zeroize();
+
+        // After zeroize the logical string is empty…
+        assert!(w.text.is_empty(), "text must be emptied by zeroize");
+        // …and the bytes that backed the secret are wiped to zero. The buffer
+        // capacity is retained by zeroize::Zeroize for String, so the original
+        // allocation is still valid to read here.
+        // SAFETY: `ptr`/`len` describe the still-allocated backing buffer of
+        // `w.text`; zeroize keeps the allocation (only sets len=0), so reading
+        // `len` bytes from `ptr` is in-bounds. No aliasing: `w` is not borrowed.
+        let wiped = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert!(
+            wiped.iter().all(|&b| b == 0),
+            "secret bytes must be zeroed after zeroize(), got {wiped:?}"
+        );
+    }
+
+    #[test]
+    fn hard_reset_clears_pending_clipboard_writes() {
+        // P-V3: a hard reset (RIS, `ESC c`) scrubs any still-pending OSC 52
+        // clipboard payloads the app had not yet drained.
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b]52;c;aGVsbG8=\x07"); // "hello" queued
+                                              // RIS — full reset. Must wipe the pending queue.
+        t.advance(b"\x1bc");
+        assert!(
+            t.take_clipboard_write().is_none(),
+            "pending clipboard writes must be cleared by a hard reset"
+        );
     }
 
     #[test]

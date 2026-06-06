@@ -623,6 +623,7 @@ dependencies = [
  "tracing",
  "unicode-width",
  "vte",
+ "zeroize",
 ]
 
 [[package]]

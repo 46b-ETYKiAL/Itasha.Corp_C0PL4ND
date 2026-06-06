@@ -2345,8 +2345,11 @@ impl App {
                     if !resp.is_empty() {
                         responses.push((ti, *leaf, slot, resp));
                     }
-                    for cw in term.take_clipboard_writes() {
-                        clipboard.push(cw.text);
+                    for mut cw in term.take_clipboard_writes() {
+                        // `ClipboardWrite` zeroizes its buffer on drop; take the
+                        // text out (leaving an empty buffer to drop) rather than
+                        // moving the field out of the Drop type.
+                        clipboard.push(std::mem::take(&mut cw.text));
                     }
                     let cs = term.take_color_sets();
                     if !cs.is_empty() {
