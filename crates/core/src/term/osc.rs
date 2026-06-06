@@ -31,6 +31,14 @@ pub enum ClipboardSelection {
 }
 
 /// A pending OSC 52 clipboard write request drained by the application.
+///
+/// The decoded clipboard `text` is potentially sensitive (a program inside the
+/// terminal can place arbitrary bytes — including secrets — onto the clipboard
+/// via OSC 52). To keep that plaintext from lingering in freed allocations
+/// recoverable from a crash dump / pagefile (P-V3), the buffer is wiped on drop
+/// via [`zeroize`]. Dropping a `ClipboardWrite` — whether the app drains and
+/// drops it after copying to the OS clipboard, or the terminal clears the
+/// pending queue on reset — zeroes `text`'s backing bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardWrite {
     /// The selection targeted by the request.
@@ -38,6 +46,25 @@ pub struct ClipboardWrite {
     /// The decoded UTF-8 text to place on the clipboard.
     pub text: String,
 }
+
+impl zeroize::Zeroize for ClipboardWrite {
+    /// Wipe the sensitive `text` buffer in place. `selection` is a non-sensitive
+    /// `Copy` enum and needs no zeroizing.
+    fn zeroize(&mut self) {
+        self.text.zeroize();
+    }
+}
+
+impl Drop for ClipboardWrite {
+    fn drop(&mut self) {
+        use zeroize::Zeroize as _;
+        self.text.zeroize();
+    }
+}
+
+// `ZeroizeOnDrop` is the marker promising the `Drop` impl above zeroes all
+// sensitive state — it lets the type compose into other zeroizing containers.
+impl zeroize::ZeroizeOnDrop for ClipboardWrite {}
 
 // ============================================================================
 // Dynamic colors / notifications
