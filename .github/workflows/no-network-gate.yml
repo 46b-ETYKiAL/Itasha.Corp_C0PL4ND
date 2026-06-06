@@ -1,0 +1,104 @@
+name: No-Network Gate
+
+# Enforces C0PL4ND's zero-egress privacy invariant (roadmap P-V1): the ONLY
+# outbound-network code in the tree lives in the two opt-in updater modules
+# (`crates/app/src/update/` — the legacy CLI version check — and
+# `crates/app/src/update_engine/` — the in-app verify-before-swap updater).
+#
+# Any `ureq` / `reqwest` / raw-socket call site that appears OUTSIDE those two
+# directories is a regression of the "zero network connections by default"
+# guarantee and FAILS the build. This is a source grep — it needs no toolchain,
+# no checkout of dependencies, and no network itself.
+#
+# The job ALWAYS runs and the aggregating `no-network-gate` step explicitly
+# inspects the scan result, so a path-filter skip can never silently satisfy a
+# required check (merge-queue-check-gating discipline).
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: no-network-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: Zero-egress invariant
+    runs-on: ubuntu-latest
+    # ALWAYS run so a conditional skip cannot report success on the merge queue.
+    if: always()
+    steps:
+      - name: Harden the runner (egress audit)
+        # step-security/harden-runner@v2.19.4
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Grep for network call sites outside the updater modules
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The ONLY directories permitted to contain network code. Both are
+          # opt-in updater modules; everything else must be network-free.
+          ALLOWED_RE='^crates/app/src/(update|update_engine)/'
+
+          # Outbound-network signatures we forbid elsewhere in the source tree.
+          # NOTE: matched against Rust SOURCE (.rs) only — Cargo.toml lists the
+          # `ureq` dependency by design (it backs the updater) and must not trip
+          # the gate.
+          PATTERN='ureq::|reqwest|TcpStream|TcpListener|UdpSocket|std::net::|tokio::net'
+
+          echo "== scanning crates/**/*.rs for forbidden network call sites =="
+
+          # grep -rn over .rs only; tolerate "no matches" (grep exit 1) without
+          # tripping `set -e`. Then drop any hit inside an allowed updater dir.
+          all_hits="$(grep -rnE --include='*.rs' "$PATTERN" crates/ || true)"
+
+          violations="$(printf '%s\n' "$all_hits" \
+            | grep -vE "$ALLOWED_RE" \
+            | sed '/^$/d' || true)"
+
+          if [ -n "$violations" ]; then
+            echo "::error::Network call site(s) found OUTSIDE the opt-in updater modules (crates/app/src/update/ and crates/app/src/update_engine/). This breaks the zero-egress privacy invariant."
+            printf '%s\n' "$violations" | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            echo
+            echo "Forbidden pattern: $PATTERN"
+            echo "Only permitted under: crates/app/src/update/ and crates/app/src/update_engine/"
+            exit 1
+          fi
+
+          echo "OK: no network call sites outside the opt-in updater modules."
+
+  # Aggregating gate so a skipped/cancelled scan cannot pass as a required check.
+  no-network-gate:
+    name: No-Network Gate
+    runs-on: ubuntu-latest
+    needs: [scan]
+    if: always()
+    steps:
+      - name: Verify the scan succeeded
+        run: |
+          set -euo pipefail
+          result="${{ needs.scan.result }}"
+          echo "scan = ${result}"
+          if [ "${result}" != "success" ]; then
+            echo "::error::The zero-egress scan did not succeed (result=${result})."
+            exit 1
+          fi
+          echo "Zero-egress invariant holds."
