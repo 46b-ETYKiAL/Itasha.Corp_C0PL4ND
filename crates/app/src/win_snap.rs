@@ -29,11 +29,14 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+use windows::Win32::UI::Shell::{
+    DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, MINMAXINFO,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_GETMINMAXINFO,
-    WM_NCCALCSIZE, WM_NCHITTEST, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_THICKFRAME,
+    WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_THICKFRAME,
 };
 
 // Hit-test result codes (Win32 `HT*`). The windows crate exposes these as `u32`
@@ -88,8 +91,11 @@ fn zone_contains(px: i32, zones: &[(i32, i32)]) -> bool {
 }
 
 /// Geometry the hit-test needs, in PHYSICAL pixels, matching the renderer.
-/// Stored in a leaked `Box` whose pointer is the subclass `dwrefdata`, so the
-/// wndproc can read it without any global state.
+/// Heap-allocated via `Box`; the raw pointer is the subclass `dwrefdata`, so
+/// the wndproc can read it without any global state. The `Box` is RECLAIMED
+/// (freed) when the subclass is removed — either explicitly via [`uninstall`]
+/// or automatically on `WM_NCDESTROY` (see [`reclaim_geom`]) — so the
+/// allocation never leaks across a window lifetime.
 #[derive(Clone, Copy)]
 struct SnapGeometry {
     /// Title-bar drag-strip height (physical px).
@@ -176,18 +182,48 @@ pub unsafe fn install(
     }
 }
 
-/// Remove the subclass. Safe to call if never installed.
+/// Reclaim (free) the heap-allocated [`SnapGeometry`] backing the subclass on
+/// `hwnd`, if one is installed, then remove the subclass. Idempotent: a second
+/// call finds no subclass and is a no-op, so it can never double-free.
+///
+/// `RemoveWindowSubclass` does NOT hand back the `dwRefData`, so we first read
+/// it with `GetWindowSubclass`, remove the subclass (after which no further
+/// wndproc call can observe the pointer), and only THEN reconstruct the `Box`
+/// to drop it. Ordering matters: removing before the `Box::from_raw` closes the
+/// window where a concurrent message could read freed memory.
+///
+/// # Safety
+/// `hwnd` must be a valid window handle, and any installed subclass on it must
+/// have been installed by [`install`] (so the `dwRefData` is a `Box<SnapGeometry>`
+/// pointer this module created).
+unsafe fn reclaim_geom(hwnd: HWND) {
+    let mut refdata: usize = 0;
+    // `GetWindowSubclass` returns TRUE and fills `refdata` only when OUR subclass
+    // (matching proc + id) is currently installed on the window.
+    let installed =
+        GetWindowSubclass(hwnd, Some(snap_wndproc), SUBCLASS_ID, Some(&mut refdata)).as_bool();
+    // Always attempt removal; harmless when not installed.
+    let _ = RemoveWindowSubclass(hwnd, Some(snap_wndproc), SUBCLASS_ID);
+    if installed && refdata != 0 {
+        // SAFETY: `refdata` is the exact pointer produced by `Box::into_raw` in
+        // `install`; the subclass is now removed so no wndproc can read it; we
+        // own it and drop it exactly once.
+        drop(Box::from_raw(refdata as *mut SnapGeometry));
+    }
+}
+
+/// Remove the subclass and free its geometry allocation. Safe to call if never
+/// installed (no-op) and safe to call more than once (idempotent — the second
+/// call finds no subclass).
 ///
 /// # Safety
 /// `hwnd` must be the same handle passed to [`install`].
-#[allow(dead_code)] // Teardown API: winit drops the HWND at process exit, so the
-                    // happy path never calls this; kept for symmetry + tests.
+#[allow(dead_code)] // Teardown API: winit drops the HWND at process exit (where
+                    // WM_NCDESTROY also reclaims), so the happy path may never
+                    // call this; kept for explicit teardown + tests.
 pub unsafe fn uninstall(hwnd: isize) {
     let hwnd = HWND(hwnd as *mut core::ffi::c_void);
-    // RemoveWindowSubclass does not hand back dwrefdata, so the tiny per-window
-    // geometry Box is reclaimed by the OS at process exit. Bounded, documented,
-    // teardown-path-only.
-    let _ = RemoveWindowSubclass(hwnd, Some(snap_wndproc), SUBCLASS_ID);
+    reclaim_geom(hwnd);
 }
 
 /// Flash the taskbar button until the window is next brought to the foreground
@@ -243,6 +279,18 @@ unsafe extern "system" fn snap_wndproc(
             clamp_maxinfo(hwnd, lparam);
             // Let the default proc run too so it fills the other fields.
             def_subclass(hwnd, msg, wparam, lparam)
+        }
+
+        // Window is being destroyed — the LAST message a window receives. Free
+        // the heap-allocated geometry and detach the subclass here so the `Box`
+        // is reclaimed even when the host (winit) never calls `uninstall`. We
+        // forward to the default proc FIRST so the rest of the chain sees the
+        // destroy, then reclaim (reclaim is idempotent, so a later `uninstall`
+        // is a harmless no-op).
+        WM_NCDESTROY => {
+            let r = def_subclass(hwnd, msg, wparam, lparam);
+            reclaim_geom(hwnd);
+            r
         }
 
         _ => def_subclass(hwnd, msg, wparam, lparam),

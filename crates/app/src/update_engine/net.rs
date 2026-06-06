@@ -30,6 +30,53 @@ use serde::Deserialize;
 
 use super::verify::{verify_artifact, EMBEDDED_PUBLIC_KEY};
 
+/// Decompression-bomb guard: hard cap on the TOTAL number of uncompressed bytes
+/// any single archive may expand to during extraction (S-4). A legitimate
+/// C0PL4ND release archive holds one binary of ~10-30 MiB plus a handful of
+/// small sidecars, so 256 MiB is comfortably above the real ceiling while
+/// refusing a malicious/MITM'd archive that expands a tiny payload into a
+/// disk-filling flood. The cap is enforced on the STREAMED copy (not the
+/// header-declared size), so a lying header cannot bypass it.
+const MAX_EXTRACTED_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Decompression-bomb guard: hard cap on the number of entries any single
+/// archive may contain. A release archive is one binary plus a few docs; an
+/// archive with thousands of entries is a zip-bomb / resource-exhaustion shape.
+const MAX_ARCHIVE_ENTRIES: usize = 64;
+
+/// A bounded reader-copy that aborts once `limit` uncompressed bytes have been
+/// written, defending against decompression bombs whose declared size lies.
+/// Returns the number of bytes copied, or an error string if the cap is hit.
+/// This is the load-bearing bomb guard: it measures the ACTUAL inflated stream,
+/// not any header field an attacker controls.
+fn copy_capped<R: Read, W: std::io::Write>(
+    reader: &mut R,
+    writer: &mut W,
+    limit: u64,
+) -> Result<u64, String> {
+    let mut written: u64 = 0;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("failed to read archive entry: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        written = written.saturating_add(n as u64);
+        if written > limit {
+            return Err(format!(
+                "refusing to extract: archive expands past the {limit}-byte \
+                 decompression-bomb cap"
+            ));
+        }
+        writer
+            .write_all(&buf[..n])
+            .map_err(|e| format!("failed to write extracted bytes: {e}"))?;
+    }
+    Ok(written)
+}
+
 /// Mandatory `User-Agent` for every request. App name + version ONLY — no
 /// machine identifier, OS fingerprint, install ID, or any unique token.
 const USER_AGENT: &str = concat!("c0pl4nd-updater/", env!("CARGO_PKG_VERSION"));
@@ -280,7 +327,16 @@ fn extract_binary_targz(archive_bytes: &[u8], dir: &Path) -> Result<PathBuf, Str
     let entries = archive
         .entries()
         .map_err(|e| format!("failed to read tar entries: {e}"))?;
+    let mut entry_count: usize = 0;
     for entry in entries {
+        // Decompression-bomb guard (S-4): refuse an archive with an
+        // unreasonable number of entries before parsing any further.
+        entry_count += 1;
+        if entry_count > MAX_ARCHIVE_ENTRIES {
+            return Err(format!(
+                "refusing to extract: archive has more than {MAX_ARCHIVE_ENTRIES} entries"
+            ));
+        }
         let mut entry = entry.map_err(|e| format!("failed to read tar entry: {e}"))?;
         let path = entry
             .path()
@@ -293,8 +349,9 @@ fn extract_binary_targz(archive_bytes: &[u8], dir: &Path) -> Result<PathBuf, Str
             let out_path = dir.join(&file_name);
             let mut out = fs::File::create(&out_path)
                 .map_err(|e| format!("failed to create {}: {e}", out_path.display()))?;
-            std::io::copy(&mut entry, &mut out)
-                .map_err(|e| format!("failed to write extracted binary: {e}"))?;
+            // Bounded copy: aborts past MAX_EXTRACTED_BYTES even if a malicious
+            // gzip stream tries to inflate a tiny payload into a disk-filler.
+            copy_capped(&mut entry, &mut out, MAX_EXTRACTED_BYTES)?;
             drop(out);
             set_executable(&out_path)?;
             return Ok(out_path);
@@ -309,6 +366,13 @@ fn extract_binary_zip(archive_bytes: &[u8], dir: &Path) -> Result<PathBuf, Strin
     let reader = std::io::Cursor::new(archive_bytes);
     let mut zip =
         zip::ZipArchive::new(reader).map_err(|e| format!("failed to read zip archive: {e}"))?;
+    // Decompression-bomb guard (S-4): refuse an archive with an unreasonable
+    // number of entries before touching any of them.
+    if zip.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(format!(
+            "refusing to extract: zip has more than {MAX_ARCHIVE_ENTRIES} entries"
+        ));
+    }
     for i in 0..zip.len() {
         let mut file = zip
             .by_index(i)
@@ -325,8 +389,9 @@ fn extract_binary_zip(archive_bytes: &[u8], dir: &Path) -> Result<PathBuf, Strin
             let out_path = dir.join(&file_name);
             let mut out = fs::File::create(&out_path)
                 .map_err(|e| format!("failed to create {}: {e}", out_path.display()))?;
-            std::io::copy(&mut file, &mut out)
-                .map_err(|e| format!("failed to write extracted binary: {e}"))?;
+            // Bounded copy: aborts past MAX_EXTRACTED_BYTES even if a malicious
+            // zip entry lies about its uncompressed size (a classic zip bomb).
+            copy_capped(&mut file, &mut out, MAX_EXTRACTED_BYTES)?;
             drop(out);
             set_executable(&out_path)?;
             return Ok(out_path);
@@ -623,6 +688,71 @@ mod tests {
         }
         let extracted = extract_binary(&buf, "c0pl4nd-x.zip", dir.path()).unwrap();
         assert_eq!(fs::read(&extracted).unwrap(), payload);
+    }
+
+    #[test]
+    fn copy_capped_aborts_past_the_limit() {
+        // A reader that yields more bytes than the cap must be refused, and the
+        // error must name the cap (S-4 decompression-bomb guard).
+        let payload = vec![0u8; 1024];
+        let mut reader = std::io::Cursor::new(payload);
+        let mut sink: Vec<u8> = Vec::new();
+        let err = copy_capped(&mut reader, &mut sink, 512).expect_err("must hit the cap");
+        assert!(err.contains("decompression-bomb cap"), "got: {err}");
+    }
+
+    #[test]
+    fn copy_capped_passes_under_the_limit() {
+        let payload = vec![7u8; 100];
+        let mut reader = std::io::Cursor::new(payload.clone());
+        let mut sink: Vec<u8> = Vec::new();
+        let n = copy_capped(&mut reader, &mut sink, 256).expect("under cap copies cleanly");
+        assert_eq!(n, 100);
+        assert_eq!(sink, payload);
+    }
+
+    #[test]
+    fn extract_binary_targz_refuses_too_many_entries() {
+        // An archive with more than MAX_ARCHIVE_ENTRIES is a resource-exhaustion
+        // shape and is refused before the binary is ever located.
+        let dir = tempfile::tempdir().unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut gz);
+            for i in 0..(MAX_ARCHIVE_ENTRIES + 5) {
+                let data = b"x";
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, format!("decoy-{i}.txt"), &data[..])
+                    .unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        let archive_bytes = gz.finish().unwrap();
+        let err = extract_binary(&archive_bytes, "c0pl4nd-x.tar.gz", dir.path())
+            .expect_err("too many entries must be refused");
+        assert!(err.contains("more than"), "got: {err}");
+    }
+
+    #[test]
+    fn extract_binary_zip_refuses_too_many_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            for i in 0..(MAX_ARCHIVE_ENTRIES + 5) {
+                zw.start_file(format!("decoy-{i}.txt"), opts).unwrap();
+                zw.write_all(b"x").unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        let err = extract_binary(&buf, "c0pl4nd-x.zip", dir.path())
+            .expect_err("too many entries must be refused");
+        assert!(err.contains("more than"), "got: {err}");
     }
 
     #[test]

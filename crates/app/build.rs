@@ -24,8 +24,43 @@ fn main() {
     println!("cargo:rerun-if-changed=../../packaging/windows/c0pl4nd.ico");
     println!("cargo:rerun-if-changed=build.rs");
 
+    emit_windows_exploit_mitigations();
+
     #[cfg(windows)]
     embed_windows_resource();
+}
+
+/// Opt the shipped Windows binaries into the modern exploit-mitigation set
+/// (roadmap S-5). These are LINKER flags, so they are emitted via
+/// `cargo:rustc-link-arg-bins` (binaries only — never the lib/test crates,
+/// which would otherwise inherit MSVC-only flags the test harness rejects) and
+/// gated to the MSVC target by `TARGET`. On any non-MSVC target this is a
+/// no-op, so a Linux/macOS or `*-windows-gnu` build is unaffected.
+///
+/// Flags (Microsoft linker docs + BinSkim policy):
+/// - `/GUARD:CF`     — Control Flow Guard (indirect-call target validation)
+/// - `/CETCOMPAT`    — Intel CET shadow-stack compatibility (ROP defense)
+/// - `/HIGHENTROPYVA`— 64-bit high-entropy ASLR
+/// - `/DYNAMICBASE`  — ASLR (relocatable image; default, asserted explicitly)
+/// - `/NXCOMPAT`     — DEP (data-execution prevention; default, asserted)
+fn emit_windows_exploit_mitigations() {
+    // `TARGET` is the cross-compilation target triple cargo always sets for a
+    // build script — the correct signal even when cross-compiling from Linux.
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if !target.ends_with("-windows-msvc") {
+        return;
+    }
+    // `rustc-link-arg-bins=<arg>` passes `<arg>` straight to the linker for
+    // binary targets only — exactly the MSVC `link.exe` switches we want.
+    for flag in [
+        "/GUARD:CF",
+        "/CETCOMPAT",
+        "/HIGHENTROPYVA",
+        "/DYNAMICBASE",
+        "/NXCOMPAT",
+    ] {
+        println!("cargo:rustc-link-arg-bins={flag}");
+    }
 }
 
 #[cfg(windows)]

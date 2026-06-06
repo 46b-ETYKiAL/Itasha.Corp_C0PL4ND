@@ -565,6 +565,13 @@ impl Config {
     /// Persist to a specific path, creating parent directories as needed.
     /// Used by the settings panel and the window-geometry persistence so the
     /// config file stays the single source of truth.
+    ///
+    /// After writing, the file is locked down to **owner-only** access
+    /// (roadmap P-V2): `0600` on Unix, an owner-only DACL on Windows. The config
+    /// may reflect the user's environment, so other local accounts should not be
+    /// able to read it. Permission tightening is BEST-EFFORT — a failure is
+    /// logged and ignored, never propagated, so a restrictive/locked filesystem
+    /// can never block a settings save.
     pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| ConfigError::Io {
@@ -576,7 +583,9 @@ impl Config {
         std::fs::write(path, body).map_err(|e| ConfigError::Io {
             path: path.to_path_buf(),
             source: e,
-        })
+        })?;
+        restrict_to_owner(path);
+        Ok(())
     }
 
     /// Update only the persisted window-geometry fields on the file at
@@ -596,6 +605,43 @@ impl Config {
         cfg.window.monitor = window.monitor;
         cfg.save_to(&path).ok()?;
         Some(path)
+    }
+}
+
+/// Best-effort tighten `path` to **owner-only** access (roadmap P-V2): `0600` on
+/// Unix, an inheritance-stripped owner-only ACL on Windows. The config can
+/// reflect the user's environment, so other local accounts should not read it.
+/// Failure is intentionally swallowed — a restrictive / locked-down filesystem
+/// must never block a settings save (the write already succeeded by here).
+fn restrict_to_owner(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // 0600 = owner read/write, no group/other.
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(windows)]
+    {
+        // The file lives under the per-user `%APPDATA%` profile, whose NTFS ACLs
+        // already deny other standard users; as defense-in-depth we additionally
+        // remove inheritance and grant only the current user, best-effort via
+        // `icacls`. Output is discarded and any failure is ignored.
+        if let Ok(user) = std::env::var("USERNAME") {
+            if !user.is_empty() {
+                let _ = std::process::Command::new("icacls")
+                    .arg(path)
+                    .arg("/inheritance:r")
+                    .arg("/grant:r")
+                    .arg(format!("{user}:F"))
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
     }
 }
 
