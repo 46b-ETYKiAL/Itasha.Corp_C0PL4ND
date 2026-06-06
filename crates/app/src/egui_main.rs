@@ -91,7 +91,7 @@ fn main() -> eframe::Result<()> {
         // glow — glyphon (Milestone 2) shares egui's wgpu device.
         ..Default::default()
     };
-    prefer_dx12_on_windows(&mut options);
+    prefer_backend_on_windows(&mut options, launch_transparency_enabled());
 
     eframe::run_native(
         "C0PL4ND",
@@ -140,26 +140,56 @@ fn launch_check_config() -> (bool, String) {
         .unwrap_or_else(|| (false, "stable".to_string()))
 }
 
-/// Prefer the DX12 backend on Windows. eframe's default selects Vulkan first,
-/// but third-party Vulkan *overlay layers* (GPU/game overlays such as
-/// `GalaxyOverlayVkLayer`) inject into the Vulkan instance and corrupt the
-/// device — egui-wgpu then panics while allocating buffers ("Failed to create
-/// staging buffer for index data"), crashing the app mid-session. DX12 avoids
-/// the Vulkan layer path entirely and is the more stable Windows backend. A user
-/// can still force a specific backend with the `WGPU_BACKEND` env var, which is
-/// honoured here via `Backends::from_env()`. No-op on non-Windows platforms,
-/// where the default (Vulkan/Metal) is correct.
-fn prefer_dx12_on_windows(options: &mut eframe::NativeOptions) {
+/// Whether the persisted config has window transparency enabled — read at launch
+/// to pick a transparency-capable wgpu backend (see [`prefer_backend_on_windows`]).
+/// Defaults to `false` (opaque) when no config exists, matching the app default.
+fn launch_transparency_enabled() -> bool {
+    c0pl4nd_core::Config::default_path()
+        .filter(|p| p.exists())
+        .and_then(|p| {
+            std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|s| c0pl4nd_core::Config::from_toml(&s, &p).ok())
+        })
+        .map(|c| c.effective_translucent())
+        .unwrap_or(false)
+}
+
+/// Choose the wgpu backend on Windows.
+///
+/// **Real window transparency requires the Vulkan backend.** A wgpu swapchain
+/// bound to a plain Win32 HWND through DX12/DXGI cannot per-pixel alpha-composite
+/// with the desktop — `CreateSwapChainForHwnd` forces `DXGI_ALPHA_MODE_UNSPECIFIED`
+/// (opaque to DWM), so `with_transparent(true)` + `clear_color=[0,0,0,0]` is a
+/// silent no-op and the `window-vibrancy` acrylic/mica backdrop is fully occluded
+/// by the opaque swapchain (the "solid dark box" transparency bug). Vulkan's WSI
+/// DOES expose `VK_COMPOSITE_ALPHA_PRE_MULTIPLIED`, so a see-through / acrylic
+/// window only works on Vulkan — empirically verified on Win11 (and the reason the
+/// sibling SCR1B3, which uses the default Vulkan-first backend, is see-through).
+///
+/// The trade-off: some third-party Vulkan *overlay layers* (e.g.
+/// `GalaxyOverlayVkLayer`) corrupt the Vulkan instance and panic egui-wgpu, which
+/// is why the OPAQUE path keeps the more robust DX12. So: when the user has
+/// enabled window transparency we select Vulkan; otherwise DX12. `WGPU_BACKEND`
+/// always overrides (a user hitting a Vulkan-overlay crash can force `dx12`,
+/// trading transparency for stability). No-op on non-Windows platforms.
+fn prefer_backend_on_windows(options: &mut eframe::NativeOptions, want_transparency: bool) {
     #[cfg(target_os = "windows")]
     {
+        use eframe::wgpu::Backends;
         if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
         {
-            setup.instance_descriptor.backends =
-                eframe::wgpu::Backends::from_env().unwrap_or(eframe::wgpu::Backends::DX12);
+            let default = if want_transparency {
+                Backends::VULKAN
+            } else {
+                Backends::DX12
+            };
+            setup.instance_descriptor.backends = Backends::from_env().unwrap_or(default);
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = want_transparency;
         let _ = options; // used on every platform; backend default is correct off Windows
     }
 }
