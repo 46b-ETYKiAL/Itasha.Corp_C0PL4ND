@@ -33,7 +33,12 @@ winit.workspace = true
 wgpu.workspace = true
 glyphon.workspace = true # used by the legacy winit-driven `c0pl4nd` binary's renderer
 pollster = "0.4"
-ureq = "2"
+# HTTP client for the in-app updater. `tls` is ureq 2.x's DEFAULT TLS feature
+# and is rustls-backed (the lock graph resolves rustls, never native-tls);
+# declared explicitly with `default-features = false` + `["tls", "gzip"]` so the
+# rustls backend is pinned-by-manifest (audit #6) and a future default-feature
+# change cannot silently swap in native-tls. Exact-pinned per dependency-management.md.
+ureq = { version = "=2.12.1", default-features = false, features = ["tls", "gzip"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 # BiDi/RTL: Unicode Bidirectional Algorithm for per-row visual reordering of
 # terminal text (right-to-left scripts). Already in the lock graph transitively.
@@ -58,6 +63,7 @@ self-replace = "=1.5.0"                                   # atomic running-exe s
 flate2 = "=1.1.9"                                         # gunzip the Unix `.tar.gz` release archive
 tar = { version = "=0.4.46", default-features = false }   # untar the binary from the Unix archive
 zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }  # unzip the Windows `.zip` archive
+tempfile = "=3.27.0"                                      # per-run unique 0700 staging dir for the verified download (defense-in-depth TOCTOU fix; already in the lock graph)
 
 # --- egui chrome bundle (Milestone 1) ---
 eframe.workspace = true
@@ -72,10 +78,10 @@ window-vibrancy.workspace = true
 egui_kittest = { version = "0.34", features = ["wgpu", "snapshot", "eframe"] }
 
 # Updater test fixtures: `minisign` SIGNS test artifacts (the production path
-# only VERIFIES via the zero-dep `minisign-verify`); `tempfile` provides
-# scratch dirs for the download/extract/install round-trip tests.
+# only VERIFIES via the zero-dep `minisign-verify`). `tempfile` is now a normal
+# (production) dependency above — the updater uses it for the per-run staging
+# dir — so it is available to the round-trip tests without a dev-dep entry.
 minisign = "0.9"
-tempfile = "3"
 
 # Embeds the sigil icon + version resource into the exe (build.rs). Windows-only
 # build dependency; uses the MSVC resource compiler. Pinned exact per dep policy.

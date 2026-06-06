@@ -22,6 +22,13 @@ use std::sync::mpsc::Receiver;
 use super::net::{self, ReleaseInfo};
 use super::{UPDATE_OWNER, UPDATE_REPO};
 
+/// Persist a [`tempfile::TempDir`] past its drop-guard, returning its path. The
+/// updater owns the dir's lifetime explicitly (it must survive from download
+/// until apply) and deletes it itself via `Updater::cleanup_staging_dir`.
+fn persist_tempdir(dir: tempfile::TempDir) -> PathBuf {
+    dir.keep()
+}
+
 /// This build's Rust target triple, used to pick the matching release asset.
 ///
 /// Prefers a build-time-baked `C0PL4ND_TARGET` env (if a build script or the
@@ -103,6 +110,10 @@ pub struct Updater {
     rx: Option<Receiver<UpdateMsg>>,
     /// Why the in-flight check was started (decides auto-download on success).
     launch_kind: LaunchKind,
+    /// The per-run, freshly-created, user-only staging directory of the most
+    /// recent download (audit finding #5, TOCTOU). Tracked so it can be removed
+    /// after apply (success or failure) instead of leaking in `temp_dir()`.
+    staging_dir: Option<PathBuf>,
 }
 
 impl Updater {
@@ -140,10 +151,40 @@ impl Updater {
     }
 
     /// Spawn the download + verify + extract worker for a chosen release.
+    ///
+    /// The staging directory is a **freshly created, uniquely named,
+    /// user-only-permission** temp dir (audit finding #5). Each download attempt
+    /// gets its own randomized dir via [`tempfile::Builder`] rather than the old
+    /// fixed, predictable, world-readable `temp_dir()/c0pl4nd-update` — closing
+    /// the local TOCTOU / info-leak surface on a multi-user box. The dir is
+    /// removed after apply (success or failure), and any prior staging dir from
+    /// an earlier attempt is cleaned up here before a new one is created.
     pub fn start_download(&mut self, ctx: &egui::Context, info: ReleaseInfo) {
         if self.is_busy() {
             return;
         }
+        // Clean up any staging dir left over from a prior download attempt.
+        self.cleanup_staging_dir();
+
+        // Create the per-run unique staging dir up front. `tempfile` makes it
+        // with secure permissions — 0700 (owner-only) on unix via mkdtemp, and
+        // a random name under the per-user %TEMP% on Windows — and a random
+        // suffix so the path is unpredictable (no pre-create / race / read by
+        // another local user).
+        let staging = match tempfile::Builder::new().prefix("c0pl4nd-update-").tempdir() {
+            Ok(dir) => {
+                // Persist the dir past this `TempDir` guard so the verified
+                // binary survives until `apply_and_restart`; we delete it
+                // ourselves in `cleanup_staging_dir`.
+                persist_tempdir(dir)
+            }
+            Err(e) => {
+                self.state = UpdateState::Failed(format!("cannot create staging dir: {e}"));
+                return;
+            }
+        };
+        self.staging_dir = Some(staging.clone());
+
         self.state = UpdateState::Downloading {
             received: 0,
             total: 0,
@@ -152,24 +193,25 @@ impl Updater {
         self.rx = Some(rx);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let staging = std::env::temp_dir().join("c0pl4nd-update");
-            let _ = std::fs::remove_dir_all(&staging);
             let version = info.version.to_string();
-            let result = match std::fs::create_dir_all(&staging) {
-                Ok(()) => {
-                    let ptx = tx.clone();
-                    let pctx = ctx.clone();
-                    net::download_verify_extract(&info, &staging, move |received, total| {
-                        let _ = ptx.send(UpdateMsg::Progress { received, total });
-                        pctx.request_repaint();
-                    })
-                    .map(|path| (path, version))
-                }
-                Err(e) => Err(format!("cannot create staging dir: {e}")),
-            };
+            let ptx = tx.clone();
+            let pctx = ctx.clone();
+            let result = net::download_verify_extract(&info, &staging, move |received, total| {
+                let _ = ptx.send(UpdateMsg::Progress { received, total });
+                pctx.request_repaint();
+            })
+            .map(|path| (path, version));
             let _ = tx.send(UpdateMsg::Downloaded(result));
             ctx.request_repaint();
         });
+    }
+
+    /// Remove the tracked per-run staging directory, if any. Best-effort: a
+    /// failure to delete never blocks the updater (the OS reclaims temp dirs).
+    fn cleanup_staging_dir(&mut self) {
+        if let Some(dir) = self.staging_dir.take() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     /// Swap the running executable for the staged, verified binary and best-
@@ -196,7 +238,13 @@ impl Updater {
             let _ = super::apply::back_up(&exe, bak);
         }
 
-        match super::apply::replace_running_executable(&staged) {
+        let swap = super::apply::replace_running_executable(&staged);
+        // The swap has consumed the staged binary (success) or failed; either
+        // way the per-run staging dir is no longer needed — delete it so the
+        // verified binary + sidecars do not linger in temp (audit finding #5).
+        self.cleanup_staging_dir();
+
+        match swap {
             Ok(()) => {
                 if let Ok(exe) = std::env::current_exe() {
                     match std::process::Command::new(&exe).spawn() {
@@ -227,6 +275,7 @@ impl Updater {
             return;
         };
         let mut disconnect = false;
+        let mut cleanup_staging = false;
         loop {
             match rx.try_recv() {
                 Ok(UpdateMsg::CheckResult(Ok(Some(info)))) => {
@@ -254,6 +303,10 @@ impl Updater {
                     self.state = UpdateState::ReadyToApply { staged, version };
                 }
                 Ok(UpdateMsg::Downloaded(Err(e))) => {
+                    // Verify/extract failed — `download_verify_extract` already
+                    // removed the dir contents; drop our tracker so nothing leaks.
+                    // Deferred past the `rx` borrow (cleanup needs `&mut self`).
+                    cleanup_staging = true;
                     self.state = UpdateState::Failed(e);
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -262,6 +315,9 @@ impl Updater {
                     break;
                 }
             }
+        }
+        if cleanup_staging {
+            self.cleanup_staging_dir();
         }
         if disconnect {
             self.rx = None;

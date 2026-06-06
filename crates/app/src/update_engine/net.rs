@@ -185,6 +185,24 @@ pub fn check_for_update(
     Ok(select_update(&raw, current, target, archive_ext()))
 }
 
+/// Reject any download URL that is not `https://` (audit finding #6, TLS
+/// downgrade defense-in-depth). The `browser_download_url` fields come from the
+/// GitHub Releases JSON and are used verbatim; a malicious or MITM'd response
+/// could supply an `http://` asset/sig/sha URL. Integrity is still caught by
+/// minisign, but enforcing https closes the downgrade-to-cleartext channel
+/// before any byte is fetched. Case-insensitive on the scheme per RFC 3986.
+fn assert_https(url: &str) -> Result<(), String> {
+    let scheme_ok = url
+        .split_once("://")
+        .map(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
+        .unwrap_or(false);
+    if scheme_ok {
+        Ok(())
+    } else {
+        Err(format!("refusing non-https download URL: {url}"))
+    }
+}
+
 /// Blocking GET of a small file (sig / sha), returning its raw bytes.
 fn download_small(url: &str) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
@@ -359,6 +377,13 @@ fn download_verify_extract_inner(
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(staging_dir).map_err(|e| format!("failed to create staging dir: {e}"))?;
 
+    // Defense-in-depth (audit #6): assert every download URL is https BEFORE
+    // any fetch. The GitHub API base is hardcoded https, but these three URLs
+    // are `browser_download_url` values taken verbatim from the JSON response.
+    assert_https(&info.asset_url)?;
+    assert_https(&info.sig_url)?;
+    assert_https(&info.sha_url)?;
+
     // Big asset (streamed for progress) + the two tiny sidecars.
     let asset_bytes = download_asset(&info.asset_url, progress)?;
     let sig_bytes = download_small(&info.sig_url)?;
@@ -417,6 +442,58 @@ mod tests {
                 ),
             ],
         }
+    }
+
+    #[test]
+    fn assert_https_accepts_https_and_rejects_others() {
+        assert!(assert_https("https://github.com/o/r/releases/download/x/a.zip").is_ok());
+        // Case-insensitive scheme (RFC 3986).
+        assert!(assert_https("HTTPS://example.com/a.zip").is_ok());
+        // Every non-https scheme is refused.
+        assert!(assert_https("http://example.com/a.zip").is_err());
+        assert!(assert_https("ftp://example.com/a.zip").is_err());
+        assert!(assert_https("file:///etc/passwd").is_err());
+        assert!(assert_https("/relative/path").is_err());
+        assert!(assert_https("httpsx://no-delim").is_err());
+    }
+
+    #[test]
+    fn download_verify_extract_refuses_http_asset_url_without_network() {
+        // A MITM'd / malicious release response could hand back an http:// asset
+        // URL. The https assertion must fire BEFORE any byte is fetched.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let info = ReleaseInfo {
+            version: semver::Version::parse("0.4.0").unwrap(),
+            tag: "v0.4.0".to_string(),
+            asset_url: "http://evil.example/c0pl4nd.zip".to_string(),
+            asset_name: "c0pl4nd.zip".to_string(),
+            sig_url: "https://dl/c0pl4nd.zip.minisig".to_string(),
+            sha_url: "https://dl/c0pl4nd.zip.sha256".to_string(),
+            html_url: "https://github.com/o/r".to_string(),
+        };
+        let err = download_verify_extract(&info, dir.path(), |_, _| {})
+            .expect_err("http asset url must be refused");
+        assert!(
+            err.contains("non-https"),
+            "expected an https-refusal error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn download_verify_extract_refuses_http_sig_url_without_network() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let info = ReleaseInfo {
+            version: semver::Version::parse("0.4.0").unwrap(),
+            tag: "v0.4.0".to_string(),
+            asset_url: "https://dl/c0pl4nd.zip".to_string(),
+            asset_name: "c0pl4nd.zip".to_string(),
+            sig_url: "http://evil.example/c0pl4nd.zip.minisig".to_string(),
+            sha_url: "https://dl/c0pl4nd.zip.sha256".to_string(),
+            html_url: "https://github.com/o/r".to_string(),
+        };
+        let err = download_verify_extract(&info, dir.path(), |_, _| {})
+            .expect_err("http sig url must be refused");
+        assert!(err.contains("non-https"), "got: {err}");
     }
 
     #[test]

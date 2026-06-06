@@ -1237,6 +1237,13 @@ impl Screen {
             self.history_wrapped.clear();
             self.view_offset = 0;
             self.saved_primary = None;
+            // A hard reset also clears the grid (above), so every anchor's grid
+            // row is gone too — drop all anchored metadata rather than re-base
+            // (audit finding #4: bound the otherwise-unpruned metadata Vecs).
+            self.images.clear();
+            self.prompt_marks.clear();
+            self.command_marks.clear();
+            self.hyperlinks.clear();
         }
     }
 
@@ -1877,9 +1884,14 @@ impl Perform for Screen {
                     }
                     3 => {
                         // Erase scrollback (the `clear` command's second half).
+                        // The live grid stays, so re-base the anchored metadata
+                        // by the erased history length and drop anchors that
+                        // pointed into the now-gone scrollback (audit #4).
+                        let erased = self.history.len();
                         self.history.clear();
                         self.history_wrapped.clear();
                         self.view_offset = 0;
+                        self.reanchor_after_scrollback_clear(erased);
                     }
                     _ => {}
                 }
@@ -1952,7 +1964,7 @@ impl Perform for Screen {
                 // OSC 8 ; params ; URI  — capture non-empty URIs for click/open.
                 if let Some(uri) = params.get(2).and_then(|p| std::str::from_utf8(p).ok()) {
                     if !uri.is_empty() {
-                        self.hyperlinks.push(uri.to_string());
+                        self.push_hyperlink(uri.to_string());
                     }
                 }
             }
@@ -1966,11 +1978,11 @@ impl Perform for Screen {
                 let abs = self.history.len() + self.row;
                 match kind {
                     Some(b"A") | Some(b"B") if self.prompt_marks.last() != Some(&abs) => {
-                        self.prompt_marks.push(abs);
+                        self.push_prompt_mark(abs);
                     }
                     Some(b"A") | Some(b"B") => {}
                     Some(b"C") => {
-                        self.command_marks.push(osc::CommandMark {
+                        self.push_command_mark(osc::CommandMark {
                             kind: osc::CommandMarkKind::OutputStart,
                             line: abs,
                         });
@@ -1985,7 +1997,7 @@ impl Perform for Screen {
                                     .find_map(|tok| tok.trim().parse::<i32>().ok())
                             })
                         });
-                        self.command_marks.push(osc::CommandMark {
+                        self.push_command_mark(osc::CommandMark {
                             kind: osc::CommandMarkKind::CommandEnd { exit_code },
                             line: abs,
                         });
@@ -2069,9 +2081,10 @@ impl Perform for Screen {
     fn unhook(&mut self) {
         if let Some(buf) = self.sixel_accum.take() {
             if let Some(img) = crate::image::decode_sixel(&buf) {
-                self.images.push(TerminalImage {
+                let line = self.history.len() + self.row;
+                self.push_image(TerminalImage {
                     image: img,
-                    line: self.history.len() + self.row,
+                    line,
                     col: self.col,
                 });
             }
@@ -2178,9 +2191,10 @@ impl Screen {
 
     /// Anchor a decoded Kitty image at the current cursor position.
     fn place_kitty_image(&mut self, image: crate::image::DecodedImage) {
-        self.images.push(TerminalImage {
+        let line = self.history.len() + self.row;
+        self.push_image(TerminalImage {
             image,
-            line: self.history.len() + self.row,
+            line,
             col: self.col,
         });
     }
@@ -2207,6 +2221,103 @@ impl Screen {
             } else {
                 break;
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Anchored-metadata bounds (audit finding #4). The `images`,
+    // `hyperlinks`, `prompt_marks`, and `command_marks` Vecs accumulate as a
+    // hostile (or merely chatty) stream emits inline images / OSC 8 links /
+    // OSC 133 marks. Left unbounded they are a slow memory-exhaustion DoS.
+    // Two orthogonal bounds keep them honest, mirroring the Kitty-store
+    // discipline above:
+    //   1. a hard COUNT cap per Vec (ring-buffer: drop oldest on overflow), and
+    //      for `images` an additional total-RGBA-BYTE cap. This is the load-
+    //      bearing memory bound — it holds under any flood, capped or not.
+    //   2. re-anchoring on a scrollback CLEAR (`reanchor_after_scrollback_clear`):
+    //      when the whole history is erased (full reset / ESC[3J), each anchor's
+    //      `line` is shifted down by the erased history length so it keeps the
+    //      `history.len() + grid_row` convention the renderer + jump-to-prompt
+    //      rely on (window.rs); anchors that pointed into the now-erased
+    //      scrollback (would go negative) are dropped.
+    // ------------------------------------------------------------------
+
+    /// Max retained inline images. A ring-buffer cap — the oldest image is
+    /// dropped when a new one would exceed it. Mirrors the Kitty transmit-store
+    /// image cap so on-screen + stored image memory share one discipline.
+    const IMAGES_MAX: usize = 256;
+    /// Max total decoded-RGBA bytes across retained images (matches the Kitty
+    /// transmit-store byte cap). Oldest images are dropped until under the cap.
+    const IMAGES_MAX_BYTES: usize = 64 * 1024 * 1024;
+    /// Max retained OSC 8 hyperlink URIs (oldest dropped on overflow).
+    const HYPERLINKS_MAX: usize = 4096;
+    /// Max retained OSC 133 prompt marks (oldest dropped on overflow).
+    const PROMPT_MARKS_MAX: usize = 4096;
+    /// Max retained OSC 133 command marks (oldest dropped on overflow).
+    const COMMAND_MARKS_MAX: usize = 8192;
+
+    /// Append an inline image, then enforce the count + byte caps by dropping
+    /// the oldest entries (ring-buffer). The single push path for both Sixel
+    /// (`unhook`) and Kitty (`place_kitty_image`) anchors.
+    fn push_image(&mut self, img: TerminalImage) {
+        self.images.push(img);
+        while self.images.len() > Self::IMAGES_MAX {
+            self.images.remove(0);
+        }
+        let mut total: usize = self.images.iter().map(|i| i.image.rgba.len()).sum();
+        while total > Self::IMAGES_MAX_BYTES && self.images.len() > 1 {
+            let removed = self.images.remove(0);
+            total -= removed.image.rgba.len();
+        }
+    }
+
+    /// Append an OSC 8 hyperlink, then drop the oldest until under the cap.
+    fn push_hyperlink(&mut self, uri: String) {
+        self.hyperlinks.push(uri);
+        while self.hyperlinks.len() > Self::HYPERLINKS_MAX {
+            self.hyperlinks.remove(0);
+        }
+    }
+
+    /// Append an OSC 133 prompt mark, then drop the oldest until under the cap.
+    fn push_prompt_mark(&mut self, abs: usize) {
+        self.prompt_marks.push(abs);
+        while self.prompt_marks.len() > Self::PROMPT_MARKS_MAX {
+            self.prompt_marks.remove(0);
+        }
+    }
+
+    /// Append an OSC 133 command mark, then drop the oldest until under the cap.
+    fn push_command_mark(&mut self, mark: osc::CommandMark) {
+        self.command_marks.push(mark);
+        while self.command_marks.len() > Self::COMMAND_MARKS_MAX {
+            self.command_marks.remove(0);
+        }
+    }
+
+    /// Reconcile anchored metadata after the scrollback history was erased
+    /// (`history.clear()`), where `erased` is the history length immediately
+    /// BEFORE the clear. Anchors use the `history.len() + grid_row` convention;
+    /// erasing `erased` lines of scrollback means every anchor's `line` shifts
+    /// down by `erased`. Anchors that pointed at or below the erased scrollback
+    /// (`line < erased`) referenced content that is now gone and are dropped;
+    /// the rest are re-based so they keep pointing at the same live grid row.
+    /// Hyperlinks carry no line anchor (arrival-order only) and are untouched.
+    fn reanchor_after_scrollback_clear(&mut self, erased: usize) {
+        if erased == 0 {
+            return;
+        }
+        self.images.retain(|i| i.line >= erased);
+        for i in self.images.iter_mut() {
+            i.line -= erased;
+        }
+        self.prompt_marks.retain(|&m| m >= erased);
+        for m in self.prompt_marks.iter_mut() {
+            *m -= erased;
+        }
+        self.command_marks.retain(|m| m.line >= erased);
+        for m in self.command_marks.iter_mut() {
+            m.line -= erased;
         }
     }
 }
@@ -3048,6 +3159,149 @@ mod tests {
             t.advance(format!("{i}\r\n").as_bytes());
         }
         assert!(t.scrollback_len() <= 2, "history must not exceed the cap");
+    }
+
+    // ---- Audit finding #4: anchored-metadata Vecs are bounded under a flood ----
+
+    #[test]
+    fn hyperlink_vec_is_count_capped_under_flood() {
+        let mut t = Terminal::with_scrollback(4, 80, 100_000);
+        // Emit far more OSC 8 hyperlinks than the cap. Each carries a distinct
+        // URI so none is de-duplicated; without the cap this Vec grows forever.
+        let flood = Screen::HYPERLINKS_MAX + 5_000;
+        for i in 0..flood {
+            t.advance(format!("\x1b]8;;https://h/{i}\x07x\x1b]8;;\x07").as_bytes());
+        }
+        assert!(
+            t.hyperlinks().len() <= Screen::HYPERLINKS_MAX,
+            "hyperlinks must stay <= cap ({}), got {}",
+            Screen::HYPERLINKS_MAX,
+            t.hyperlinks().len()
+        );
+        // The most-recent URI is retained (ring-buffer keeps the newest).
+        let last = format!("https://h/{}", flood - 1);
+        assert_eq!(t.hyperlinks().last(), Some(&last));
+    }
+
+    #[test]
+    fn prompt_marks_vec_is_count_capped_under_flood() {
+        // Huge scrollback so a unique `abs` is produced per mark (abs grows
+        // monotonically with history.len()), exercising the count cap, not
+        // the dedup path.
+        let mut t = Terminal::with_scrollback(2, 8, 1_000_000);
+        let flood = Screen::PROMPT_MARKS_MAX + 2_000;
+        for _ in 0..flood {
+            // A newline bumps history.len() so the next mark's abs differs.
+            t.advance(b"\x1b]133;A\x07\r\n");
+        }
+        assert!(
+            t.prompt_marks().len() <= Screen::PROMPT_MARKS_MAX,
+            "prompt_marks must stay <= cap ({}), got {}",
+            Screen::PROMPT_MARKS_MAX,
+            t.prompt_marks().len()
+        );
+    }
+
+    #[test]
+    fn command_marks_vec_is_count_capped_under_flood() {
+        let mut t = Terminal::with_scrollback(2, 8, 1_000_000);
+        let flood = Screen::COMMAND_MARKS_MAX + 2_000;
+        for _ in 0..flood {
+            // OSC 133 ; C marks output-start; newline keeps abs advancing.
+            t.advance(b"\x1b]133;C\x07\r\n");
+        }
+        assert!(
+            t.command_marks().len() <= Screen::COMMAND_MARKS_MAX,
+            "command_marks must stay <= cap ({}), got {}",
+            Screen::COMMAND_MARKS_MAX,
+            t.command_marks().len()
+        );
+    }
+
+    #[test]
+    fn images_vec_is_count_capped_under_flood() {
+        let mut t = Terminal::with_scrollback(4, 20, 1_000_000);
+        // Each minimal Sixel produces one TerminalImage. Flood past the cap.
+        let flood = Screen::IMAGES_MAX + 500;
+        for _ in 0..flood {
+            t.advance(b"\x1bPq#0;2;100;0;0~\x1b\\");
+            // Advance the cursor so successive images anchor at distinct rows.
+            t.advance(b"\r\n");
+        }
+        assert!(
+            t.images().len() <= Screen::IMAGES_MAX,
+            "images must stay <= cap ({}), got {}",
+            Screen::IMAGES_MAX,
+            t.images().len()
+        );
+    }
+
+    #[test]
+    fn images_vec_is_byte_capped_under_flood() {
+        let mut t = Terminal::with_scrollback(4, 20, 1_000_000);
+        // Flood enough small images that, were they all retained, total RGBA
+        // bytes would exceed the byte cap. The byte cap evicts oldest first.
+        for _ in 0..(Screen::IMAGES_MAX) {
+            t.advance(b"\x1bPq#0;2;100;0;0~\x1b\\");
+            t.advance(b"\r\n");
+        }
+        let total: usize = t.images().iter().map(|i| i.image.rgba.len()).sum();
+        assert!(
+            total <= Screen::IMAGES_MAX_BYTES,
+            "retained image bytes ({total}) must stay <= byte cap ({})",
+            Screen::IMAGES_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn erase_scrollback_reanchors_and_drops_stale_marks() {
+        // A small grid + scrollback. Build history, place a prompt mark on a
+        // scrolled-off line and another on the live grid, then ESC[3J.
+        let mut t = Terminal::with_scrollback(2, 8, 100);
+        // Scroll some lines into history first.
+        t.advance(b"a\r\nb\r\nc\r\nd\r\n");
+        // Mark on the current live grid row (will survive the scrollback erase,
+        // re-based to the new history length 0).
+        t.advance(b"\x1b]133;A\x07");
+        let before = t.prompt_marks().len();
+        assert!(before >= 1, "expected at least one prompt mark");
+        // Erase scrollback. The live-grid mark survives but re-bases so it is
+        // still consistent with the now-zero history length.
+        t.advance(b"\x1b[3J");
+        assert_eq!(t.scrollback_len(), 0, "scrollback cleared");
+        // Surviving marks must now sit within the live coordinate space
+        // (history.len() + grid rows) — never dangling above it.
+        let rows = t.grid().rows();
+        for &m in t.prompt_marks() {
+            assert!(
+                m <= t.scrollback_len() + rows,
+                "re-anchored prompt mark {m} out of live range"
+            );
+        }
+    }
+
+    #[test]
+    fn hard_reset_clears_anchored_metadata() {
+        let mut t = Terminal::with_scrollback(2, 8, 100);
+        t.advance(b"\x1b]8;;https://x\x07L\x1b]8;;\x07");
+        t.advance(b"\x1b]133;A\x07");
+        t.advance(b"\x1bPq#0;2;100;0;0~\x1b\\");
+        assert!(!t.hyperlinks().is_empty());
+        // RIS hard reset must drop all anchored metadata (grid + scrollback gone).
+        t.advance(b"\x1bc");
+        assert!(
+            t.hyperlinks().is_empty(),
+            "hyperlinks cleared on hard reset"
+        );
+        assert!(
+            t.prompt_marks().is_empty(),
+            "prompt_marks cleared on hard reset"
+        );
+        assert!(t.images().is_empty(), "images cleared on hard reset");
+        assert!(
+            t.command_marks().is_empty(),
+            "command_marks cleared on hard reset"
+        );
     }
 
     /// Deterministic robustness regression mirroring the `vt_parser` fuzz
