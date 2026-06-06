@@ -50,6 +50,17 @@ pub struct ChromeActions {
     /// command AND records it for the interaction tests to observe — a click on
     /// the real button thus has an assertable outcome without a window.
     pub window_cmd: Option<super::WindowCmd>,
+    /// User clicked the script-menu "Open…" item (#35). The host runs the native
+    /// `rfd` file picker AFTER the panel closure returns (the blocking modal
+    /// dialog must not fire mid-panel-borrow), then feeds the picked path to the
+    /// focused PTY as a command via the existing run path.
+    pub open_script_file: bool,
+    /// User clicked a history row in the script menu (#35) — re-run this command
+    /// in the focused pane via the SAME [`run_command_in_focused`] path the
+    /// command palette + history sidebar use. Routed through the action struct
+    /// (like [`open_shell`](Self::open_shell)) so the host applies it after the
+    /// panel closes.
+    pub rerun_command: Option<String>,
 }
 
 impl C0pl4ndApp {
@@ -284,6 +295,62 @@ impl C0pl4ndApp {
             menu.response
                 .on_hover_text("Choose which shell new terminals run");
 
+            // Script launcher (📜 ▾): sits in this flow row, immediately LEFT of
+            // the absolute-positioned caption cluster (whose leftmost glyph is the
+            // settings gear). The menu pins an "Open…" item at the top (native
+            // file picker → run the chosen script file) and lists the previously
+            // run commands newest-first; clicking a row re-runs it. Both outcomes
+            // are deferred to the host via the action struct — the picker BLOCKS
+            // and the run path is `&mut self`, neither of which is safe mid-panel.
+            let scripts = ui.menu_button(
+                RichText::new(format!("{} ▾", icon::SCROLL)).size(13.0),
+                |ui| {
+                    if ui
+                        .button(format!("{} Open…", icon::FOLDER_OPEN))
+                        .on_hover_text("Pick a script file to run in the focused terminal")
+                        .clicked()
+                    {
+                        actions.open_script_file = true;
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                    ui.separator();
+                    // `entries()` is already most-recent-first (see
+                    // `command_history`). Collect owned so the borrow of `self`
+                    // does not outlive the closure's per-row widget building.
+                    let entries: Vec<String> =
+                        self.cmd_history.entries().map(str::to_string).collect();
+                    if entries.is_empty() {
+                        ui.weak("No commands run yet.");
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .id_salt("script_menu_history")
+                            .max_height(320.0)
+                            .show(ui, |ui| {
+                                for cmd in &entries {
+                                    let item = ui.button(cmd);
+                                    item.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::WidgetType::Button,
+                                            true,
+                                            format!("re-run {cmd}"),
+                                        )
+                                    });
+                                    if item.clicked() {
+                                        actions.rerun_command = Some(cmd.clone());
+                                        ui.close_kind(egui::UiKind::Menu);
+                                    }
+                                }
+                            });
+                    }
+                },
+            );
+            scripts.response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "script menu")
+            });
+            scripts
+                .response
+                .on_hover_text("Run a script file or re-run a previous command");
+
             // ---- right-pinned caption cluster ----
             // Placed at ABSOLUTE rects via `ui.put`. Every layout-flow attempt
             // (`right_to_left`, `Sides`, `allocate_ui_with_layout`, an
@@ -364,6 +431,11 @@ impl C0pl4ndApp {
                     .color(colors.fg)
                     .weak(),
             );
+            ui.separator();
+            // F11 is the only fullscreen affordance (the titlebar double-click-to-
+            // maximize is hidden while the bar is hidden), so surface it here for
+            // discoverability (#36).
+            ui.label(RichText::new("F11: fullscreen").color(colors.fg).weak());
             // Mouse-reporting badge: when the FOCUSED pane's TUI has grabbed the
             // mouse (DEC ?1000/?1002/?1003), show a small badge so the user can
             // see why their clicks/scroll go to the app instead of the terminal.
@@ -474,9 +546,9 @@ fn mouse_mode_badge_label(mode: MouseMode) -> Option<&'static str> {
 /// then scroll) rather than collapsing to zero. Pure so the reserve invariant is
 /// unit-testable without an egui frame.
 fn tab_strip_max_width(available_width: f32) -> f32 {
-    /// Caption cluster (~176pt: 4 × 42 + inset) + the "+"/view-toggle/"▾" flow
-    /// controls.
-    const TAB_STRIP_RIGHT_RESERVE: f32 = 330.0;
+    /// Caption cluster (~176pt: 4 × 42 + inset) + the
+    /// "+"/view-toggle/"▾ shell"/"📜 ▾ scripts" flow controls.
+    const TAB_STRIP_RIGHT_RESERVE: f32 = 370.0;
     (available_width - TAB_STRIP_RIGHT_RESERVE).max(80.0)
 }
 
