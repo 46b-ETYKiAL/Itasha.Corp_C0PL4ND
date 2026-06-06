@@ -145,6 +145,16 @@ pub struct C0pl4ndApp {
     /// Per-pane live terminal state (PTY + grid), keyed by pane id. A pane with
     /// no entry (or a failed spawn) renders an error/placeholder body.
     terms: HashMap<PaneId, PaneTerm>,
+    /// Panes whose PTY is DEFERRED until their real pixel rect is known. The
+    /// initial pane(s) are registered here at construction WITHOUT a PTY: if we
+    /// spawned them at the 80×24 placeholder (the cmd-banner cursor-home bug
+    /// #40) the first `resize_to_px` to the real width (e.g. a 200-col config)
+    /// would reflow cmd's grid and snap its cursor back to (0,0), so typing
+    /// overwrites the banner. Instead [`render_pane_body`] spawns each pending
+    /// pane at the MEASURED `(cols, rows)` on the first frame its rect is known —
+    /// exactly how a manually-opened terminal (`spawn_term`) already behaves —
+    /// after which the debounced resize is a no-op and the cursor stays put.
+    pending_spawn: HashSet<PaneId>,
     /// Monotonic pane-id allocator.
     pane_alloc: PaneIdAllocator,
     /// The currently-focused pane (drives tab highlight + input routing).
@@ -374,9 +384,11 @@ impl C0pl4ndApp {
     }
 
     /// Construct the app state independent of eframe — used by `new` and by the
-    /// headless `egui_kittest` tests (which run without a window). Spawns a live
-    /// [`PaneTerm`] for each initial pane (a failed spawn degrades to an error
-    /// label, never a panic).
+    /// headless `egui_kittest` tests (which run without a window). The initial
+    /// pane(s) are registered in `pending_spawn` WITHOUT a PTY; each is spawned
+    /// at its MEASURED size on the first frame its rect is known (bug #40), so
+    /// the first pane behaves like a manually-opened one. A failed spawn degrades
+    /// to an error label, never a panic.
     /// Default-config constructor used by the headless `egui_kittest` test
     /// binaries (the real app uses [`Self::new`], which loads the persisted
     /// config). `#[allow(dead_code)]` because it is unused in the shipping
@@ -396,15 +408,19 @@ impl C0pl4ndApp {
         let initial: Vec<PaneId> = (0..INITIAL_PANES).map(|_| pane_alloc.next()).collect();
         let focused_pane = initial[0];
         let grid_tree = grid::build_default_grid(&initial);
-        let mut terms = HashMap::new();
-        for pid in &initial {
-            terms.insert(*pid, PaneTerm::spawn(theme.clone(), SPAWN_COLS, SPAWN_ROWS));
-        }
+        // DEFER the initial pane PTYs: register them as pending and let
+        // `render_pane_body` spawn each at the MEASURED `(cols, rows)` on the
+        // first frame its rect is known (bug #40). Spawning here at the 80×24
+        // placeholder is exactly what desynced cmd's cursor when the first
+        // `resize_to_px` reflowed it to the real (e.g. 200-col) width.
+        let terms: HashMap<PaneId, PaneTerm> = HashMap::new();
+        let pending_spawn: HashSet<PaneId> = initial.iter().copied().collect();
         Self {
             config,
             theme,
             grid_tree,
             terms,
+            pending_spawn,
             pane_alloc,
             focused_pane,
             pinned: HashSet::new(),
@@ -711,6 +727,7 @@ impl C0pl4ndApp {
         pane_id: PaneId,
         focused: bool,
         terms: &mut HashMap<PaneId, PaneTerm>,
+        pending_spawn: &mut HashSet<PaneId>,
         galley_cache: &mut GalleyCache,
         theme: &c0pl4nd_core::Theme,
         font_size: f32,
@@ -733,6 +750,24 @@ impl C0pl4ndApp {
         // Line-height folds into the row pitch here so the PTY reflows to the
         // SAME pitch the painter draws at.
         let cell_metrics = monospace_cell_metrics(&painter, font_size, ppp, line_height_px);
+
+        // --- deferred first-spawn at the MEASURED size (bug #40) ---
+        // The configurable inner padding (points) insets the text on every edge,
+        // so the grid area is the rect minus 2×padding per axis. We need it both
+        // for the deferred spawn (below) and the debounced resize (further down),
+        // so compute it ONCE here.
+        let pad = padding.max(0.0);
+        let px_w = (rect.width() - 2.0 * pad).max(0.0) * ppp;
+        let px_h = (rect.height() - 2.0 * pad).max(0.0) * ppp;
+        // A pane whose PTY was deferred (the initial pane) is spawned HERE, at the
+        // real `(cols, rows)` derived from its measured rect — exactly the size
+        // `resize_to_px` would otherwise reflow it to a frame later. Spawning at
+        // the correct size up front means the subsequent debounced `resize_to_px`
+        // is a no-op, so cmd's banner/prompt cursor never snaps home to (0,0).
+        if pending_spawn.remove(&pane_id) {
+            let (cols, rows) = cell_metrics.cols_rows(px_w, px_h);
+            terms.insert(pane_id, PaneTerm::spawn(theme.clone(), cols, rows));
+        }
 
         // --- background quad (theme bg) + focus ring ---
         // `bg_alpha` is 255 for an opaque window and the opacity-folded alpha
@@ -1035,6 +1070,10 @@ impl C0pl4ndApp {
         {
             // Disjoint borrows: the closure touches these fields, NOT grid_tree.
             let terms = &mut self.terms;
+            // Deferred first-spawn set (bug #40): disjoint field borrow, passed
+            // through so `render_pane_body` can spawn a pending pane at the
+            // MEASURED `(cols, rows)` on the first frame its rect is known.
+            let pending_spawn = &mut self.pending_spawn;
             // The per-row galley cache is a separate field, so it borrows
             // disjointly from `terms` AND from `grid_tree` (audit #2).
             let galley_cache = &mut self.galley_cache;
@@ -1082,6 +1121,7 @@ impl C0pl4ndApp {
                     pid,
                     pid == focused,
                     terms,
+                    pending_spawn,
                     galley_cache,
                     theme,
                     font_size,
@@ -3618,34 +3658,6 @@ fn font_apply_key(font: &c0pl4nd_core::config::FontConfig) -> String {
 /// made low opacities "just dim" instead of going see-through — issue #27).
 const TRANSLUCENT_ALPHA_FLOOR: f32 = 0.05;
 
-/// Per-mode CEILING (fraction) on the translucent panel alpha for the native
-/// DWM-backdrop modes (Glass / Mica / Vibrancy). This is the load-bearing fix
-/// for "all the modes look identical / nothing is see-through" (#27): the
-/// window's clear-color is already a transparent hole (`window_clear_color`
-/// returns `[0,0,0,0]` for these modes), but the pane + central panel fills
-/// were painted at the raw `opacity` alpha — and the DEFAULT opacity is `1.0`,
-/// so every native-blur mode re-filled the hole with a fully OPAQUE quad and
-/// collapsed to a flat tint. Capping the fill alpha guarantees the backdrop
-/// shows through even at opacity 1.0, and each mode's distinct ceiling makes
-/// them visibly different: Acrylic (Glass) blurs strongly through the biggest
-/// hole, Mica tints the wallpaper through a subtle one, Vibrancy is a plain
-/// reduced-alpha see-through. Research §3 (the Win11 backdrop table). `None`
-/// (Transparent / Opaque) means "no extra ceiling — the opacity slider alone
-/// drives the alpha", because Transparent has no DWM hole to preserve.
-fn translucent_alpha_ceiling(mode: c0pl4nd_core::config::WindowMode) -> Option<f32> {
-    use c0pl4nd_core::config::WindowMode;
-    match mode {
-        // Acrylic: the strong live-blur backdrop — keep the largest hole.
-        WindowMode::Glass => Some(0.35),
-        // Mica: subtle wallpaper tint — a small hole reads as a faint wash.
-        WindowMode::Mica => Some(0.45),
-        // Vibrancy: plain reduced-alpha see-through, no DWM blur — a mid hole.
-        WindowMode::Vibrancy => Some(0.55),
-        // Transparent (portable, no DWM backdrop) + Opaque: slider-only.
-        WindowMode::Transparent | WindowMode::Opaque => None,
-    }
-}
-
 /// The alpha (0..=255) to paint the pane grid background (and the central panel
 /// fill) with, for the current config:
 ///
@@ -3653,23 +3665,26 @@ fn translucent_alpha_ceiling(mode: c0pl4nd_core::config::WindowMode) -> Option<f
 ///   the desktop never bleeds through. The unchanged, safe default.
 /// * **Translucent** (`effective_translucent()`): the `opacity` slider folded
 ///   into a 0..=255 alpha (floored at [`TRANSLUCENT_ALPHA_FLOOR`] so the grid
-///   stays readable), then CAPPED by the per-mode
-///   [`translucent_alpha_ceiling`] for the native-blur modes so the DWM
-///   backdrop hole is never re-filled opaque. An opaque pane fill here is
-///   exactly why transparency previously "did nothing" / "looked identical
-///   across modes": at the default opacity `1.0` it covered the transparent
-///   clear-color and the DWM backdrop (#27).
+///   never fully vanishes). The opacity slider drives the fill alpha across its
+///   FULL range in every translucent mode — Glass/Mica/Vibrancy are
+///   distinguished by their DWM backdrop EFFECT (acrylic / mica / plain, applied
+///   separately via `window-vibrancy`), NOT by capping the alpha. A prior
+///   per-mode ceiling (#27) capped Glass at 0.35 etc., which made the slider a
+///   no-op above the cap AND washed the terminal content out to near-invisible
+///   over a bright backdrop (#41). The backdrop now shows through because the
+///   DEFAULT opacity is < 1.0 (see `Config` default), not because the alpha is
+///   force-capped — so opacity 1.0 legitimately means "fully opaque".
 ///
 /// Pure (`&Config`) so the transparency wiring is unit-testable without a
-/// window. Mirrors SCR1B3's translucent-panel pattern (research §1c).
+/// window.
 fn pane_bg_alpha(config: &c0pl4nd_core::Config) -> u8 {
     if !config.effective_translucent() {
         return 255;
     }
-    let mut a = config.opacity.clamp(TRANSLUCENT_ALPHA_FLOOR, 1.0);
-    if let Some(ceiling) = translucent_alpha_ceiling(config.window_mode) {
-        a = a.min(ceiling);
-    }
+    // The opacity slider drives the alpha directly in ALL translucent modes,
+    // floored so the grid stays readable. No per-mode ceiling: the modes differ
+    // by their DWM backdrop, not by a forced alpha cap (#41).
+    let a = config.opacity.clamp(TRANSLUCENT_ALPHA_FLOOR, 1.0);
     (a * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
@@ -4748,51 +4763,48 @@ mod tests {
     }
 
     #[test]
-    fn native_blur_modes_cap_alpha_so_the_backdrop_is_never_re_filled_opaque() {
+    fn opacity_slider_drives_fill_alpha_across_full_range_in_every_mode() {
         use c0pl4nd_core::config::WindowMode;
-        // The #27 root cause: the default opacity is 1.0, so without a per-mode
-        // ceiling every native-blur mode painted a FULLY OPAQUE pane fill over
-        // the transparent DWM hole — collapsing every mode to a flat tint. Each
-        // native-blur mode must cap its fill alpha well below 255 even at
-        // opacity 1.0 so the backdrop shows through.
-        for mode in [WindowMode::Glass, WindowMode::Mica, WindowMode::Vibrancy] {
+        // #41: the opacity slider must drive the pane-fill alpha across its FULL
+        // range in EVERY translucent mode — no per-mode ceiling. The old ceiling
+        // capped Glass at 0.35 etc., so the slider was a no-op above the cap and
+        // the terminal washed out. Now opacity 0.85 yields ~0.85*255 in every
+        // mode (the modes differ only by their DWM backdrop, not the fill alpha).
+        let want = (0.85_f32 * 255.0).round() as u8;
+        for mode in [
+            WindowMode::Glass,
+            WindowMode::Mica,
+            WindowMode::Vibrancy,
+            WindowMode::Transparent,
+        ] {
             let mut cfg = cfg_mode(true, mode);
-            cfg.opacity = 1.0; // the default — the worst case for occlusion
-            let a = pane_bg_alpha(&cfg);
-            assert!(
-                a < 255,
-                "{mode:?} must NOT paint an opaque fill at opacity 1.0 (it would \
-                 occlude the DWM backdrop and look identical to every other mode)"
-            );
-            let ceiling = translucent_alpha_ceiling(mode).expect("native mode has a ceiling");
+            cfg.opacity = 0.85;
             assert_eq!(
-                a,
-                (ceiling * 255.0_f32).round() as u8,
-                "{mode:?} alpha is capped at its per-mode ceiling"
+                pane_bg_alpha(&cfg),
+                want,
+                "{mode:?}: opacity 0.85 must give ~217 fill alpha (slider drives \
+                 it, no ceiling) — was washed out / capped before #41"
             );
         }
     }
 
     #[test]
-    fn native_blur_mode_ceilings_make_the_modes_visibly_distinct() {
+    fn opacity_slider_is_monotonic_in_a_native_blur_mode() {
         use c0pl4nd_core::config::WindowMode;
-        // The distinct per-mode ceilings are what make Glass/Mica/Vibrancy look
-        // DIFFERENT (the user-visible bug was "they all look identical"). At the
-        // default opacity 1.0 each mode resolves to a different fill alpha.
-        let alpha = |mode| {
-            let mut cfg = cfg_mode(true, mode);
-            cfg.opacity = 1.0;
+        // Moving the slider must visibly change the fill alpha in a DWM-blur mode
+        // (the user-reported "slider does nothing in Glass"): lower opacity →
+        // strictly lower alpha → more see-through. At opacity 1.0 the fill is
+        // fully opaque (255) — opacity 1.0 legitimately means "opaque"; the
+        // backdrop shows whenever opacity < 1.0.
+        let alpha = |o: f32| {
+            let mut cfg = cfg_mode(true, WindowMode::Glass);
+            cfg.opacity = o;
             pane_bg_alpha(&cfg)
         };
-        let glass = alpha(WindowMode::Glass);
-        let mica = alpha(WindowMode::Mica);
-        let vibrancy = alpha(WindowMode::Vibrancy);
-        // Glass keeps the biggest hole (lowest fill alpha) for the strong blur;
-        // Vibrancy the smallest. All three differ.
+        assert_eq!(alpha(1.0), 255, "opacity 1.0 in Glass is opaque");
         assert!(
-            glass < mica && mica < vibrancy,
-            "the three native-blur modes must have distinct fill alphas \
-             (glass {glass} < mica {mica} < vibrancy {vibrancy})"
+            alpha(0.5) < alpha(0.85) && alpha(0.85) < alpha(1.0),
+            "the opacity slider must change the Glass fill alpha monotonically"
         );
     }
 

@@ -564,12 +564,14 @@ fn render_sections(
                     config.transparency_enabled && config.window_mode.is_translucent(),
                     |ui| {
                         ui.label("Opacity").on_hover_text(
-                            "Surface opacity for translucent modes — below 100% the \
-                             desktop / blur shows through.",
+                            "Surface opacity for every translucent mode (Glass / \
+                             Mica / Vibrancy / Transparent) — below 100% the \
+                             desktop / blur shows through, and the slider tunes how \
+                             see-through the terminal is across its full range.",
                         );
                         changed |= ui
                             .add(
-                                egui::Slider::new(&mut config.opacity, 0.30..=1.0)
+                                egui::Slider::new(&mut config.opacity, 0.15..=1.0)
                                     .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
                                     .custom_parser(|s| {
                                         s.trim_end_matches('%')
