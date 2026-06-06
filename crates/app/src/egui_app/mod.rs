@@ -50,6 +50,87 @@ pub enum WindowCmd {
     Close,
 }
 
+/// Which of a grid row's up-to-three painted galleys this cache entry holds: the
+/// crisp main pass in the runs' real colours, or one of the two pure-channel
+/// chromatic-aberration ghost passes. Each pass for a row is keyed separately so
+/// the ghost galleys (drawn in a single override colour) never collide with the
+/// crisp galley (drawn in the runs' real per-cell colours).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RowPass {
+    /// The crisp main pass — each run keeps its real SGR colour.
+    Main,
+    /// The pure-red ghost (chromatic aberration), shifted left.
+    GhostRed,
+    /// The pure-blue ghost (chromatic aberration), shifted right.
+    GhostBlue,
+}
+
+/// Per-(pane, row, pass) laid-out-galley cache for [`paint_grid_native`]
+/// (audit #2). Each row's [`egui::Galley`] is re-laid-out only when its content
+/// or style key changes; an idle or partially-changed grid reuses the cached
+/// `Arc<Galley>` instead of rebuilding the [`egui::text::LayoutJob`] (the
+/// per-run string-append allocations) and re-running layout every frame. egui's
+/// own `Fonts` galley cache memoises identical jobs too, but it cannot save the
+/// job-construction cost — this cache does, and skips the cache lookup entirely
+/// on a hit. Cleared wholesale on a font re-install (the cached galleys reference
+/// the old font atlas).
+#[derive(Default)]
+struct GalleyCache {
+    /// `(pane, row_idx, pass) -> (content/style key, laid-out galley)`.
+    rows: HashMap<(PaneId, usize, RowPass), (u64, std::sync::Arc<egui::Galley>)>,
+    /// Row indices touched THIS frame, per pane, so rows that scrolled off (a
+    /// shrunk grid) are pruned and the map cannot grow without bound.
+    seen_this_frame: HashSet<(PaneId, usize, RowPass)>,
+}
+
+impl GalleyCache {
+    /// Lay out one grid row's colour runs as a single galley, reusing the cached
+    /// galley when the content/style `key` is unchanged. `build` constructs the
+    /// [`egui::text::LayoutJob`] on a miss (kept as a closure so the per-run
+    /// string allocations only happen when the cache misses). Records the entry
+    /// as seen this frame for the end-of-frame prune.
+    fn row_galley(
+        &mut self,
+        painter: &egui::Painter,
+        pane: PaneId,
+        row_idx: usize,
+        pass: RowPass,
+        key: u64,
+        build: impl FnOnce() -> egui::text::LayoutJob,
+    ) -> std::sync::Arc<egui::Galley> {
+        let id = (pane, row_idx, pass);
+        self.seen_this_frame.insert(id);
+        if let Some((cached_key, galley)) = self.rows.get(&id) {
+            if *cached_key == key {
+                return galley.clone();
+            }
+        }
+        let galley = painter.layout_job(build());
+        self.rows.insert(id, (key, galley.clone()));
+        galley
+    }
+
+    /// Drop cache entries for `(pane, row, pass)` tuples NOT touched this frame
+    /// (rows that scrolled off / a closed pane) and reset the per-frame seen set.
+    /// Called once at the end of [`C0pl4ndApp::grid_ui`].
+    fn prune_unseen(&mut self) {
+        if self.seen_this_frame.is_empty() {
+            // Nothing painted this frame (e.g. every pane errored): keep entries
+            // so a transient empty frame does not evict the whole cache.
+            return;
+        }
+        self.rows.retain(|id, _| self.seen_this_frame.contains(id));
+        self.seen_this_frame.clear();
+    }
+
+    /// Drop every entry — used when the font stack is re-installed (the cached
+    /// galleys reference the previous font atlas and must be relaid).
+    fn clear(&mut self) {
+        self.rows.clear();
+        self.seen_this_frame.clear();
+    }
+}
+
 /// The modern egui chrome application. Holds the tiling grid, the focused pane,
 /// a settings-window toggle, and a transient status-bar toast.
 pub struct C0pl4ndApp {
@@ -172,6 +253,32 @@ pub struct C0pl4ndApp {
     /// event — but NOT in headless tests, where an unconditional repaint would
     /// make `Harness::run` loop until `max_steps`.
     live_window: bool,
+    /// Frameless terminal-only fullscreen (#36), toggled by F11 (and exited by
+    /// F11 or Esc). TRANSIENT — never persisted to `Config`: F11 is a per-session
+    /// view toggle, not a saved preference, so a relaunch is always windowed.
+    /// While true, the titlebar + status panels (and the frameless resize bands)
+    /// are not rendered, so only the grid fills the screen. The local mirror is
+    /// the source of truth the panels read THIS frame (the OS-reported
+    /// `i.viewport().fullscreen` lags a frame, which would flash the titlebar);
+    /// it is reconciled from the OS value each frame to stay honest.
+    fullscreen: bool,
+    /// Per-(pane,row) laid-out galley cache for [`paint_grid_native`] (audit #2).
+    /// A row's galley is re-laid-out only when its content/style key changes, so
+    /// an idle or partially-changed grid does not re-run text layout for every
+    /// row every frame. Invalidated implicitly by the key (which folds font size,
+    /// default fg, and the chromatic ghost params); cleared wholesale on a font
+    /// re-install (family/fallback change). Bounded by per-pane row pruning.
+    galley_cache: GalleyCache,
+    /// Receiver for the off-thread system-font load (audit #3). When the default
+    /// (or any custom) font config names a non-built-in family,
+    /// `load_system_fonts()` (100s of ms) would block first paint; instead the
+    /// first frame paints with the built-in mono and a worker thread enumerates
+    /// the system font DB, sending the finished `FontDefinitions` here. `frame_tick`
+    /// polls this and applies them via `set_fonts` when ready. `None` once applied
+    /// (or when no system load is needed). Skipped entirely in the headless
+    /// harness (no `live_window`), which keeps the synchronous path for
+    /// deterministic tests.
+    pending_fonts: Option<std::sync::mpsc::Receiver<egui::FontDefinitions>>,
 }
 
 /// The PTY grid size used to spawn a pane before its real pixel rect is known.
@@ -229,12 +336,20 @@ impl C0pl4ndApp {
         // font / cursor / update prefs take effect across launches. The headless
         // `bootstrap()` path keeps `Config::default()` for deterministic tests.
         let mut app = Self::bootstrap_with(load_config());
-        // Install the chrome icon fonts AND the user's configured monospace
-        // family + fallbacks (loaded from the system font DB and prepended to
-        // `FontFamily::Monospace`), so the very first frame already renders the
-        // grid in the chosen font. Done after the config load so `app.config.font`
-        // is the source of truth.
-        install_chrome_fonts(&cc.egui_ctx, &app.config.font);
+        // Install the chrome icon fonts so the very first frame renders. When the
+        // configured monospace family is a built-in choice this is the complete
+        // install. When it names a SYSTEM family (the default config does —
+        // "Monaspace Neon" / "Noto Sans JP"), the (100s-of-ms) system-font DB
+        // load would block first paint, so instead we install the built-in base
+        // immediately and enumerate the system DB on a worker thread (audit #3);
+        // `frame_tick` swaps in the custom stack via `set_fonts` when it arrives.
+        // Done after the config load so `app.config.font` is the source of truth.
+        if system_font_load_needed(&app.config.font) {
+            install_base_fonts(&cc.egui_ctx);
+            app.pending_fonts = Some(spawn_system_font_load(&app.config.font));
+        } else {
+            install_chrome_fonts(&cc.egui_ctx, &app.config.font);
+        }
         app.applied_font_family = font_apply_key(&app.config.font);
         // Apply the OS glass/acrylic/mica/vibrancy effect — ONLY when the master
         // transparency toggle is on AND the chosen mode wants a non-opaque
@@ -320,6 +435,9 @@ impl C0pl4ndApp {
             last_update_notice: None,
             last_window_cmd: None,
             live_window: false,
+            fullscreen: false,
+            galley_cache: GalleyCache::default(),
+            pending_fonts: None,
         }
     }
 
@@ -593,6 +711,7 @@ impl C0pl4ndApp {
         pane_id: PaneId,
         focused: bool,
         terms: &mut HashMap<PaneId, PaneTerm>,
+        galley_cache: &mut GalleyCache,
         theme: &c0pl4nd_core::Theme,
         font_size: f32,
         line_height_px: f32,
@@ -673,6 +792,8 @@ impl C0pl4ndApp {
                     &painter,
                     rect,
                     term,
+                    pane_id,
+                    galley_cache,
                     font_size,
                     line_height_px,
                     theme,
@@ -914,6 +1035,9 @@ impl C0pl4ndApp {
         {
             // Disjoint borrows: the closure touches these fields, NOT grid_tree.
             let terms = &mut self.terms;
+            // The per-row galley cache is a separate field, so it borrows
+            // disjointly from `terms` AND from `grid_tree` (audit #2).
+            let galley_cache = &mut self.galley_cache;
             let theme = &self.theme;
             let font_size = self.config.font.size;
             // Read the line-height LIVE from the config so a Settings change
@@ -958,6 +1082,7 @@ impl C0pl4ndApp {
                     pid,
                     pid == focused,
                     terms,
+                    galley_cache,
                     theme,
                     font_size,
                     line_height_px,
@@ -1005,6 +1130,10 @@ impl C0pl4ndApp {
                 self.grid_tree.ui(&mut behavior, ui);
             }
         }
+        // Prune galley-cache rows not painted this frame (rows that scrolled off,
+        // a pane switched away from in Tabs view, or a closed pane) so the cache
+        // tracks only the live grid and cannot grow without bound (audit #2).
+        self.galley_cache.prune_unseen();
         if let Some(s) = focused_size {
             self.last_focused_size = Some(s);
         }
@@ -1303,6 +1432,31 @@ impl C0pl4ndApp {
         self.cmd_history.record(cmd.to_string());
     }
 
+    /// Open a native file picker (#35) and, on a pick, RUN the chosen script in
+    /// the focused pane by feeding its PATH to the shell as a command — the
+    /// shell then executes it via its own shebang/interpreter dispatch. Reading
+    /// and injecting the file's lines instead would bypass the shebang, mangle
+    /// multi-line scripts, and flood the shell's line history. The path is
+    /// quoted for the active shell ([`quote_path_for_shell`]: PowerShell's call
+    /// operator `& "…"`, else a `'…'`/`"…"`-quoted path). The blocking
+    /// `pick_file()` is fine here — it is called from the post-panel action
+    /// block (every panel has already closed) and the OS dialog runs its own
+    /// modal loop, so no egui borrow is held and no animation is in flight.
+    fn open_script_file(&mut self) {
+        let picked = rfd::FileDialog::new()
+            .set_title("Run a script in the focused terminal")
+            .add_filter(
+                "Scripts",
+                &["sh", "ps1", "bat", "cmd", "py", "js", "rb", "fish", "zsh"],
+            )
+            .add_filter("All files", &["*"])
+            .pick_file();
+        if let Some(path) = picked {
+            let quoted = quote_path_for_shell(&path, self.active_shell_label());
+            self.run_command_in_focused(&quoted);
+        }
+    }
+
     // ---- command-history quick-run sidebar (#21) -------------------------
     //
     // A toggleable docked `egui::SidePanel` (side from `config.history_sidebar_
@@ -1476,6 +1630,14 @@ impl C0pl4ndApp {
     #[allow(dead_code)]
     pub fn palette_open(&self) -> bool {
         self.palette_open
+    }
+
+    /// Whether the app is in frameless terminal-only fullscreen (#36).
+    /// Observation accessor for the interaction test (asserts an F11 press
+    /// toggled it through the real frame loop, hiding the chrome panels).
+    #[allow(dead_code)]
+    pub fn fullscreen(&self) -> bool {
+        self.fullscreen
     }
 
     /// The recorded command history, most-recent-first. Observation accessor for
@@ -1943,12 +2105,35 @@ impl C0pl4ndApp {
         // re-install it THIS frame so the new typeface shows without a relaunch.
         // The `applied_font_family` key folds the family + fallbacks into one
         // string so the (expensive) re-install runs ONLY on an actual change,
-        // never every frame.
+        // never every frame. A re-install changes the font atlas, so the cached
+        // galleys (which reference the old atlas) must be dropped (audit #2).
         else {
             let want = font_apply_key(&self.config.font);
             if want != self.applied_font_family {
                 install_chrome_fonts(ctx, &self.config.font);
                 self.applied_font_family = want;
+                self.galley_cache.clear();
+                // A settings re-install supersedes any in-flight startup load.
+                self.pending_fonts = None;
+            }
+        }
+        // Off-thread startup font load (audit #3): when the worker thread that
+        // enumerated the system font DB has finished, swap in the custom stack.
+        // Until then the window painted with the built-in mono. `try_recv` is
+        // non-blocking so the frame never stalls; a disconnected channel (the
+        // worker failed to spawn or panicked) just drops the pending state and
+        // keeps the built-in mono.
+        if let Some(rx) = &self.pending_fonts {
+            match rx.try_recv() {
+                Ok(defs) => {
+                    ctx.set_fonts(defs);
+                    self.galley_cache.clear();
+                    self.pending_fonts = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.pending_fonts = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
         // Surface an opt-in launch update check result (if one arrived) as a
@@ -2027,6 +2212,56 @@ impl C0pl4ndApp {
             self.toggle_history_sidebar();
         }
 
+        // 0a''') frameless fullscreen (#36): F11 toggles borderless OS fullscreen
+        //        (the window is already `decorations: false`, so `Fullscreen` —
+        //        not `Maximized` — is the right call; it covers the monitor with
+        //        no border and keeps DWM compositing so the acrylic/mica backdrop
+        //        still composites). The F11 key-press is removed from the event
+        //        stream so it never reaches the PTY as the F11 escape sequence —
+        //        the SAME chord-leak discipline the palette / find / history
+        //        chords use above. Esc ALSO exits fullscreen, but ONLY when no
+        //        overlay owns Esc (the palette + find consume Esc to close
+        //        themselves; handling it here too would fight them), and is left
+        //        in the stream otherwise so those overlays still see it.
+        let toggle_fullscreen = ctx.input_mut(|i| {
+            let mut found = false;
+            i.events.retain(|ev| {
+                let hit = matches!(
+                    ev,
+                    egui::Event::Key {
+                        key: egui::Key::F11,
+                        pressed: true,
+                        ..
+                    }
+                );
+                found |= hit;
+                !hit
+            });
+            found
+        });
+        let esc_exit_fullscreen = self.fullscreen
+            && !self.palette_open
+            && !self.search_open
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if toggle_fullscreen || esc_exit_fullscreen {
+            // F11 toggles; an Esc in fullscreen always EXITS. Read the OS-reported
+            // state so a fullscreen entered via another path is honoured.
+            let now = ctx.input(|i| i.viewport().fullscreen.unwrap_or(self.fullscreen));
+            let want = if esc_exit_fullscreen { false } else { !now };
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(want));
+            // Local mirror is the source of truth the panels read THIS frame —
+            // `i.viewport().fullscreen` updates a frame late (the OS reports back
+            // next frame), so a local mirror avoids a one-frame flash of the
+            // titlebar on enter / of the bare grid on exit.
+            self.fullscreen = want;
+        } else {
+            // Reconcile the mirror from the OS each frame so a fullscreen toggled
+            // via another path (e.g. a window-manager shortcut) stays honest.
+            if let Some(os) = ctx.input(|i| i.viewport().fullscreen) {
+                self.fullscreen = os;
+            }
+        }
+
         // 0b) route this frame's input. When the palette is open, its navigation
         //     keys (↑/↓/Enter/Esc) are consumed here and the typed query is
         //     captured by the palette's focused TextEdit — NOT forwarded to the
@@ -2102,8 +2337,12 @@ impl C0pl4ndApp {
         //     there (when no widget wants the pointer) start an OS resize via
         //     ViewportCommand::BeginResize. Run early, BEFORE the panels, so an
         //     edge grab wins; the `!wants_pointer_input()` guard still lets a
-        //     widget sitting at the very edge get its click.
-        handle_frameless_resize(ctx);
+        //     widget sitting at the very edge get its click. Skipped in
+        //     fullscreen (#36): there is no window edge to resize, and the
+        //     synthetic resize cursors at the screen edge would be visually wrong.
+        if !self.fullscreen {
+            handle_frameless_resize(ctx);
+        }
 
         // Theme-derived chrome surface palette — the titlebar / tab strip /
         // status bar / central pane / settings window all follow the active
@@ -2113,36 +2352,47 @@ impl C0pl4ndApp {
 
         // 1) custom titlebar + tab strip. Fixed height so the drag region below
         //    is exactly the bar (not the whole remaining column), and so the
-        //    caption-cluster geometry is stable.
-        let actions = egui::TopBottomPanel::top("titlebar")
-            .exact_height(40.0)
-            .frame(egui::Frame::new().fill(colors.panel).inner_margin(6.0))
-            .show(ctx, |ui| {
-                // Frameless-window move: dragging any EMPTY part of the titlebar
-                // moves the window; double-click toggles maximize. Added FIRST so
-                // it sits behind the tabs/buttons (egui gives later widgets the
-                // click), so only the empty bar area initiates a drag.
-                let bar = ui.interact(
-                    ui.max_rect(),
-                    egui::Id::new("c0pl4nd_titlebar_drag"),
-                    egui::Sense::click_and_drag(),
-                );
-                if bar.drag_started_by(egui::PointerButton::Primary) {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                }
-                if bar.double_clicked() {
-                    let is_max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
-                }
-                self.titlebar_and_tabs(ui, colors)
-            })
-            .inner;
+        //    caption-cluster geometry is stable. In fullscreen (#36) the titlebar
+        //    + status panels are NOT rendered so only the grid fills the screen;
+        //    `actions` falls back to the empty default for that frame (no chrome
+        //    means no chrome actions). The floating overlays (settings / palette /
+        //    find / history) can still open over the grid while fullscreen.
+        let actions = if self.fullscreen {
+            chrome::ChromeActions::default()
+        } else {
+            egui::TopBottomPanel::top("titlebar")
+                .exact_height(40.0)
+                .frame(egui::Frame::new().fill(colors.panel).inner_margin(6.0))
+                .show(ctx, |ui| {
+                    // Frameless-window move: dragging any EMPTY part of the
+                    // titlebar moves the window; double-click toggles maximize.
+                    // Added FIRST so it sits behind the tabs/buttons (egui gives
+                    // later widgets the click), so only the empty bar area
+                    // initiates a drag.
+                    let bar = ui.interact(
+                        ui.max_rect(),
+                        egui::Id::new("c0pl4nd_titlebar_drag"),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if bar.drag_started_by(egui::PointerButton::Primary) {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                    if bar.double_clicked() {
+                        let is_max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                    }
+                    self.titlebar_and_tabs(ui, colors)
+                })
+                .inner
+        };
 
-        // 2) status bar
-        egui::TopBottomPanel::bottom("status")
-            .frame(egui::Frame::new().fill(colors.panel).inner_margin(4.0))
-            .show(ctx, |ui| self.status_bar(ui, colors));
+        // 2) status bar (hidden in fullscreen — see the titlebar gate above).
+        if !self.fullscreen {
+            egui::TopBottomPanel::bottom("status")
+                .frame(egui::Frame::new().fill(colors.panel).inner_margin(4.0))
+                .show(ctx, |ui| self.status_bar(ui, colors));
+        }
 
         // 2b) command-history quick-run sidebar (#21), if open. Rendered as a
         //     docked SidePanel BEFORE the CentralPanel so the terminal grid
@@ -2193,6 +2443,16 @@ impl C0pl4ndApp {
         }
         if actions.toggle_settings {
             self.settings_open = !self.settings_open;
+        }
+        // Script menu (#35), applied AFTER the panels close so neither the
+        // `&mut self` run path nor the BLOCKING native file picker fires
+        // mid-panel-borrow. A history re-run goes first; the "Open…" picker
+        // (which blocks on its own OS modal loop) runs last.
+        if let Some(cmd) = actions.rerun_command {
+            self.run_command_in_focused(&cmd);
+        }
+        if actions.open_script_file {
+            self.open_script_file();
         }
         // View-mode toggle (#30): flip the pane shell layout (Grid ⇄ Tabs) and
         // persist it. The disk write is real-window-only (the headless harness
@@ -2815,6 +3075,8 @@ fn paint_grid_native(
     painter: &egui::Painter,
     rect: egui::Rect,
     term: &PaneTerm,
+    pane_id: PaneId,
+    galley_cache: &mut GalleyCache,
     font_size: f32,
     line_height_px: f32,
     theme: &c0pl4nd_core::Theme,
@@ -2857,8 +3119,16 @@ fn paint_grid_native(
     let chroma = effects.effective_chromatic();
     let ghost_offset = chromatic_offset(chroma, ppp);
     let ghost_alpha = chromatic_ghost_alpha(chroma);
+    // Style bits shared by every row this frame (font size + the fallback fg).
+    // Folded into each row's cache key so a font-size or theme change relays the
+    // rows (a font FAMILY change clears the whole cache via `clear()`).
+    let style_key = row_style_key(font_size, default_fg);
     for (row_idx, runs) in rows.iter().enumerate() {
         let row_origin = egui::pos2(origin.x, origin.y + row_idx as f32 * ch);
+        // Content hash of this row's runs (text + per-cell colours), folded with
+        // the shared style bits — the cache key for the crisp pass. Computed once
+        // and reused for the ghost passes (which add the override colour).
+        let content_key = row_content_key(runs, style_key);
         // --- chromatic aberration (research §2 + §2(b) edge-weighting): re-draw
         // the row's glyphs as PURE-CHANNEL ghosts at ±offset BEHIND the crisp
         // pass — a pure-red copy shifted left and a pure-blue copy shifted right,
@@ -2866,42 +3136,58 @@ fn paint_grid_native(
         // authentic additive RGB split (tinted galleys washed to grey under the
         // glyph; pure channels pop). The offset is EDGE-WEIGHTED by the row's
         // vertical position so the fringing is stronger toward the top/bottom of
-        // the pane and near-zero at the middle — the CRT lens falloff.
+        // the pane and near-zero at the middle — the CRT lens falloff. The ghost
+        // galleys are cached separately per pass (the override colour + alpha
+        // fold into their key) so they too skip re-layout on an unchanged row.
         if ghost_offset > 0.0 {
             let row_y = row_origin.y;
             let off =
                 chromatic_edge_weighted_offset(ghost_offset, row_y, rect.top(), rect.bottom());
             // Pure red, shifted LEFT — drawn first (behind).
-            paint_row_galley(
+            let red = egui::Color32::from_rgba_unmultiplied(255, 0, 0, ghost_alpha);
+            let red_galley = galley_cache.row_galley(
                 painter,
+                pane_id,
+                row_idx,
+                RowPass::GhostRed,
+                content_key ^ (u64::from(ghost_alpha) << 8 | 0x01),
+                || build_row_job(runs, &font, Some(red)),
+            );
+            painter.galley(
                 row_origin + egui::vec2(-off, 0.0),
-                runs,
-                &font,
-                Some(egui::Color32::from_rgba_unmultiplied(
-                    255,
-                    0,
-                    0,
-                    ghost_alpha,
-                )),
-                default_fg,
+                red_galley,
+                egui::Color32::from_rgb(default_fg.0, default_fg.1, default_fg.2),
             );
             // Pure blue, shifted RIGHT.
-            paint_row_galley(
+            let blue = egui::Color32::from_rgba_unmultiplied(0, 0, 255, ghost_alpha);
+            let blue_galley = galley_cache.row_galley(
                 painter,
+                pane_id,
+                row_idx,
+                RowPass::GhostBlue,
+                content_key ^ (u64::from(ghost_alpha) << 8 | 0x02),
+                || build_row_job(runs, &font, Some(blue)),
+            );
+            painter.galley(
                 row_origin + egui::vec2(off, 0.0),
-                runs,
-                &font,
-                Some(egui::Color32::from_rgba_unmultiplied(
-                    0,
-                    0,
-                    255,
-                    ghost_alpha,
-                )),
-                default_fg,
+                blue_galley,
+                egui::Color32::from_rgb(default_fg.0, default_fg.1, default_fg.2),
             );
         }
         // Crisp main pass in the runs' real colours, on top of any ghosts.
-        paint_row_galley(painter, row_origin, runs, &font, None, default_fg);
+        let main_galley = galley_cache.row_galley(
+            painter,
+            pane_id,
+            row_idx,
+            RowPass::Main,
+            content_key,
+            || build_row_job(runs, &font, None),
+        );
+        painter.galley(
+            row_origin,
+            main_galley,
+            egui::Color32::from_rgb(default_fg.0, default_fg.1, default_fg.2),
+        );
     }
 
     // --- terminal cursor ---
@@ -2991,21 +3277,17 @@ fn split_runs_into_rows(runs: Vec<ColorRun>) -> Vec<Vec<ColorRun>> {
     rows
 }
 
-/// Paint one grid row's colour runs as a single galley at `pos`. When
-/// `override_color` is `Some`, every run is drawn in that colour (the R/B
-/// chromatic-aberration ghost passes); when `None`, each run keeps its real SGR
-/// colour (the crisp main pass). `default_fg` is the galley's fallback colour.
-fn paint_row_galley(
-    painter: &egui::Painter,
-    pos: egui::Pos2,
+/// Build the [`egui::text::LayoutJob`] for one grid row's colour runs (a single
+/// unwrapped line). When `override_color` is `Some`, every run is drawn in that
+/// colour (the R/B chromatic-aberration ghost passes); when `None`, each run
+/// keeps its real SGR colour (the crisp main pass). Called only on a galley-cache
+/// MISS (the per-run string-append allocations are the cost the cache avoids on a
+/// hit — see [`GalleyCache::row_galley`]).
+fn build_row_job(
     runs: &[ColorRun],
     font: &egui::FontId,
     override_color: Option<egui::Color32>,
-    default_fg: (u8, u8, u8),
-) {
-    if runs.is_empty() {
-        return;
-    }
+) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = f32::INFINITY;
     for (text, (r, g, b)) in runs {
@@ -3020,12 +3302,70 @@ fn paint_row_galley(
             },
         );
     }
-    let galley = painter.layout_job(job);
-    painter.galley(
-        pos,
-        galley,
-        egui::Color32::from_rgb(default_fg.0, default_fg.1, default_fg.2),
-    );
+    job
+}
+
+/// Fold the per-frame style bits (font size + fallback fg) into a stable seed for
+/// a row's galley-cache key. Font SIZE is captured here (so a size change relays
+/// the rows); a font FAMILY/fallback change instead clears the whole cache (the
+/// galleys reference the old atlas). Pure → unit-testable.
+fn row_style_key(font_size: f32, default_fg: (u8, u8, u8)) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    font_size.to_bits().hash(&mut h);
+    default_fg.hash(&mut h);
+    h.finish()
+}
+
+/// Hash a grid row's colour runs (text + per-cell RGB) folded with the shared
+/// `style_key` seed — the galley-cache key for the crisp main pass. Two rows
+/// produce the same key iff they lay out to the same galley, so an unchanged row
+/// reuses its cached galley instead of re-running layout. Pure → unit-testable.
+fn row_content_key(runs: &[ColorRun], style_key: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    style_key.hash(&mut h);
+    for (text, rgb) in runs {
+        text.hash(&mut h);
+        rgb.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Quote a script `path` as a command line for the active shell (#35), so the
+/// shell EXECUTES the file (via its shebang/interpreter) rather than the app
+/// reading + injecting its lines. The form depends on the shell named by
+/// `shell_label`:
+///
+/// * **PowerShell** (`PowerShell 7` / `Windows PowerShell`): the call operator
+///   `& "<path>"` — required because a bare quoted path in PowerShell is a
+///   string expression, not an invocation. Embedded `"` are backtick-escaped
+///   (PowerShell's double-quote escape inside a `"…"` string).
+/// * **cmd / Default shell on Windows**: a plain double-quoted path `"<path>"`.
+/// * **POSIX shells** (bash/zsh/fish/sh, the Default shell off Windows): a
+///   single-quoted path `'<path>'`, with the POSIX `'\''` escape for any
+///   embedded single quote.
+///
+/// Pure (no I/O) so the per-shell quoting is unit-testable. The path is rendered
+/// with `Path::display()` (lossy on non-UTF-8 paths — acceptable for a
+/// user-picked script path typed into a shell).
+fn quote_path_for_shell(path: &std::path::Path, shell_label: &str) -> String {
+    let raw = path.display().to_string();
+    if shell_label.contains("PowerShell") {
+        // PowerShell call operator; `"` → `` ` `` + `"` inside the double-quoted
+        // string.
+        let escaped = raw.replace('"', "`\"");
+        return format!("& \"{escaped}\"");
+    }
+    if cfg!(windows) {
+        // cmd.exe (incl. the Windows "Default shell"): a double-quoted path. cmd
+        // has no in-quote escape for `"`, but Windows paths cannot contain `"`,
+        // so a plain wrap is correct.
+        return format!("\"{raw}\"");
+    }
+    // POSIX shell: single-quote, escaping any embedded single quote as '\''.
+    let escaped = raw.replace('\'', "'\\''");
+    format!("'{escaped}'")
 }
 
 /// Map an `egui::Key` (+ modifiers) onto the engine-agnostic [`LogicalKey`] for
@@ -3191,19 +3531,69 @@ fn base_font_definitions() -> egui::FontDefinitions {
 /// first-frame gate in `frame_tick`, and re-run live by [`C0pl4ndApp::frame_tick`]
 /// when the user changes the family/fallback in settings.
 fn install_chrome_fonts(ctx: &egui::Context, font: &c0pl4nd_core::config::FontConfig) {
-    let base = base_font_definitions();
     // Fast path: nothing custom to load (default config / built-in choice) — set
     // the icon base and skip the expensive system-font enumeration entirely.
-    let needs_load = !fonts::is_builtin_family(&font.family)
-        || font.fallback.iter().any(|f| !fonts::is_builtin_family(f));
-    if !needs_load {
-        ctx.set_fonts(base);
+    if !system_font_load_needed(font) {
+        ctx.set_fonts(base_font_definitions());
         return;
     }
+    // Custom family: the (100s-of-ms) system DB load runs synchronously here. The
+    // startup path avoids this by going through `install_base_fonts` +
+    // `spawn_system_font_load` instead (audit #3); this synchronous form is the
+    // settings-change re-install (user-initiated, expects an immediate apply) and
+    // the headless-test path (deterministic, no worker thread).
+    ctx.set_fonts(build_system_font_definitions(font));
+}
+
+/// Whether the configured font stack names any non-built-in family, i.e. whether
+/// the (slow) system-font DB load is required. Pure → unit-testable.
+fn system_font_load_needed(font: &c0pl4nd_core::config::FontConfig) -> bool {
+    !fonts::is_builtin_family(&font.family)
+        || font.fallback.iter().any(|f| !fonts::is_builtin_family(f))
+}
+
+/// Install ONLY the built-in icon/base fonts (no system-DB enumeration), so the
+/// first frame paints immediately with the built-in monospace while the custom
+/// system fonts load on a worker thread (audit #3).
+fn install_base_fonts(ctx: &egui::Context) {
+    ctx.set_fonts(base_font_definitions());
+}
+
+/// Build the full [`egui::FontDefinitions`] for a custom font stack: enumerate
+/// the system font DB and prepend the chosen family + fallbacks to
+/// `FontFamily::Monospace`. This is the heavy (100s-of-ms) call — invoked off the
+/// startup critical path on a worker thread by [`spawn_system_font_load`], and
+/// synchronously by [`install_chrome_fonts`] on a settings change.
+fn build_system_font_definitions(font: &c0pl4nd_core::config::FontConfig) -> egui::FontDefinitions {
+    let base = base_font_definitions();
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
     let (defs, _loaded) = fonts::build_font_definitions(base, &db, &font.family, &font.fallback);
-    ctx.set_fonts(defs);
+    defs
+}
+
+/// Spawn a worker thread that builds the custom-font [`egui::FontDefinitions`]
+/// off the startup critical path (audit #3) and returns the receiver the frame
+/// loop polls. The closure owns a clone of the font config so the thread is
+/// self-contained. `frame_tick` calls `ctx.set_fonts(defs)` when the result
+/// arrives — until then the window paints with the built-in mono from
+/// [`install_base_fonts`]. A send failure (the app dropped the receiver, e.g. at
+/// shutdown) is ignored — the result is simply discarded.
+fn spawn_system_font_load(
+    font: &c0pl4nd_core::config::FontConfig,
+) -> std::sync::mpsc::Receiver<egui::FontDefinitions> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let font = font.clone();
+    std::thread::Builder::new()
+        .name("c0pl4nd-font-load".to_string())
+        .spawn(move || {
+            let defs = build_system_font_definitions(&font);
+            let _ = tx.send(defs);
+        })
+        // A spawn failure (resource-exhausted) is non-fatal: fall back to the
+        // built-in mono already installed; no custom font this session.
+        .ok();
+    rx
 }
 
 /// Fold a [`FontConfig`](c0pl4nd_core::config::FontConfig)'s family + ordered
@@ -3515,6 +3905,134 @@ mod tests {
         let app = C0pl4ndApp::bootstrap();
         assert_eq!(app.pane_count(), INITIAL_PANES);
         assert!(!app.settings_is_open());
+    }
+
+    /// The app boots windowed: the transient fullscreen flag (#36) is never
+    /// persisted, so a fresh app is always non-fullscreen.
+    #[test]
+    fn bootstrap_is_not_fullscreen() {
+        assert!(!C0pl4ndApp::bootstrap().fullscreen());
+    }
+
+    /// #35: PowerShell uses the call operator `& "<path>"`; cmd / a Windows
+    /// "Default shell" uses a plain double-quoted path; POSIX shells use a
+    /// single-quoted path with the `'\''` escape. Keyed off the active shell
+    /// LABEL so the form matches what the user's shell actually expects.
+    #[test]
+    fn quote_path_for_shell_matches_the_active_shell() {
+        let p = std::path::Path::new("/tmp/my script.sh");
+        // PowerShell → call operator (matched by the label containing "PowerShell").
+        assert_eq!(
+            quote_path_for_shell(p, "PowerShell 7"),
+            "& \"/tmp/my script.sh\"",
+            "PowerShell must use the call operator so the path is invoked, not echoed"
+        );
+        assert_eq!(
+            quote_path_for_shell(p, "Windows PowerShell"),
+            "& \"/tmp/my script.sh\"",
+            "Windows PowerShell uses the same call-operator form"
+        );
+        // A PowerShell path with an embedded double-quote backtick-escapes it.
+        assert_eq!(
+            quote_path_for_shell(std::path::Path::new(r#"C:\a"b.ps1"#), "PowerShell 7"),
+            "& \"C:\\a`\"b.ps1\"",
+            "PowerShell escapes an embedded double-quote with a backtick"
+        );
+        // Non-PowerShell on the host platform: Windows → cmd double-quote; POSIX
+        // → single-quote. Assert the branch that matches THIS build's `cfg`.
+        let cmd_or_posix = quote_path_for_shell(p, "Default shell");
+        if cfg!(windows) {
+            assert_eq!(
+                cmd_or_posix, "\"/tmp/my script.sh\"",
+                "a non-PowerShell Windows shell (cmd) uses a plain double-quoted path"
+            );
+        } else {
+            assert_eq!(
+                cmd_or_posix, "'/tmp/my script.sh'",
+                "a POSIX shell uses a single-quoted path"
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn quote_path_for_shell_posix_escapes_single_quote() {
+        // POSIX `'\''` escape: a path with an embedded single quote.
+        assert_eq!(
+            quote_path_for_shell(std::path::Path::new("/x/it's.sh"), "Bash"),
+            "'/x/it'\\''s.sh'",
+            "an embedded single quote is escaped as '\\'' for POSIX shells"
+        );
+    }
+
+    /// The galley-cache content key (audit #2) is content+style sensitive and
+    /// stable: identical runs+style hash equal; any change to text, colour, or
+    /// the style seed changes the key.
+    #[test]
+    fn row_content_key_is_content_and_style_sensitive() {
+        let style = row_style_key(14.0, (200, 200, 200));
+        let runs_a: Vec<ColorRun> = vec![("hello".to_string(), (255, 0, 0))];
+        let runs_a2: Vec<ColorRun> = vec![("hello".to_string(), (255, 0, 0))];
+        let runs_text: Vec<ColorRun> = vec![("hallo".to_string(), (255, 0, 0))];
+        let runs_color: Vec<ColorRun> = vec![("hello".to_string(), (0, 255, 0))];
+
+        assert_eq!(
+            row_content_key(&runs_a, style),
+            row_content_key(&runs_a2, style),
+            "identical runs + style produce the same key (a cache HIT)"
+        );
+        assert_ne!(
+            row_content_key(&runs_a, style),
+            row_content_key(&runs_text, style),
+            "a text change must change the key (a cache MISS → relayout)"
+        );
+        assert_ne!(
+            row_content_key(&runs_a, style),
+            row_content_key(&runs_color, style),
+            "a colour change must change the key"
+        );
+        // A style (font-size / fg) change changes the seed and thus the key.
+        let style2 = row_style_key(18.0, (200, 200, 200));
+        assert_ne!(
+            row_content_key(&runs_a, style),
+            row_content_key(&runs_a, style2),
+            "a font-size change must change the key"
+        );
+    }
+
+    /// `system_font_load_needed` (audit #3) is true only when a non-built-in
+    /// family or fallback is configured — the gate that decides whether the
+    /// off-thread system-font load runs.
+    #[test]
+    fn system_font_load_needed_tracks_custom_families() {
+        let mut font = c0pl4nd_core::config::FontConfig {
+            family: "monospace".to_string(),
+            // Clear the default fallback list (which names CJK system faces) so
+            // this case isolates the FAMILY gate.
+            fallback: Vec::new(),
+            ..Default::default()
+        };
+        // A built-in family with no custom fallback needs no system load.
+        if fonts::is_builtin_family(&font.family) {
+            assert!(
+                !system_font_load_needed(&font),
+                "a built-in family with built-in fallbacks needs no system-font load"
+            );
+        }
+        // A built-in family BUT with a custom fallback DOES need the load (the
+        // default config's exact shape — the audit #3 case).
+        font.fallback = vec!["Some Custom CJK Face".to_string()];
+        assert!(
+            system_font_load_needed(&font),
+            "a custom fallback alone requires the system-font DB load"
+        );
+        font.fallback = Vec::new();
+        // A clearly-custom family always needs the load.
+        font.family = "Some Custom Face That Is Not Built In".to_string();
+        assert!(
+            system_font_load_needed(&font),
+            "a non-built-in family requires the system-font DB load"
+        );
     }
 
     /// A short title passes through unchanged (trimmed); a title longer than the

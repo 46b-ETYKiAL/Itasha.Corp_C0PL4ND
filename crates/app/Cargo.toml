@@ -72,6 +72,16 @@ egui_tiles.workspace = true
 egui-phosphor.workspace = true
 window-vibrancy.workspace = true
 
+# Native file-open dialog for the titlebar script launcher (#35). The 0.15.x
+# line returns `Option<PathBuf>` directly from the SYNC `pick_file()` (the 0.17
+# line wraps it in a `FileHandle`), the simpler shape for a one-shot modal
+# picker fired off a button click. `default-features = false` drops the Linux
+# GTK system-lib build dependency in favour of the DBus `xdg-portal` backend
+# (`async-std` is its self-contained runtime; `common-controls-v6` selects the
+# modern Win32 dialog). Windows links its native backend unconditionally.
+# Exact-pinned per dependency-management.md (production). MIT/Apache-2.0.
+rfd = { version = "=0.15.4", default-features = false, features = ["xdg-portal", "async-std", "common-controls-v6"] }
+
 [dev-dependencies]
 # Headless egui UI tests (kittest = AccessKit-driven). State-assertion tests run
 # everywhere; pixel snapshots are deliberately kept out of CI for now (recon §7).

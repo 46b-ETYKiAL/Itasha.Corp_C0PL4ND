@@ -657,3 +657,85 @@ fn shell_switcher_lists_the_default_profile_first() {
         "the active shell defaults to the first (platform default) profile"
     );
 }
+
+// ---- #36 F11 frameless fullscreen + #35 script launcher menu ----------------
+
+/// Press F11 (a real, modifier-free `Event::Key`) and step the frame loop — the
+/// production fullscreen toggle chord.
+fn press_f11(h: &mut Harness<'_>) {
+    h.key_press(egui::Key::F11);
+    h.run();
+}
+
+/// F11 toggles frameless fullscreen through the REAL `frame_tick` chord: the
+/// first press enters (the titlebar's accessible widgets disappear because the
+/// titlebar panel is no longer rendered), the second press exits (the titlebar
+/// returns). Drives the real key event and asserts the observable state +
+/// chrome-presence flip, not a set-state tautology.
+#[test]
+fn f11_toggles_frameless_fullscreen_and_hides_the_chrome() {
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    assert!(
+        !app.borrow().fullscreen(),
+        "the app starts windowed (not fullscreen)"
+    );
+    assert!(
+        h.query_by_label("settings").is_some(),
+        "the titlebar caption cluster (settings gear) is present while windowed"
+    );
+
+    press_f11(&mut h);
+    assert!(
+        app.borrow().fullscreen(),
+        "F11 must enter fullscreen through the real frame loop"
+    );
+    assert!(
+        h.query_by_label("settings").is_none(),
+        "entering fullscreen hides the titlebar (its gear is no longer rendered)"
+    );
+
+    press_f11(&mut h);
+    assert!(
+        !app.borrow().fullscreen(),
+        "a second F11 must exit fullscreen"
+    );
+    assert!(
+        h.query_by_label("settings").is_some(),
+        "exiting fullscreen restores the titlebar (the gear is back)"
+    );
+}
+
+/// Esc exits fullscreen when no overlay owns Esc (the palette / find consume it
+/// to close themselves). Enter fullscreen with F11, press Esc, assert it exited.
+#[test]
+fn esc_exits_fullscreen_when_no_overlay_is_open() {
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    press_f11(&mut h);
+    assert!(app.borrow().fullscreen(), "F11 entered fullscreen");
+
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(
+        !app.borrow().fullscreen(),
+        "Esc must exit fullscreen when no palette/find overlay owns Esc"
+    );
+}
+
+/// The script launcher menu button (#35) is present in the titlebar (left of the
+/// settings gear) while windowed, exposing its accessible "script menu" label —
+/// the same observable-presence discipline the shell ▾ menu test uses.
+#[test]
+fn script_menu_button_is_present_in_the_titlebar() {
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+    h.run();
+
+    assert!(
+        h.query_by_label("script menu").is_some(),
+        "the titlebar must carry the script launcher menu button (#35)"
+    );
+}
