@@ -8,11 +8,20 @@
 # Run a target locally (requires a nightly toolchain + cargo-fuzz):
 #   cargo install cargo-fuzz
 #   cargo +nightly fuzz run vt_parser
+#   cargo +nightly fuzz run state_json
 #
-# The highest-value untrusted-input surface in a terminal emulator is the VT /
-# ANSI / OSC escape-sequence parser: it consumes arbitrary bytes produced by any
-# program running inside the terminal. The `vt_parser` target drives exactly
-# that path (`c0pl4nd_core::Terminal::advance`).
+# The highest-value untrusted-input surfaces this crate fuzzes (both reachable
+# through `c0pl4nd_core`'s public API — see fuzz/README.md for the surfaces that
+# are NOT reachable and why):
+#   * vt_parser  — the VT / ANSI / OSC escape-sequence parser. It consumes
+#                  arbitrary bytes produced by any program running inside the
+#                  terminal, so the input is fully untrusted. Drives
+#                  `c0pl4nd_core::Terminal::advance`.
+#   * state_json — the persisted window/pane/workspace layout JSON loader, which
+#                  is untrusted-at-rest (hand-edited / crash-truncated / tampered
+#                  config files). Drives
+#                  `c0pl4nd_core::layout_persist::{WorkspaceSnapshot,
+#                  LayoutSnapshot}::from_json` + the reconstruction paths.
 
 [package]
 name = "c0pl4nd-fuzz"
@@ -23,8 +32,16 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
+# Fuzz tooling is exact-pinned per dependency-management.md (security-sensitive
+# tooling): a fuzz harness gates the two untrusted-input surfaces, so a silent
+# minor bump that changed harness semantics is itself a supply-chain risk.
 [dependencies]
-libfuzzer-sys = "0.4"
+libfuzzer-sys = "=0.4.10"
+# `arbitrary` gives structured fuzzing (typed inputs derived from the raw byte
+# stream). The current targets drive byte-oriented entry points directly, but
+# `arbitrary` is declared so structured targets can be added without a manifest
+# churn and so `cargo fuzz`'s structured-input idioms are available.
+arbitrary = { version = "=1.4.2", features = ["derive"] }
 
 [dependencies.c0pl4nd-core]
 path = "../crates/core"
@@ -35,6 +52,13 @@ path = "../crates/core"
 [[bin]]
 name = "vt_parser"
 path = "fuzz_targets/vt_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "state_json"
+path = "fuzz_targets/state_json.rs"
 test = false
 doc = false
 bench = false

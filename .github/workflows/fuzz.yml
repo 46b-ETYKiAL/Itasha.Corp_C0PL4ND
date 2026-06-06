@@ -1,0 +1,108 @@
+name: Fuzz Build
+
+# Compiles the cargo-fuzz targets (the VT/ANSI parser + the persisted-state JSON
+# loader) on a nightly toolchain so they cannot bitrot. It deliberately does NOT
+# run a long fuzzing campaign — fuzzing is an unbounded search and belongs in a
+# dedicated/scheduled run, not the per-PR gate. A short smoke run (a few seconds
+# per target) catches an immediately-reproducible crash without making the gate
+# time-unbounded.
+#
+# The fuzz crate is its own workspace excluded from the parent (see fuzz/
+# Cargo.toml + the root Cargo.toml `[workspace].exclude`), so this is the only
+# job that touches nightly + the sanitizer-instrumented build.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz-build:
+    name: cargo fuzz build (nightly)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        # step-security/harden-runner@v2.19.4
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Install nightly Rust toolchain
+        # dtolnay/rust-toolchain @master commit (channel selected via toolchain:)
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: nightly
+
+      - name: Install cargo-fuzz
+        # taiki-e/install-action@v2.79.10
+        uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09
+        with:
+          tool: cargo-fuzz
+
+      - name: Cache cargo registry and fuzz target
+        # Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          # The fuzz crate is its own workspace under fuzz/.
+          workspaces: "fuzz -> target"
+          key: fuzz
+
+      - name: Install Linux build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libfontconfig1-dev
+
+      - name: cargo fuzz build (compile all targets — bitrot guard)
+        # Compiles every registered fuzz target with the sanitizer-instrumented
+        # nightly build. Failure here means a fuzz target stopped compiling
+        # against the current public API of c0pl4nd-core.
+        run: cargo fuzz build
+
+      - name: cargo fuzz smoke run (a few seconds per target)
+        # A short, bounded run per target: catches an immediately-reproducible
+        # crash on the empty/seed corpus without making the gate time-unbounded.
+        run: |
+          set -euo pipefail
+          for target in $(cargo fuzz list); do
+            echo "== smoke fuzzing ${target} for 10s =="
+            cargo fuzz run "${target}" -- -max_total_time=10 -runs=200000
+          done
+
+  # Aggregating gate so a skipped/cancelled build cannot pass as a required check.
+  fuzz-gate:
+    name: Fuzz Gate
+    runs-on: ubuntu-latest
+    needs: [fuzz-build]
+    if: always()
+    steps:
+      - name: Verify the fuzz build succeeded
+        run: |
+          set -euo pipefail
+          result="${{ needs.fuzz-build.result }}"
+          echo "fuzz-build = ${result}"
+          if [ "${result}" != "success" ]; then
+            echo "::error::cargo fuzz build did not succeed (result=${result})."
+            exit 1
+          fi
+          echo "Fuzz targets compile and pass the smoke run."
