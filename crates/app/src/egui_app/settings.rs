@@ -451,6 +451,7 @@ fn render_sections(
             "tint",
             "acrylic",
             "scanlines",
+            "scanline darkness",
             "chromatic aberration",
         ],
     ) {
@@ -633,8 +634,11 @@ fn render_sections(
             if row_visible(q, "crt scanlines") {
                 ui.label("CRT scanlines");
                 changed |= ui
-                    .toggle_value(&mut config.effects.crt_scanlines, "Scanline overlay")
-                    .on_hover_text("Auto-disabled under reduced-motion / battery-save.")
+                    .toggle_value(&mut config.effects.crt_scanlines, "Animated scan lines")
+                    .on_hover_text(
+                        "Dark scan-line bands with a rolling refresh sweep. \
+                         Auto-disabled under reduced-motion / battery-save.",
+                    )
                     .changed();
                 changed |= reset_to_default(
                     ui,
@@ -644,11 +648,53 @@ fn render_sections(
                 ui.end_row();
             }
 
+            if row_visible(q, "scanline darkness") {
+                ui.label("Scanline darkness");
+                let on = config.effects.crt_scanlines;
+                changed |= ui
+                    .add_enabled(
+                        on,
+                        egui::Slider::new(&mut config.effects.scanline_darkness, 0.0..=1.0)
+                            .text("darkness"),
+                    )
+                    .on_hover_text("How dark the scan-line troughs read. Enable scan lines first.")
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.scanline_darkness,
+                    &def.effects.scanline_darkness,
+                );
+                ui.end_row();
+            }
+
             if row_visible(q, "chromatic aberration") {
                 ui.label("Chromatic aberration");
+                // Explicit ON/OFF checkbox (issue #28): the intensity slider alone
+                // read as "broken" when it sat at 0. On first enable, default the
+                // intensity to a visible value so the effect shows immediately.
+                let was_enabled = config.effects.chromatic_aberration_enabled;
+                if ui
+                    .checkbox(
+                        &mut config.effects.chromatic_aberration_enabled,
+                        "RGB split",
+                    )
+                    .on_hover_text("Pure-channel red/blue fringing behind the text.")
+                    .changed()
+                {
+                    changed = true;
+                    if config.effects.chromatic_aberration_enabled
+                        && !was_enabled
+                        && config.effects.chromatic_aberration <= 0.0
+                    {
+                        config.effects.chromatic_aberration =
+                            c0pl4nd_core::config::DEFAULT_CHROMATIC_INTENSITY;
+                    }
+                }
+                let on = config.effects.chromatic_aberration_enabled;
                 changed |= ui
-                    .add(
-                        egui::Slider::new(&mut config.effects.chromatic_aberration, 0.0..=1.0)
+                    .add_enabled(
+                        on,
+                        egui::Slider::new(&mut config.effects.chromatic_aberration, 0.1..=1.5)
                             .text("intensity"),
                     )
                     .changed();

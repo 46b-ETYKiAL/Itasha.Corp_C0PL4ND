@@ -274,15 +274,56 @@ pub struct EffectsConfig {
     /// CRT scanline post-effect. OFF by default; also auto-disabled under
     /// reduced-motion / battery-save (see renderer).
     pub crt_scanlines: bool,
-    /// Chromatic-aberration intensity (0.0 = off).
+    /// Scanline darkness (0.0 = none .. 1.0 = strong). Tunes how dark the
+    /// scanline troughs are painted; the renderer maps this to the dark-band
+    /// alpha. Default [`DEFAULT_SCANLINE_DARKNESS`] reads as distinct lines
+    /// rather than a flat grey film.
+    #[serde(default = "default_scanline_darkness")]
+    pub scanline_darkness: f32,
+    /// Explicit chromatic-aberration ON/OFF toggle. Distinct from
+    /// [`EffectsConfig::chromatic_aberration`] (the intensity) so the UI is a
+    /// checkbox + an enabled-gated intensity slider rather than a single
+    /// slider the user reads as "broken" when it sits at 0. Default OFF.
+    #[serde(default)]
+    pub chromatic_aberration_enabled: bool,
+    /// Chromatic-aberration intensity (0.0 = off). Only applied when
+    /// [`EffectsConfig::chromatic_aberration_enabled`] is `true`.
     pub chromatic_aberration: f32,
 }
+
+/// Default scanline darkness — strong enough to read as scan lines (not a flat
+/// dimming film). Free function so `#[serde(default = ...)]` can name it.
+pub fn default_scanline_darkness() -> f32 {
+    DEFAULT_SCANLINE_DARKNESS
+}
+
+/// Default scanline-darkness value (≈38% trough darkening at the band centre).
+pub const DEFAULT_SCANLINE_DARKNESS: f32 = 0.4;
+
+/// The visible default chromatic-aberration intensity applied on first enable,
+/// so flipping the toggle shows the effect immediately instead of a no-op at 0.
+pub const DEFAULT_CHROMATIC_INTENSITY: f32 = 0.6;
 
 impl Default for EffectsConfig {
     fn default() -> Self {
         EffectsConfig {
             crt_scanlines: false,
+            scanline_darkness: DEFAULT_SCANLINE_DARKNESS,
+            chromatic_aberration_enabled: false,
             chromatic_aberration: 0.0,
+        }
+    }
+}
+
+impl EffectsConfig {
+    /// The effective chromatic-aberration intensity: the configured intensity
+    /// only when the explicit toggle is on, else `0.0`. The single predicate the
+    /// renderer consults so the toggle is honoured uniformly.
+    pub fn effective_chromatic(&self) -> f32 {
+        if self.chromatic_aberration_enabled {
+            self.chromatic_aberration.max(0.0)
+        } else {
+            0.0
         }
     }
 }
@@ -764,5 +805,76 @@ mod tests {
         assert_eq!(c.tint, "#aabbcc");
         assert!((c.tint_strength - 0.4).abs() < f32::EPSILON);
         assert!(c.effective_translucent());
+    }
+
+    // ---- Effects (CRT scanlines + chromatic aberration) ----
+
+    #[test]
+    fn effects_defaults_are_off_with_visible_scanline_darkness() {
+        let e = EffectsConfig::default();
+        assert!(!e.crt_scanlines, "scanlines opt-in");
+        assert!(!e.chromatic_aberration_enabled, "chromatic opt-in");
+        assert_eq!(e.chromatic_aberration, 0.0);
+        assert!(
+            (e.scanline_darkness - DEFAULT_SCANLINE_DARKNESS).abs() < f32::EPSILON,
+            "default darkness reads as lines, not a flat film"
+        );
+    }
+
+    #[test]
+    fn effective_chromatic_is_gated_by_the_explicit_toggle() {
+        // Intensity set but toggle off => effectively off (no "slider at 0.6 but
+        // does nothing because the checkbox is unchecked" surprise — the toggle
+        // is authoritative).
+        let mut e = EffectsConfig {
+            chromatic_aberration: 0.6,
+            ..EffectsConfig::default()
+        };
+        assert_eq!(e.effective_chromatic(), 0.0, "toggle off => no aberration");
+        // Toggle on => the intensity applies.
+        e.chromatic_aberration_enabled = true;
+        assert!((e.effective_chromatic() - 0.6).abs() < f32::EPSILON);
+        // Negative intensity is floored to 0 even when enabled.
+        e.chromatic_aberration = -1.0;
+        assert_eq!(
+            e.effective_chromatic(),
+            0.0,
+            "negative intensity floors to 0"
+        );
+    }
+
+    #[test]
+    fn old_config_without_new_effects_fields_still_parses() {
+        // A pre-toggle config that only set crt_scanlines + the f32 intensity
+        // must keep loading via serde(default), backfilling the new fields.
+        let p = PathBuf::from("test.toml");
+        let c = Config::from_toml(
+            "[effects]\ncrt_scanlines = true\nchromatic_aberration = 0.5\n",
+            &p,
+        )
+        .unwrap();
+        assert!(c.effects.crt_scanlines);
+        assert!((c.effects.chromatic_aberration - 0.5).abs() < f32::EPSILON);
+        // The new toggle defaults OFF, so an old file's intensity stays inert
+        // until the user opts in — backward-compatible.
+        assert!(!c.effects.chromatic_aberration_enabled);
+        assert!(
+            (c.effects.scanline_darkness - DEFAULT_SCANLINE_DARKNESS).abs() < f32::EPSILON,
+            "missing darkness backfills to the visible default"
+        );
+    }
+
+    #[test]
+    fn new_effects_fields_round_trip_through_toml() {
+        let p = PathBuf::from("test.toml");
+        let c = Config::from_toml(
+            "[effects]\ncrt_scanlines = true\nscanline_darkness = 0.55\nchromatic_aberration_enabled = true\nchromatic_aberration = 0.8\n",
+            &p,
+        )
+        .unwrap();
+        assert!(c.effects.crt_scanlines);
+        assert!((c.effects.scanline_darkness - 0.55).abs() < f32::EPSILON);
+        assert!(c.effects.chromatic_aberration_enabled);
+        assert!((c.effects.effective_chromatic() - 0.8).abs() < f32::EPSILON);
     }
 }
