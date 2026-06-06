@@ -2596,49 +2596,76 @@ fn term_default_fg(theme: &c0pl4nd_core::Theme) -> (u8, u8, u8) {
 // when the setting is off/zero (the caller gates on `crt_scanlines` /
 // `chromatic_aberration > 0`).
 
-/// The vertical gap (POINTS) between CRT scanlines. A faithful CRT reads as
-/// thin dark lines every ~2-3 points; pure so the spacing is unit-testable.
-const CRT_SCANLINE_GAP: f32 = 3.0;
-/// Per-line darkening alpha (0..=255) for a scanline. Subtle — the lines must
-/// dim the phosphor, not black the text out — but visible enough to read as a
-/// real scanned tube (≈0.22, up from the near-invisible old 0.11; #28).
-const CRT_SCANLINE_ALPHA: u8 = 56;
+/// The scanline period in PHYSICAL pixels. A scanline reads as a *line* only
+/// when the eye resolves an alternating dark-band / lit-band pattern; on a
+/// HiDPI panel a 3-logical-px period collapses sub-physical-px and the GPU
+/// antialiases it into a uniform grey film (issue #28). Anchoring the period to
+/// PHYSICAL pixels (`PERIOD / ppp` logical points) keeps the band/gap contrast
+/// resolvable at any scale factor. ~3 physical px = a believable tube pitch.
+const CRT_SCANLINE_PERIOD_PHYS_PX: f32 = 3.0;
+/// Fraction of each period painted as the DARK band (the rest is the lit gap).
+/// Real CRT shaders darken the *trough region* by ~40-70%, not a 1px sliver —
+/// a wide band is what reads as a line. 0.66 = a 2-px-dark / 1-px-lit feel at a
+/// 3-physical-px period.
+const CRT_SCANLINE_DUTY: f32 = 0.66;
+/// The dark-band alpha (0..=255) at the maximum configured darkness (1.0). The
+/// effective alpha is `scanline_darkness * THIS` so the config slider tunes
+/// trough darkness. The default darkness (0.4) lands at alpha 96 (~38% darken)
+/// — the research band that reads as distinct lines, not a flat film (#28); full
+/// darkness (1.0) caps at 240 (a near-black trough for a heavy-CRT look).
+const CRT_SCANLINE_MAX_DARK_ALPHA: f32 = 240.0;
+/// The animated rolling "scan" band speed (LOGICAL points / second) — the
+/// classic CRT refresh sweep drifting down the pane.
+const CRT_ROLL_SPEED_PTS_PER_SEC: f32 = 60.0;
+/// The rolling scan band's height as a fraction of the content height.
+const CRT_ROLL_HEIGHT_FRAC: f32 = 0.18;
 
-/// The maximum horizontal RGB ghost offset (POINTS) — capped small so a wild
+/// The maximum horizontal RGB ghost offset (PHYSICAL pixels) — capped so a wild
 /// config value can never smear the text into illegibility.
-const CHROMATIC_MAX_OFFSET: f32 = 3.0;
-/// The minimum visible ghost offset (POINTS) once aberration is ON, so the
-/// fringing actually READS as RGB separation rather than vanishing (issue #28:
-/// "does nothing visible"). At least one whole pixel of separation.
-const CHROMATIC_MIN_OFFSET: f32 = 1.0;
+const CHROMATIC_MAX_OFFSET_PHYS_PX: f32 = 6.0;
+/// The minimum visible ghost offset (PHYSICAL pixels) once aberration is ON. The
+/// ghost must clear the opaque main glyph's edge to read as RGB separation
+/// rather than vanishing under it (issue #28: "does nothing visible"). ≥2
+/// physical px is the floor at which the fringe escapes the glyph.
+const CHROMATIC_MIN_OFFSET_PHYS_PX: f32 = 2.0;
 
-/// The horizontal RGB ghost offset (POINTS) for a chromatic-aberration
-/// `intensity` (the `config.effects.chromatic_aberration` value). The red ghost
-/// draws at `-offset`, the blue ghost at `+offset`; `intensity == 0` ⇒ offset
-/// `0` (off). When ON it is floored at [`CHROMATIC_MIN_OFFSET`] (≥1px so the
-/// fringe is visible) and capped at [`CHROMATIC_MAX_OFFSET`]. Pure →
-/// unit-testable without a GPU.
-fn chromatic_offset(intensity: f32) -> f32 {
+/// The horizontal RGB ghost offset (LOGICAL points) for a chromatic-aberration
+/// `intensity`, resolved against the display's `ppp` (pixels-per-point). The
+/// physical-px offset is `(MIN..=MAX) * intensity` clamped, then divided by
+/// `ppp` to logical points the painter consumes — so on a 2× HiDPI panel the
+/// fringe is still ≥2 PHYSICAL px and visibly clears the glyph (issue #28). The
+/// red ghost draws at `-offset`, the blue ghost at `+offset`; `intensity == 0`
+/// ⇒ offset `0` (off). Pure → unit-testable without a GPU.
+fn chromatic_offset(intensity: f32, ppp: f32) -> f32 {
     if !intensity.is_finite() || intensity <= 0.0 {
         return 0.0;
     }
-    intensity.clamp(CHROMATIC_MIN_OFFSET, CHROMATIC_MAX_OFFSET)
+    let ppp = if ppp.is_finite() && ppp > 0.0 {
+        ppp
+    } else {
+        1.0
+    };
+    // Physical-px separation scales with intensity from the visible floor to the
+    // illegibility cap, so intensity 1.0 ≈ MIN..MAX-spanning fringe.
+    let phys = (CHROMATIC_MIN_OFFSET_PHYS_PX
+        + (CHROMATIC_MAX_OFFSET_PHYS_PX - CHROMATIC_MIN_OFFSET_PHYS_PX) * intensity.min(1.0))
+    .clamp(CHROMATIC_MIN_OFFSET_PHYS_PX, CHROMATIC_MAX_OFFSET_PHYS_PX);
+    phys / ppp
 }
 
-/// The alpha (0..=255) of each RGB ghost for a chromatic-aberration
-/// `intensity`. Scales with intensity so a faint ghost at low intensity grows
-/// to a stronger (but never opaque) fringe — bumped to the 100..=140 band
-/// (issue #28: the old 60..=120 was too faint to see) so the fringing is
-/// clearly visible while the crisp main glyph still dominates. `intensity == 0`
-/// ⇒ alpha `0` (no ghost).
+/// The alpha (0..=255) of each PURE-channel RGB ghost for a chromatic-aberration
+/// `intensity`. The ghosts are pure red `(255,0,0)` / pure blue `(0,0,255)`
+/// drawn BEHIND the crisp glyph, so only the un-occluded fringe shows as an
+/// additive RGB split. Alpha is kept high (the fringe sits behind, never greys
+/// the main glyph) and scales with intensity. `intensity == 0` ⇒ alpha `0`.
 fn chromatic_ghost_alpha(intensity: f32) -> u8 {
-    let i = chromatic_offset(intensity);
-    if i <= 0.0 {
+    if !intensity.is_finite() || intensity <= 0.0 {
         return 0;
     }
-    // 100 at the 1.0 floor, scaling to 140 at the 3.0 cap.
-    let t = (i - CHROMATIC_MIN_OFFSET) / (CHROMATIC_MAX_OFFSET - CHROMATIC_MIN_OFFSET);
-    (100.0 + 40.0 * t).clamp(0.0, 140.0).round() as u8
+    // 150 at low intensity scaling to 220 at full — saturated enough to POP as
+    // RGB fringing (issue #28: the old 100..=140 tinted galleys washed to grey).
+    let t = intensity.clamp(0.0, 1.0);
+    (150.0 + 70.0 * t).clamp(0.0, 220.0).round() as u8
 }
 
 /// Edge-weight a base chromatic-aberration `offset` (points) by a glyph's
@@ -2661,35 +2688,87 @@ fn chromatic_edge_weighted_offset(offset: f32, x: f32, left: f32, right: f32) ->
     offset * (0.4 + 0.6 * dist)
 }
 
-/// The number of evenly-spaced [`CRT_SCANLINE_GAP`]-point dark scan lines that
-/// fill a content `rect` of the given `height`. Pure and GPU-free so the line
-/// geometry is unit-testable without a painter: the line at index `i` sits at
-/// `top + i * CRT_SCANLINE_GAP`, and the count is exactly the number of those
-/// that fall inside `[top, bottom)`. Issue #28: the prior implementation painted
-/// a tinted vignette BOX around the frame instead of real scan lines across the
-/// whole content; this is the geometry for the real horizontal lines.
-fn scanline_count(height: f32) -> usize {
+/// The scanline period in LOGICAL points for a display `ppp`. Anchored to
+/// [`CRT_SCANLINE_PERIOD_PHYS_PX`] PHYSICAL pixels so the band/gap contrast is
+/// resolvable at any scale factor (issue #28: a fixed logical period collapses
+/// sub-physical-px on HiDPI and reads as a flat film). Pure → unit-testable.
+fn scanline_period_pts(ppp: f32) -> f32 {
+    let ppp = if ppp.is_finite() && ppp > 0.0 {
+        ppp
+    } else {
+        1.0
+    };
+    CRT_SCANLINE_PERIOD_PHYS_PX / ppp
+}
+
+/// The number of dark scanline BANDS that fill a content `rect` of the given
+/// `height` at the given `ppp`. One band per [`scanline_period_pts`]. Pure +
+/// GPU-free so the band geometry is unit-testable without a painter.
+fn scanline_count(height: f32, ppp: f32) -> usize {
     if !height.is_finite() || height <= 0.0 {
         return 0;
     }
-    // Lines at y = 0, GAP, 2*GAP, … strictly below `height`.
-    (height / CRT_SCANLINE_GAP).ceil() as usize
+    (height / scanline_period_pts(ppp)).ceil() as usize
 }
 
-/// Paint REAL CRT scan lines across the WHOLE pane content `rect` (issue #28).
-/// Thin (1px) dark translucent horizontal rows every [`CRT_SCANLINE_GAP`]
-/// points dim the phosphor like a scanned tube — drawn over the entire content,
-/// NOT as a vignette box around the frame (the old wrong behaviour). GPU-free
-/// (egui `hline` primitives only) and only invoked by the caller when
-/// `crt_scanlines` is on, so it is strictly zero-cost when the effect is
-/// disabled. The caller's `painter_at(rect)` clip keeps every line inside the
-/// pane. A 1080p pane is ~360 thin lines — one cheap primitive batch.
-fn paint_crt_scanlines(painter: &egui::Painter, rect: egui::Rect) {
-    let line_col = egui::Color32::from_rgba_unmultiplied(0, 0, 0, CRT_SCANLINE_ALPHA);
-    let lines = scanline_count(rect.height());
+/// The dark-band alpha (0..=255) for a configured `darkness` (0..=1). Maps the
+/// config slider onto [`CRT_SCANLINE_MAX_DARK_ALPHA`] so the trough darkening is
+/// tunable. Pure → unit-testable.
+fn scanline_dark_alpha(darkness: f32) -> u8 {
+    if !darkness.is_finite() || darkness <= 0.0 {
+        return 0;
+    }
+    (darkness.clamp(0.0, 1.0) * CRT_SCANLINE_MAX_DARK_ALPHA)
+        .clamp(0.0, 255.0)
+        .round() as u8
+}
+
+/// The top Y (LOGICAL points) of the animated rolling "scan" band at time `t`
+/// seconds for a content rect `[top, bottom)`. The band drifts down at
+/// [`CRT_ROLL_SPEED_PTS_PER_SEC`] and wraps, starting fully off the top so it
+/// sweeps in from above — the classic CRT refresh sweep. Pure → unit-testable.
+fn scanline_roll_top(top: f32, height: f32, roll_h: f32, t: f32) -> f32 {
+    if !height.is_finite() || height <= 0.0 {
+        return top;
+    }
+    let span = height + roll_h;
+    let phase = (t * CRT_ROLL_SPEED_PTS_PER_SEC).rem_euclid(span);
+    top + phase - roll_h
+}
+
+/// Paint REAL CRT scan lines across the WHOLE pane content `rect` (issue #28) —
+/// filled DARK BANDS (not 1px slivers) at a PHYSICAL-px-anchored period, plus an
+/// animated rolling brighten band so the tube visibly "scans". `ppp` resolves
+/// the period to logical points; `t` is the animation clock (seconds);
+/// `darkness` (0..=1) tunes the trough darkness. GPU-free (filled rects). The
+/// caller's `painter_at(rect)` clip keeps every band inside the pane; the caller
+/// also requests a repaint each frame so the roll keeps moving.
+fn paint_crt_scanlines(painter: &egui::Painter, rect: egui::Rect, ppp: f32, t: f32, darkness: f32) {
+    let period = scanline_period_pts(ppp);
+    let band_h = period * CRT_SCANLINE_DUTY;
+    let dark = egui::Color32::from_black_alpha(scanline_dark_alpha(darkness));
+    // --- static dark bands: filled rects across the whole content width ---
+    let lines = scanline_count(rect.height(), ppp);
     for i in 0..lines {
-        let y = rect.top() + i as f32 * CRT_SCANLINE_GAP;
-        painter.hline(rect.x_range(), y, egui::Stroke::new(1.0, line_col));
+        let y = rect.top() + i as f32 * period;
+        let band = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), y),
+            egui::pos2(rect.right(), y + band_h),
+        );
+        painter.rect_filled(band, 0.0, dark);
+    }
+    // --- animated rolling "scan" band: a soft white brighten bar drifting down,
+    // built from a few stacked translucent rects for a cheap gaussian falloff.
+    let roll_h = (rect.height() * CRT_ROLL_HEIGHT_FRAC).max(1.0);
+    let roll_top = scanline_roll_top(rect.top(), rect.height(), roll_h, t);
+    for k in 0..4u8 {
+        let a = (10u8.saturating_sub(k * 2)).max(2);
+        let inset = roll_h * f32::from(k) / 8.0;
+        let band = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), roll_top + inset),
+            egui::pos2(rect.right(), roll_top + roll_h - inset),
+        );
+        painter.rect_filled(band, 0.0, egui::Color32::from_white_alpha(a));
     }
 }
 
@@ -2771,20 +2850,28 @@ fn paint_grid_native(
         }
     };
 
-    let ghost_offset = chromatic_offset(effects.chromatic_aberration);
-    let ghost_alpha = chromatic_ghost_alpha(effects.chromatic_aberration);
+    // The effective chromatic intensity (gated by the explicit enable toggle),
+    // resolved to a PHYSICAL-px-aware ghost offset so the fringe clears the glyph
+    // on HiDPI panels (issue #28). Zero-cost when off (offset == 0 ⇒ skipped).
+    let ppp = painter.ctx().pixels_per_point();
+    let chroma = effects.effective_chromatic();
+    let ghost_offset = chromatic_offset(chroma, ppp);
+    let ghost_alpha = chromatic_ghost_alpha(chroma);
     for (row_idx, runs) in rows.iter().enumerate() {
         let row_origin = egui::pos2(origin.x, origin.y + row_idx as f32 * ch);
         // --- chromatic aberration (research §2 + §2(b) edge-weighting): re-draw
-        // the row's glyphs with R/B ghosts at ±offset BEHIND the crisp pass.
-        // The offset is EDGE-WEIGHTED by the row's vertical position so the
-        // fringing is stronger toward the top/bottom of the pane and near-zero
-        // at the middle — the authentic CRT lens falloff. Zero-cost when the
-        // setting is 0.0 (offset == 0 ⇒ skipped entirely).
+        // the row's glyphs as PURE-CHANNEL ghosts at ±offset BEHIND the crisp
+        // pass — a pure-red copy shifted left and a pure-blue copy shifted right,
+        // so only the un-occluded fringe spills past the glyph edge as an
+        // authentic additive RGB split (tinted galleys washed to grey under the
+        // glyph; pure channels pop). The offset is EDGE-WEIGHTED by the row's
+        // vertical position so the fringing is stronger toward the top/bottom of
+        // the pane and near-zero at the middle — the CRT lens falloff.
         if ghost_offset > 0.0 {
             let row_y = row_origin.y;
             let off =
                 chromatic_edge_weighted_offset(ghost_offset, row_y, rect.top(), rect.bottom());
+            // Pure red, shifted LEFT — drawn first (behind).
             paint_row_galley(
                 painter,
                 row_origin + egui::vec2(-off, 0.0),
@@ -2792,20 +2879,21 @@ fn paint_grid_native(
                 &font,
                 Some(egui::Color32::from_rgba_unmultiplied(
                     255,
-                    40,
-                    40,
+                    0,
+                    0,
                     ghost_alpha,
                 )),
                 default_fg,
             );
+            // Pure blue, shifted RIGHT.
             paint_row_galley(
                 painter,
                 row_origin + egui::vec2(off, 0.0),
                 runs,
                 &font,
                 Some(egui::Color32::from_rgba_unmultiplied(
-                    40,
-                    80,
+                    0,
+                    0,
                     255,
                     ghost_alpha,
                 )),
@@ -2860,11 +2948,15 @@ fn paint_grid_native(
         }
     }
 
-    // --- CRT scanlines + vignette (research §2): the LAST thing painted over
-    // this pane's grid, so the lines dim the glyphs + cursor uniformly. Drawn
-    // only when the setting is on (strictly zero-cost otherwise).
+    // --- CRT scanlines (research §1): the LAST thing painted over this pane's
+    // grid, so the dark bands dim the glyphs + cursor uniformly. Filled dark
+    // bands at a physical-px-anchored period + an animated rolling scan band.
+    // Drawn only when the setting is on (strictly zero-cost otherwise); the
+    // repaint request keeps the roll animating without an explicit timer.
     if effects.crt_scanlines {
-        paint_crt_scanlines(painter, rect);
+        let t = painter.ctx().input(|i| i.time) as f32;
+        paint_crt_scanlines(painter, rect, ppp, t, effects.scanline_darkness);
+        painter.ctx().request_repaint();
     }
 }
 
@@ -3917,51 +4009,75 @@ mod tests {
     // ---- CRT / chromatic-aberration helpers ----
 
     #[test]
-    fn chromatic_offset_is_zero_when_off_and_clamps_when_wild() {
+    fn chromatic_offset_is_zero_when_off_and_clears_the_glyph_on_hidpi() {
         // 0.0 (the default) → no ghost offset at all (the OFF fast-path).
-        assert_eq!(chromatic_offset(0.0), 0.0, "0 intensity = no aberration");
-        assert_eq!(chromatic_offset(-1.0), 0.0, "negative = off");
-        assert_eq!(chromatic_offset(f32::NAN), 0.0, "NaN = off");
-        // ON → floored at the visible 1px minimum (#28: the fringe must be
-        // visible), and a wild value clamps to the 3px cap so the text can never
-        // smear into illegibility.
-        assert!(
-            (chromatic_offset(0.3) - CHROMATIC_MIN_OFFSET).abs() < 1e-6,
-            "a low intensity floors at the 1px visible minimum"
+        assert_eq!(
+            chromatic_offset(0.0, 1.0),
+            0.0,
+            "0 intensity = no aberration"
         );
+        assert_eq!(chromatic_offset(-1.0, 1.0), 0.0, "negative = off");
+        assert_eq!(chromatic_offset(f32::NAN, 1.0), 0.0, "NaN = off");
+        // ON at 1× → the PHYSICAL-px offset is the logical offset; the minimum is
+        // ≥2 physical px so the fringe clears the opaque glyph (#28).
+        let low = chromatic_offset(0.0001, 1.0);
         assert!(
-            (chromatic_offset(2.0) - 2.0).abs() < 1e-6,
-            "mid passes through"
+            low >= CHROMATIC_MIN_OFFSET_PHYS_PX - 1e-3,
+            "even a tiny intensity floors at the ≥2-physical-px visible minimum"
         );
+        // Full intensity at 1× → the cap in physical px.
         assert!(
-            (chromatic_offset(99.0) - CHROMATIC_MAX_OFFSET).abs() < 1e-6,
-            "clamped to the 3px cap"
+            (chromatic_offset(1.0, 1.0) - CHROMATIC_MAX_OFFSET_PHYS_PX).abs() < 1e-3,
+            "intensity 1.0 reaches the physical-px cap at 1×"
         );
+        // HiDPI (2×): the LOGICAL offset halves, but it still represents ≥2
+        // PHYSICAL px — the whole point of the ppp-aware fix. At the floor the
+        // logical offset is MIN/2 but ×ppp == the physical floor.
+        let phys_at_2x = chromatic_offset(0.0001, 2.0) * 2.0;
+        assert!(
+            phys_at_2x >= CHROMATIC_MIN_OFFSET_PHYS_PX - 1e-3,
+            "on a 2× panel the fringe is still ≥2 physical px (clears the glyph)"
+        );
+        // A wild intensity still clamps to the cap (never smears to illegibility).
+        assert!(
+            (chromatic_offset(99.0, 1.0) - CHROMATIC_MAX_OFFSET_PHYS_PX).abs() < 1e-3,
+            "clamped to the physical-px cap"
+        );
+        // A bad ppp is treated as 1× (never NaN / div-by-zero).
+        assert!(chromatic_offset(1.0, 0.0).is_finite());
+        assert!(chromatic_offset(1.0, f32::NAN).is_finite());
     }
 
     #[test]
     fn chromatic_ghost_alpha_scales_with_intensity_and_is_zero_when_off() {
         // OFF → no ghost alpha (so no ghost passes are even drawn).
         assert_eq!(chromatic_ghost_alpha(0.0), 0, "0 intensity = no ghost");
-        // ON → visible 100..=140 band (#28: the old 60..=120 was too faint).
+        assert_eq!(chromatic_ghost_alpha(-1.0), 0, "negative = off");
+        // ON → saturated 150..=220 band (#28: pure-channel ghosts behind the
+        // glyph must POP, not wash to grey like the old 100..=140 tinted galleys).
+        assert_eq!(
+            chromatic_ghost_alpha(0.0001),
+            150,
+            "a low intensity starts at the visible 150 floor"
+        );
         assert_eq!(
             chromatic_ghost_alpha(1.0),
-            100,
-            "intensity 1.0 → alpha 100 (visible floor)"
+            220,
+            "full intensity reaches the 220 cap"
         );
         assert_eq!(
             chromatic_ghost_alpha(99.0),
-            140,
-            "alpha is capped at 140 even for a wild intensity"
+            220,
+            "alpha is capped at 220 even for a wild intensity"
         );
         assert!(
-            chromatic_ghost_alpha(1.0) <= chromatic_ghost_alpha(2.5),
+            chromatic_ghost_alpha(0.3) <= chromatic_ghost_alpha(0.9),
             "ghost alpha grows with intensity"
         );
-        // Every visible ghost is firmly in the readable 100..=140 band.
-        for i in [0.5_f32, 1.0, 2.0, 3.0, 9.0] {
+        // Every visible ghost is firmly in the saturated 150..=220 band.
+        for i in [0.2_f32, 0.5, 1.0, 3.0, 9.0] {
             let a = chromatic_ghost_alpha(i);
-            assert!((100..=140).contains(&a), "alpha {a} in the visible band");
+            assert!((150..=220).contains(&a), "alpha {a} in the visible band");
         }
     }
 
@@ -3988,22 +4104,85 @@ mod tests {
     }
 
     #[test]
-    fn scanline_count_fills_the_whole_rect_and_is_zero_for_empty() {
-        // Real scan lines (#28): the lines fill the WHOLE content height every
-        // CRT_SCANLINE_GAP points — not a vignette box. A 300px pane at a 3px
-        // gap yields 100 lines.
-        assert_eq!(
-            scanline_count(300.0),
-            (300.0_f32 / CRT_SCANLINE_GAP).ceil() as usize
-        );
+    fn scanline_period_is_physical_px_anchored() {
+        // The period is PHYSICAL-px-anchored: at 1× it is the raw physical px; at
+        // 2× HiDPI the LOGICAL period halves but still spans the same physical px
+        // (the fix for "reads as a flat film on HiDPI", #28).
+        assert!((scanline_period_pts(1.0) - CRT_SCANLINE_PERIOD_PHYS_PX).abs() < 1e-6);
         assert!(
-            scanline_count(300.0) >= 90,
-            "a tall pane is covered by many lines, not a 4-edge box"
+            (scanline_period_pts(2.0) - CRT_SCANLINE_PERIOD_PHYS_PX / 2.0).abs() < 1e-6,
+            "2× panel halves the logical period (same physical pitch)"
+        );
+        // A bad ppp is treated as 1× (never div-by-zero / NaN).
+        assert!((scanline_period_pts(0.0) - CRT_SCANLINE_PERIOD_PHYS_PX).abs() < 1e-6);
+        assert!(scanline_period_pts(f32::NAN).is_finite());
+    }
+
+    #[test]
+    fn scanline_count_fills_the_whole_rect_and_is_zero_for_empty() {
+        // Bands fill the WHOLE content height every period — not a vignette box.
+        let n = scanline_count(300.0, 1.0);
+        assert_eq!(n, (300.0_f32 / scanline_period_pts(1.0)).ceil() as usize);
+        assert!(
+            n >= 90,
+            "a tall pane is covered by many bands, not a 4-edge box"
+        );
+        // A HiDPI panel has MORE (thinner-logical) bands for the same height.
+        assert!(
+            scanline_count(300.0, 2.0) > scanline_count(300.0, 1.0),
+            "a 2× panel packs more logical bands into the same height"
         );
         // Degenerate heights paint nothing (no panic, no negative loop).
-        assert_eq!(scanline_count(0.0), 0, "empty rect → no lines");
-        assert_eq!(scanline_count(-5.0), 0, "negative → no lines");
-        assert_eq!(scanline_count(f32::NAN), 0, "NaN → no lines");
+        assert_eq!(scanline_count(0.0, 1.0), 0, "empty rect → no bands");
+        assert_eq!(scanline_count(-5.0, 1.0), 0, "negative → no bands");
+        assert_eq!(scanline_count(f32::NAN, 1.0), 0, "NaN → no bands");
+    }
+
+    #[test]
+    fn scanline_dark_alpha_maps_darkness_to_a_visible_band() {
+        // Darkness 0 → no band; darkness 1 → the strong cap; monotone between.
+        assert_eq!(scanline_dark_alpha(0.0), 0, "no darkness = no band");
+        assert_eq!(scanline_dark_alpha(-1.0), 0, "negative = no band");
+        assert_eq!(scanline_dark_alpha(f32::NAN), 0, "NaN = no band");
+        assert_eq!(
+            scanline_dark_alpha(1.0),
+            CRT_SCANLINE_MAX_DARK_ALPHA as u8,
+            "full darkness reaches the dark-band cap"
+        );
+        // The default darkness reads as a band (well above a near-invisible film).
+        let def = scanline_dark_alpha(c0pl4nd_core::config::DEFAULT_SCANLINE_DARKNESS);
+        assert!(
+            def >= 80,
+            "the default darkness paints a clearly-visible band (alpha {def})"
+        );
+        assert!(
+            scanline_dark_alpha(0.2) < scanline_dark_alpha(0.8),
+            "darker config => darker band"
+        );
+    }
+
+    #[test]
+    fn scanline_roll_band_moves_with_time_and_wraps() {
+        // The animated roll band drifts down as time advances (the visible
+        // proof of animation), starting off the top so it sweeps in.
+        let (top, height, roll_h) = (0.0_f32, 200.0, 36.0);
+        let y0 = scanline_roll_top(top, height, roll_h, 0.0);
+        let y1 = scanline_roll_top(top, height, roll_h, 0.5);
+        assert!(y1 > y0, "the scan band moves DOWN as time advances");
+        assert!(
+            y0 <= top,
+            "at t=0 the band starts at/above the top (sweeps in from above)"
+        );
+        // It wraps within one period, never running away unbounded.
+        let span = height + roll_h;
+        let period = span / CRT_ROLL_SPEED_PTS_PER_SEC;
+        let wrapped = scanline_roll_top(top, height, roll_h, period);
+        assert!(
+            (wrapped - y0).abs() < 1e-2,
+            "one full period returns the band to its start (wraps)"
+        );
+        // Degenerate height never panics.
+        assert!(scanline_roll_top(top, 0.0, roll_h, 1.0).is_finite());
     }
 
     // ---- Translucent pane background alpha (the transparency fix) ----
