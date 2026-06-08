@@ -658,6 +658,7 @@ dependencies = [
  "anyhow",
  "criterion",
  "image",
+ "memchr",
  "portable-pty",
  "regex",
  "serde",

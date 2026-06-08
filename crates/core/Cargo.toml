@@ -14,6 +14,11 @@ serde.workspace = true
 serde_json = "1"
 toml.workspace = true
 vte = "0.15"
+# SIMD-accelerated byte search (BurntSushi) for the VT parser fast path: skip
+# runs of plain printable bytes to the next ESC/control byte instead of scanning
+# scalar. Already in the lock graph transitively (via `regex`); exact-pinned per
+# dependency-management.md. Pure-Rust, no transitive deps.
+memchr = "=2.8.1"
 # PINNED to 0.8.x deliberately. 0.9.0 drops the unmaintained `serial` dep
 # (RUSTSEC-2017-0008) for `serial2`, but is KNOWN-BROKEN on Windows —
 # ConPTY `pty.read` returns garbage / the shell round-trip hangs
