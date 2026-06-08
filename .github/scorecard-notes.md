@@ -52,9 +52,12 @@ action.
   VT/ANSI/OSC escape-sequence parser — the highest-value untrusted-input
   surface for a terminal emulator (Scorecard detects the `fuzz_target!`
   integration). The crate is `exclude`d from the stable workspace because
-  libFuzzer needs a nightly + sanitizer toolchain incompatible with this repo's
-  static-musl CI target; it is run locally (`cargo +nightly fuzz run vt_parser`)
-  and is structured for OSS-Fuzz onboarding (documented in `SECURITY.md`). A
+  libFuzzer needs a nightly + sanitizer toolchain that must not pollute the
+  stable `cargo build`. A dedicated `Fuzz Build` CI job compiles + smoke-runs
+  every target on nightly (pinned to the gnu target, since ASAN is incompatible
+  with the musl-static `cargo-fuzz` default), and it is also runnable locally
+  (`cargo +nightly fuzz run vt_parser`). The crate is structured for OSS-Fuzz
+  onboarding (documented in `SECURITY.md`). A
   deterministic adversarial-seed regression test mirrors the fuzz seeds and runs
   in the stable `cargo test` suite on every platform / every PR.
 

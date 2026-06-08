@@ -77,20 +77,38 @@ jobs:
         # Compiles every registered fuzz target with the sanitizer-instrumented
         # nightly build. Failure here means a fuzz target stopped compiling
         # against the current public API of c0pl4nd-core.
+        #
         # `+nightly` is REQUIRED: cargo-fuzz passes `-Zsanitizer=address` which
         # only the nightly compiler accepts. The toolchain step installs nightly
-        # but does not make it the default (a repo rust-toolchain pin would win),
-        # so the channel is selected explicitly here.
-        run: cargo +nightly fuzz build
+        # but does not make it the default (the repo `rust-toolchain.toml` pins
+        # stable), so the channel is selected explicitly here — the `+nightly`
+        # rustup proxy exports `RUSTUP_TOOLCHAIN=nightly`, which propagates to
+        # the inner `cargo build` that cargo-fuzz spawns.
+        #
+        # `--target x86_64-unknown-linux-gnu` is REQUIRED: `taiki-e/install-action`
+        # installs a *musl-static* `cargo-fuzz` binary, and cargo-fuzz defaults
+        # the fuzz `--target` to its own triple (`x86_64-unknown-linux-musl`).
+        # AddressSanitizer is incompatible with a statically-linked libc
+        # ("sanitizer is incompatible with statically linked libc" +
+        # "can't find crate for `core`"), so the musl default cannot link. The
+        # gnu target is the runner's host triple (always installed with nightly)
+        # and is where ASAN is supported.
+        env:
+          FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu
+        run: cargo +nightly fuzz build --target "${FUZZ_TARGET_TRIPLE}"
 
       - name: cargo fuzz smoke run (a few seconds per target)
         # A short, bounded run per target: catches an immediately-reproducible
         # crash on the empty/seed corpus without making the gate time-unbounded.
+        # Same gnu-target pin as the build step (see its comment for why).
+        env:
+          FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu
         run: |
           set -euo pipefail
           for target in $(cargo +nightly fuzz list); do
             echo "== smoke fuzzing ${target} for 10s =="
-            cargo +nightly fuzz run "${target}" -- -max_total_time=10 -runs=200000
+            cargo +nightly fuzz run --target "${FUZZ_TARGET_TRIPLE}" "${target}" \
+              -- -max_total_time=10 -runs=200000
           done
 
   # Aggregating gate so a skipped/cancelled build cannot pass as a required check.
