@@ -24,7 +24,7 @@ pub mod theme;
 
 pub use config::Config;
 pub use grid::{Cell, CellFlags, Color, Grid};
-pub use session::Session;
+pub use session::{Session, WakeFn};
 pub use term::Terminal;
 pub use theme::Theme;
 

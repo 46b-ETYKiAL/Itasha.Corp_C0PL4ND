@@ -12,11 +12,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+/// A UI-wake callback the reader thread invokes after parsing a chunk of PTY
+/// output into the [`Terminal`]. The UI layer registers one via
+/// [`Session::set_wake_callback`] so the render loop can sleep when idle and be
+/// woken the instant new output lands — instead of free-running at the monitor
+/// refresh rate. Deliberately a plain `Fn` (not an `egui` type) so `core` stays
+/// UI-toolkit-agnostic; the app wires it to `egui::Context::request_repaint`,
+/// which is documented to be safe to call from any thread.
+pub type WakeFn = Arc<dyn Fn() + Send + Sync>;
+
 pub struct Session {
     pty: PtyProcess,
     terminal: Arc<Mutex<Terminal>>,
     writer: Box<dyn Write + Send>,
     alive: Arc<AtomicBool>,
+    /// Shared slot for the UI-wake callback. The reader thread holds a clone and
+    /// calls it (if set) once per drained chunk; the UI sets it post-spawn.
+    wake: Arc<Mutex<Option<WakeFn>>>,
     reader_thread: Option<JoinHandle<()>>,
 }
 
@@ -51,8 +63,11 @@ impl Session {
         let terminal = Arc::new(Mutex::new(Terminal::new(rows as usize, cols as usize)));
         let alive = Arc::new(AtomicBool::new(true));
 
+        let wake: Arc<Mutex<Option<WakeFn>>> = Arc::new(Mutex::new(None));
+
         let term_for_thread = Arc::clone(&terminal);
         let alive_for_thread = Arc::clone(&alive);
+        let wake_for_thread = Arc::clone(&wake);
         let reader_thread = std::thread::Builder::new()
             .name("c0pl4nd-pty-reader".into())
             .spawn(move || {
@@ -89,6 +104,15 @@ impl Session {
                             if let Ok(mut term) = term_for_thread.lock() {
                                 term.advance(&buf[..n]);
                             }
+                            // Wake the UI so it repaints the new output, then
+                            // sleeps again. Clone the callback OUT of the lock so
+                            // it is never invoked while the slot mutex is held
+                            // (the callback runs UI code and must not be able to
+                            // deadlock the reader against a `set_wake_callback`).
+                            let cb = wake_for_thread.lock().ok().and_then(|g| g.clone());
+                            if let Some(cb) = cb {
+                                cb();
+                            }
                         }
                         Err(_) => break,
                     }
@@ -101,8 +125,19 @@ impl Session {
             terminal,
             writer,
             alive,
+            wake,
             reader_thread: Some(reader_thread),
         })
+    }
+
+    /// Register the UI-wake callback invoked once per drained chunk of output.
+    /// The UI layer passes a closure that calls `egui::Context::request_repaint`
+    /// so the render loop can stay asleep when idle yet repaint the instant new
+    /// PTY output arrives. Replacing a previously-set callback is allowed.
+    pub fn set_wake_callback(&self, wake: WakeFn) {
+        if let Ok(mut slot) = self.wake.lock() {
+            *slot = Some(wake);
+        }
     }
 
     /// Send input bytes to the child process.
@@ -236,6 +271,59 @@ mod tests {
         assert!(
             seen,
             "expected the final line {last_token:?} of a large burst to reach the grid"
+        );
+    }
+
+    /// The UI-wake callback must fire at least once after the child produces
+    /// output — this is the signal the render loop relies on to repaint live
+    /// output while otherwise sleeping (the damage-tracked-redraw mechanism).
+    #[test]
+    fn wake_callback_fires_on_output() {
+        use std::sync::atomic::AtomicUsize;
+
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_cb = Arc::clone(&wakes);
+
+        // Stream many lines over time (not a single `echo`) so the callback,
+        // registered immediately after spawn, reliably catches output chunks
+        // that arrive AFTER registration — avoiding a race where a one-shot
+        // child drains before the UI has wired its wake.
+        #[cfg(windows)]
+        let session = Session::spawn_program(
+            "cmd.exe",
+            &["/C", "for /L %i in (1,1,500) do @echo wake%i"],
+            24,
+            80,
+        )
+        .expect("spawn");
+        #[cfg(not(windows))]
+        let session = Session::spawn_program(
+            "/bin/sh",
+            &[
+                "-c",
+                "i=0; while [ $i -le 500 ]; do echo wake$i; i=$((i+1)); done",
+            ],
+            24,
+            80,
+        )
+        .expect("spawn");
+
+        // Register the callback AFTER spawn (the real wiring order: the UI sets
+        // it once it has an egui Context). It must still catch the output.
+        session.set_wake_callback(Arc::new(move || {
+            wakes_cb.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if wakes.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            wakes.load(Ordering::SeqCst) > 0,
+            "wake callback should fire at least once after the child emits output"
         );
     }
 }

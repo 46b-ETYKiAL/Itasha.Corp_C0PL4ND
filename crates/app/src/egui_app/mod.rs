@@ -2140,6 +2140,14 @@ impl C0pl4ndApp {
             self.applied_font_family = font_apply_key(&self.config.font);
             self.fonts_installed = true;
         }
+        // Wire each live pane's UI-wake callback (once) so live PTY output wakes
+        // the render loop — the other half of the damage-tracked-redraw scheme
+        // whose idle side lives in `idle_repaint_interval`. Real window only:
+        // a wake that calls `request_repaint` would make headless `Harness::run`
+        // loop until `max_steps`.
+        if self.live_window {
+            self.wire_pane_wakes(ctx);
+        }
         // Live font apply: when the user changes the Family (or a Fallback) in
         // settings, the configured font stack changed since the last install —
         // re-install it THIS frame so the new typeface shows without a relaunch.
@@ -2559,17 +2567,64 @@ impl C0pl4ndApp {
             paint_tint_overlay(ctx, &self.config.tint, self.config.tint_strength);
         }
 
-        // Live terminals: keep repainting so PTY output animates without waiting
-        // for an input event — but ONLY in the real window (`live_window`). In the
-        // headless `egui_kittest` harness an unconditional `request_repaint`
-        // makes `Harness::run` loop until `max_steps` (the UI never settles); the
-        // tests there drive frames explicitly with `h.run()` after each input, so
-        // they do not need the animation pump.
+        // Live terminals: schedule the IDLE repaint fallback — but ONLY in the
+        // real window (`live_window`). PTY output now wakes the UI instantly via
+        // each pane's Session wake callback (wired in `wire_pane_wakes`), and
+        // real input repaints natively, so we no longer free-run at the monitor
+        // refresh rate: an idle terminal drops from 60–144 fps to ~1–2 fps,
+        // cutting idle GPU/CPU. `request_repaint_after` only sets a ceiling on
+        // staleness (egui repaints at the SOONEST of all requests). In the
+        // headless `egui_kittest` harness an unconditional repaint would make
+        // `Harness::run` loop until `max_steps`, so the pump stays off there.
         if self.live_window {
-            ctx.request_repaint();
+            ctx.request_repaint_after(self.idle_repaint_interval());
         }
     }
+
+    /// Wire every live pane's UI-wake callback exactly once. The reader thread
+    /// invokes it after each chunk of PTY output so [`Self::idle_repaint_interval`]
+    /// can let the UI sleep when idle while still repainting the instant output
+    /// arrives. Idempotent per pane (see [`PaneTerm::wire_wake`]); cheap to call
+    /// every frame. Only invoked for the real window.
+    fn wire_pane_wakes(&mut self, ctx: &egui::Context) {
+        for pane in self.terms.values_mut() {
+            pane.wire_wake(|| {
+                let ctx = ctx.clone();
+                std::sync::Arc::new(move || ctx.request_repaint())
+            });
+        }
+    }
+
+    /// The longest the live UI may wait before an *unforced* repaint. PTY output
+    /// and user input repaint immediately; this only bounds idle staleness so an
+    /// otherwise-quiescent terminal stops redrawing at the monitor refresh rate.
+    fn idle_repaint_interval(&self) -> std::time::Duration {
+        use std::time::Duration;
+        // The CRT scanline post-effect is a continuous animation — keep it smooth
+        // by ticking every frame while it is enabled (the scanline painter also
+        // self-requests a repaint, so this just matches that cadence).
+        if self.config.effects.crt_scanlines {
+            return Duration::ZERO; // == request_repaint(): animate at display rate
+        }
+        // A blink-enabled cursor must keep blinking on an otherwise-idle screen;
+        // tick at the blink half-period so the caret toggles. The cursor painter
+        // reads wall-clock time and does NOT self-request, so without this tick a
+        // fully-idle screen would freeze the blink.
+        if self.config_cursor_blink() {
+            return Duration::from_millis(CURSOR_BLINK_HALF_PERIOD_MS);
+        }
+        // Fully quiescent: a 1 s safety-net tick bounds worst-case staleness if
+        // any animation path forgot to self-request, while still cutting the idle
+        // repaint rate ~60–140×. Output and input always repaint immediately.
+        Duration::from_secs(1)
+    }
 }
+
+/// Cursor-blink half-period, in milliseconds (the on/off toggle interval). Used
+/// to schedule the idle repaint tick so a blinking caret keeps animating on an
+/// otherwise-quiescent screen. Matches the 530 ms cadence the cursor painter and
+/// the legacy winit shell use.
+const CURSOR_BLINK_HALF_PERIOD_MS: u64 = 530;
 
 /// Width of the 4 edge resize zones, in logical px. Slim so they only intercept
 /// pointer events right at the window border (#24).

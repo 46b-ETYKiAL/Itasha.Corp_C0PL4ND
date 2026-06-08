@@ -65,6 +65,11 @@ pub struct PaneTerm {
     theme: Theme,
     /// The last `(cols, rows)` the PTY was sized to — used to debounce resizes.
     size: (u16, u16),
+    /// Whether this pane's [`Session`] has had its UI-wake callback wired yet.
+    /// The app wires it once (it needs an `egui::Context`, only available from a
+    /// frame); the flag makes [`PaneTerm::wire_wake`] idempotent so the per-frame
+    /// sweep does not re-register a fresh closure every frame.
+    wake_wired: bool,
 }
 
 impl PaneTerm {
@@ -78,12 +83,14 @@ impl PaneTerm {
                 error: None,
                 theme,
                 size: (cols, rows),
+                wake_wired: false,
             },
             Err(e) => Self {
                 session: None,
                 error: Some(format!("shell failed to start: {e}")),
                 theme,
                 size: (cols, rows),
+                wake_wired: false,
             },
         }
     }
@@ -102,12 +109,14 @@ impl PaneTerm {
                 error: None,
                 theme,
                 size: (cols, rows),
+                wake_wired: false,
             },
             Err(e) => Self {
                 session: None,
                 error: Some(format!("program failed to start: {e}")),
                 theme,
                 size: (cols, rows),
+                wake_wired: false,
             },
         }
     }
@@ -129,6 +138,22 @@ impl PaneTerm {
     #[allow(dead_code)]
     pub fn size(&self) -> (u16, u16) {
         self.size
+    }
+
+    /// Wire this pane's UI-wake callback exactly once. The reader thread invokes
+    /// `wake` after each chunk of PTY output so the render loop can sleep when
+    /// idle and repaint the instant output arrives. `make_wake` is a thunk so the
+    /// (cheap) callback `Arc` is only built on the first call for a live pane —
+    /// the per-frame sweep that calls this is a no-op after the first wiring (or
+    /// for a failed-spawn pane with no session).
+    pub fn wire_wake(&mut self, make_wake: impl FnOnce() -> c0pl4nd_core::WakeFn) {
+        if self.wake_wired {
+            return;
+        }
+        if let Some(session) = &self.session {
+            session.set_wake_callback(make_wake());
+            self.wake_wired = true;
+        }
     }
 
     /// Whether the terminal currently requests DECCKM application-cursor mode
