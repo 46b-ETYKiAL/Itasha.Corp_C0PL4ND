@@ -55,4 +55,8 @@ jobs:
           # Apache-2.0) are in the allow-list above, and cargo-deny (which parses
           # the slash form correctly) accepts it — so exempt this one package from
           # the action's license check. NOT a real license issue; a parser quirk.
-          allow-dependencies-licenses: pkg:cargo/filetime@0.2.29
+          # libfuzzer-sys bundles the LLVM libFuzzer runtime, so its SPDX is
+          # `(MIT OR Apache-2.0) AND NCSA` — the NCSA term (a permissive
+          # BSD-style license used by LLVM) isn't worth adding tree-wide; exempt
+          # the fuzz-only dev dependency. Not shipped in any release binary.
+          allow-dependencies-licenses: pkg:cargo/filetime@0.2.29, pkg:cargo/libfuzzer-sys@0.4.10
