@@ -2474,20 +2474,47 @@ impl Terminal {
     pub fn advance(&mut self, bytes: &[u8]) {
         // Fast path: when no escape sequence is in flight and the chunk has no
         // ESC byte, hand it straight to vte (the overwhelmingly common case).
-        if self.apc_state == ApcFilter::Normal && !bytes.contains(&0x1b) {
+        // `memchr` is SIMD-accelerated (AVX2/NEON) — on a large paste / `cat
+        // bigfile` the common case is "no ESC", so the `is_none()` short-circuit
+        // is pure win over the scalar `bytes.contains(&0x1b)` byte scan.
+        if self.apc_state == ApcFilter::Normal && memchr::memchr(0x1b, bytes).is_none() {
             self.parser.advance(&mut self.screen, bytes);
             return;
         }
 
         let mut passthrough: Vec<u8> = Vec::new();
-        for &b in bytes {
+        // Index-based walk so the `Normal` state can SIMD-skip runs of plain
+        // (non-ESC) bytes via `memchr` instead of pushing one byte at a time —
+        // byte-for-byte identical to the per-byte loop, just bulk-copied.
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
             match self.apc_state {
                 ApcFilter::Normal => {
-                    if b == 0x1b {
-                        // Possible escape sequence — hold the ESC until we know.
-                        self.apc_state = ApcFilter::Esc;
-                    } else {
-                        passthrough.push(b);
+                    // Bulk-copy the run of non-ESC bytes up to the next ESC (or
+                    // end of buffer) in one `extend_from_slice`, then handle the
+                    // ESC (if any) on the next iteration. This is the hot path for
+                    // bulk output that DOES contain an occasional escape.
+                    match memchr::memchr(0x1b, &bytes[i..]) {
+                        None => {
+                            // No further ESC: copy the rest and finish the walk.
+                            passthrough.extend_from_slice(&bytes[i..]);
+                            i = bytes.len();
+                            continue;
+                        }
+                        Some(0) => {
+                            // Current byte IS the ESC — hold it until we know.
+                            self.apc_state = ApcFilter::Esc;
+                            i += 1;
+                            continue;
+                        }
+                        Some(rel) => {
+                            // Copy the plain run, then position on the ESC.
+                            passthrough.extend_from_slice(&bytes[i..i + rel]);
+                            self.apc_state = ApcFilter::Esc;
+                            i += rel + 1;
+                            continue;
+                        }
                     }
                 }
                 ApcFilter::Esc => {
@@ -2560,6 +2587,10 @@ impl Terminal {
                     }
                 }
             }
+            // The Normal arm `continue`s after advancing `i` itself (it may
+            // bulk-skip a run); every other arm consumes exactly one byte and
+            // falls through to here.
+            i += 1;
         }
 
         // Flush any trailing passthrough text. A half-finished escape/APC stays
@@ -5372,5 +5403,72 @@ mod tests {
         assert!(!t.reverse_screen());
         assert!(!t.insert_mode());
         assert!(!t.origin_mode());
+    }
+
+    // ---- VT parser memchr fast-path equivalence ----
+
+    /// The `memchr` ESC-scan fast path (and the bulk run-skip in the APC
+    /// pre-filter) must be byte-for-byte behaviour-identical to feeding the same
+    /// stream one byte at a time. We build a stream with LONG runs of plain
+    /// printable ASCII interleaved with real escape sequences (SGR colour, cursor
+    /// moves, an OSC title, and a Kitty APC) and assert the resulting grid text,
+    /// cursor position, and PTY response are identical whether the bytes arrive
+    /// in one `advance()` call (fast path + bulk skip) or one byte per call
+    /// (scalar path, ESC never bulk-skipped).
+    #[test]
+    fn memchr_fast_path_matches_byte_at_a_time() {
+        // A long plain run, an SGR colour change, more plain text, a CUP, an OSC
+        // title set, a Kitty graphics APC (filtered), and a trailing plain run.
+        let plain_a = "abcdefghijklmnopqrstuvwxyz0123456789".repeat(4);
+        let plain_b = "the quick brown fox jumps over the lazy dog".repeat(3);
+        let mut stream: Vec<u8> = Vec::new();
+        stream.extend_from_slice(plain_a.as_bytes());
+        stream.extend_from_slice(b"\x1b[31m"); // SGR red
+        stream.extend_from_slice(plain_b.as_bytes());
+        stream.extend_from_slice(b"\x1b[2;3H"); // CUP row 2 col 3
+        stream.extend_from_slice(b"\x1b]0;a title\x07"); // OSC 0 title
+        stream.extend_from_slice(b"\x1b_Gf=24,s=1,v=1;AAA\x1b\\"); // Kitty APC
+        stream.extend_from_slice(b"tail-run-plain-text"); // trailing plain run
+
+        // (a) whole chunk: exercises the memchr fast-path gate + bulk run-skip.
+        let mut whole = Terminal::new(8, 40);
+        whole.advance(&stream);
+
+        // (b) one byte per advance(): ESC can never be bulk-skipped; each byte
+        // walks the state machine individually.
+        let mut split = Terminal::new(8, 40);
+        for &b in &stream {
+            split.advance(&[b]);
+        }
+
+        assert_eq!(
+            whole.grid().to_text(),
+            split.grid().to_text(),
+            "grid text must match between whole-chunk and byte-at-a-time parsing"
+        );
+        assert_eq!(
+            whole.cursor_position(),
+            split.cursor_position(),
+            "cursor position must match"
+        );
+        assert_eq!(whole.title(), split.title(), "OSC title must match");
+        assert_eq!(
+            whole.images().len(),
+            split.images().len(),
+            "Kitty APC image count must match"
+        );
+    }
+
+    /// A pure plain-ASCII chunk with NO escape byte must take the fast path and
+    /// land verbatim on the grid (the overwhelmingly common bulk-output case).
+    #[test]
+    fn memchr_fast_path_pure_plain_run() {
+        let mut t = Terminal::new(4, 80);
+        let run = "plain text with no escapes whatsoever 1234567890";
+        t.advance(run.as_bytes());
+        assert!(
+            t.grid().to_text().contains(run),
+            "a pure plain run must reach the grid unchanged"
+        );
     }
 }
