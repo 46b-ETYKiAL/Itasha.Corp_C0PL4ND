@@ -31,10 +31,31 @@
 mod egui_app;
 
 use std::cell::RefCell;
+use std::time::{Duration, Instant};
 
 use egui_kittest::Harness;
 
 use egui_app::C0pl4ndApp;
+
+/// Poll until the focused pane's grid shows `needle` (the shell has echoed it),
+/// stepping frames. Command history only records lines the terminal actually
+/// echoed (so a non-echoed password is never captured), so a test that records
+/// a typed command must wait for the echo before pressing Enter — otherwise it
+/// races the async PTY round-trip (flaky on a loaded CI runner).
+fn wait_for_echo(h: &mut Harness<'_>, app: &RefCell<C0pl4ndApp>, needle: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        h.step();
+        if app
+            .borrow()
+            .focused_grid_text()
+            .is_some_and(|t| t.contains(needle))
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
 
 /// Build a headless harness driving the REAL `frame_tick` for a shared app.
 fn harness(app: &RefCell<C0pl4ndApp>) -> Harness<'_> {
@@ -78,8 +99,11 @@ fn press_palette_chord(h: &mut Harness<'_>) {
 }
 
 /// Type-then-Enter a command into the focused pane (records it in the history).
-fn run_line(h: &mut Harness<'_>, line: &str) {
+/// Waits for the shell to echo the line before Enter so the echo-gated history
+/// capture records it deterministically.
+fn run_line(h: &mut Harness<'_>, app: &RefCell<C0pl4ndApp>, line: &str) {
     type_text(h, line);
+    wait_for_echo(h, app, line);
     press_enter(h);
 }
 
@@ -90,8 +114,8 @@ fn typed_lines_are_recorded_in_command_history() {
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let mut h = harness(&app);
 
-    run_line(&mut h, "echo one");
-    run_line(&mut h, "echo two");
+    run_line(&mut h, &app, "echo one");
+    run_line(&mut h, &app, "echo two");
 
     let entries = app.borrow().command_history_entries();
     assert_eq!(
@@ -119,6 +143,8 @@ fn blank_lines_are_ignored_and_backspace_edits_the_line() {
     type_text(&mut h, "lss");
     h.key_press(egui::Key::Backspace);
     h.step();
+    // Wait for the edited line to echo before committing (history is echo-gated).
+    wait_for_echo(&mut h, &app, "ls");
     press_enter(&mut h);
     assert_eq!(
         app.borrow().command_history_entries(),
@@ -158,8 +184,8 @@ fn selecting_and_running_a_palette_entry_runs_it_and_closes() {
     let mut h = harness(&app);
 
     // History (most-recent-first): ["echo two", "echo one"].
-    run_line(&mut h, "echo one");
-    run_line(&mut h, "echo two");
+    run_line(&mut h, &app, "echo one");
+    run_line(&mut h, &app, "echo two");
 
     // Open the palette (empty query → all entries, selection at row 0 = newest).
     press_palette_chord(&mut h);
@@ -199,7 +225,7 @@ fn escape_closes_the_palette_without_running() {
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let mut h = harness(&app);
 
-    run_line(&mut h, "echo one");
+    run_line(&mut h, &app, "echo one");
     press_palette_chord(&mut h);
     assert!(app.borrow().palette_open(), "palette opened");
 
