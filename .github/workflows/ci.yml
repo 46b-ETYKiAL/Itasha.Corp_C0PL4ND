@@ -61,7 +61,7 @@ jobs:
       - name: Install cargo-nextest
         # taiki-e/install-action provides reproducible prebuilt-tool installs.
         # taiki-e/install-action@v2.79.10
-        uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09
+        uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154
         with:
           tool: cargo-nextest
 
@@ -198,7 +198,7 @@ jobs:
 
       - name: Install cargo-deny + cargo-audit
         # taiki-e/install-action@v2.79.10
-        uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09
+        uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154
         with:
           tool: cargo-deny,cargo-audit
 
