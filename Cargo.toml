@@ -53,6 +53,17 @@ window-vibrancy = "=0.7.1" # OS glass/acrylic/mica/vibrancy (MIT/Apache-2.0); ex
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+# Fat LTO over thin: a terminal's hot path (VT parse + grid) benefits from
+# cross-crate inlining between `core` and `app`; the extra release build time is
+# acceptable for a shipped binary (CI build matrix already tolerates it).
+lto = "fat"
 codegen-units = 1
 strip = true
+# Abort on panic in release builds. (1) Smaller binary — no unwind tables /
+# landing pads. (2) The terminal has 21 `unsafe` Win32/winit FFI blocks;
+# unwinding a panic across the C ABI is UB, so a deterministic abort is the safe
+# failure mode. (3) A panic in the PTY reader thread on hostile input should kill
+# the process cleanly, not leave a wedged zombie pane. Tests run in the dev/test
+# profile (unwind preserved), so `#[should_panic]` is unaffected. The cargo-fuzz
+# crate is a separate excluded workspace and sets its own panic strategy.
+panic = "abort"

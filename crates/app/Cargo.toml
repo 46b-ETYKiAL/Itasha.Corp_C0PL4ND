@@ -81,6 +81,11 @@ window-vibrancy.workspace = true
 # modern Win32 dialog). Windows links its native backend unconditionally.
 # Exact-pinned per dependency-management.md (production). MIT/Apache-2.0.
 rfd = { version = "=0.15.4", default-features = false, features = ["xdg-portal", "async-std", "common-controls-v6"] }
+# Global allocator. The system allocator is the canonical egui-native-slowness
+# bottleneck (emilk/egui#5587); mimalloc restores headroom under the per-frame
+# grid-snapshot + paste/scroll allocation churn. Set as `#[global_allocator]` in
+# both binary roots. Pure-Rust-friendly vendored C, no runtime deps.
+mimalloc = "=0.1.43"
 
 [dev-dependencies]
 # Headless egui UI tests (kittest = AccessKit-driven). State-assertion tests run
