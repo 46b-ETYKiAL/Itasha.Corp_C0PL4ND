@@ -217,6 +217,20 @@ impl Updater {
     /// Swap the running executable for the staged, verified binary and best-
     /// effort relaunch. On success the window is asked to close.
     ///
+    /// ## Anti-rollback (version-downgrade) gate — fail-closed, BEFORE the swap
+    ///
+    /// Signature/checksum verification proves the staged binary is a GENUINE
+    /// C0PL4ND release, but a validly-signed OLDER release is still genuine: a
+    /// MITM'd or replayed Releases listing could hand back a signed-but-
+    /// superseded version (a BlackLotus-class downgrade). So before touching the
+    /// live executable we re-evaluate the strictly-monotonic freshness rule via
+    /// [`super::rollback_guard`] against the highest version this installation
+    /// has ever run. A candidate that is older (or an unparseable version) is
+    /// REFUSED here, even though it would pass `verify_artifact` — integrity ≠
+    /// freshness. An equal version is a no-op (already installed). This is the
+    /// security boundary that complements `net::select_update`'s check-time
+    /// `latest <= current` rejection, closing the check→apply replay window.
+    ///
     /// Defense-in-depth: before the `self-replace` swap, keep a copy of the
     /// current executable next to it (`<exe>.c0pl4nd-bak`) via
     /// [`apply::install_with_backup`]'s sibling helper. If the swap fails, the
@@ -228,6 +242,21 @@ impl Updater {
             return;
         };
         let (staged, version) = (staged.clone(), version.clone());
+
+        // Anti-rollback gate (fail-closed): refuse to INSTALL anything that is
+        // not strictly newer than the highest version ever installed, even
+        // though it passed signature/checksum verification. A downgrade or an
+        // unparseable version stops here and never reaches the swap.
+        let decision = super::rollback_guard::evaluate_installed(&version);
+        if !decision.may_apply() {
+            let reason = decision
+                .reason()
+                .unwrap_or_else(|| "update refused by anti-rollback gate".to_string());
+            // The staged artifact is no longer needed — drop the per-run dir.
+            self.cleanup_staging_dir();
+            self.state = UpdateState::Failed(reason);
+            return;
+        }
 
         // Best-effort keep-one-prior backup of the current exe, so a botched
         // install is recoverable via `apply::rollback`.
@@ -246,6 +275,16 @@ impl Updater {
 
         match swap {
             Ok(()) => {
+                // Advance the anti-rollback high-water mark to the just-installed
+                // version (monotonic — never lowers it). Best-effort: a failed
+                // record write never blocks the applied update, because the
+                // freshly-installed binary's own compiled CARGO_PKG_VERSION will
+                // govern the floor on the next launch regardless.
+                if let (Ok(exe), Ok(applied)) =
+                    (std::env::current_exe(), semver::Version::parse(&version))
+                {
+                    let _ = super::rollback_guard::record_installed(&exe, &applied);
+                }
                 if let Ok(exe) = std::env::current_exe() {
                     match std::process::Command::new(&exe).spawn() {
                         Ok(_) => {}
@@ -378,6 +417,63 @@ mod tests {
     #[test]
     fn launch_kind_default_is_manual() {
         assert_eq!(LaunchKind::default(), LaunchKind::Manual);
+    }
+
+    #[test]
+    fn apply_blocks_a_downgrade_staged_version() {
+        // A staged version BELOW the running build's own version is an attempted
+        // downgrade. Even though it (hypothetically) passed signature/checksum
+        // verification to reach ReadyToApply, the anti-rollback gate in
+        // `apply_and_restart` must refuse it — moving to Failed("downgrade
+        // blocked: …") WITHOUT performing the swap. The baseline here is at
+        // least the compiled CARGO_PKG_VERSION, so 0.0.1 is always older.
+        let ctx = egui::Context::default();
+        let mut u = updater_in(UpdateState::ReadyToApply {
+            staged: PathBuf::from("nonexistent-staged-binary"),
+            version: "0.0.1".into(),
+        });
+        u.apply_and_restart(&ctx);
+        match &u.state {
+            UpdateState::Failed(msg) => {
+                assert!(
+                    msg.contains("downgrade blocked"),
+                    "expected a downgrade-blocked failure, got: {msg}"
+                );
+                assert!(msg.contains("0.0.1"), "reason names the candidate: {msg}");
+            }
+            other => panic!("expected Failed(downgrade blocked), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_blocks_a_malformed_staged_version() {
+        // An unparseable staged version is refused fail-closed — never treated
+        // as "newer" and never swapped in.
+        let ctx = egui::Context::default();
+        let mut u = updater_in(UpdateState::ReadyToApply {
+            staged: PathBuf::from("nonexistent-staged-binary"),
+            version: "not-a-version".into(),
+        });
+        u.apply_and_restart(&ctx);
+        match &u.state {
+            UpdateState::Failed(msg) => {
+                assert!(
+                    msg.contains("downgrade blocked") && msg.contains("unparseable"),
+                    "expected an unparseable-version block, got: {msg}"
+                );
+            }
+            other => panic!("expected Failed(unparseable), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_is_a_noop_when_not_ready() {
+        // The gate only runs from ReadyToApply; any other state leaves apply a
+        // no-op (guards the early-return contract the gate piggybacks on).
+        let ctx = egui::Context::default();
+        let mut u = updater_in(UpdateState::UpToDate);
+        u.apply_and_restart(&ctx);
+        assert_eq!(u.state, UpdateState::UpToDate);
     }
 
     #[test]

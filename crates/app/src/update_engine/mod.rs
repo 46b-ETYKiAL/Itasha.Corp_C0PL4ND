@@ -10,6 +10,10 @@
 //! - [`verify`] — SHA-256 **then** minisign against an EMBEDDED public key;
 //!   fails closed (an unverified binary is NEVER returned).
 //! - [`apply`] — keep-one-prior backup + `self-replace` atomic swap + rollback.
+//! - [`rollback_guard`] — anti-rollback (version-downgrade) protection: a
+//!   strictly-monotonic version floor re-checked at APPLY time so a
+//!   validly-signed but OLDER release (a replayed/MITM'd listing) cannot
+//!   downgrade the install. Integrity (verify) ≠ freshness (this).
 //! - [`updater`] — the egui-thread [`updater::Updater`] state machine
 //!   (`std::thread` + `mpsc`) the Updates page drives.
 //!
@@ -21,6 +25,7 @@
 
 pub mod apply;
 pub mod net;
+pub mod rollback_guard;
 pub mod updater;
 pub mod verify;
 
