@@ -19,6 +19,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod dll_hardening;
 #[path = "egui_app/mod.rs"]
 mod egui_app;
 #[path = "update/mod.rs"]
@@ -27,6 +28,13 @@ mod update;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
+    // FIRST statement: harden the Windows DLL search order before any other DLL
+    // could be implicitly loaded, defeating DLL-planting when launched from an
+    // untrusted directory (e.g. Downloads). Safe wrapper; the Win32 `unsafe` FFI
+    // lives in `dll_hardening` so this `#![forbid(unsafe_code)]` binary stays
+    // unsafe-free. No-op off Windows.
+    dll_hardening::harden_dll_search_order();
+
     // Best-effort tracing; the env filter mirrors the legacy binary.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
