@@ -171,12 +171,29 @@ pub fn fetch_latest_release(owner: &str, repo: &str) -> Result<RawRelease, Strin
 /// `None` when up-to-date, malformed, a prerelease/draft, or no matching asset
 /// triple exists. The archive is matched by **substring** (`<target>` +
 /// `<ext>`), so the tag prefix in the filename does not matter.
+///
+/// ## Channel pinning
+///
+/// The in-app updater has NO mutable channel selector: it is pinned to the
+/// STABLE channel by construction. [`fetch_latest_release`] reads ONLY the
+/// dedicated `…/releases/latest` endpoint (which GitHub defines as the newest
+/// NON-prerelease release), and this function additionally rejects any
+/// `prerelease` or `draft` release outright — so even a newer prerelease can
+/// never be silently installed as a cross-channel (stable → beta) jump. (The
+/// per-channel `pick_channel_tag` logic lives only in the legacy, browser-
+/// pointing CLI `update` module, which never installs in place.) There is thus
+/// no separate channel-pinning guard to add here — the single-channel
+/// guarantee is enforced by the endpoint choice plus the prerelease/draft
+/// rejection below.
 pub fn select_update(
     raw: &RawRelease,
     current: &semver::Version,
     target: &str,
     ext: &str,
 ) -> Option<ReleaseInfo> {
+    // Channel pinning: a prerelease/draft is a different release CHANNEL than
+    // the pinned stable stream. Reject it even when it is numerically newer, so
+    // the updater can never silently jump the user from stable onto beta.
     if raw.prerelease || raw.draft {
         return None;
     }
@@ -605,6 +622,20 @@ mod tests {
         let mut draft = release_with_triple("v0.4.0", target, ".tar.gz");
         draft.draft = true;
         assert!(select_update(&draft, &current, target, ".tar.gz").is_none());
+    }
+
+    #[test]
+    fn select_update_rejects_a_newer_prerelease_channel_pinning() {
+        // Channel-pinning: even a NUMERICALLY-NEWER prerelease must be refused —
+        // the stable-pinned in-app updater never silently jumps stable -> beta.
+        let target = "x86_64-unknown-linux-gnu";
+        let current = semver::Version::parse("0.3.0").unwrap();
+        let mut newer_beta = release_with_triple("v0.9.0-beta.1", target, ".tar.gz");
+        newer_beta.prerelease = true;
+        assert!(
+            select_update(&newer_beta, &current, target, ".tar.gz").is_none(),
+            "a newer prerelease must not be installed (channel pinning)"
+        );
     }
 
     #[test]
