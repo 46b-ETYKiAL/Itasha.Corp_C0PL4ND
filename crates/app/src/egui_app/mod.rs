@@ -192,6 +192,13 @@ pub struct C0pl4ndApp {
     /// Committed to `cmd_history` on Enter, reset on focus change. Best-effort:
     /// it models printable text + Backspace, not full shell line-editing.
     input_line: String,
+    /// A multi-line paste deferred for confirmation (paste-safety). When
+    /// `config.paste_warn_multiline` is on and a paste contains a newline, it is
+    /// parked here and a confirm overlay is shown instead of executing it
+    /// immediately (the embedded newline would otherwise run a command on land).
+    /// Enter in the overlay sends it (through the paste-injection guard); Esc
+    /// discards it.
+    pending_paste: Option<String>,
     /// Whether the command palette overlay is open.
     palette_open: bool,
     /// Whether the command-history quick-run sidebar (`#21`) is open. A docked
@@ -432,6 +439,7 @@ impl C0pl4ndApp {
             settings_open: false,
             cmd_history: c0pl4nd_core::command_history::CommandHistory::default(),
             input_line: String::new(),
+            pending_paste: None,
             palette_open: false,
             history_open: false,
             history_filter: String::new(),
@@ -980,9 +988,20 @@ impl C0pl4ndApp {
             for (lk, m) in &keys {
                 forwarded.extend(term.forward_key(lk, *m));
             }
-            for s in &pastes {
-                term.write_bytes(s.as_bytes());
-                forwarded.extend_from_slice(s.as_bytes());
+        }
+
+        // Paste handling — SECURITY: every paste goes through the core paste-
+        // injection guard (`PaneTerm::write_paste` → `Terminal::frame_paste`),
+        // NEVER raw `write_bytes`. A multi-line paste can execute the instant its
+        // embedded newline lands, so when `paste_warn_multiline` is on we DEFER a
+        // multi-line paste to a confirm overlay (`pending_paste`) instead of
+        // pasting immediately. The config read / `pending_paste` set / `terms`
+        // borrow are sequential statements so they never alias `self`.
+        for s in &pastes {
+            if self.config.paste_warn_multiline && (s.contains('\n') || s.contains('\r')) {
+                self.pending_paste = Some(s.clone());
+            } else if let Some(term) = self.terms.get_mut(&self.focused_pane) {
+                term.write_paste(s);
             }
         }
 
@@ -1382,6 +1401,98 @@ impl C0pl4ndApp {
     #[allow(dead_code)]
     pub fn config_paste_warn_multiline(&self) -> bool {
         self.config.paste_warn_multiline
+    }
+
+    /// Whether a multi-line paste is currently awaiting confirmation. (Test /
+    /// observation API for the paste-safety overlay.)
+    #[allow(dead_code)]
+    pub fn has_pending_paste(&self) -> bool {
+        self.pending_paste.is_some()
+    }
+
+    /// Send the deferred multi-line paste to the focused pane through the core
+    /// paste-injection guard, then clear it. Returns the text that was sent (for
+    /// tests; `None` if nothing was pending). The OS side effect aside, this is
+    /// the same path a non-deferred paste takes.
+    pub fn confirm_pending_paste(&mut self) -> Option<String> {
+        let text = self.pending_paste.take()?;
+        if let Some(term) = self.terms.get_mut(&self.focused_pane) {
+            term.write_paste(&text);
+        }
+        Some(text)
+    }
+
+    /// Discard the deferred multi-line paste without sending it.
+    pub fn cancel_pending_paste(&mut self) {
+        self.pending_paste = None;
+    }
+
+    /// The multi-line-paste confirm overlay: a small centred modal showing how
+    /// many lines the paste is and a preview, with Send / Cancel. Defends against
+    /// the "paste a multi-line command that runs on the embedded newline" footgun
+    /// — the paste does not reach the PTY until the user confirms. Enter = send,
+    /// Esc = cancel (also handled here so the modal is keyboard-drivable).
+    fn paste_confirm_window(&mut self, ctx: &egui::Context) {
+        let Some(text) = self.pending_paste.clone() else {
+            return;
+        };
+        // Keyboard: Esc cancels, Enter (or Ctrl+Enter) sends.
+        let (send, cancel) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::Enter),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if cancel {
+            self.cancel_pending_paste();
+            return;
+        }
+        if send {
+            self.confirm_pending_paste();
+            return;
+        }
+
+        let line_count = text.lines().count().max(1);
+        // A short, control-stripped preview so the modal itself can't be used to
+        // smuggle escape sequences into the chrome.
+        let preview: String = text
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\n')
+            .take(400)
+            .collect();
+
+        let mut do_send = false;
+        let mut do_cancel = false;
+        egui::Window::new("Paste multiple lines?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "This paste contains {line_count} lines and may run commands as soon as it lands."
+                ));
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&preview).monospace())
+                            .wrap(),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Send paste (Enter)").clicked() {
+                        do_send = true;
+                    }
+                    if ui.button("Cancel (Esc)").clicked() {
+                        do_cancel = true;
+                    }
+                });
+            });
+        if do_send {
+            self.confirm_pending_paste();
+        } else if do_cancel {
+            self.cancel_pending_paste();
+        }
     }
 
     /// The current inner window padding (points) from the live config — the
@@ -2317,7 +2428,12 @@ impl C0pl4ndApp {
         //     the panels, so the keystrokes reach the PTY whose grid this same
         //     frame then snapshots (the load-bearing "typing reaches the PTY and
         //     the grid updates" round-trip).
-        if self.palette_open {
+        if self.pending_paste.is_some() {
+            // A multi-line paste is awaiting confirmation: the confirm overlay is
+            // modal, so DO NOT forward this frame's keystrokes to the PTY (else
+            // the Enter that confirms the paste would also send a bare newline to
+            // the shell). The overlay itself reads Enter/Esc in `paste_confirm_window`.
+        } else if self.palette_open {
             let (up, down, enter, esc) = ctx.input_mut(|i| {
                 (
                     i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
@@ -2557,6 +2673,13 @@ impl C0pl4ndApp {
         //     inside the window closure.
         if self.search_open {
             self.search_window(ctx);
+        }
+
+        // 5c) the multi-line paste confirm overlay, if a paste is pending. Floats
+        //     above everything; Enter sends it through the injection guard, Esc
+        //     discards it. Rendered before the tint so the wash sits over it too.
+        if self.pending_paste.is_some() {
+            self.paste_confirm_window(ctx);
         }
 
         // 6) window color-tint overlay (a subtle full-window wash). Only painted

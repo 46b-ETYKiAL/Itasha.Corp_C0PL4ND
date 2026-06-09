@@ -288,3 +288,57 @@ fn shrinking_the_window_resizes_the_pane_pty() {
          (was {big:?}, now {small:?})"
     );
 }
+
+/// SECURITY (paste-injection / pastejacking): a MULTI-LINE paste must be
+/// DEFERRED to the confirm overlay (not executed on its embedded newline), and
+/// must NOT reach the PTY until the user confirms. With `paste_warn_multiline`
+/// on by default, pasting `"X1uniq\nX2uniq"` parks it in `pending_paste` and the
+/// focused grid never shows it; confirming then clears the pending state.
+#[test]
+fn multiline_paste_is_deferred_until_confirmed() {
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    h.event(egui::Event::Paste("X1uniq\nX2uniq".to_string()));
+    h.step();
+    h.step();
+
+    assert!(
+        app.borrow().has_pending_paste(),
+        "a multi-line paste must be deferred to the confirm overlay"
+    );
+    // It must NOT have been forwarded to the PTY (so the shell can't run it yet).
+    assert!(
+        !app.borrow()
+            .focused_grid_text()
+            .is_some_and(|t| t.contains("X1uniq")),
+        "a deferred multi-line paste must NOT reach the PTY before confirmation"
+    );
+
+    let sent = app.borrow_mut().confirm_pending_paste();
+    assert_eq!(sent.as_deref(), Some("X1uniq\nX2uniq"));
+    assert!(
+        !app.borrow().has_pending_paste(),
+        "confirming clears the pending paste"
+    );
+}
+
+/// A SINGLE-LINE paste is not a multi-line-execution hazard, so it goes straight
+/// through the injection guard to the PTY (no deferral) and the shell echoes it.
+#[test]
+fn singleline_paste_reaches_the_pty() {
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    h.event(egui::Event::Paste("PASTEPROBE42".to_string()));
+    h.step();
+
+    assert!(
+        !app.borrow().has_pending_paste(),
+        "a single-line paste is sent immediately, not deferred"
+    );
+    assert!(
+        poll_focused_contains(&mut h, &app, "PASTEPROBE42", Duration::from_secs(10)),
+        "a single-line paste must reach the PTY and be echoed into the grid"
+    );
+}
