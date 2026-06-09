@@ -142,9 +142,13 @@ pub struct Grid {
     rows: usize,
     cols: usize,
     cells: Vec<Cell>,
-    /// True when content changed since the last `clear_damage` — drives
-    /// render-on-input so an idle terminal issues zero redraws.
-    damaged: bool,
+    /// Per-row damage flags: `row_dirty[r] == true` means row `r`'s cells changed
+    /// since the last `clear_damage`. Length is always `rows`. The whole-grid
+    /// "is anything damaged?" question is `row_dirty.iter().any(..)`; the per-row
+    /// granularity lets the renderer rebuild spans only for the rows that changed
+    /// (the rest reuse their cached layout). Replaces the old single `damaged`
+    /// bool — `is_damaged()` preserves the exact previous semantics.
+    row_dirty: Vec<bool>,
     /// Per-row soft-wrap flags (`wrapped[r] == true` means row `r` filled the
     /// width and the logical line continues on row `r + 1`, i.e. there was NO
     /// hard newline between them). Drives non-lossy reflow on resize. Length is
@@ -165,9 +169,37 @@ impl Grid {
             rows,
             cols,
             cells: vec![Cell::default(); rows * cols],
-            damaged: true,
+            row_dirty: vec![true; rows],
             wrapped: vec![false; rows],
             continuation: vec![false; rows * cols],
+        }
+    }
+
+    /// Mark a single row dirty (its cells changed). No-op out of bounds.
+    #[inline]
+    fn mark_row(&mut self, row: usize) {
+        if let Some(d) = self.row_dirty.get_mut(row) {
+            *d = true;
+        }
+    }
+
+    /// Mark an inclusive row range `[top, bottom]` dirty (a scroll/region op
+    /// rewrote every row in it). Clamped to the grid.
+    #[inline]
+    fn mark_rows(&mut self, top: usize, bottom: usize) {
+        let bottom = bottom.min(self.rows.saturating_sub(1));
+        for r in top..=bottom {
+            if let Some(d) = self.row_dirty.get_mut(r) {
+                *d = true;
+            }
+        }
+    }
+
+    /// Mark every row dirty (clear / resize / full-grid scroll).
+    #[inline]
+    fn mark_all(&mut self) {
+        for d in &mut self.row_dirty {
+            *d = true;
         }
     }
 
@@ -188,7 +220,7 @@ impl Grid {
             if self.cells[i] != cell || !self.continuation[i] {
                 self.cells[i] = cell;
                 self.continuation[i] = true;
-                self.damaged = true;
+                self.mark_row(row);
             }
         }
     }
@@ -199,7 +231,7 @@ impl Grid {
         if row < self.rows && col < self.cols {
             let i = self.idx(row, col);
             self.cells[i].push_combining(mark);
-            self.damaged = true;
+            self.mark_row(row);
         }
     }
 
@@ -211,17 +243,28 @@ impl Grid {
         self.cols
     }
 
+    /// Whether ANY row changed since the last `clear_damage` (preserves the exact
+    /// semantics of the former single `damaged` bool).
     pub fn is_damaged(&self) -> bool {
-        self.damaged
+        self.row_dirty.iter().any(|&d| d)
+    }
+
+    /// Whether row `r` changed since the last `clear_damage`. Out-of-range rows
+    /// are reported clean. Lets the renderer rebuild only the rows that changed.
+    pub fn is_row_dirty(&self, row: usize) -> bool {
+        self.row_dirty.get(row).copied().unwrap_or(false)
     }
 
     pub fn clear_damage(&mut self) {
-        self.damaged = false;
+        for d in &mut self.row_dirty {
+            *d = false;
+        }
     }
 
-    /// Force the next frame to redraw (e.g. after a scroll-view change).
+    /// Force the next frame to redraw EVERY row (e.g. after a scroll-view change
+    /// where the visible window moved but the grid cells did not).
     pub fn touch(&mut self) {
-        self.damaged = true;
+        self.mark_all();
     }
 
     /// Whether row `r` soft-wrapped into the next row (no hard newline between).
@@ -256,7 +299,7 @@ impl Grid {
             if self.cells[i] != cell || self.continuation[i] {
                 self.cells[i] = cell;
                 self.continuation[i] = false;
-                self.damaged = true;
+                self.mark_row(row);
             }
         }
     }
@@ -272,7 +315,7 @@ impl Grid {
         for k in &mut self.continuation {
             *k = false;
         }
-        self.damaged = true;
+        self.mark_all();
     }
 
     /// Resize, preserving top-left content. Marks the grid damaged.
@@ -303,7 +346,8 @@ impl Grid {
         self.cells = next;
         self.wrapped = next_wrapped;
         self.continuation = next_cont;
-        self.damaged = true;
+        // Resize the per-row damage vector to the new height and mark all dirty.
+        self.row_dirty = vec![true; self.rows];
     }
 
     /// Scroll the whole grid up by one line (top line lost, bottom blank).
@@ -326,7 +370,8 @@ impl Grid {
             self.wrapped.remove(0);
             self.wrapped.push(false);
         }
-        self.damaged = true;
+        // The whole grid shifted up — every row's content changed.
+        self.mark_all();
         dropped
     }
 
@@ -364,7 +409,8 @@ impl Grid {
                 false
             };
         }
-        self.damaged = true;
+        // Every row in the scrolled region was rewritten.
+        self.mark_rows(top, bottom);
         dropped
     }
 
@@ -396,7 +442,8 @@ impl Grid {
                 false
             };
         }
-        self.damaged = true;
+        // Every row in the scrolled region was rewritten.
+        self.mark_rows(top, bottom);
     }
 
     /// Insert `count` blank cells at `(row, col)`, shifting the rest of the line
@@ -416,7 +463,7 @@ impl Grid {
             };
             self.cells[dst] = cell;
         }
-        self.damaged = true;
+        self.mark_row(row);
     }
 
     /// Delete `count` cells at `(row, col)`, shifting the rest of the line left
@@ -435,7 +482,7 @@ impl Grid {
             };
             self.cells[dst] = cell;
         }
-        self.damaged = true;
+        self.mark_row(row);
     }
 
     /// Erase `count` cells at `(row, col)` to blank without shifting (ECH).
@@ -448,7 +495,7 @@ impl Grid {
             let dst = self.idx(row, c);
             self.cells[dst] = Cell::default();
         }
-        self.damaged = true;
+        self.mark_row(row);
     }
 
     /// Borrow one row's cells as a slice.
@@ -685,5 +732,117 @@ mod tests {
         }
         let count = c.combining.as_ref().unwrap().chars().count();
         assert_eq!(count, Cell::MAX_COMBINING, "combining marks cap enforced");
+    }
+
+    // ---- Per-row damage tracking ----
+
+    fn cell(ch: char) -> Cell {
+        Cell {
+            c: ch,
+            ..Default::default()
+        }
+    }
+
+    /// `is_damaged()` preserves the exact previous semantics: a fresh grid is
+    /// damaged; clearing makes it clean; any single-row change re-damages it.
+    #[test]
+    fn is_damaged_matches_any_row_dirty() {
+        let mut g = Grid::new(4, 6);
+        assert!(g.is_damaged(), "a fresh grid is damaged");
+        g.clear_damage();
+        assert!(!g.is_damaged(), "clear_damage makes it clean");
+        g.set(2, 1, cell('x'));
+        assert!(g.is_damaged(), "a change re-damages");
+        assert_eq!(g.is_damaged(), (0..g.rows()).any(|r| g.is_row_dirty(r)));
+    }
+
+    /// A `set` marks ONLY its own row dirty.
+    #[test]
+    fn set_marks_only_its_row() {
+        let mut g = Grid::new(5, 6);
+        g.clear_damage();
+        g.set(2, 1, cell('x'));
+        for r in 0..5 {
+            assert_eq!(
+                g.is_row_dirty(r),
+                r == 2,
+                "only row 2 dirty after set, got r={r}"
+            );
+        }
+    }
+
+    /// `erase_chars` / `delete_chars` / `insert_blanks` mark only their row.
+    #[test]
+    fn line_ops_mark_only_their_row() {
+        for op in 0..3 {
+            let mut g = Grid::new(5, 8);
+            g.clear_damage();
+            match op {
+                0 => g.erase_chars(3, 0, 4),
+                1 => g.delete_chars(3, 0, 2),
+                _ => g.insert_blanks(3, 0, 2),
+            }
+            for r in 0..5 {
+                assert_eq!(
+                    g.is_row_dirty(r),
+                    r == 3,
+                    "op {op}: only row 3 dirty, got r={r}"
+                );
+            }
+        }
+    }
+
+    /// `scroll_region_up` marks every row in `[top, bottom]` dirty and nothing
+    /// outside it (rows above/below the margin are untouched).
+    #[test]
+    fn scroll_region_marks_only_the_region() {
+        let mut g = Grid::new(6, 6);
+        g.clear_damage();
+        let _ = g.scroll_region_up(1, 3, 1);
+        for r in 0..6 {
+            let expect = (1..=3).contains(&r);
+            assert_eq!(g.is_row_dirty(r), expect, "scroll_region_up [1,3]: r={r}");
+        }
+
+        let mut g = Grid::new(6, 6);
+        g.clear_damage();
+        g.scroll_region_down(2, 4, 1);
+        for r in 0..6 {
+            let expect = (2..=4).contains(&r);
+            assert_eq!(g.is_row_dirty(r), expect, "scroll_region_down [2,4]: r={r}");
+        }
+    }
+
+    /// A whole-grid scroll and `clear` mark EVERY row dirty.
+    #[test]
+    fn full_scroll_and_clear_mark_all_rows() {
+        let mut g = Grid::new(4, 6);
+        g.clear_damage();
+        g.scroll_up();
+        assert!(
+            (0..4).all(|r| g.is_row_dirty(r)),
+            "scroll_up marks all rows"
+        );
+
+        g.clear_damage();
+        g.clear();
+        assert!((0..4).all(|r| g.is_row_dirty(r)), "clear marks all rows");
+    }
+
+    /// `resize` re-sizes the dirty vector to the new height and marks all dirty
+    /// (so `is_row_dirty` is valid for the new last row).
+    #[test]
+    fn resize_resizes_and_marks_all_dirty() {
+        let mut g = Grid::new(3, 4);
+        g.clear_damage();
+        g.resize(7, 4);
+        assert_eq!(g.rows(), 7);
+        assert!(
+            (0..7).all(|r| g.is_row_dirty(r)),
+            "resize marks every new row dirty"
+        );
+        // is_row_dirty is in-range for the new height (no panic / stale length).
+        assert!(g.is_row_dirty(6));
+        assert!(!g.is_row_dirty(7), "out-of-range row reads clean");
     }
 }
