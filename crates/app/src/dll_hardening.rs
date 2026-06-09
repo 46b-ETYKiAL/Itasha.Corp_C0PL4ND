@@ -1,5 +1,12 @@
 //! Windows DLL search-order hardening — defeat DLL planting / preloading.
 //!
+// This is the ONE audited platform-FFI module the otherwise unsafe-free
+// `c0pl4nd` binary permits: the two Win32 loader calls below are inherently
+// `unsafe`, so this module opts back in (its parent binary uses
+// `deny(unsafe_code)`, which this scoped `allow` overrides). Every `unsafe`
+// block carries a `// SAFETY:` justification.
+#![allow(unsafe_code)]
+//!
 //! A GUI executable launched from an untrusted directory (the classic case is
 //! the user's `Downloads` folder) is a DLL-planting target: by default the
 //! Windows loader searches the *application directory* and the *current working

@@ -10,12 +10,16 @@
 // are visible). Without this, launching the installed app spawns a second
 // "terminal" window showing the wgpu/Vulkan INFO log spam.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-// The egui chrome shell is pure-safe Rust; no `unsafe` FFI lives in this binary
-// (the `win_snap.rs` Win32 subclass is NOT compiled into `c0pl4nd-egui`).
-#![forbid(unsafe_code)]
+// The egui chrome shell is pure-safe Rust: `deny(unsafe_code)` keeps ALL of this
+// binary's own UI code unsafe-free. The SOLE exception is the audited
+// `dll_hardening` platform-init module (it must call two Win32 search-order
+// functions); it opts back in with a narrowly-scoped `#![allow(unsafe_code)]`.
+// `deny` (not `forbid`) is required precisely so that one vetted module can
+// override it — `forbid` is unconditional and would reject the submodule.
+#![deny(unsafe_code)]
 
 // mimalloc as the global allocator (see crates/app/Cargo.toml) — the
-// declaration is safe; no `unsafe` needed, so `forbid(unsafe_code)` stands.
+// declaration is safe; no `unsafe` needed.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
