@@ -1197,22 +1197,17 @@ impl App {
     fn do_paste(&mut self, text: String) {
         // Read the bracketed-paste flag under a short lock, dropped before the
         // mutable session borrow below.
-        let bracketed = self
+        // Frame the paste through the SHARED core guard (strip embedded
+        // `ESC[201~`, bracket-wrap iff `?2004`) so this legacy winit path and the
+        // egui path cannot drift apart — the drift that left the egui path raw
+        // (paste-injection) is exactly what this consolidation closes.
+        let bytes: Vec<u8> = self
             .active_session()
-            .and_then(|s| s.terminal().lock().ok().map(|t| t.bracketed_paste()))
-            .unwrap_or(false);
-        let bytes: Vec<u8> = if bracketed {
-            // Strip any embedded end-sentinel so the payload can't terminate the
-            // bracket early and inject commands into the shell.
-            let cleaned = text.replace("\x1b[201~", "");
-            let mut b = Vec::with_capacity(cleaned.len() + 12);
-            b.extend_from_slice(b"\x1b[200~");
-            b.extend_from_slice(cleaned.as_bytes());
-            b.extend_from_slice(b"\x1b[201~");
-            b
-        } else {
-            text.into_bytes()
-        };
+            .and_then(|s| s.terminal().lock().ok().map(|t| t.frame_paste(&text)))
+            .unwrap_or_default();
+        if bytes.is_empty() {
+            return;
+        }
         if let Some(s) = self.active_session_mut() {
             if let Ok(mut term) = s.terminal().lock() {
                 term.scroll_to_bottom();

@@ -1829,8 +1829,18 @@ impl Perform for Screen {
             }
             'b' => {
                 // REP — repeat the last printed grapheme N times.
+                //
+                // `n` is an attacker-controllable CSI parameter and `print`
+                // scrolls the whole grid + scrollback, so an unbounded loop
+                // (`x\x1b[2000000000b`) would freeze the reader thread — the
+                // iTerm2 REP DoS class. Clamp to `MAX_REP`: repeating a single
+                // grapheme more than that just scrolls identical content off the
+                // top of the scrollback, so the clamp is lossless for any
+                // realistic use (filling an 80×10000 scrollback is ~800K) while
+                // killing the DoS. See dgl.cx/2023/09/ansi-terminal-security.
                 if let Some(c) = self.last_print {
-                    let n = Self::first_param(params, 1);
+                    const MAX_REP: usize = 1 << 20; // 1,048,576
+                    let n = Self::first_param(params, 1).min(MAX_REP);
                     for _ in 0..n {
                         self.print(c);
                     }
@@ -2661,12 +2671,45 @@ impl Terminal {
 
     /// Whether bracketed-paste mode (`?2004`) is enabled.
     ///
-    /// Integration point: when this is `true`, the host's paste handler must
-    /// wrap the pasted text in `ESC [ 200 ~` … `ESC [ 201 ~` before writing it
-    /// to the PTY (and strip any embedded bracket sequences from the paste).
-    /// That framing lives in the app's input layer, not in this core crate.
+    /// Integration point: every host paste path MUST go through [`Self::frame_paste`]
+    /// (which consults this flag), never write clipboard bytes to the PTY raw.
     pub fn bracketed_paste(&self) -> bool {
         self.screen.dec_modes.bracketed_paste
+    }
+
+    /// Frame a clipboard paste for safe delivery to the PTY — the canonical
+    /// paste-injection ("pastejacking") guard. EVERY UI paste path must route
+    /// through this; writing clipboard bytes to the PTY raw is the bug class this
+    /// closes (CyberArk pastejacking; the bracketed-paste-bypass CVEs in
+    /// MinTTY/Xshell/ZOC).
+    ///
+    /// - When the running program enabled bracketed-paste mode (`?2004`), the
+    ///   text is wrapped in `ESC[200~ … ESC[201~` AND every embedded `ESC[201~`
+    ///   end-sentinel is stripped first, so a hostile clipboard payload cannot
+    ///   terminate the bracket early and have the shell execute the bytes that
+    ///   follow as typed commands.
+    /// - When bracketed mode is off, the bytes are returned unwrapped (the
+    ///   shell's line discipline consumes them). The embedded-newline-executes
+    ///   risk on this path is mitigated UI-side by the multi-line-paste confirm
+    ///   gate (`paste_warn_multiline`); a bare `ESC[201~` here is inert noise but
+    ///   is still stripped for consistency.
+    ///
+    /// Pure (`&self`) so both the egui and the legacy winit UIs share ONE
+    /// hardened implementation and the paths cannot drift apart again.
+    pub fn frame_paste(&self, text: &str) -> Vec<u8> {
+        // Strip any embedded end-sentinel on BOTH paths (in bracketed mode it is
+        // the active injection vector; unbracketed it is inert but removing it
+        // keeps the two paths identical and audit-simple).
+        let cleaned = text.replace("\x1b[201~", "");
+        if self.bracketed_paste() {
+            let mut b = Vec::with_capacity(cleaned.len() + 12);
+            b.extend_from_slice(b"\x1b[200~");
+            b.extend_from_slice(cleaned.as_bytes());
+            b.extend_from_slice(b"\x1b[201~");
+            b
+        } else {
+            cleaned.into_bytes()
+        }
     }
 
     /// The active mouse tracking mode (`?1000` / `?1002` / `?1003`).
@@ -4625,6 +4668,59 @@ mod tests {
         t.advance(b"x\x1b[3b"); // print x, repeat 3 more
         let line: String = (0..4).map(|c| t.grid().cell(0, c).unwrap().c).collect();
         assert_eq!(line, "xxxx");
+    }
+
+    #[test]
+    fn rep_count_is_clamped_no_dos() {
+        // An attacker-controlled huge REP count must NOT spin billions of times
+        // (the iTerm2 REP DoS). The clamp bounds it to <= MAX_REP (~1M) so this
+        // returns promptly; we just assert it completes and the grid is sane.
+        let mut t = Terminal::with_scrollback(24, 80, 1000);
+        let start = std::time::Instant::now();
+        t.advance(b"z\x1b[2000000000b"); // REP 2 billion
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "REP with a 2-billion count must be clamped, not loop unbounded"
+        );
+        // The visible cursor row is full of 'z' (sanity: parsing still works).
+        assert_eq!(
+            t.grid().cell(t.cursor_position().unwrap().0, 0).unwrap().c,
+            'z'
+        );
+    }
+
+    // ---- Paste-injection guard (frame_paste) ----
+
+    #[test]
+    fn frame_paste_unbracketed_strips_end_sentinel() {
+        let t = Terminal::new(4, 20);
+        assert!(!t.bracketed_paste());
+        // A hostile clipboard payload carrying an embedded ESC[201~ must have it
+        // stripped even on the un-bracketed path; no 200~/201~ framing is added.
+        let out = t.frame_paste("a\x1b[201~rm -rf ~");
+        assert_eq!(out, b"arm -rf ~");
+        assert!(!contains_subslice(&out, b"\x1b[201~"));
+    }
+
+    #[test]
+    fn frame_paste_bracketed_wraps_and_neutralizes_injection() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[?2004h"); // enable bracketed paste
+        assert!(t.bracketed_paste());
+        // The classic pastejacking payload: an embedded ESC[201~ tries to close
+        // the bracket early so `rm -rf ~\n` runs as typed. frame_paste must strip
+        // the embedded sentinel and wrap the whole (now-safe) payload exactly
+        // once, so nothing escapes the bracket.
+        let out = t.frame_paste("a\x1b[201~rm -rf ~\n");
+        assert!(out.starts_with(b"\x1b[200~"), "must open the bracket");
+        assert!(out.ends_with(b"\x1b[201~"), "must close the bracket");
+        // Exactly ONE 201~ (the closing frame) — the embedded one was stripped.
+        let closes = out.windows(6).filter(|w| *w == b"\x1b[201~").count();
+        assert_eq!(closes, 1, "embedded end-sentinel must be stripped");
+    }
+
+    fn contains_subslice(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
     }
 
     #[test]

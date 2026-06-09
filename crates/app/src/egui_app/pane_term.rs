@@ -236,6 +236,30 @@ impl PaneTerm {
         }
     }
 
+    /// Write a clipboard paste to the PTY through the core paste-injection guard
+    /// ([`c0pl4nd_core::Terminal::frame_paste`]): an embedded `ESC[201~` is
+    /// stripped and the text is bracket-wrapped iff the program enabled `?2004`.
+    /// This is the ONLY path egui pastes take — never `write_bytes(raw)` — so a
+    /// hostile clipboard payload cannot break out of bracketed paste and inject
+    /// commands (pastejacking). The terminal is also scrolled to the bottom so
+    /// the paste lands at the prompt.
+    pub fn write_paste(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        let bytes = match session.terminal().lock() {
+            Ok(mut term) => {
+                term.scroll_to_bottom();
+                term.frame_paste(text)
+            }
+            Err(_) => return,
+        };
+        let _ = session.write_input(&bytes);
+    }
+
     /// Encode a logical key + modifiers via the SHARED core encoder and write
     /// the resulting bytes to the PTY. Returns the bytes written (empty when the
     /// key encodes nothing or the session is dead) so tests can assert exactly
