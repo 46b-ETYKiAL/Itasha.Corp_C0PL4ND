@@ -1035,7 +1035,10 @@ impl C0pl4ndApp {
                 }
                 LogicalKey::Enter => {
                     let line = std::mem::take(&mut self.input_line);
-                    self.cmd_history.record(line);
+                    if self.should_record_history(&line) {
+                        // `record` redacts inline secrets (--password=…, API_KEY=…).
+                        self.cmd_history.record(line);
+                    }
                 }
                 _ => {}
             }
@@ -1425,6 +1428,38 @@ impl C0pl4ndApp {
     /// Discard the deferred multi-line paste without sending it.
     pub fn cancel_pending_paste(&mut self) {
         self.pending_paste = None;
+    }
+
+    /// Whether a just-typed line should be recorded in command history. PRIVACY:
+    /// the history feeds the palette + sidebar and must never capture secrets the
+    /// user never meant to store. Two guards:
+    ///
+    /// 1. **Leading-space opt-out** (the HISTCONTROL=ignorespace convention): a
+    ///    line the user prefixed with a space/tab is intentionally excluded.
+    /// 2. **Password-prompt suppression** (the load-bearing one): a password
+    ///    typed at `sudo` / `ssh` / `mysql -p` is NOT echoed by the tty, so its
+    ///    characters never reach the grid. We record a line only if a short
+    ///    prefix of it was ECHOED into the focused pane's visible text. A
+    ///    non-echoed line (zero echo = password) is dropped. The prefix (the
+    ///    earliest-typed chars, which have had the most time to round-trip
+    ///    through the PTY) tolerates trailing-echo lag while still catching a
+    ///    fully-unechoed secret. Privacy-conservative: when in doubt, drop —
+    ///    losing a history entry is acceptable; storing a password is not.
+    ///
+    /// Inline secrets that ARE echoed (`--password=…`, `API_KEY=…`) are redacted
+    /// downstream by [`c0pl4nd_core::command_history::redact_secrets`].
+    fn should_record_history(&self, line: &str) -> bool {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        if line.starts_with(' ') || line.starts_with('\t') {
+            return false;
+        }
+        const PROBE_LEN: usize = 4;
+        let probe: String = trimmed.chars().take(PROBE_LEN).collect();
+        self.focused_grid_text()
+            .is_some_and(|grid| grid.contains(&probe))
     }
 
     /// The multi-line-paste confirm overlay: a small centred modal showing how

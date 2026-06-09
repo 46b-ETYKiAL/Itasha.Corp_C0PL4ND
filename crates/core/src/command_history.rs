@@ -8,8 +8,45 @@
 //! Search reuses the crate's dependency-free [`crate::fuzzy`] matcher.
 
 use std::collections::VecDeque;
+use std::sync::OnceLock;
+
+use regex::Regex;
 
 use crate::fuzzy;
+
+/// Redact obvious inline secrets from a command line before it is stored in
+/// history (and shown in the palette + sidebar). Conservative by design — only
+/// UNAMBIGUOUS secret-bearing tokens are masked, so ordinary commands are never
+/// mangled:
+/// - long-form credential flags: `--password=…`, `--token=…`, `--secret=…`,
+///   `--api-key=…`, `--access-key=…`, `--private-key=…`, `--auth-token=…`;
+/// - environment-style assignments whose NAME names a secret:
+///   `API_KEY=…`, `DB_PASSWORD=…`, `GH_TOKEN=…`, etc.
+///
+/// The value is replaced with `<redacted>` while the command shape is preserved
+/// so the entry stays useful for recall. Interactive password PROMPTS (`sudo`,
+/// `ssh`, `mysql -p`) are handled separately upstream — those keystrokes are not
+/// echoed by the tty, and the app drops non-echoed lines before they ever reach
+/// `record`. The ambiguous short `-p<value>` flag is deliberately NOT matched
+/// (it collides with non-secret uses like `cp -p`); precision over recall.
+pub fn redact_secrets(line: &str) -> String {
+    static FLAG: OnceLock<Regex> = OnceLock::new();
+    static ENV: OnceLock<Regex> = OnceLock::new();
+    let flag = FLAG.get_or_init(|| {
+        Regex::new(
+            r"(?i)(--(?:password|passwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|auth[-_]?token)=)\S+",
+        )
+        .expect("static secret-flag regex is valid")
+    });
+    let env = ENV.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b([A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API[-_]?KEY|ACCESS[-_]?KEY|PRIVATE[-_]?KEY|AUTH[-_]?TOKEN)[A-Z0-9_]*=)\S+",
+        )
+        .expect("static secret-env regex is valid")
+    });
+    let out = flag.replace_all(line, "${1}<redacted>");
+    env.replace_all(&out, "${1}<redacted>").into_owned()
+}
 
 /// Default maximum number of distinct commands kept.
 pub const DEFAULT_CAP: usize = 200;
@@ -45,7 +82,11 @@ impl CommandHistory {
         if trimmed.is_empty() {
             return;
         }
-        let value = trimmed.to_string();
+        // Redact inline secrets before the command is stored / shown in the
+        // palette + sidebar. Interactive password prompts are excluded upstream
+        // (the app drops non-echoed lines); this catches secrets typed ON the
+        // command line (`mysql --password=…`, `export API_KEY=…`).
+        let value = redact_secrets(trimmed);
         if let Some(pos) = self.entries.iter().position(|e| e == &value) {
             self.entries.remove(pos);
         }
@@ -148,5 +189,59 @@ mod tests {
         h.record("ls -la");
         let hits = h.search("crgts"); // subsequence of "cargo test"
         assert_eq!(hits, vec!["cargo test".to_string()]);
+    }
+
+    #[test]
+    fn redact_secrets_masks_credential_flags() {
+        assert_eq!(
+            redact_secrets("mysql --password=hunter2 -h db"),
+            "mysql --password=<redacted> -h db"
+        );
+        assert_eq!(
+            redact_secrets("curl --token=ghp_abc123 https://x"),
+            "curl --token=<redacted> https://x"
+        );
+        assert_eq!(
+            redact_secrets("foo --api-key=AKIA1234"),
+            "foo --api-key=<redacted>"
+        );
+    }
+
+    #[test]
+    fn redact_secrets_masks_secret_env_assignments() {
+        assert_eq!(
+            redact_secrets("export API_KEY=sk-secret-value"),
+            "export API_KEY=<redacted>"
+        );
+        assert_eq!(
+            redact_secrets("DB_PASSWORD=p@ss ./run"),
+            "DB_PASSWORD=<redacted> ./run"
+        );
+        assert_eq!(
+            redact_secrets("GH_TOKEN=ghp_xyz gh pr list"),
+            "GH_TOKEN=<redacted> gh pr list"
+        );
+    }
+
+    #[test]
+    fn redact_secrets_leaves_ordinary_commands_untouched() {
+        // No secret indicators → identical. Precision over recall: the short
+        // `-p` flag and non-secret `=` assignments must NOT be mangled.
+        for cmd in [
+            "git commit -m 'fix build'",
+            "cp -p src dst",
+            "make CC=gcc TARGET=release",
+            "cargo build --release",
+            "PATH=/usr/bin:$PATH ls",
+        ] {
+            assert_eq!(redact_secrets(cmd), cmd, "must not mangle: {cmd}");
+        }
+    }
+
+    #[test]
+    fn record_applies_redaction() {
+        let mut h = CommandHistory::default();
+        h.record("psql --password=topsecret");
+        assert_eq!(h.entries().next(), Some("psql --password=<redacted>"));
     }
 }
