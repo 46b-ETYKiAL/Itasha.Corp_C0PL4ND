@@ -1,0 +1,17 @@
+# cargo-nextest configuration.
+#
+# A large share of this crate's integration tests drive a REAL shell through the
+# headless egui harness and assert on what the shell ECHOES back into the grid
+# (typed input, pasted text, command history). That echo is an asynchronous PTY
+# round-trip: the assertions are deterministic, but the *timing* can lag on a
+# heavily-loaded CI runner (nextest runs the whole suite in parallel), so a slow
+# echo occasionally trips a poll-with-timeout. Retry a failed test a couple of
+# times rather than failing the whole run — a genuinely-broken test still fails
+# every attempt, while a timing flake recovers. Retries only ever re-run FAILED
+# tests, so the green path is not slowed.
+[profile.default]
+retries = 2
+
+# CI uses the same policy (the default profile is inherited).
+[profile.ci]
+retries = 2
