@@ -301,8 +301,10 @@ fn quad_verts(q: &ColorRect, sw: f32, sh: f32) -> [[f32; 6]; 6] {
 
 /// Reinterpret the vertex array as bytes (no external bytemuck dependency).
 fn verts_bytes(verts: &[[f32; 6]; 6]) -> &[u8] {
-    // Safety: `[[f32;6];6]` is a contiguous block of plain f32s with no
-    // padding; reading it as bytes is well-defined and borrows the same data.
+    // SAFETY: `verts.as_ptr()` is a valid, aligned pointer to `[[f32;6];6]` — a
+    // contiguous block of `f32`s (no padding, all bit patterns valid as bytes).
+    // The length is exactly its byte size, so the reinterpreted `u8` slice stays
+    // in-bounds, and it borrows `verts` so the source outlives the returned slice.
     unsafe { std::slice::from_raw_parts(verts.as_ptr() as *const u8, std::mem::size_of_val(verts)) }
 }
 

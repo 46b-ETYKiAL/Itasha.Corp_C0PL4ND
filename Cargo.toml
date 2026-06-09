@@ -67,3 +67,15 @@ strip = true
 # profile (unwind preserved), so `#[should_panic]` is unaffected. The cargo-fuzz
 # crate is a separate excluded workspace and sets its own panic strategy.
 panic = "abort"
+
+# Workspace-wide unsafe-code discipline. Every `unsafe {}` block in the tree must
+# carry an accurate `// SAFETY:` comment justifying why the operation is sound,
+# each block holds at most ONE unsafe operation, and `unsafe fn` bodies must still
+# wrap their unsafe operations in explicit `unsafe {}` blocks (no implicit unsafe
+# in an unsafe fn). Member crates opt in via `[lints] workspace = true`.
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

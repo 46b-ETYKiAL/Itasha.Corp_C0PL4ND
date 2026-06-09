@@ -134,25 +134,37 @@ pub unsafe fn install(
     // Add the styles that make the DWM treat the window as snap-able + animatable
     // while keeping it frameless (WM_NCCALCSIZE below hides the frame). Keep
     // whatever winit set and OR in the snap styles.
-    let cur = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    // SAFETY: `hwnd` is a valid top-level window handle per this fn's contract;
+    // `GetWindowLongPtrW(GWL_STYLE)` only reads the window's style word.
+    let cur = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
     let add = (WS_THICKFRAME | WS_CAPTION | WS_MAXIMIZEBOX | WS_MINIMIZEBOX).0 as isize;
-    SetWindowLongPtrW(hwnd, GWL_STYLE, cur | add);
+    // SAFETY: same valid `hwnd`; writing the OR of the existing style with the
+    // documented snap-enabling style bits is a well-formed `SetWindowLongPtrW`.
+    unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, cur | add) };
 
     // SetWindowSubclass inserts our proc into the chain; def_subclass keeps
     // winit's wndproc running for everything we don't intercept.
-    let _ = SetWindowSubclass(hwnd, Some(snap_wndproc), SUBCLASS_ID, geom_ptr);
+    // SAFETY: `hwnd` is valid; `snap_wndproc` is a real `extern "system"` proc;
+    // `geom_ptr` is the `Box::into_raw` pointer the proc reconstructs/reads and is
+    // reclaimed on `WM_NCDESTROY`/`uninstall`, so it stays live while subclassed.
+    let _ = unsafe { SetWindowSubclass(hwnd, Some(snap_wndproc), SUBCLASS_ID, geom_ptr) };
 
     // Force a frame recalculation so WM_NCCALCSIZE runs immediately with the new
     // styles (otherwise the OS frame flashes until the first resize).
-    let _ = SetWindowPos(
-        hwnd,
-        None,
-        0,
-        0,
-        0,
-        0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-    );
+    // SAFETY: `hwnd` is valid; the SWP_* no-move/no-size/no-zorder/no-activate
+    // flags mean every positional argument is ignored, so this only triggers a
+    // frame recalc (`None` z-order insert-after is valid under SWP_NOZORDER).
+    let _ = unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+    };
 
     // Windows 11: round the window corners to match the modern OS chrome.
     // Ignored as a harmless no-op on Windows 10 (the attribute is unknown there).
@@ -160,12 +172,17 @@ pub unsafe fn install(
         DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     };
     let corner_pref = DWMWCP_ROUND;
-    let _ = DwmSetWindowAttribute(
-        hwnd,
-        DWMWA_WINDOW_CORNER_PREFERENCE,
-        &corner_pref as *const _ as *const core::ffi::c_void,
-        core::mem::size_of_val(&corner_pref) as u32,
-    );
+    // SAFETY: `hwnd` is valid; the attribute pointer + length describe the live
+    // stack `corner_pref` (`size_of_val` bytes), matching the documented
+    // `DWMWA_WINDOW_CORNER_PREFERENCE` input contract.
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner_pref as *const _ as *const core::ffi::c_void,
+            core::mem::size_of_val(&corner_pref) as u32,
+        )
+    };
 
     // Windows 11 acrylic/mica backdrop (opt-in). Only meaningful when the window
     // is translucent (the wgpu surface clears with alpha < 1); on an opaque
@@ -173,12 +190,17 @@ pub unsafe fn install(
     if acrylic {
         use windows::Win32::Graphics::Dwm::{DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE};
         let backdrop = DWMSBT_TRANSIENTWINDOW;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE,
-            &backdrop as *const _ as *const core::ffi::c_void,
-            core::mem::size_of_val(&backdrop) as u32,
-        );
+        // SAFETY: `hwnd` is valid; the attribute pointer + length describe the
+        // live stack `backdrop` (`size_of_val` bytes), matching the documented
+        // `DWMWA_SYSTEMBACKDROP_TYPE` input contract.
+        let _ = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                &backdrop as *const _ as *const core::ffi::c_void,
+                core::mem::size_of_val(&backdrop) as u32,
+            )
+        };
     }
 }
 
@@ -200,15 +222,20 @@ unsafe fn reclaim_geom(hwnd: HWND) {
     let mut refdata: usize = 0;
     // `GetWindowSubclass` returns TRUE and fills `refdata` only when OUR subclass
     // (matching proc + id) is currently installed on the window.
-    let installed =
-        GetWindowSubclass(hwnd, Some(snap_wndproc), SUBCLASS_ID, Some(&mut refdata)).as_bool();
+    // SAFETY: `hwnd` is valid per this fn's contract; `&mut refdata` is a live
+    // local the call writes only on success. Reads existing subclass state only.
+    let installed = unsafe {
+        GetWindowSubclass(hwnd, Some(snap_wndproc), SUBCLASS_ID, Some(&mut refdata)).as_bool()
+    };
     // Always attempt removal; harmless when not installed.
-    let _ = RemoveWindowSubclass(hwnd, Some(snap_wndproc), SUBCLASS_ID);
+    // SAFETY: `hwnd` is valid; removing a (possibly absent) subclass by matching
+    // proc + id is a documented no-op when not installed.
+    let _ = unsafe { RemoveWindowSubclass(hwnd, Some(snap_wndproc), SUBCLASS_ID) };
     if installed && refdata != 0 {
         // SAFETY: `refdata` is the exact pointer produced by `Box::into_raw` in
         // `install`; the subclass is now removed so no wndproc can read it; we
         // own it and drop it exactly once.
-        drop(Box::from_raw(refdata as *mut SnapGeometry));
+        drop(unsafe { Box::from_raw(refdata as *mut SnapGeometry) });
     }
 }
 
@@ -223,7 +250,9 @@ unsafe fn reclaim_geom(hwnd: HWND) {
                     // call this; kept for explicit teardown + tests.
 pub unsafe fn uninstall(hwnd: isize) {
     let hwnd = HWND(hwnd as *mut core::ffi::c_void);
-    reclaim_geom(hwnd);
+    // SAFETY: `hwnd` is the handle passed to `install` per this fn's contract, so
+    // any subclass on it was installed by us and its `dwRefData` is our `Box`.
+    unsafe { reclaim_geom(hwnd) };
 }
 
 /// Flash the taskbar button until the window is next brought to the foreground
@@ -244,7 +273,10 @@ pub unsafe fn flash_taskbar(hwnd: isize) {
         uCount: 0,
         dwTimeout: 0,
     };
-    let _ = FlashWindowEx(&info);
+    // SAFETY: `&info` points to a fully-initialised `FLASHWINFO` with its `cbSize`
+    // set to its own size and a valid `hwnd` per this fn's contract; the call only
+    // reads the struct for the duration of the call.
+    let _ = unsafe { FlashWindowEx(&info) };
 }
 
 /// The subclass wndproc. Intercepts the three frame messages and forwards
@@ -268,17 +300,28 @@ unsafe extern "system" fn snap_wndproc(
         // Map the cursor to a resize edge, the drag strip, or the client.
         WM_NCHITTEST => {
             if geom.is_null() {
-                return def_subclass(hwnd, msg, wparam, lparam);
+                // SAFETY: forwarding the same `hwnd`/`msg`/`wparam`/`lparam` we
+                // received down the subclass chain via `DefSubclassProc`.
+                return unsafe { def_subclass(hwnd, msg, wparam, lparam) };
             }
-            hit_test(hwnd, lparam, &*geom)
+            // SAFETY: `geom` is non-null (checked above) and is our
+            // `Box<SnapGeometry>` pointer, still live while the subclass is
+            // installed, so reborrowing it as `&SnapGeometry` is valid.
+            let geom_ref = unsafe { &*geom };
+            // SAFETY: `hwnd` is the live window receiving the message; `geom_ref`
+            // borrows the live geometry; `hit_test` only does read-only Win32 reads.
+            unsafe { hit_test(hwnd, lparam, geom_ref) }
         }
 
         // Clamp a maximized window to the monitor work area so it never covers
         // the taskbar (a frameless window otherwise maximizes over it).
         WM_GETMINMAXINFO => {
-            clamp_maxinfo(hwnd, lparam);
+            // SAFETY: `hwnd` is the live window and `lparam` is the OS-provided
+            // `MINMAXINFO*` for this message; `clamp_maxinfo` null-checks it.
+            unsafe { clamp_maxinfo(hwnd, lparam) };
             // Let the default proc run too so it fills the other fields.
-            def_subclass(hwnd, msg, wparam, lparam)
+            // SAFETY: forwarding the unmodified message down the subclass chain.
+            unsafe { def_subclass(hwnd, msg, wparam, lparam) }
         }
 
         // Window is being destroyed — the LAST message a window receives. Free
@@ -288,19 +331,25 @@ unsafe extern "system" fn snap_wndproc(
         // destroy, then reclaim (reclaim is idempotent, so a later `uninstall`
         // is a harmless no-op).
         WM_NCDESTROY => {
-            let r = def_subclass(hwnd, msg, wparam, lparam);
-            reclaim_geom(hwnd);
+            // SAFETY: forwarding the destroy message down the subclass chain first.
+            let r = unsafe { def_subclass(hwnd, msg, wparam, lparam) };
+            // SAFETY: `hwnd` is this window; any subclass on it is ours, so its
+            // `dwRefData` is our `Box<SnapGeometry>`; reclaim is idempotent.
+            unsafe { reclaim_geom(hwnd) };
             r
         }
 
-        _ => def_subclass(hwnd, msg, wparam, lparam),
+        // SAFETY: forwarding every non-intercepted message down the subclass chain.
+        _ => unsafe { def_subclass(hwnd, msg, wparam, lparam) },
     }
 }
 
 /// Forward to the next handler in the subclass chain (ultimately winit's
 /// wndproc). `DefSubclassProc` is the documented continue-the-chain call.
 unsafe fn def_subclass(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    DefSubclassProc(hwnd, msg, wparam, lparam)
+    // SAFETY: `hwnd` is the live window the message was dispatched to; passing the
+    // message parameters through unchanged is the documented continue-the-chain call.
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
 
 /// Resolve `WM_NCHITTEST`: resize edges within the border band, the title-bar
@@ -313,10 +362,14 @@ unsafe fn hit_test(hwnd: HWND, lparam: LPARAM, geom: &SnapGeometry) -> LRESULT {
     let sx = (lparam.0 & 0xFFFF) as i16 as i32;
     let sy = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
     let mut pt = POINT { x: sx, y: sy };
-    let _ = ScreenToClient(hwnd, &mut pt);
+    // SAFETY: `hwnd` is the live window per this fn's contract; `&mut pt` is a
+    // live local the call writes the converted client-space coordinates into.
+    let _ = unsafe { ScreenToClient(hwnd, &mut pt) };
 
     let mut rc = RECT::default();
-    if GetClientRect(hwnd, &mut rc).is_err() {
+    // SAFETY: `hwnd` is valid; `&mut rc` is a live local the call fills with the
+    // client rectangle. On error we fall back to HTCLIENT without reading `rc`.
+    if unsafe { GetClientRect(hwnd, &mut rc) }.is_err() {
         return LRESULT(HTCLIENT);
     }
     let w = rc.right - rc.left;
@@ -357,25 +410,34 @@ unsafe fn hit_test(hwnd: HWND, lparam: LPARAM, geom: &SnapGeometry) -> LRESULT {
 /// Clamp `WM_GETMINMAXINFO`'s max size/position to the monitor's work area so a
 /// frameless maximize does not paint over the taskbar.
 unsafe fn clamp_maxinfo(hwnd: HWND, lparam: LPARAM) {
-    let mmi = lparam.0 as *mut MINMAXINFO;
-    if mmi.is_null() {
+    let mmi_ptr = lparam.0 as *mut MINMAXINFO;
+    if mmi_ptr.is_null() {
         return;
     }
-    let hmon: HMONITOR = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    // SAFETY: for `WM_GETMINMAXINFO` the OS passes `lparam` as a valid, aligned,
+    // writable `MINMAXINFO*` (null-checked above) that lives for the duration of
+    // the message; reborrowing it as `&mut` is sound and we hold no other alias.
+    let mmi = unsafe { &mut *mmi_ptr };
+    // SAFETY: `hwnd` is the live window per this fn's contract; the call only
+    // reads it and returns the nearest-monitor handle (never null for a real HWND).
+    let hmon: HMONITOR = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
     let mut mi = MONITORINFO {
         cbSize: core::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
-    if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+    // SAFETY: `hmon` is the handle just returned by `MonitorFromWindow`; `&mut mi`
+    // is a live local with its `cbSize` set, which the call fills on success.
+    if unsafe { GetMonitorInfoW(hmon, &mut mi) }.as_bool() {
         let work = mi.rcWork;
         let mon = mi.rcMonitor;
-        // Position is relative to the monitor origin.
-        (*mmi).ptMaxPosition.x = work.left - mon.left;
-        (*mmi).ptMaxPosition.y = work.top - mon.top;
-        (*mmi).ptMaxSize.x = work.right - work.left;
-        (*mmi).ptMaxSize.y = work.bottom - work.top;
-        (*mmi).ptMaxTrackSize.x = work.right - work.left;
-        (*mmi).ptMaxTrackSize.y = work.bottom - work.top;
+        // Position is relative to the monitor origin. Safe field writes through the
+        // `&mut MINMAXINFO` reborrowed above (no further raw-pointer dereferences).
+        mmi.ptMaxPosition.x = work.left - mon.left;
+        mmi.ptMaxPosition.y = work.top - mon.top;
+        mmi.ptMaxSize.x = work.right - work.left;
+        mmi.ptMaxSize.y = work.bottom - work.top;
+        mmi.ptMaxTrackSize.x = work.right - work.left;
+        mmi.ptMaxTrackSize.y = work.bottom - work.top;
     }
 }
 

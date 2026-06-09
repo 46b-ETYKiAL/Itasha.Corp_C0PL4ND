@@ -23,6 +23,9 @@ path = "src/egui_main.rs"
 name = "c0pl4nd-legacy"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 c0pl4nd-core = { path = "../core" }
 anyhow.workspace = true
@@ -110,6 +113,7 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
+    "Win32_System_LibraryLoader", # SetDefaultDllDirectories / SetDllDirectoryW — DLL-planting defence
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

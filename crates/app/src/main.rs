@@ -24,6 +24,11 @@ use c0pl4nd_core::{Config, Session};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> Result<()> {
+    // FIRST statement: harden the Windows DLL search order before any other DLL
+    // could be implicitly loaded, defeating DLL-planting when launched from an
+    // untrusted directory (e.g. Downloads). No-op off Windows.
+    dll_hardening::harden_dll_search_order();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("C0PL4ND_LOG")
@@ -90,6 +95,7 @@ fn main() -> Result<()> {
     crate::run_gui(&config)
 }
 
+mod dll_hardening;
 mod drag;
 mod image_render;
 mod pane_render;

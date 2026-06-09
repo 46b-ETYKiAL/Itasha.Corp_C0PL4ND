@@ -302,6 +302,7 @@ mod tests {
         let got = injected_prompt(&cmd);
         // Restore before asserting so a failure cannot leak state.
         if let Some(v) = saved {
+            // SAFETY: serialized by PROMPT_ENV_LOCK; restoring the saved value.
             unsafe { std::env::set_var("PROMPT", v) };
         }
         assert_eq!(
@@ -334,6 +335,7 @@ mod tests {
         let got1 = injected_prompt(&cmd1);
 
         // Case 2: an inherited prompt that already ends in a space is untouched.
+        // SAFETY: serialized by PROMPT_ENV_LOCK; the saved value is restored below.
         unsafe { std::env::set_var("PROMPT", "$P$_$G ") };
         let mut cmd2 = CommandBuilder::new("cmd.exe");
         super::apply_prompt_env(&mut cmd2, "cmd.exe");
@@ -341,7 +343,9 @@ mod tests {
 
         // Restore before asserting so a failure cannot leak state.
         match saved {
+            // SAFETY: serialized by PROMPT_ENV_LOCK; restoring the saved value.
             Some(v) => unsafe { std::env::set_var("PROMPT", v) },
+            // SAFETY: serialized by PROMPT_ENV_LOCK; no saved value to restore.
             None => unsafe { std::env::remove_var("PROMPT") },
         }
         assert_eq!(
@@ -374,6 +378,7 @@ mod tests {
             })
             .collect();
         if let Some(v) = saved {
+            // SAFETY: serialized by PROMPT_ENV_LOCK; restoring the saved value.
             unsafe { std::env::set_var("PROMPT", v) };
         }
         for (prog, got) in injected {
