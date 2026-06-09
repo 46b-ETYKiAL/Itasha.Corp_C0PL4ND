@@ -1137,7 +1137,7 @@ impl Screen {
             let src = grid_start + vr;
             if src < total {
                 for (c, cell) in out_rows[src].iter().enumerate() {
-                    new_grid.set(vr, c, cell.clone());
+                    new_grid.set(vr, c, *cell);
                 }
                 new_grid.set_wrapped(vr, out_wrapped[src]);
             }
@@ -1590,7 +1590,6 @@ impl Perform for Screen {
                 bg: self.pen.bg,
                 flags: self.pen.flags,
                 underline_color: self.pen.underline_color,
-                combining: None,
             },
         );
         self.col += 1;
@@ -1606,7 +1605,6 @@ impl Perform for Screen {
                     bg: self.pen.bg,
                     flags: self.pen.flags,
                     underline_color: self.pen.underline_color,
-                    combining: None,
                 },
             );
             self.col += 1;
@@ -5354,7 +5352,7 @@ mod tests {
         t.advance("e\u{0301}".as_bytes()); // e + combining acute
         let cell = t.grid().cell(0, 0).unwrap();
         assert_eq!(cell.c, 'e');
-        assert_eq!(cell.grapheme(), "e\u{0301}");
+        assert_eq!(t.grid().grapheme_at(0, 0), "e\u{0301}");
         // The combining mark did NOT advance the cursor into col 1.
         assert_eq!(t.cursor_position(), Some((0, 1)));
         assert_eq!(t.grid().cell(0, 1).unwrap().c, ' ', "no own cell for mark");
@@ -5364,7 +5362,7 @@ mod tests {
     fn multiple_combining_marks_stack() {
         let mut t = Terminal::new(2, 10);
         t.advance("a\u{0301}\u{0302}".as_bytes());
-        assert_eq!(t.grid().cell(0, 0).unwrap().grapheme(), "a\u{0301}\u{0302}");
+        assert_eq!(t.grid().grapheme_at(0, 0), "a\u{0301}\u{0302}");
     }
 
     #[test]
@@ -5374,7 +5372,7 @@ mod tests {
         t.advance("\u{2764}\u{FE0F}".as_bytes());
         let cell = t.grid().cell(0, 0).unwrap();
         assert_eq!(cell.c, '\u{2764}');
-        assert_eq!(cell.grapheme(), "\u{2764}\u{FE0F}");
+        assert_eq!(t.grid().grapheme_at(0, 0), "\u{2764}\u{FE0F}");
         assert_eq!(
             t.cursor_position(),
             Some((0, 1)),
@@ -5388,7 +5386,7 @@ mod tests {
         // Wide CJK glyph occupies cols 0+1; a following combining mark must
         // attach to the BASE (col 0), not the continuation spacer (col 1).
         t.advance("世\u{0301}".as_bytes());
-        assert_eq!(t.grid().cell(0, 0).unwrap().grapheme(), "世\u{0301}");
+        assert_eq!(t.grid().grapheme_at(0, 0), "世\u{0301}");
         assert_eq!(t.cursor_position(), Some((0, 2)));
     }
 
