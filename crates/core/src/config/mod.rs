@@ -418,6 +418,19 @@ pub struct Config {
     /// such a paste shows a confirm overlay first. A security feature — set
     /// `false` to paste multi-line content without confirmation.
     pub paste_warn_multiline: bool,
+    /// Capture typed commands into the (in-memory) command history that feeds the
+    /// Ctrl+Shift+P palette + the history sidebar. `true` (default) records
+    /// echoed commands (passwords + inline secrets are excluded/redacted
+    /// upstream). Set `false` for a no-history privacy posture; the
+    /// per-session Incognito toggle forces this off regardless.
+    #[serde(default = "default_true")]
+    pub history_capture_enabled: bool,
+}
+
+/// serde default for boolean fields that should default to `true` when absent
+/// from an older on-disk config (so upgrading never silently disables a feature).
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -444,6 +457,7 @@ impl Default for Config {
             ligatures: false,
             copy_on_select: false,
             paste_warn_multiline: true,
+            history_capture_enabled: true,
         }
     }
 }

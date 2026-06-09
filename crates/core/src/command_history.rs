@@ -111,6 +111,17 @@ impl CommandHistory {
         self.entries.is_empty()
     }
 
+    /// Clear the history, zeroizing each stored command first. Recorded commands
+    /// may contain sensitive arguments, so the backing buffers are wiped (not
+    /// just dropped) when the user clears history or starts an incognito session.
+    pub fn clear(&mut self) {
+        use zeroize::Zeroize;
+        for entry in &mut self.entries {
+            entry.zeroize();
+        }
+        self.entries.clear();
+    }
+
     /// Fuzzy-search the history. An empty query returns every entry in
     /// most-recent-first order. Results are OWNED strings so a caller can hold
     /// them across a mutable borrow of the surrounding UI state (the egui

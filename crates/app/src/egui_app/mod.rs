@@ -199,6 +199,10 @@ pub struct C0pl4ndApp {
     /// Enter in the overlay sends it (through the paste-injection guard); Esc
     /// discards it.
     pending_paste: Option<String>,
+    /// Incognito session: when `true`, NO typed commands are recorded into
+    /// command history (regardless of `config.history_capture_enabled`). Runtime
+    /// only — never persisted, so it always starts off and resets each launch.
+    incognito: bool,
     /// Whether the command palette overlay is open.
     palette_open: bool,
     /// Whether the command-history quick-run sidebar (`#21`) is open. A docked
@@ -440,6 +444,7 @@ impl C0pl4ndApp {
             cmd_history: c0pl4nd_core::command_history::CommandHistory::default(),
             input_line: String::new(),
             pending_paste: None,
+            incognito: false,
             palette_open: false,
             history_open: false,
             history_filter: String::new(),
@@ -1263,8 +1268,17 @@ impl C0pl4ndApp {
         // Theme-derived palette so the settings window fill + headings follow
         // the active theme along with the rest of the chrome.
         let colors = theme::ChromeColors::from_theme(&self.theme);
-        let outcome = settings::show(ctx, &mut self.config, &mut open, colors);
+        let outcome = settings::show(ctx, &mut self.config, &mut open, colors, self.incognito);
         self.settings_open = open;
+
+        // Privacy-section actions (runtime, not config): handle before the
+        // config-changed persistence below.
+        if outcome.clear_history {
+            self.clear_command_history();
+        }
+        if let Some(on) = outcome.set_incognito {
+            self.set_incognito(on);
+        }
 
         if outcome.changed {
             // Reload the terminal grid's color theme so a theme change shows in
@@ -1449,6 +1463,10 @@ impl C0pl4ndApp {
     /// Inline secrets that ARE echoed (`--password=…`, `API_KEY=…`) are redacted
     /// downstream by [`c0pl4nd_core::command_history::redact_secrets`].
     fn should_record_history(&self, line: &str) -> bool {
+        // Privacy controls: capture disabled in settings, or an incognito session.
+        if !self.config.history_capture_enabled || self.incognito {
+            return false;
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return false;
@@ -1831,6 +1849,28 @@ impl C0pl4ndApp {
     #[allow(dead_code)]
     pub fn command_history_entries(&self) -> Vec<String> {
         self.cmd_history.entries().map(str::to_string).collect()
+    }
+
+    /// Clear all recorded command history now (the buffers are zeroized). Wired
+    /// to the Privacy settings "Clear command history" button.
+    pub fn clear_command_history(&mut self) {
+        self.cmd_history.clear();
+    }
+
+    /// Whether this session is in incognito mode (no command-history capture).
+    #[allow(dead_code)]
+    pub fn is_incognito(&self) -> bool {
+        self.incognito
+    }
+
+    /// Toggle incognito (no-history) for this session. Runtime-only; never
+    /// persisted. Entering incognito also clears any already-recorded history so
+    /// the switch is a clean break.
+    pub fn set_incognito(&mut self, on: bool) {
+        self.incognito = on;
+        if on {
+            self.cmd_history.clear();
+        }
     }
 
     /// The command most recently run from the palette, if any. Observation

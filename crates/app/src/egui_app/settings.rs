@@ -53,6 +53,7 @@ const CATEGORIES: &[&str] = &[
     "Terminal",
     "Window",
     "Keybindings",
+    "Privacy",
     "Updates",
 ];
 
@@ -104,6 +105,12 @@ pub struct Outcome {
     /// host should additionally reload the terminal grid's color theme so the
     /// change shows in the live panes, not only the chrome.
     pub theme_changed: bool,
+    /// The user clicked "Clear command history" in the Privacy section — the host
+    /// should clear (and zeroize) the in-memory command history.
+    pub clear_history: bool,
+    /// The user toggled the Incognito switch this frame, to the contained value.
+    /// `None` when unchanged. Runtime-only (not a config field).
+    pub set_incognito: Option<bool>,
 }
 
 /// Whether a category section should render: its own tab when not searching, or
@@ -213,9 +220,13 @@ pub fn show(
     config: &mut Config,
     open: &mut bool,
     colors: ChromeColors,
+    incognito: bool,
 ) -> Outcome {
     let mut changed = false;
     let mut keep_open = *open;
+    // Privacy-section actions accumulated this frame (reported via Outcome).
+    let mut clear_history = false;
+    let mut set_incognito: Option<bool> = None;
 
     // Selected category + search query survive across frames via ctx temp-data
     // (the SCR1B3 pattern) so the window remembers where the user was.
@@ -382,7 +393,16 @@ pub fn show(
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            changed |= render_sections(ui, config, &updater, sel, &q);
+                            changed |= render_sections(
+                                ui,
+                                config,
+                                &updater,
+                                sel,
+                                &q,
+                                incognito,
+                                &mut clear_history,
+                                &mut set_incognito,
+                            );
                         });
                 });
             });
@@ -401,6 +421,8 @@ pub fn show(
     Outcome {
         changed,
         theme_changed: changed && config.theme != theme_before,
+        clear_history,
+        set_incognito,
     }
 }
 
@@ -408,12 +430,16 @@ pub fn show(
 /// query. The single most impactful "un-cramp" change is setting
 /// `item_spacing` to 8 px vertical (vs egui's default 3 px) at the top; section
 /// gaps add a further 14 px of breathing room.
+#[allow(clippy::too_many_arguments)]
 fn render_sections(
     ui: &mut egui::Ui,
     config: &mut Config,
     updater: &Arc<Mutex<Updater>>,
     sel: &str,
     q: &str,
+    incognito: bool,
+    clear_history: &mut bool,
+    set_incognito: &mut Option<bool>,
 ) -> bool {
     let mut changed = false;
     // Un-cramp every row + give buttons comfier hit targets (the load-bearing
@@ -1284,6 +1310,69 @@ fn render_sections(
                 )));
             }
         }
+        group_gap(ui);
+    }
+
+    // ---- Privacy ----
+    if section_visible(
+        sel,
+        q,
+        "Privacy",
+        &["history", "incognito", "clear", "secret"],
+    ) {
+        ui.heading("Privacy");
+        help(
+            ui,
+            "C0PL4ND is local-first: no telemetry, no accounts. The only network \
+             connection is the opt-in update check. Command history is kept in \
+             memory only (never written to disk).",
+        );
+        ui.add_space(6.0);
+
+        changed |= ui
+            .toggle_value(
+                &mut config.history_capture_enabled,
+                "Record command history",
+            )
+            .on_hover_text(
+                "Capture typed commands for the Ctrl+Shift+P palette + the history \
+                 sidebar. Passwords typed at prompts are never captured (they are \
+                 not echoed); inline secrets like --password=… / API_KEY=… are \
+                 redacted. Turn off for a no-history posture.",
+            )
+            .changed();
+        changed |= reset_to_default(
+            ui,
+            &mut config.history_capture_enabled,
+            &def.history_capture_enabled,
+        );
+
+        ui.add_space(6.0);
+
+        // Incognito is RUNTIME state (never persisted) owned by the host; reflect
+        // it and report a toggle back via `set_incognito`.
+        let mut inc = incognito;
+        if ui
+            .toggle_value(&mut inc, "Incognito session (no history)")
+            .on_hover_text(
+                "Stop recording command history for THIS session and clear what is \
+                 already recorded. Resets to off on the next launch.",
+            )
+            .changed()
+        {
+            *set_incognito = Some(inc);
+        }
+
+        ui.add_space(6.0);
+
+        if ui
+            .button("Clear command history now")
+            .on_hover_text("Erase (zeroize) every recorded command immediately.")
+            .clicked()
+        {
+            *clear_history = true;
+        }
+
         group_gap(ui);
     }
 
