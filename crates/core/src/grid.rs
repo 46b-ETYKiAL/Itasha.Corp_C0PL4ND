@@ -73,7 +73,13 @@ impl CellFlags {
 }
 
 /// A single grid cell.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Deliberately `Copy`: every field is a small `Copy` scalar/enum. Combining
+/// marks / variation selectors (the only heap-allocating per-position state)
+/// live in a `Grid`-side parallel table ([`Grid::combining`]) keyed by cell
+/// index, NOT on the cell — this keeps `Cell` cheap to clone (the visible grid
+/// is snapshotted every render frame) and shrinks scrollback `Vec<Cell>` RSS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
     pub c: char,
     pub fg: Color,
@@ -84,43 +90,6 @@ pub struct Cell {
     /// `flags.underline_style != UnderlineStyle::None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub underline_color: Option<Color>,
-    /// Combining marks / variation selectors appended to the base grapheme
-    /// (C27 / C34). `None` (the common case) means the cell holds just `c`. When
-    /// present, the rendered grapheme is `c` followed by these chars. Bounded to
-    /// [`Cell::MAX_COMBINING`] chars so a hostile stream cannot grow it without
-    /// limit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub combining: Option<String>,
-}
-
-impl Cell {
-    /// Maximum combining marks appended to a single base grapheme. Past this,
-    /// further zero-width marks are dropped (a Stream-cannot-exhaust-memory
-    /// bound; real text never stacks this many).
-    pub const MAX_COMBINING: usize = 8;
-
-    /// Append a zero-width combining mark (or variation selector) to this cell's
-    /// base grapheme, up to [`Cell::MAX_COMBINING`]. No-op past the cap.
-    pub fn push_combining(&mut self, mark: char) {
-        let s = self.combining.get_or_insert_with(String::new);
-        if s.chars().count() < Self::MAX_COMBINING {
-            s.push(mark);
-        }
-    }
-
-    /// The full grapheme this cell renders: the base char plus any combining
-    /// marks. Allocates only when combining marks are present.
-    pub fn grapheme(&self) -> String {
-        match &self.combining {
-            Some(extra) => {
-                let mut g = String::with_capacity(1 + extra.len());
-                g.push(self.c);
-                g.push_str(extra);
-                g
-            }
-            None => self.c.to_string(),
-        }
-    }
 }
 
 impl Default for Cell {
@@ -131,7 +100,6 @@ impl Default for Cell {
             bg: Color::Default,
             flags: CellFlags::empty(),
             underline_color: None,
-            combining: None,
         }
     }
 }
@@ -159,9 +127,23 @@ pub struct Grid {
     /// glyph's base cell (for attaching combining marks, C27). Length is always
     /// `rows * cols`. Parallel to `cells`.
     continuation: Vec<bool>,
+    /// Per-cell combining marks / variation selectors appended to the base
+    /// grapheme (C27 / C34). `combining[idx] == None` (the common case) means
+    /// the cell at `idx` renders just its base char. When present, the rendered
+    /// grapheme is `cells[idx].c` followed by these chars. Bounded to
+    /// [`Grid::MAX_COMBINING`] chars per cell so a hostile stream cannot grow it
+    /// without limit. Length is always `rows * cols`. Parallel to `cells` — held
+    /// here, off the [`Cell`], so `Cell` stays `Copy` (the visible grid is
+    /// cloned every render frame; scrollback stores `Vec<Cell>` rows).
+    combining: Vec<Option<String>>,
 }
 
 impl Grid {
+    /// Maximum combining marks appended to a single base grapheme. Past this,
+    /// further zero-width marks are dropped (a stream-cannot-exhaust-memory
+    /// bound; real text never stacks this many).
+    pub const MAX_COMBINING: usize = 8;
+
     pub fn new(rows: usize, cols: usize) -> Self {
         let rows = rows.max(1);
         let cols = cols.max(1);
@@ -172,6 +154,7 @@ impl Grid {
             row_dirty: vec![true; rows],
             wrapped: vec![false; rows],
             continuation: vec![false; rows * cols],
+            combining: vec![None; rows * cols],
         }
     }
 
@@ -217,21 +200,48 @@ impl Grid {
     pub fn set_continuation(&mut self, row: usize, col: usize, cell: Cell) {
         if row < self.rows && col < self.cols {
             let i = self.idx(row, col);
-            if self.cells[i] != cell || !self.continuation[i] {
+            if self.cells[i] != cell || !self.continuation[i] || self.combining[i].is_some() {
                 self.cells[i] = cell;
                 self.continuation[i] = true;
+                // A fresh write is its own base grapheme — drop any prior marks.
+                self.combining[i] = None;
                 self.mark_row(row);
             }
         }
     }
 
     /// Append a combining mark / variation selector to the base grapheme at
-    /// `(row, col)` (C27 / C34). No-op out of bounds or past the per-cell cap.
+    /// `(row, col)` (C27 / C34). No-op out of bounds or past the per-cell cap
+    /// ([`Grid::MAX_COMBINING`]).
     pub fn push_combining_at(&mut self, row: usize, col: usize, mark: char) {
         if row < self.rows && col < self.cols {
             let i = self.idx(row, col);
-            self.cells[i].push_combining(mark);
+            let s = self.combining[i].get_or_insert_with(String::new);
+            if s.chars().count() < Self::MAX_COMBINING {
+                s.push(mark);
+            }
             self.mark_row(row);
+        }
+    }
+
+    /// The full grapheme rendered at `(row, col)`: the base char plus any
+    /// combining marks held in the side-table (C27 / C34). Allocates only when
+    /// combining marks are present. Returns an empty string out of bounds.
+    pub fn grapheme_at(&self, row: usize, col: usize) -> String {
+        if row < self.rows && col < self.cols {
+            let i = self.idx(row, col);
+            let base = self.cells[i].c;
+            match &self.combining[i] {
+                Some(extra) => {
+                    let mut g = String::with_capacity(1 + extra.len());
+                    g.push(base);
+                    g.push_str(extra);
+                    g
+                }
+                None => base.to_string(),
+            }
+        } else {
+            String::new()
         }
     }
 
@@ -294,11 +304,12 @@ impl Grid {
     pub fn set(&mut self, row: usize, col: usize, cell: Cell) {
         if row < self.rows && col < self.cols {
             let i = self.idx(row, col);
-            // A normal write always clears any wide-glyph continuation marker —
-            // the cell is now its own base grapheme.
-            if self.cells[i] != cell || self.continuation[i] {
+            // A normal write always clears any wide-glyph continuation marker AND
+            // any combining marks — the cell is now its own fresh base grapheme.
+            if self.cells[i] != cell || self.continuation[i] || self.combining[i].is_some() {
                 self.cells[i] = cell;
                 self.continuation[i] = false;
+                self.combining[i] = None;
                 self.mark_row(row);
             }
         }
@@ -315,6 +326,9 @@ impl Grid {
         for k in &mut self.continuation {
             *k = false;
         }
+        for m in &mut self.combining {
+            *m = None;
+        }
         self.mark_all();
     }
 
@@ -324,10 +338,12 @@ impl Grid {
         let cols = cols.max(1);
         let mut next = vec![Cell::default(); rows * cols];
         let mut next_cont = vec![false; rows * cols];
+        let mut next_comb: Vec<Option<String>> = vec![None; rows * cols];
         for r in 0..rows.min(self.rows) {
             for c in 0..cols.min(self.cols) {
-                next[r * cols + c] = self.cells[self.idx(r, c)].clone();
+                next[r * cols + c] = self.cells[self.idx(r, c)];
                 next_cont[r * cols + c] = self.continuation[self.idx(r, c)];
+                next_comb[r * cols + c] = self.combining[self.idx(r, c)].clone();
             }
         }
         let mut next_wrapped = vec![false; rows];
@@ -346,6 +362,7 @@ impl Grid {
         self.cells = next;
         self.wrapped = next_wrapped;
         self.continuation = next_cont;
+        self.combining = next_comb;
         // Resize the per-row damage vector to the new height and mark all dirty.
         self.row_dirty = vec![true; self.rows];
     }
@@ -365,6 +382,10 @@ impl Grid {
         self.continuation.drain(0..self.cols);
         self.continuation
             .extend(std::iter::repeat_n(false, self.cols));
+        // Keep the combining side-table parallel: drop the top row's marks, add
+        // a blank (mark-free) bottom row.
+        self.combining.drain(0..self.cols);
+        self.combining.extend(std::iter::repeat_n(None, self.cols));
         // Shift wrap flags up by one; the new bottom row starts unwrapped.
         if !self.wrapped.is_empty() {
             self.wrapped.remove(0);
@@ -396,12 +417,14 @@ impl Grid {
             let src = r + n;
             for c in 0..self.cols {
                 let dst = self.idx(r, c);
-                let cell = if src <= bottom {
-                    self.cells[self.idx(src, c)].clone()
+                let (cell, comb) = if src <= bottom {
+                    let s = self.idx(src, c);
+                    (self.cells[s], self.combining[s].clone())
                 } else {
-                    Cell::default()
+                    (Cell::default(), None)
                 };
                 self.cells[dst] = cell;
+                self.combining[dst] = comb;
             }
             self.wrapped[r] = if src <= bottom {
                 self.wrapped[src]
@@ -429,12 +452,14 @@ impl Grid {
         for r in (top..=bottom).rev() {
             for c in 0..self.cols {
                 let dst = self.idx(r, c);
-                let cell = if r >= top + n {
-                    self.cells[self.idx(r - n, c)].clone()
+                let (cell, comb) = if r >= top + n {
+                    let s = self.idx(r - n, c);
+                    (self.cells[s], self.combining[s].clone())
                 } else {
-                    Cell::default()
+                    (Cell::default(), None)
                 };
                 self.cells[dst] = cell;
+                self.combining[dst] = comb;
             }
             self.wrapped[r] = if r >= top + n {
                 self.wrapped[r - n]
@@ -456,12 +481,14 @@ impl Grid {
         // Shift right: walk from the right edge inward.
         for c in (col..self.cols).rev() {
             let dst = self.idx(row, c);
-            let cell = if c >= col + count {
-                self.cells[self.idx(row, c - count)].clone()
+            let (cell, comb) = if c >= col + count {
+                let s = self.idx(row, c - count);
+                (self.cells[s], self.combining[s].clone())
             } else {
-                Cell::default()
+                (Cell::default(), None)
             };
             self.cells[dst] = cell;
+            self.combining[dst] = comb;
         }
         self.mark_row(row);
     }
@@ -475,12 +502,14 @@ impl Grid {
         let count = count.min(self.cols - col);
         for c in col..self.cols {
             let dst = self.idx(row, c);
-            let cell = if c + count < self.cols {
-                self.cells[self.idx(row, c + count)].clone()
+            let (cell, comb) = if c + count < self.cols {
+                let s = self.idx(row, c + count);
+                (self.cells[s], self.combining[s].clone())
             } else {
-                Cell::default()
+                (Cell::default(), None)
             };
             self.cells[dst] = cell;
+            self.combining[dst] = comb;
         }
         self.mark_row(row);
     }
@@ -494,6 +523,7 @@ impl Grid {
         for c in col..end {
             let dst = self.idx(row, c);
             self.cells[dst] = Cell::default();
+            self.combining[dst] = None;
         }
         self.mark_row(row);
     }
@@ -702,36 +732,117 @@ mod tests {
     }
 
     #[test]
-    fn cell_default_has_no_underline_color_or_combining() {
+    fn cell_default_has_no_underline_color() {
         let c = Cell::default();
         assert_eq!(c.underline_color, None);
-        assert_eq!(c.combining, None);
-        assert_eq!(c.grapheme(), " ");
+        // The grapheme of a fresh grid cell is just its base char (no marks).
+        let g = Grid::new(1, 1);
+        assert_eq!(g.grapheme_at(0, 0), " ");
     }
 
-    // ---- C27 / C34: combining marks on a cell ----
+    // ---- Cell is Copy / size shrink ----
 
+    /// `Cell` must be `Copy` (compile-time): the visible grid is cloned every
+    /// render frame and scrollback stores `Vec<Cell>` rows — a non-`Copy` cell
+    /// (the old `combining: Option<String>` field) forced a deep clone of every
+    /// heap string per frame.
+    #[test]
+    fn cell_is_copy_and_small() {
+        const _: () = {
+            const fn _assert_copy<T: Copy>() {}
+            _assert_copy::<Cell>();
+        };
+        // Combining marks moved to the Grid side-table, so Cell holds only
+        // small Copy scalars/enums. Assert the struct stayed compact.
+        assert!(
+            std::mem::size_of::<Cell>() <= 32,
+            "Cell grew past 32 bytes: {}",
+            std::mem::size_of::<Cell>()
+        );
+    }
+
+    // ---- C27 / C34: combining marks via the Grid side-table ----
+
+    /// A combining mark pushed via the grid round-trips through `grapheme_at`.
     #[test]
     fn push_combining_builds_grapheme() {
-        let mut c = Cell {
-            c: 'e',
-            ..Default::default()
-        };
-        c.push_combining('\u{0301}'); // combining acute accent
-        assert_eq!(c.grapheme(), "e\u{0301}");
+        let mut g = Grid::new(1, 4);
+        g.set(0, 0, cell('e'));
+        g.push_combining_at(0, 0, '\u{0301}'); // combining acute accent
+        assert_eq!(g.grapheme_at(0, 0), "e\u{0301}");
     }
 
+    /// The per-cell combining cap ([`Grid::MAX_COMBINING`]) is enforced.
     #[test]
     fn push_combining_is_bounded() {
-        let mut c = Cell {
-            c: 'x',
-            ..Default::default()
-        };
-        for _ in 0..(Cell::MAX_COMBINING + 5) {
-            c.push_combining('\u{0301}');
+        let mut g = Grid::new(1, 1);
+        g.set(0, 0, cell('x'));
+        for _ in 0..(Grid::MAX_COMBINING + 5) {
+            g.push_combining_at(0, 0, '\u{0301}');
         }
-        let count = c.combining.as_ref().unwrap().chars().count();
-        assert_eq!(count, Cell::MAX_COMBINING, "combining marks cap enforced");
+        // grapheme = base char + exactly MAX_COMBINING marks.
+        let count = g.grapheme_at(0, 0).chars().count() - 1;
+        assert_eq!(count, Grid::MAX_COMBINING, "combining marks cap enforced");
+    }
+
+    /// A normal `set` at a cell that already holds combining marks clears them —
+    /// the cell becomes a fresh base grapheme.
+    #[test]
+    fn set_clears_existing_combining() {
+        let mut g = Grid::new(1, 2);
+        g.set(0, 0, cell('e'));
+        g.push_combining_at(0, 0, '\u{0301}');
+        assert_eq!(g.grapheme_at(0, 0), "e\u{0301}");
+        g.set(0, 0, cell('z'));
+        assert_eq!(g.grapheme_at(0, 0), "z", "set drops prior combining marks");
+    }
+
+    /// The combining side-table is threaded through cell-moving mutations EXACTLY
+    /// parallel to `cells`: a mark survives a whole-grid scroll onto the row it
+    /// moves to. This is the load-bearing correctness proof for the side-table.
+    #[test]
+    fn combining_survives_whole_grid_scroll() {
+        let mut g = Grid::new(3, 4);
+        g.set(1, 2, cell('e'));
+        g.push_combining_at(1, 2, '\u{0301}');
+        assert_eq!(g.grapheme_at(1, 2), "e\u{0301}");
+        // Whole-grid scroll-up: row 1 content moves to row 0.
+        g.scroll_up();
+        assert_eq!(
+            g.grapheme_at(0, 2),
+            "e\u{0301}",
+            "combining mark followed its cell up one row"
+        );
+        // The vacated bottom row carries no stale marks.
+        assert_eq!(g.grapheme_at(2, 2), " ");
+    }
+
+    /// Same proof for a bounded region scroll (`scroll_region_up`): the mark
+    /// shifts up within the region exactly as the base char does.
+    #[test]
+    fn combining_survives_region_scroll() {
+        let mut g = Grid::new(4, 4);
+        g.set(2, 1, cell('a'));
+        g.push_combining_at(2, 1, '\u{0302}'); // combining circumflex
+                                               // Scroll rows 1..=3 up by 1: row 2 content moves to row 1.
+        let _ = g.scroll_region_up(1, 3, 1);
+        assert_eq!(
+            g.grapheme_at(1, 1),
+            "a\u{0302}",
+            "combining mark shifted up within the scroll region"
+        );
+    }
+
+    /// `delete_chars` shifts the combining side-table left in lockstep with the
+    /// base cells.
+    #[test]
+    fn combining_shifts_with_delete_chars() {
+        let mut g = Grid::new(1, 5);
+        g.set(0, 2, cell('m'));
+        g.push_combining_at(0, 2, '\u{0303}'); // combining tilde
+                                               // Delete 2 cells at col 0 — the marked cell shifts from col 2 to col 0.
+        g.delete_chars(0, 0, 2);
+        assert_eq!(g.grapheme_at(0, 0), "m\u{0303}");
     }
 
     // ---- Per-row damage tracking ----
