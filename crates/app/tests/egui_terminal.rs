@@ -383,3 +383,45 @@ fn history_records_echoed_commands_and_skips_leading_space() {
         "a leading-space command must be excluded from history"
     );
 }
+
+/// PRIVACY controls: an incognito session records NO command history, and the
+/// "clear history" action empties it. Drives the public control surface the
+/// Privacy settings page is wired to.
+#[test]
+fn incognito_blocks_history_and_clear_empties_it() {
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    // Incognito ON → a typed+echoed command is NOT recorded.
+    app.borrow_mut().set_incognito(true);
+    type_text(&mut h, "incog_SECRET_cmd");
+    poll_focused_contains(&mut h, &app, "incog_SECRET_cmd", Duration::from_secs(10));
+    press_enter(&mut h);
+    h.step();
+    assert!(
+        app.borrow().command_history_entries().is_empty(),
+        "incognito must record no command history"
+    );
+
+    // Incognito OFF → a command records; clear empties it (zeroized).
+    app.borrow_mut().set_incognito(false);
+    type_text(&mut h, "kept_after_incog");
+    assert!(
+        poll_focused_contains(&mut h, &app, "kept_after_incog", Duration::from_secs(10)),
+        "command echoes after leaving incognito"
+    );
+    press_enter(&mut h);
+    h.step();
+    assert!(
+        app.borrow()
+            .command_history_entries()
+            .iter()
+            .any(|e| e.contains("kept_after_incog")),
+        "leaving incognito resumes history capture"
+    );
+    app.borrow_mut().clear_command_history();
+    assert!(
+        app.borrow().command_history_entries().is_empty(),
+        "clear_command_history empties the history"
+    );
+}
