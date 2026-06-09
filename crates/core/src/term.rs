@@ -670,7 +670,17 @@ impl Screen {
             return;
         }
 
+        // Size-cap BEFORE decoding: a base64 payload is ~4/3 the decoded size, so
+        // reject early when even the encoded length cannot fit under the cap. This
+        // bounds the allocation a hostile multi-megabyte OSC 52 write can force.
+        if payload.len() / 4 * 3 > Self::OSC52_WRITE_MAX_BYTES {
+            return;
+        }
         if let Some(decoded) = base64_decode(payload) {
+            // Drop oversized writes (defence-in-depth vs. the pre-decode check).
+            if decoded.len() > Self::OSC52_WRITE_MAX_BYTES {
+                return;
+            }
             // Wipe the transient decoded byte buffer on drop (P-V3): it holds
             // the plaintext clipboard payload before it is re-encoded into the
             // `ClipboardWrite` (which itself zeroizes on drop). Without this the
@@ -1989,7 +1999,12 @@ impl Perform for Screen {
         match code {
             Some("0") | Some("2") => {
                 if let Some(t) = params.get(1).and_then(|p| std::str::from_utf8(p).ok()) {
-                    self.title = t.to_string();
+                    // Cap the STORED title length. A title is a short window label;
+                    // an escape sequence that stuffs a multi-megabyte OSC 2 string
+                    // is a memory-DoS / desktop-flood vector (CyberArk title-abuse
+                    // class), so retain at most TITLE_MAX_CHARS. The tab strip
+                    // already truncates the DISPLAY; this bounds the stored value.
+                    self.title = t.chars().take(Self::TITLE_MAX_CHARS).collect();
                 }
             }
             Some("7") => {
@@ -2288,6 +2303,14 @@ impl Screen {
     const IMAGES_MAX_BYTES: usize = 64 * 1024 * 1024;
     /// Max retained OSC 8 hyperlink URIs (oldest dropped on overflow).
     const HYPERLINKS_MAX: usize = 4096;
+    /// Max chars retained for the window title (OSC 0/2). A title is a short
+    /// label; a multi-megabyte OSC 2 string is a memory-DoS vector, so the stored
+    /// value is truncated to this length (the tab strip truncates display separately).
+    const TITLE_MAX_CHARS: usize = 512;
+    /// Max bytes of a single OSC 52 clipboard-WRITE payload we accept (after
+    /// base64-decode). A real yank is small; a multi-megabyte OSC 52 write is a
+    /// memory-DoS, so oversized writes are dropped. READ is already default-off.
+    const OSC52_WRITE_MAX_BYTES: usize = 1024 * 1024;
     /// Max retained OSC 133 prompt marks (oldest dropped on overflow).
     const PROMPT_MARKS_MAX: usize = 4096;
     /// Max retained OSC 133 command marks (oldest dropped on overflow).
@@ -3298,6 +3321,80 @@ mod tests {
         let mut t = Terminal::new(2, 40);
         t.advance(b"\x1b]8;;https://itasha.corp\x07link\x1b]8;;\x07");
         assert_eq!(t.hyperlinks(), &["https://itasha.corp".to_string()]);
+    }
+
+    #[test]
+    fn title_is_length_capped() {
+        // A hostile OSC 2 stuffing a huge title must NOT be stored verbatim
+        // (memory-DoS). The stored title is capped to TITLE_MAX_CHARS.
+        let mut t = Terminal::new(2, 40);
+        let mut seq = b"\x1b]2;".to_vec();
+        seq.extend(std::iter::repeat_n(b'A', 100_000));
+        seq.push(0x07);
+        t.advance(&seq);
+        assert!(
+            t.title().chars().count() <= Screen::TITLE_MAX_CHARS,
+            "title must be length-capped (was {})",
+            t.title().chars().count()
+        );
+    }
+
+    #[test]
+    fn osc52_oversized_write_is_dropped() {
+        // A multi-megabyte OSC 52 clipboard write must be dropped, not buffered.
+        let mut t = Terminal::new(2, 40);
+        let big_b64 = "QQ".repeat(1_500_000); // ~3 MB of base64 → >1 MiB decoded
+        let mut seq = b"\x1b]52;c;".to_vec();
+        seq.extend_from_slice(big_b64.as_bytes());
+        seq.push(0x07);
+        t.advance(&seq);
+        assert!(
+            t.take_clipboard_writes().is_empty(),
+            "an oversized OSC 52 write must be dropped"
+        );
+
+        // A small write still works (cap doesn't break the legit feature).
+        t.advance(b"\x1b]52;c;aGVsbG8=\x07"); // base64("hello")
+        assert_eq!(
+            t.take_clipboard_writes().len(),
+            1,
+            "a small OSC 52 write is kept"
+        );
+    }
+
+    /// SECURITY (device-reply echo-to-stdin, the #1 terminal-RCE class —
+    /// CVE-2022-45872 etc.): every reply the terminal queues for the PTY must be
+    /// built ONLY from validated internal state, never reflect attacker-supplied
+    /// request bytes, and must be 7-bit-clean (no embedded C0 controls other than
+    /// the `ESC` / `BEL` / `ST` framing). We feed a battery of malformed
+    /// DECRQSS / XTGETTCAP / OSC-color-query requests carrying hostile bytes and
+    /// assert the drained reply never smuggles a control byte that could be
+    /// echoed onto the shell's stdin as if typed.
+    #[test]
+    fn device_replies_are_7bit_clean_with_no_smuggled_controls() {
+        let inputs: &[&[u8]] = &[
+            b"\x1bP$qm\x1b\\",        // DECRQSS: request SGR
+            b"\x1bP$q\"q\x1b\\",      // DECRQSS: request DECSCA
+            b"\x1bP$q\x07evil\x1b\\", // DECRQSS with an embedded BEL + junk
+            b"\x1bP+q686f7374\x1b\\", // XTGETTCAP: hex name "host"
+            b"\x1bP+q00ff\x1b\\",     // XTGETTCAP: hex decoding to NUL/0xff
+            b"\x1b]10;?\x07",         // OSC 10 foreground color query
+            b"\x1b]11;?\x1b\\",       // OSC 11 background color query (ST-terminated)
+            b"\x1b]4;1;?\x07",        // OSC 4 indexed color query
+        ];
+        for inp in inputs {
+            let mut t = Terminal::new(4, 20);
+            t.advance(inp);
+            let reply = t.take_pty_response();
+            for (i, &b) in reply.iter().enumerate() {
+                let is_framing = b == 0x1b || b == 0x5c || b == 0x07; // ESC, '\', BEL
+                let is_printable = (0x20..=0x7e).contains(&b);
+                assert!(
+                    is_framing || is_printable,
+                    "device reply for {inp:x?} smuggled control byte {b:#04x} at {i}: {reply:x?}"
+                );
+            }
+        }
     }
 
     #[test]
