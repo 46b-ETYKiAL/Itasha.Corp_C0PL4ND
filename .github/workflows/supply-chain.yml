@@ -70,12 +70,10 @@ jobs:
         with:
           tool: cargo-vet
 
-      - name: Cache cargo registry and target
-        # Swatinem/rust-cache@v2.9.1
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
-        with:
-          workspaces: ". -> target"
-          key: cargo-vet
+      # No rust-cache here: `cargo vet --locked` checks the supply-chain config
+      # against Cargo.lock and does NOT compile, so a build cache buys nothing —
+      # and adding Swatinem/rust-cache (LGPL-3.0) to this NEW workflow trips the
+      # dependency-review license gate.
 
       - name: cargo vet (fail on any unvetted dependency)
         # --locked: do not mutate config.toml / imports.lock; fail if a new
