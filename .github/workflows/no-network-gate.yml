@@ -10,6 +10,15 @@ name: No-Network Gate
 # guarantee and FAILS the build. This is a source grep — it needs no toolchain,
 # no checkout of dependencies, and no network itself.
 #
+# BUILD SCRIPTS ARE IN SCOPE. `crates/*/build.rs` files are `.rs` sources under
+# `crates/`, so the `--include='*.rs'` scan below already covers them: a
+# build-time network call (e.g. a build.rs that fetches something during
+# compilation — a supply-chain risk class of its own) is forbidden by the same
+# pattern. The dedicated `build-script-scan` step below makes that coverage an
+# explicit, named, non-skippable assertion rather than an implicit side effect
+# of the tree-wide scan, and pins down that NO build.rs in the workspace
+# performs network I/O.
+#
 # The job ALWAYS runs and the aggregating `no-network-gate` step explicitly
 # inspects the scan result, so a path-filter skip can never silently satisfy a
 # required check (merge-queue-check-gating discipline).
@@ -84,6 +93,42 @@ jobs:
           fi
 
           echo "OK: no network call sites outside the opt-in updater modules."
+
+      - name: Assert build scripts perform no network I/O
+        shell: bash
+        # Build scripts (`build.rs`) run on the BUILD machine during
+        # compilation with full ambient permissions, so a network call there is
+        # a distinct supply-chain risk (compile-time exfiltration / fetch) that
+        # the runtime-modules carve-out above does NOT excuse. No build.rs is
+        # ever permitted to touch the network — there is no allowed updater
+        # exception at build time. This is a redundant, NARROWER assertion over
+        # the same .rs grep, scoped explicitly to build.rs so build-script
+        # coverage is a named gate, not an implicit side effect.
+        run: |
+          set -euo pipefail
+
+          # The same outbound-network signatures forbidden tree-wide, plus
+          # build-script-specific egress vectors (a build.rs that shells out to
+          # curl/wget, or fetches via a downloader, is also a build-time fetch).
+          PATTERN='ureq::|reqwest|TcpStream|TcpListener|UdpSocket|std::net::|tokio::net|curl|wget|reqwest::|Command::new\("curl"\)|Command::new\("wget"\)'
+
+          build_scripts="$(find crates -name 'build.rs' -type f)"
+          echo "== build scripts in scope =="
+          printf '%s\n' "$build_scripts"
+
+          echo "== scanning each build.rs for network call sites (NONE permitted) =="
+          violations="$(grep -rnE --include='build.rs' "$PATTERN" crates/ || true)"
+          violations="$(printf '%s\n' "$violations" | sed '/^$/d' || true)"
+
+          if [ -n "$violations" ]; then
+            echo "::error::Build script network call site(s) found. build.rs MUST NOT perform network I/O (compile-time fetch / exfiltration risk)."
+            printf '%s\n' "$violations" | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit 1
+          fi
+
+          echo "OK: no build.rs in the workspace performs network I/O."
 
   # Aggregating gate so a skipped/cancelled scan cannot pass as a required check.
   no-network-gate:

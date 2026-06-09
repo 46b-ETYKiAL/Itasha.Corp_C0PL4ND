@@ -1,0 +1,102 @@
+name: Supply-Chain Vet
+
+# cargo-vet supply-chain audit gate for C0PL4ND.
+#
+# `cargo vet --locked` asserts that EVERY crate in the dependency graph is
+# accounted for in supply-chain/config.toml — either by a recorded audit, by
+# an entry imported from a shared registry (Mozilla / Google / Bytecode
+# Alliance, declared under [imports]), or by an explicit exemption. A new
+# unvetted dependency (one not covered by any of those) FAILS the build.
+#
+# `--locked` additionally requires supply-chain/imports.lock to be current with
+# respect to the [imports] in config.toml, so a config change that was not
+# accompanied by `cargo vet` (which refreshes the lock) is caught here.
+#
+# The job ALWAYS runs and the aggregating `supply-chain-gate` step explicitly
+# inspects the result, so a path-filter / conditional skip can never silently
+# satisfy a required check (merge-queue-check-gating discipline). All
+# third-party actions are pinned by full commit SHA (version noted alongside),
+# matching the rest of .github/workflows/.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  vet:
+    name: cargo-vet
+    runs-on: ubuntu-latest
+    # ALWAYS run so a conditional skip cannot report success on the merge queue.
+    if: always()
+    steps:
+      - name: Harden the runner (egress audit)
+        # cargo-vet fetches the shared audit registries declared under
+        # [imports]; egress must stay in audit (not block) mode so those
+        # fetches succeed. The fetched URLs are pinned in config.toml and the
+        # resolved set is committed to imports.lock for reproducibility.
+        # step-security/harden-runner@v2.19.4
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        # dtolnay/rust-toolchain @master commit (channel selected via toolchain:)
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: stable
+
+      - name: Install cargo-vet
+        # taiki-e/install-action@v2.79.10 — reproducible prebuilt-tool install.
+        uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09
+        with:
+          tool: cargo-vet
+
+      - name: Cache cargo registry and target
+        # Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          workspaces: ". -> target"
+          key: cargo-vet
+
+      - name: cargo vet (fail on any unvetted dependency)
+        # --locked: do not mutate config.toml / imports.lock; fail if a new
+        # dependency is unaccounted-for OR if imports.lock is stale. A
+        # maintainer refreshes both locally with `cargo vet` (no --locked).
+        run: cargo vet --locked
+
+  # Aggregating gate so a skipped/cancelled vet cannot pass as a required check.
+  supply-chain-gate:
+    name: Supply-Chain Gate
+    runs-on: ubuntu-latest
+    needs: [vet]
+    if: always()
+    steps:
+      - name: Verify the vet succeeded
+        run: |
+          set -euo pipefail
+          result="${{ needs.vet.result }}"
+          echo "vet = ${result}"
+          if [ "${result}" != "success" ]; then
+            echo "::error::cargo vet did not succeed (result=${result}). An unvetted dependency was introduced, or imports.lock is out of date (run \`cargo vet\` to refresh)."
+            exit 1
+          fi
+          echo "Supply-chain vet passed: all dependencies are vetted, imported, or exempted."
