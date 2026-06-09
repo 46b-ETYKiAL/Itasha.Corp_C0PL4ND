@@ -110,6 +110,16 @@ fn main() -> eframe::Result<()> {
     };
     prefer_backend_on_windows(&mut options, launch_transparency_enabled());
 
+    // Lower the wgpu present queue to ONE frame of latency (eframe's default is
+    // 2): a terminal is latency-sensitive (keystroke → glyph), and one in-flight
+    // frame shaves a frame off input-to-display lag. We deliberately do NOT force
+    // a Mailbox/AutoNoVsync present mode (the dead legacy-winit path at
+    // window.rs did): the egui app is event-driven (the damage-tracked redraw
+    // makes an idle terminal repaint ~0 fps), and Mailbox would force continuous
+    // high-FPS rendering, undoing that power win. The default vsync present mode
+    // is correct for an on-demand repainter.
+    options.wgpu_options.desired_maximum_frame_latency = Some(1);
+
     eframe::run_native(
         "C0PL4ND",
         options,
