@@ -342,3 +342,44 @@ fn singleline_paste_reaches_the_pty() {
         "a single-line paste must reach the PTY and be echoed into the grid"
     );
 }
+
+/// PRIVACY (command-history capture): a line the user typed that the shell
+/// ECHOED is recorded in history; a line prefixed with a SPACE is excluded
+/// (HISTCONTROL=ignorespace). This also exercises the echo-gate: a recorded
+/// line must have appeared in the focused grid.
+#[test]
+fn history_records_echoed_commands_and_skips_leading_space() {
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    // Type an echoed (but not executed elsewhere) token, then Enter. The shell
+    // echoes it onto the prompt line, so the echo-gate records it.
+    type_text(&mut h, "echohist_KEEP");
+    // Make sure the echo has landed in the grid before committing.
+    assert!(
+        poll_focused_contains(&mut h, &app, "echohist_KEEP", Duration::from_secs(10)),
+        "the typed command must be echoed before Enter"
+    );
+    press_enter(&mut h);
+    h.step();
+    assert!(
+        app.borrow()
+            .command_history_entries()
+            .iter()
+            .any(|e| e.contains("echohist_KEEP")),
+        "an echoed typed command must be recorded in history"
+    );
+
+    // A leading-space line must NOT be recorded (ignorespace opt-out).
+    type_text(&mut h, " spacedout_DROP");
+    poll_focused_contains(&mut h, &app, "spacedout_DROP", Duration::from_secs(10));
+    press_enter(&mut h);
+    h.step();
+    assert!(
+        !app.borrow()
+            .command_history_entries()
+            .iter()
+            .any(|e| e.contains("spacedout_DROP")),
+        "a leading-space command must be excluded from history"
+    );
+}
