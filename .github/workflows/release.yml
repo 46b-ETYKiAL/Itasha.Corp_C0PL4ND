@@ -74,6 +74,18 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      - name: Install cargo-auditable
+        # SBOM-in-binary: `cargo auditable build` embeds the dependency tree
+        # (versions + sources) into a `.dep-v0` section of the shipped binary,
+        # so it self-describes and can be audited post-hoc with `cargo audit
+        # bin <binary>` even without the source tree. This is a build-wrapper
+        # only — it does not change the binary's runtime behavior or add a
+        # runtime dependency.
+        # taiki-e/install-action@v2.79.10 — reproducible prebuilt-tool install.
+        uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09
+        with:
+          tool: cargo-auditable
+
       - name: Cache cargo registry and target
         # Swatinem/rust-cache@v2.9.1
         # zizmor: ignore[cache-poisoning]
@@ -103,8 +115,12 @@ jobs:
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libwayland-dev libfontconfig1-dev
 
-      - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin ${{ env.BIN_NAME }}
+      - name: Build release binary (with embedded SBOM)
+        # `cargo auditable build` is a drop-in wrapper for `cargo build` that
+        # embeds the dependency tree into the binary (auditable post-hoc via
+        # `cargo audit bin`). Same flags as a plain release build; runtime
+        # behavior is unchanged.
+        run: cargo auditable build --release --locked --target ${{ matrix.target }} --bin ${{ env.BIN_NAME }}
 
       - name: Determine version
         id: version
