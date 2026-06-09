@@ -14,6 +14,11 @@
 // (the `win_snap.rs` Win32 subclass is NOT compiled into `c0pl4nd-egui`).
 #![forbid(unsafe_code)]
 
+// mimalloc as the global allocator (see crates/app/Cargo.toml) — the
+// declaration is safe; no `unsafe` needed, so `forbid(unsafe_code)` stands.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[path = "egui_app/mod.rs"]
 mod egui_app;
 #[path = "update/mod.rs"]

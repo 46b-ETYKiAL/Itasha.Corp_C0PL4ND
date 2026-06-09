@@ -18,6 +18,11 @@ use std::time::{Duration, Instant};
 
 use c0pl4nd_core::{Config, Session};
 
+// mimalloc as the global allocator (see crates/app/Cargo.toml) — matches the
+// canonical `c0pl4nd` binary so both bins share the same allocator behaviour.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
