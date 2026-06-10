@@ -229,11 +229,13 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Install cargo-cyclonedx
-        # taiki-e/install-action@v2.79.10
-        uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154
-        with:
-          tool: cargo-cyclonedx
+      - name: Install cargo-cyclonedx (version-pinned via cargo install)
+        # Pin the SBOM generator to an EXACT version with `--locked` so the SBOM
+        # tooling itself is reproducible release-to-release (a moving installer
+        # tag could silently change the CycloneDX spec version or output shape).
+        # `cargo install --locked` builds from crates.io against the tool's own
+        # committed Cargo.lock — no surprise transitive drift.
+        run: cargo install cargo-cyclonedx --locked --version 0.5.7
 
       - name: Generate CycloneDX SBOM
         run: |
@@ -252,18 +254,55 @@ jobs:
           # Fail loudly if no SBOM was produced (don't ship a release missing it).
           test "$(find sbom -name '*.cdx.json' | wc -l)" -gt 0
 
+      - name: Record toolchain build-provenance (rustc -vV + pin hash)
+        # Reproducible-build provenance text artifact. Captures the EXACT compiler
+        # identity (`rustc -vV` → version, commit-hash, commit-date, llvm) plus the
+        # committed `rust-toolchain.toml` pin and its SHA-256, so a downstream
+        # verifier can confirm which toolchain produced a given release. This is
+        # the plain-text complement to the SLSA attestation: human-readable, and
+        # it survives even when the attestation infra is unavailable.
+        run: |
+          set -euo pipefail
+          mkdir -p sbom
+          prov="sbom/BUILD-PROVENANCE.txt"
+          {
+            echo "C0PL4ND build provenance"
+            echo "tag: ${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+            echo "commit: ${GITHUB_SHA}"
+            echo "generated-at-utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo
+            echo "=== rustc -vV ==="
+            rustc -vV
+            echo
+            echo "=== cargo --version ==="
+            cargo --version
+            echo
+            echo "=== rust-toolchain.toml (pinned channel) ==="
+            if [ -f rust-toolchain.toml ]; then
+              cat rust-toolchain.toml
+              echo
+              echo "rust-toolchain.toml sha256: $(sha256sum rust-toolchain.toml | cut -d' ' -f1)"
+            else
+              echo "(rust-toolchain.toml not present)"
+            fi
+          } > "$prov"
+          echo "--- ${prov} ---"
+          cat "$prov"
+
       - name: Attest SBOM provenance
         # actions/attest-build-provenance@v4.1.0
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
         with:
           subject-path: "sbom/*.cdx.json"
 
-      - name: Upload SBOM artifact
+      - name: Upload SBOM + build-provenance artifact
         # actions/upload-artifact@v4.6.2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: sbom
-          path: sbom/*.cdx.json
+          path: |
+            sbom/*.cdx.json
+            sbom/BUILD-PROVENANCE.txt
           if-no-files-found: error
 
   # --------------------------------------------------------------------------
@@ -417,7 +456,7 @@ jobs:
           set -euo pipefail
           mkdir -p release
           find artifacts -type f \
-            \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name '*.sha256' -o -name '*.cdx.json' \) \
+            \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name '*.sha256' -o -name '*.cdx.json' -o -name 'BUILD-PROVENANCE.txt' \) \
             -exec cp {} release/ \;
           ( cd release && cat *.sha256 > SHA256SUMS 2>/dev/null || true )
           ls -la release
