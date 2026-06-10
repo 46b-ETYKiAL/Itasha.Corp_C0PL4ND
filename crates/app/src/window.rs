@@ -2226,30 +2226,83 @@ impl App {
     }
 
     /// On launch, restore the saved `default` workspace if present (fresh
-    /// shells); otherwise leave the single pane spawn_tab created.
+    /// shells); otherwise leave the single pane `spawn_tab` created.
+    ///
+    /// Corruption guard (F4-2): the restore distinguishes the three states the
+    /// user must perceive differently:
+    ///
+    /// * **Absent** — no saved file. Normal first-launch / never-saved case:
+    ///   start fresh **silently** (the `spawn_tab` default is already correct).
+    /// * **Corrupt** — a file exists but is unparseable / semantically invalid /
+    ///   unreadable. Degrade gracefully to the fresh default tab, **surface a
+    ///   "session restore failed — started fresh" notice**, AND quarantine the
+    ///   corrupt file aside (`<file>.corrupt-<hash8>`) so it is neither silently
+    ///   re-loaded on the next launch nor destroyed (preserved for debugging).
+    /// * **Restored** — a valid file; re-materialise it when it carries a real
+    ///   multi-pane / multi-tab / saved-cwd layout (a lone single-pane tab is
+    ///   identical to the fresh tab we already have).
     fn restore_default_workspace_on_startup(&mut self) {
         let Some(path) = Self::workspace_path("default") else {
             return;
         };
-        if !path.exists() {
-            return;
+        match layout_persist::WorkspaceSnapshot::load_outcome(&path) {
+            // Normal: nothing saved yet — start fresh, no notice.
+            layout_persist::RestoreOutcome::Absent => {}
+            // Corrupt: degrade gracefully, tell the user, quarantine the file.
+            layout_persist::RestoreOutcome::Corrupt { reason } => {
+                self.handle_corrupt_workspace(&path, &reason);
+            }
+            layout_persist::RestoreOutcome::Restored(restored) => {
+                // Restore when there's something to restore: more than one
+                // window tab, any multi-pane tab, or any saved working
+                // directory. A lone single-pane tab with no cwd is identical to
+                // the fresh tab we already have.
+                let interesting = restored.tabs.len() > 1
+                    || restored.tabs.iter().any(|t| {
+                        t.layout.leaf_count() > 1 || t.leaves.iter().any(|(_, v)| v.cwd.is_some())
+                    });
+                if interesting {
+                    self.materialize_workspace(restored);
+                }
+            }
         }
-        // Load the multi-tab workspace (a v1 single-layout file migrates to a
-        // 1-tab workspace; a corrupt file falls back to a single default tab).
-        let ws = layout_persist::WorkspaceSnapshot::load(&path);
-        let Ok(restored) = ws.restore_all() else {
-            return;
-        };
-        // Restore when there's something to restore: more than one window tab,
-        // any multi-pane tab, or any saved working directory. A lone single-pane
-        // tab with no cwd is identical to the fresh tab we already have.
-        let interesting = restored.tabs.len() > 1
-            || restored.tabs.iter().any(|t| {
-                t.layout.leaf_count() > 1 || t.leaves.iter().any(|(_, v)| v.cwd.is_some())
-            });
-        if interesting {
-            self.materialize_workspace(restored);
+    }
+
+    /// Degrade a corrupt-restore gracefully: keep the fresh default session,
+    /// surface a non-fatal "session restore failed — started fresh" notice on
+    /// the startup overlay, and quarantine the corrupt file aside so it is not
+    /// silently re-loaded next launch (but is preserved for debugging — never
+    /// deleted). Best-effort: a quarantine IO failure is logged, never fatal.
+    fn handle_corrupt_workspace(&mut self, path: &std::path::Path, reason: &str) {
+        // Privacy (F2): the reason can embed the corrupt file's parse position
+        // but never the user-chosen workspace name or the username-bearing path,
+        // so it is safe to log at WARN for diagnosis.
+        tracing::warn!("session restore failed ({reason}); starting fresh");
+        match layout_persist::quarantine_corrupt(path) {
+            Ok(dest) => tracing::info!(
+                "corrupt workspace quarantined ({} bytes path)",
+                dest.as_os_str().len()
+            ),
+            // Quarantine is best-effort — the app has already fallen back to a
+            // fresh session, so a rename failure is non-fatal.
+            Err(e) => tracing::warn!("could not quarantine corrupt workspace: {e}"),
         }
+        self.arm_restore_failed_notice();
+    }
+
+    /// Arm the user-facing "session restore failed" notice, reusing the existing
+    /// startup-splash overlay (dismissed on the first keypress — the same
+    /// transient-notice surface as the neofetch panel). Prepended above any
+    /// existing splash so the notice is the first thing the user reads; if no
+    /// splash is armed (e.g. `startup_panel` disabled), the notice stands alone.
+    fn arm_restore_failed_notice(&mut self) {
+        const NOTICE: &str = "  ⚠  session restore failed — started fresh\n  \
+             (your saved layout could not be read; a copy was kept for debugging)\n";
+        match self.splash.take() {
+            Some(existing) => self.splash = Some(format!("{NOTICE}\n{existing}")),
+            None => self.splash = Some(NOTICE.to_string()),
+        }
+        self.request_redraw();
     }
 
     /// Discover the saved workspace names (file stems under the workspaces dir).

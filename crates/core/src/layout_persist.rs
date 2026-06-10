@@ -557,6 +557,123 @@ impl WorkspaceSnapshot {
         let src = std::fs::read_to_string(path).map_err(|e| LoadError::Io(e.to_string()))?;
         Self::from_json(&src)
     }
+
+    /// Load a workspace from `path`, distinguishing the three load states the
+    /// UI must treat differently:
+    ///
+    /// * [`RestoreOutcome::Absent`] — no file exists. This is the **normal**
+    ///   first-launch / never-saved case; the app starts fresh **silently**.
+    /// * [`RestoreOutcome::Corrupt`] — a file exists but could not be parsed or
+    ///   failed semantic validation (truncated/malformed JSON, an unknown
+    ///   format version, an out-of-range index, an over-cap or empty tree). The
+    ///   app starts fresh AND must surface a "session restore failed — started
+    ///   fresh" notice so the user knows their saved layout was dropped, not
+    ///   lost to a bug. The `reason` is a human-readable [`LoadError`] message.
+    /// * [`RestoreOutcome::Restored`] — a valid file fully reconstructed.
+    ///
+    /// Unlike [`WorkspaceSnapshot::load`] (which collapses absent and corrupt
+    /// into the same silent single-tab fallback), this never panics and never
+    /// loses the absent/corrupt distinction. The caller decides whether to
+    /// surface a notice and whether to quarantine via [`quarantine_corrupt`].
+    #[must_use]
+    pub fn load_outcome(path: &Path) -> RestoreOutcome {
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            // A missing file is the normal "nothing saved yet" case — Absent,
+            // never Corrupt, so a fresh start is silent.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RestoreOutcome::Absent,
+            // Any other IO failure (permission, unreadable) is a real failure
+            // the user should be told about — treat as Corrupt with the reason.
+            Err(e) => {
+                return RestoreOutcome::Corrupt {
+                    reason: LoadError::Io(e.to_string()).to_string(),
+                }
+            }
+        };
+        match Self::from_json(&src).and_then(|ws| ws.restore_all()) {
+            Ok(restored) => RestoreOutcome::Restored(restored),
+            Err(e) => RestoreOutcome::Corrupt {
+                reason: e.to_string(),
+            },
+        }
+    }
+}
+
+/// The outcome of attempting to restore a persisted workspace, distinguishing
+/// the three states the UI treats differently (see
+/// [`WorkspaceSnapshot::load_outcome`]). This is the **total** restore surface:
+/// every persisted file resolves to exactly one of these variants, and none of
+/// them ever panics.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RestoreOutcome {
+    /// A valid file fully reconstructed into a live workspace.
+    Restored(RestoredWorkspace),
+    /// A file existed but was corrupt (unparseable, semantically invalid, or
+    /// unreadable). The app should start fresh AND surface a "restore failed"
+    /// notice. `reason` is a human-readable [`LoadError`] description.
+    Corrupt {
+        /// Human-readable description of why the restore failed.
+        reason: String,
+    },
+    /// No file existed — the normal first-launch / never-saved case. The app
+    /// starts fresh **silently** (no notice).
+    Absent,
+}
+
+impl RestoreOutcome {
+    /// `true` for the [`RestoreOutcome::Corrupt`] variant — the only state that
+    /// warrants a user-facing "restore failed" notice.
+    #[must_use]
+    pub fn is_corrupt(&self) -> bool {
+        matches!(self, RestoreOutcome::Corrupt { .. })
+    }
+
+    /// The corruption reason, or `None` for the non-corrupt variants.
+    #[must_use]
+    pub fn corrupt_reason(&self) -> Option<&str> {
+        match self {
+            RestoreOutcome::Corrupt { reason } => Some(reason.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// Quarantine a corrupt workspace file by renaming it aside to
+/// `<file>.corrupt-<hash8>` so it is **not silently re-loaded** on the next
+/// launch (which would re-surface the same notice forever) but is **preserved
+/// for debugging** (never deleted — user data is never destroyed). The `<hash8>`
+/// suffix is the first 8 hex chars of a stable FNV-1a hash of the file's bytes,
+/// so re-running on an unchanged file targets the same quarantine name (no
+/// proliferation) while two distinct corrupt files get distinct names.
+///
+/// Returns the quarantine path on success. A best-effort operation: an IO
+/// failure (e.g. the file vanished, or the destination is unwritable) returns
+/// the [`LoadError::Io`] so the caller may log it, but is never fatal — the app
+/// has already fallen back to a fresh session by the time this is called.
+pub fn quarantine_corrupt(path: &Path) -> Result<std::path::PathBuf, LoadError> {
+    let bytes = std::fs::read(path).map_err(|e| LoadError::Io(e.to_string()))?;
+    let hash = fnv1a_hash8(&bytes);
+    // Append a `.corrupt-<hash8>` suffix to the existing file name, keeping the
+    // original extension(s) intact in the stem so the provenance is obvious.
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".corrupt-{hash}"));
+    let dest = path.with_file_name(name);
+    std::fs::rename(path, &dest).map_err(|e| LoadError::Io(e.to_string()))?;
+    Ok(dest)
+}
+
+/// First 8 hex chars of a 64-bit FNV-1a hash of `bytes`. Stable, dependency-free
+/// (no RNG, no external crate), and good enough to disambiguate distinct corrupt
+/// files in a quarantine name — not a security primitive.
+fn fnv1a_hash8(bytes: &[u8]) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h = FNV_OFFSET;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    format!("{:08x}", (h >> 32) as u32)
 }
 
 /// The result of restoring a [`WorkspaceSnapshot`]: one [`RestoredLayout`] per
@@ -1194,5 +1311,216 @@ mod tests {
         let back = WorkspaceSnapshot::from_json(&json).unwrap();
         let restored = back.restore_all().unwrap();
         assert_eq!(restored.tabs[0].leaves[0].1.scrollback, Some(lines));
+    }
+
+    // --- restore-outcome corruption guard (F4-2) -------------------------
+
+    /// A unique temp path per test invocation so the suite is parallel-safe.
+    fn unique_tmp(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "c0pl4nd-outcome-{}-{}-{tag}.json",
+            std::process::id(),
+            n
+        ))
+    }
+
+    #[test]
+    fn load_outcome_absent_file_is_absent_not_corrupt() {
+        let missing = unique_tmp("absent");
+        let _ = std::fs::remove_file(&missing);
+        let outcome = WorkspaceSnapshot::load_outcome(&missing);
+        assert_eq!(outcome, RestoreOutcome::Absent);
+        assert!(!outcome.is_corrupt(), "an absent file is NOT corrupt");
+        assert_eq!(outcome.corrupt_reason(), None);
+    }
+
+    #[test]
+    fn load_outcome_malformed_json_is_corrupt_with_reason() {
+        let tmp = unique_tmp("malformed");
+        std::fs::write(&tmp, "this is { not ] valid json").unwrap();
+        let outcome = WorkspaceSnapshot::load_outcome(&tmp);
+        assert!(
+            outcome.is_corrupt(),
+            "malformed JSON must be Corrupt: {outcome:?}"
+        );
+        let reason = outcome.corrupt_reason().expect("a corrupt reason");
+        assert!(!reason.is_empty(), "the reason must be human-readable");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn load_outcome_truncated_json_is_corrupt() {
+        // A valid workspace JSON cut off mid-structure (the classic
+        // crash-during-save / partial-write corruption shape).
+        let tmp = unique_tmp("truncated");
+        let ws = WorkspaceSnapshot::from_tabs(vec![snap_of(2, |_| LeafView::single())], 0);
+        let full = ws.to_json().unwrap();
+        let truncated = &full[..full.len() / 2];
+        std::fs::write(&tmp, truncated).unwrap();
+        let outcome = WorkspaceSnapshot::load_outcome(&tmp);
+        assert!(
+            outcome.is_corrupt(),
+            "truncated JSON must be Corrupt: {outcome:?}"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn load_outcome_unknown_version_is_corrupt() {
+        let tmp = unique_tmp("badversion");
+        // A wrapper-shaped file with an unknown future version → Corrupt.
+        let json = r#"{ "version": 999, "tabs": [ { "version": 1, "root": { "kind": "leaf", "view": { "tab_count": 1, "active": 0 } }, "focused_ordinal": 0 } ], "active": 0 }"#;
+        std::fs::write(&tmp, json).unwrap();
+        let outcome = WorkspaceSnapshot::load_outcome(&tmp);
+        assert!(
+            outcome.is_corrupt(),
+            "unknown version must be Corrupt: {outcome:?}"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn load_outcome_over_cap_tree_is_corrupt() {
+        // A semantically-invalid tree (over MAX_PANES) that parses as JSON but
+        // fails validation → Corrupt, not a silent drop.
+        let tmp = unique_tmp("overcap");
+        let mut children = Vec::new();
+        for _ in 0..(MAX_PANES + 1) {
+            children.push(ChildView {
+                flex: 1.0,
+                node: NodeView::Leaf {
+                    view: LeafView::single(),
+                },
+            });
+        }
+        let bad_tab = LayoutSnapshot {
+            version: LayoutSnapshot::VERSION,
+            root: NodeView::Split {
+                axis: Axis::Horizontal,
+                children,
+            },
+            focused_ordinal: 0,
+        };
+        let ws = WorkspaceSnapshot {
+            version: WorkspaceSnapshot::VERSION,
+            tabs: vec![bad_tab],
+            active: 0,
+        };
+        std::fs::write(&tmp, ws.to_json().unwrap()).unwrap();
+        let outcome = WorkspaceSnapshot::load_outcome(&tmp);
+        assert!(
+            outcome.is_corrupt(),
+            "over-cap tree must be Corrupt: {outcome:?}"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn load_outcome_out_of_range_active_is_coerced_and_restored() {
+        // An out-of-range active index is COERCED (clamped) on load, not
+        // rejected — a recoverable defect, so the outcome is Restored.
+        let tmp = unique_tmp("oob-active");
+        let ws = WorkspaceSnapshot {
+            version: WorkspaceSnapshot::VERSION,
+            tabs: vec![snap_of(2, |_| LeafView::single())],
+            active: 99, // out of range
+        };
+        std::fs::write(&tmp, ws.to_json().unwrap()).unwrap();
+        let outcome = WorkspaceSnapshot::load_outcome(&tmp);
+        match outcome {
+            RestoreOutcome::Restored(r) => {
+                assert_eq!(r.active, 0, "out-of-range active clamps to the last tab");
+                assert_eq!(r.tabs.len(), 1);
+            }
+            other => panic!("expected coerced Restored, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn load_outcome_valid_file_round_trips_to_restored() {
+        let tmp = unique_tmp("valid");
+        let ws = WorkspaceSnapshot::from_tabs(
+            vec![
+                snap_of(2, |_| LeafView::single()),
+                snap_of(3, |_| LeafView::single()),
+            ],
+            1,
+        );
+        ws.save_atomic(&tmp).expect("save");
+        let outcome = WorkspaceSnapshot::load_outcome(&tmp);
+        match outcome {
+            RestoreOutcome::Restored(r) => {
+                assert_eq!(r.tabs.len(), 2);
+                assert_eq!(r.active, 1);
+                assert_eq!(r.tabs[0].layout.leaf_count(), 2);
+                assert_eq!(r.tabs[1].layout.leaf_count(), 3);
+            }
+            other => panic!("expected Restored, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn quarantine_renames_corrupt_file_aside_without_deleting_data() {
+        let tmp = unique_tmp("quarantine");
+        let body = "this is { not ] valid json";
+        std::fs::write(&tmp, body).unwrap();
+
+        let dest = quarantine_corrupt(&tmp).expect("quarantine");
+
+        // The original path is gone (so it won't be re-loaded next launch)...
+        assert!(
+            !tmp.exists(),
+            "the corrupt file is moved aside, not left in place"
+        );
+        // ...but the data is preserved at the quarantine path (never deleted).
+        assert!(dest.exists(), "the quarantine file exists for debugging");
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            body,
+            "data preserved verbatim"
+        );
+        // The quarantine name carries the `.corrupt-<hash8>` provenance suffix.
+        let dest_name = dest.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(dest_name.contains(".corrupt-"), "got {dest_name}");
+
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[test]
+    fn quarantine_hash_is_stable_for_same_bytes() {
+        let a = unique_tmp("stable-a");
+        let b = unique_tmp("stable-b");
+        let body = "identical corrupt bytes";
+        std::fs::write(&a, body).unwrap();
+        std::fs::write(&b, body).unwrap();
+
+        let da = quarantine_corrupt(&a).expect("quarantine a");
+        let db = quarantine_corrupt(&b).expect("quarantine b");
+
+        // Same bytes → same `.corrupt-<hash8>` suffix (deterministic, no RNG).
+        let sa = da.file_name().unwrap().to_string_lossy();
+        let sb = db.file_name().unwrap().to_string_lossy();
+        let suffix_a = sa.rsplit(".corrupt-").next().unwrap();
+        let suffix_b = sb.rsplit(".corrupt-").next().unwrap();
+        assert_eq!(suffix_a, suffix_b, "stable hash for identical bytes");
+
+        let _ = std::fs::remove_file(&da);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn quarantine_missing_file_errors_but_does_not_panic() {
+        let missing = unique_tmp("quarantine-absent");
+        let _ = std::fs::remove_file(&missing);
+        // Best-effort: a missing file yields an Io error, never a panic.
+        assert!(matches!(
+            quarantine_corrupt(&missing),
+            Err(LoadError::Io(_))
+        ));
     }
 }
