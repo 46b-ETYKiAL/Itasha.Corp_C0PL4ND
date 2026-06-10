@@ -245,6 +245,20 @@ fn clear_saved_ui_state() -> String {
     }
 }
 
+/// F5-2: open `path` in the OS file manager (reveal-in-folder / open-with-
+/// default-app). Uses the platform opener via `std::process` — no `unsafe`, no
+/// network. Best-effort: a spawn failure is ignored (worst case the user
+/// navigates to the shown path manually). Consistent with a terminal emulator
+/// that already spawns child processes.
+fn reveal_in_file_manager(path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+}
+
 /// Render the settings window. `open` is toggled false when the user closes it
 /// (via the egui Window's built-in ✕). Returns the [`Outcome`] for this frame so
 /// the host can persist + re-apply the theme.
@@ -512,6 +526,9 @@ fn render_sections(
             "scanlines",
             "scanline darkness",
             "chromatic aberration",
+            "ui scale",
+            "zoom",
+            "accessibility",
         ],
     ) {
         ui.heading("Appearance");
@@ -689,6 +706,26 @@ fn render_sections(
                         .changed();
                     changed |= reset_to_default(ui, &mut config.tint_strength, &def.tint_strength);
                 });
+                ui.end_row();
+            }
+
+            // ---- UI scale (F2-3): persisted accessibility zoom for the UI ----
+            // Placed AFTER opacity + tint so the existing slider-order assertions
+            // in egui_settings.rs (opacity = slider 0, tint = slider 1) hold.
+            if row_visible(q, "ui scale zoom accessibility size") {
+                ui.label("UI scale").on_hover_text(
+                    "Accessibility zoom for the WHOLE interface (chrome + grid), \
+                     persisted across launches. 1.0 = 100%. (Ctrl+/- also zooms, \
+                     but is not saved.)",
+                );
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut config.ui_scale, 0.5..=3.0)
+                            .fixed_decimals(2)
+                            .suffix("×"),
+                    )
+                    .changed();
+                changed |= reset_to_default(ui, &mut config.ui_scale, &def.ui_scale);
                 ui.end_row();
             }
 
@@ -1178,6 +1215,49 @@ fn render_sections(
                 egui::Color32::from_rgb(0xff, 0xb0, 0x00),
                 format!("\u{26a0} {}", issue.message()),
             );
+        }
+        group_gap(ui);
+    }
+
+    // --------------------------------------------------------------------- Config
+    if section_visible(
+        sel,
+        q,
+        "Config",
+        &[
+            "config", "file", "folder", "open", "reveal", "path", "edit", "toml",
+        ],
+    ) {
+        ui.heading("Config");
+        if let Some(path) = c0pl4nd_core::Config::default_path() {
+            help(
+                ui,
+                "Settings are saved to a single TOML file. Open its folder to back \
+                 it up or hand-edit it.",
+            );
+            ui.label(
+                egui::RichText::new(path.display().to_string())
+                    .weak()
+                    .small()
+                    .monospace(),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Open config folder").clicked() {
+                    if let Some(dir) = path.parent() {
+                        // Create the dir if it does not exist yet (zero-config
+                        // start) so "reveal" always lands somewhere real.
+                        let _ = std::fs::create_dir_all(dir);
+                        reveal_in_file_manager(dir);
+                    }
+                }
+                // Only offer "open file" when it actually exists — opening a
+                // non-existent path just fails silently.
+                if path.exists() && ui.button("Open config file").clicked() {
+                    reveal_in_file_manager(&path);
+                }
+            });
+        } else {
+            help(ui, "No config path is available on this platform.");
         }
         group_gap(ui);
     }
