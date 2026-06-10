@@ -650,9 +650,12 @@ impl C0pl4ndApp {
 
     /// Trim a raw OSC title and cap it to [`Self::MAX_TAB_TITLE`] CHARACTERS
     /// (not bytes — a multi-byte glyph is never split), appending `…` when the
-    /// title was actually shortened.
+    /// title was actually shortened. The raw title is first run through
+    /// [`scrub_display_text`] so a hostile program/SSH host cannot inject bidi,
+    /// zero-width, or control characters into the tab label.
     fn cap_tab_title(raw: &str) -> String {
-        let trimmed = raw.trim();
+        let scrubbed = scrub_display_text(raw);
+        let trimmed = scrubbed.trim();
         if trimmed.chars().count() <= Self::MAX_TAB_TITLE {
             trimmed.to_string()
         } else {
@@ -3045,6 +3048,48 @@ fn cell_at_pos(pos: egui::Pos2, origin: egui::Pos2, cw: f32, ch: f32) -> Option<
     Some((row, col))
 }
 
+/// Strip characters that are dangerous to render in app chrome from `s`,
+/// returning a cleaned copy. A program (or a remote SSH host) controls the OSC
+/// 0/2 terminal title and any OSC-8 / detected hyperlink URI; rendering those
+/// strings verbatim in a tab label or link preview is a spoofing surface
+/// (bidi-override "evil.com<U+202E>gpj.exe", zero-width obfuscation, embedded
+/// control codes). This is a WHITELIST: we keep ordinary printable text — including
+/// non-ASCII printable glyphs (accented Latin, CJK, emoji) — and drop only the
+/// dangerous set:
+///
+/// - C0 controls `U+0000..=U+001F` and `U+007F`, and C1 controls
+///   `U+0080..=U+009F`. For a one-line chrome label there is no legitimate
+///   `\t`/`\n`/`\r`, so all control chars (including those) are removed.
+/// - Bidirectional formatting: the embeddings/overrides `U+202A..=U+202E`
+///   (LRE/RLE/PDF/LRO/RLO), the isolates `U+2066..=U+2069`
+///   (LRI/RLI/FSI/PDI), and the marks `U+200E`/`U+200F` (LRM/RLM).
+/// - Zero-width: `U+200B..=U+200D` (ZWSP/ZWNJ/ZWJ) and `U+FEFF` (ZWNBSP / BOM).
+///
+/// `pub(crate)` so any future chrome path that shows attacker-controlled text
+/// (e.g. an OSC-8 hyperlink-URI preview) can reuse the exact same filter.
+pub(crate) fn scrub_display_text(s: &str) -> String {
+    s.chars()
+        .filter(|&c| {
+            // Drop all control characters (C0 + DEL + C1). `char::is_control`
+            // covers U+0000..=U+001F, U+007F, and U+0080..=U+009F.
+            if c.is_control() {
+                return false;
+            }
+            !matches!(
+                c,
+                // Bidi embeddings / overrides + isolates + marks.
+                '\u{202A}'..='\u{202E}'
+                    | '\u{2066}'..='\u{2069}'
+                    | '\u{200E}'
+                    | '\u{200F}'
+                    // Zero-width joiners/non-joiners/space + BOM/ZWNBSP.
+                    | '\u{200B}'..='\u{200D}'
+                    | '\u{FEFF}'
+            )
+        })
+        .collect()
+}
+
 /// The URL whose cell span covers grid cell `(row, col)`, or `None`. Scans the
 /// precomputed `(CellSpan, url)` links (built by
 /// [`C0pl4ndApp::cell_spans_for_hyperlinks`]); the column test is half-open
@@ -4352,6 +4397,64 @@ mod tests {
         assert!(
             capped.ends_with('…') && capped.starts_with('b'),
             "the truncated title keeps the leading chars and ends with an ellipsis"
+        );
+    }
+
+    /// `scrub_display_text` removes the bidi/zero-width/control spoofing set but
+    /// preserves ordinary printable text, including non-ASCII printable glyphs.
+    #[test]
+    fn scrub_display_text_strips_dangerous_and_keeps_printable() {
+        // RLO bidi override (the classic "evil.com\u{202E}gpj.exe" spoof).
+        assert_eq!(
+            scrub_display_text("evil.com\u{202E}gpj.exe"),
+            "evil.comgpj.exe",
+            "the RLO bidi override is removed"
+        );
+        // Zero-width space.
+        assert_eq!(
+            scrub_display_text("ab\u{200B}cd"),
+            "abcd",
+            "the zero-width space is removed"
+        );
+        // A bidi isolate (FSI here, in the U+2066..=U+2069 range).
+        assert_eq!(
+            scrub_display_text("x\u{2066}y\u{2069}z"),
+            "xyz",
+            "bidi isolates are removed"
+        );
+        // A C0 control (BEL).
+        assert_eq!(
+            scrub_display_text("title\u{07}here"),
+            "titlehere",
+            "the C0 BEL control char is removed"
+        );
+        // The whole dangerous set at once, plus other family members.
+        assert_eq!(
+            scrub_display_text(
+                "\u{202A}\u{202D}\u{200E}\u{200F}\u{200C}\u{200D}\u{FEFF}\u{2068}clean\u{0000}\u{009F}"
+            ),
+            "clean",
+            "embeddings, marks, joiners, BOM, isolate, NUL, and C1 are all removed"
+        );
+        // Printable text — ASCII, accented Latin, and CJK — is PRESERVED.
+        assert_eq!(
+            scrub_display_text("café 日本語 ~/projects"),
+            "café 日本語 ~/projects",
+            "ordinary printable text including non-ASCII is preserved verbatim"
+        );
+        // A clean string is returned unchanged.
+        assert_eq!(scrub_display_text("vim"), "vim", "clean input is a no-op");
+    }
+
+    /// The scrub is applied at the `cap_tab_title` display boundary, so a tab
+    /// label can never carry a bidi/zero-width/control spoof even before
+    /// trimming and capping run.
+    #[test]
+    fn cap_tab_title_scrubs_spoofing_chars() {
+        assert_eq!(
+            C0pl4ndApp::cap_tab_title("  evil.com\u{202E}gpj.exe\u{200B}  "),
+            "evil.comgpj.exe",
+            "the tab label is scrubbed of bidi/zero-width chars then trimmed"
         );
     }
 
