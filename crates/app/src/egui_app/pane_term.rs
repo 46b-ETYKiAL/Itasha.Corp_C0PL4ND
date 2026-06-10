@@ -24,7 +24,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use c0pl4nd_core::term::{encode_key, KeyModifiers, LogicalKey, MouseMode};
+use c0pl4nd_core::term::{
+    encode_key, encode_key_kitty, KeyEventKind, KeyModifiers, LogicalKey, MouseMode,
+};
 use c0pl4nd_core::{Session, Theme};
 
 /// A foreground colour run: a string of consecutive same-colour glyphs and the
@@ -307,11 +309,63 @@ impl PaneTerm {
         let _ = session.write_input(&bytes);
     }
 
-    /// Encode a logical key + modifiers via the SHARED core encoder and write
-    /// the resulting bytes to the PTY. Returns the bytes written (empty when the
-    /// key encodes nothing or the session is dead) so tests can assert exactly
-    /// what reached the wire.
+    /// The terminal's current kitty-keyboard-protocol flags (`0` = not
+    /// negotiated → legacy encoding). Locks the terminal briefly, mirroring
+    /// [`app_cursor`](Self::app_cursor), and returns `0` when there is no live
+    /// session or the lock is poisoned.
+    fn kitty_flags(&self) -> u8 {
+        let Some(session) = &self.session else {
+            return 0;
+        };
+        session
+            .terminal()
+            .lock()
+            .map(|t| t.kitty_keyboard_flags())
+            .unwrap_or(0)
+    }
+
+    /// Whether the focused program negotiated the kitty REPORT-EVENT-TYPES
+    /// flag (bit 2). The egui input loop reads this to decide whether to also
+    /// forward key RELEASE / REPEAT events (default: press-only).
+    pub fn kitty_reports_event_types(&self) -> bool {
+        self.kitty_flags() & 2 != 0
+    }
+
+    /// Encode a key PRESS via the SHARED core encoder and write the bytes to the
+    /// PTY. Thin wrapper over [`forward_key_event`](Self::forward_key_event) so
+    /// existing callers (and tests) that only deal in presses are unchanged.
     pub fn forward_key(&mut self, key: &LogicalKey, mods: KeyModifiers) -> Vec<u8> {
+        self.forward_key_event(key, mods, KeyEventKind::Press)
+    }
+
+    /// Encode a key event (press / repeat / release) and write the resulting
+    /// bytes to the PTY. Returns the bytes written (empty when the key encodes
+    /// nothing or the session is dead) so tests can assert exactly what reached
+    /// the wire.
+    ///
+    /// When the running program negotiated the kitty keyboard protocol
+    /// (`kitty_flags() != 0`), the CSI-u encoder is tried first and used when it
+    /// produces a sequence; otherwise the encoding falls back to the legacy
+    /// [`encode_key`] (which only ever encodes presses — a release with no kitty
+    /// encoding yields no bytes).
+    pub fn forward_key_event(
+        &mut self,
+        key: &LogicalKey,
+        mods: KeyModifiers,
+        kind: KeyEventKind,
+    ) -> Vec<u8> {
+        let flags = self.kitty_flags();
+        if flags != 0 {
+            if let Some(bytes) = encode_key_kitty(key, mods, flags, kind) {
+                self.write_bytes(&bytes);
+                return bytes;
+            }
+        }
+        // Legacy fallback. Only presses and repeats produce legacy bytes; a
+        // release with no kitty encoding writes nothing.
+        if kind == KeyEventKind::Release {
+            return Vec::new();
+        }
         let app_cursor = self.app_cursor();
         match encode_key(key, app_cursor, mods) {
             Some(bytes) => {

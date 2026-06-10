@@ -934,11 +934,20 @@ impl C0pl4ndApp {
     /// frame. Returns the bytes forwarded (for tests that drive the real input
     /// path and assert what reached the PTY).
     fn forward_input_to_focused(&mut self, ctx: &egui::Context) -> Vec<u8> {
-        use c0pl4nd_core::term::{KeyModifiers, LogicalKey};
+        use c0pl4nd_core::term::{KeyEventKind, KeyModifiers, LogicalKey};
+
+        // When the focused program negotiated the kitty keyboard protocol with
+        // REPORT-EVENT-TYPES (bit2), ALSO forward key RELEASE and REPEAT events;
+        // otherwise keep the legacy press-only behavior. Read the flag once.
+        let report_event_types = self
+            .terms
+            .get(&self.focused_pane)
+            .map(|t| t.kitty_reports_event_types())
+            .unwrap_or(false);
 
         // Collect input events under the immutable input borrow first, THEN
         // mutate the PTY (egui forbids re-entrant input borrows).
-        let mut keys: Vec<(LogicalKey, KeyModifiers)> = Vec::new();
+        let mut keys: Vec<(LogicalKey, KeyModifiers, KeyEventKind)> = Vec::new();
         let mut pastes: Vec<String> = Vec::new();
         ctx.input(|i| {
             let mods = KeyModifiers {
@@ -953,15 +962,28 @@ impl C0pl4ndApp {
                     // is held so a shortcut chord (Ctrl+C etc.) is handled by the
                     // Key event below, not double-sent as raw text.
                     egui::Event::Text(t) if !mods.ctrl && !mods.logo => {
-                        keys.push((LogicalKey::Text(t.clone()), mods));
+                        keys.push((LogicalKey::Text(t.clone()), mods, KeyEventKind::Press));
                     }
                     egui::Event::Paste(s) => pastes.push(s.clone()),
                     egui::Event::Key {
                         key,
-                        pressed: true,
+                        pressed,
+                        repeat,
                         modifiers,
                         ..
                     } => {
+                        // Press-only by default; with REPORT-EVENT-TYPES also
+                        // forward releases and distinguish repeats.
+                        if !*pressed && !report_event_types {
+                            continue;
+                        }
+                        let kind = if !*pressed {
+                            KeyEventKind::Release
+                        } else if *repeat {
+                            KeyEventKind::Repeat
+                        } else {
+                            KeyEventKind::Press
+                        };
                         let m = KeyModifiers {
                             ctrl: modifiers.ctrl,
                             alt: modifiers.alt,
@@ -969,7 +991,7 @@ impl C0pl4ndApp {
                             logo: modifiers.command || modifiers.mac_cmd,
                         };
                         if let Some(lk) = egui_key_to_logical(*key, m) {
-                            keys.push((lk, m));
+                            keys.push((lk, m, kind));
                         }
                     }
                     _ => {}
@@ -993,8 +1015,15 @@ impl C0pl4ndApp {
 
         let mut forwarded: Vec<u8> = Vec::new();
         if let Some(term) = self.terms.get_mut(&self.focused_pane) {
-            for (lk, m) in &keys {
-                forwarded.extend(term.forward_key(lk, *m));
+            for (lk, m, kind) in &keys {
+                // The common press path goes through the stable `forward_key`
+                // wrapper; repeats/releases (kitty REPORT-EVENT-TYPES) take the
+                // full event form.
+                forwarded.extend(if *kind == KeyEventKind::Press {
+                    term.forward_key(lk, *m)
+                } else {
+                    term.forward_key_event(lk, *m, *kind)
+                });
             }
         }
 
@@ -1024,7 +1053,12 @@ impl C0pl4ndApp {
         // Ordinary printable characters (incl. Space) arrive as `LogicalKey::Text`
         // (egui delivers them via `Event::Text`); only the special keys below are
         // `LogicalKey` variants, so this captures the full typed line.
-        for (lk, _m) in &keys {
+        for (lk, _m, kind) in &keys {
+            // Releases never accrue typed-line content (a released Enter must not
+            // re-commit the line). Presses and repeats do.
+            if *kind == KeyEventKind::Release {
+                continue;
+            }
             match lk {
                 LogicalKey::Text(t) => {
                     // Ctrl-letter chords arrive here as a single C0 control byte
