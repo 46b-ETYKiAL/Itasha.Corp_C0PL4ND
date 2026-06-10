@@ -6,6 +6,17 @@
 //! renderer uploads as a texture. Decoding is pure and dependency-free so it is
 //! fully unit-testable without a GPU.
 
+/// Per-axis ceiling (px) for a decoded inline image. Bounds the declared
+/// `IHDR`/header dimensions of a Kitty `f=100` PNG so a tiny highly-compressed
+/// payload cannot declare an enormous surface (decompression bomb). Generous for
+/// any real terminal image; `MAX_SIXEL_PIXELS` (16 Mpx) bounds the Sixel path.
+const MAX_IMAGE_DIM: u32 = 8192;
+
+/// Total allocation ceiling (bytes) the PNG decoder may use, enforced DURING
+/// decode (before the full surface is allocated). 256 MiB caps even an
+/// 8192×8192×4 (256 MiB) worst case at the dimension limit.
+const MAX_IMAGE_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+
 /// A decoded image: tightly-packed RGBA8, row-major, `width * height * 4` bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedImage {
@@ -294,7 +305,22 @@ pub fn decode_kitty(format: u16, width: usize, height: usize, raw: &[u8]) -> Opt
             })
         }
         100 => {
-            let dynimg = image::load_from_memory_with_format(raw, image::ImageFormat::Png).ok()?;
+            // PNG (Kitty `f=100`). SECURITY: a tiny, highly-compressed PNG can
+            // declare enormous dimensions (e.g. 30000×30000×4 ≈ 3.4 GB RGBA) — a
+            // decompression bomb reachable from ANY program printing a Kitty
+            // graphics escape (fully untrusted input). The 8 MiB compressed-input
+            // cap upstream does NOT bound the decoded surface. Decode through the
+            // limit-aware `ImageReader` so the dimension + allocation ceilings are
+            // enforced DURING decode, before the surface is allocated — mirroring
+            // the in-house Sixel path's `MAX_SIXEL_PIXELS` guard.
+            let mut reader =
+                image::ImageReader::with_format(std::io::Cursor::new(raw), image::ImageFormat::Png);
+            let mut limits = image::Limits::default();
+            limits.max_image_width = Some(MAX_IMAGE_DIM);
+            limits.max_image_height = Some(MAX_IMAGE_DIM);
+            limits.max_alloc = Some(MAX_IMAGE_ALLOC_BYTES);
+            reader.limits(limits);
+            let dynimg = reader.decode().ok()?;
             let rgba8 = dynimg.to_rgba8();
             let (w, h) = (rgba8.width() as usize, rgba8.height() as usize);
             Some(DecodedImage {
@@ -311,6 +337,61 @@ pub fn decode_kitty(format: u16, width: usize, height: usize, raw: &[u8]) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CRC-32 (PNG/zlib polynomial) over a chunk's type+data — for building test
+    /// PNGs with a valid IHDR.
+    fn png_crc32(bytes: &[u8]) -> u32 {
+        let mut crc: u32 = 0xFFFF_FFFF;
+        for &b in bytes {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        crc ^ 0xFFFF_FFFF
+    }
+
+    /// A minimal PNG whose IHDR DECLARES `w × h` (8-bit RGBA), with a valid IHDR
+    /// CRC but no real pixel data. A limit-aware decoder rejects it at the IHDR
+    /// dimension check — before allocating — so it models a decompression bomb
+    /// (tiny payload, enormous declared surface).
+    fn png_declaring_dims(w: u32, h: u32) -> Vec<u8> {
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(b"IHDR");
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit, RGBA, deflate, none, no-interlace
+        let crc = png_crc32(&ihdr);
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&13u32.to_be_bytes()); // IHDR data length
+        png.extend_from_slice(&ihdr); // "IHDR" + 13 data bytes
+        png.extend_from_slice(&crc.to_be_bytes());
+        png
+    }
+
+    /// SECURITY: a Kitty `f=100` PNG that declares dimensions beyond the decode
+    /// ceiling is rejected (returns `None`) instead of allocating a multi-GB
+    /// surface — the image-decompression-bomb guard. (A legitimate small PNG
+    /// still decoding through the limit-aware path is covered by
+    /// `decode_kitty_f100_decodes_png`.)
+    #[test]
+    fn kitty_png_oversized_dimensions_are_rejected() {
+        let bomb = png_declaring_dims(30000, 30000); // ~3.4 GB RGBA if honoured
+        assert!(
+            decode_kitty(100, 0, 0, &bomb).is_none(),
+            "a PNG declaring 30000x30000 must be rejected by the decode limit"
+        );
+        // A dimension just past the cap is also rejected.
+        let over = png_declaring_dims(MAX_IMAGE_DIM + 1, 1);
+        assert!(
+            decode_kitty(100, 0, 0, &over).is_none(),
+            "width > MAX_IMAGE_DIM rejected"
+        );
+    }
 
     #[test]
     fn sixel_single_column_sets_pixels() {
