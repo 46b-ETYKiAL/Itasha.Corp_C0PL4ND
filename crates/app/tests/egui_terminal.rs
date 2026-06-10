@@ -465,3 +465,44 @@ fn grid_text_is_exposed_to_accesskit_screen_readers() {
          no accessible node carried the marker '{token}'"
     );
 }
+
+/// IME COMPOSITION (F3-1): a CJK / complex-script IME routes composed text
+/// through `egui::Event::Ime(ImeEvent::Commit(..))` — NOT `Event::Text` — so
+/// without an `Event::Ime` arm in `forward_input_to_focused`, CJK input never
+/// reaches the shell. This test drives the REAL frame loop, fires a `Commit`
+/// event carrying a CJK string into the focused pane, and asserts the committed
+/// text reaches that pane's REAL terminal grid (the shell echoes typed input).
+/// Proves the IME-commit → PTY → grid round-trip. Guarded with the same
+/// no-live-PTY skip as the ASCII round-trip test so it never falsely greens on
+/// a box without a usable shell.
+#[test]
+fn ime_commit_reaches_the_pty_and_updates_the_grid() {
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    {
+        let a = app.borrow();
+        let focused = a.focused_pane();
+        if a.pane_grid_text(focused).is_none() {
+            eprintln!("no live PTY on this platform; skipping IME-commit round-trip");
+            return;
+        }
+    }
+    let mut h = harness(&app);
+
+    // A CJK composition the user finished composing: the IME delivers the final
+    // result as a single `Commit`. (A real session would also see one or more
+    // `Preedit` events first; those are display-only and need not be simulated
+    // to prove the commit path.) The shell echoes the typed characters back to
+    // the grid, exactly as ASCII `Event::Text` does in the round-trip test.
+    let composed = "日本語";
+    h.event(egui::Event::Ime(egui::ImeEvent::Commit(
+        composed.to_string(),
+    )));
+    h.step();
+
+    let seen = poll_focused_contains(&mut h, &app, composed, Duration::from_secs(8));
+    assert!(
+        seen,
+        "the IME-committed text `{composed}` must reach the PTY and echo into \
+         the focused pane's grid — proves Event::Ime(Commit) → PTY → grid (F3-1)"
+    );
+}
