@@ -123,7 +123,7 @@ startup_panel = true   # set false to launch straight to a clean prompt
 
 ## Keybindings
 
-C0PL4ND ships with sensible default keybindings (open the **command palette** to discover available actions and their current shortcuts). You can override any binding here. Bindings are simple `key = action` entries; defaults you don't override stay active.
+C0PL4ND ships with sensible default keybindings (open the **command palette** to discover available actions and their current shortcuts). For a scannable table of every default binding, see **[docs/KEYBINDINGS.md](docs/KEYBINDINGS.md)**. You can override any binding here. Bindings are simple `key = action` entries; defaults you don't override stay active.
 
 ```toml
 [keybindings]

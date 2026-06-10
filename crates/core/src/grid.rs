@@ -44,12 +44,16 @@ pub enum UnderlineStyle {
 /// Per-cell rendition attributes. Dependency-free flag set (serde-friendly).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CellFlags {
+    /// Bold / increased-intensity rendition (SGR `1`).
     pub bold: bool,
+    /// Italic rendition (SGR `3`).
     pub italic: bool,
     /// Styled-underline selection (C20). `UnderlineStyle::None` means no
     /// underline. Use [`CellFlags::underline`] for a plain on/off check.
     pub underline_style: UnderlineStyle,
+    /// Reverse-video rendition: foreground and background are swapped (SGR `7`).
     pub inverse: bool,
+    /// Strikethrough / crossed-out rendition (SGR `9`).
     pub strikeout: bool,
 }
 
@@ -81,9 +85,13 @@ impl CellFlags {
 /// is snapshotted every render frame) and shrinks scrollback `Vec<Cell>` RSS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
+    /// The printed character occupying this cell (a space for an empty cell).
     pub c: char,
+    /// Foreground (text) colour.
     pub fg: Color,
+    /// Background colour.
     pub bg: Color,
+    /// Per-cell rendition attributes (bold, italic, underline, …).
     pub flags: CellFlags,
     /// Explicit underline color (C20, SGR `58`). `None` means the underline
     /// inherits the foreground color. Only meaningful when
@@ -144,6 +152,8 @@ impl Grid {
     /// bound; real text never stacks this many).
     pub const MAX_COMBINING: usize = 8;
 
+    /// Create a blank grid of `rows` × `cols` cells. Both dimensions are
+    /// clamped to a minimum of 1 so a degenerate `0`-sized grid is never built.
     pub fn new(rows: usize, cols: usize) -> Self {
         let rows = rows.max(1);
         let cols = cols.max(1);
@@ -245,10 +255,12 @@ impl Grid {
         }
     }
 
+    /// The number of rows in the grid.
     pub fn rows(&self) -> usize {
         self.rows
     }
 
+    /// The number of columns in the grid.
     pub fn cols(&self) -> usize {
         self.cols
     }
@@ -265,6 +277,8 @@ impl Grid {
         self.row_dirty.get(row).copied().unwrap_or(false)
     }
 
+    /// Mark every row clean. Call after the renderer has consumed this frame's
+    /// damage so the next [`Grid::is_row_dirty`] reflects only new changes.
     pub fn clear_damage(&mut self) {
         for d in &mut self.row_dirty {
             *d = false;
@@ -293,6 +307,8 @@ impl Grid {
         row * self.cols + col
     }
 
+    /// Borrow the cell at `(row, col)`, or `None` if the coordinates are out of
+    /// range.
     pub fn cell(&self, row: usize, col: usize) -> Option<&Cell> {
         if row < self.rows && col < self.cols {
             Some(&self.cells[self.idx(row, col)])
@@ -301,6 +317,9 @@ impl Grid {
         }
     }
 
+    /// Write `cell` at `(row, col)`. Out-of-range coordinates are ignored. The
+    /// affected row is marked dirty and any wide-glyph continuation marker on
+    /// the cell is cleared.
     pub fn set(&mut self, row: usize, col: usize, cell: Cell) {
         if row < self.rows && col < self.cols {
             let i = self.idx(row, col);
