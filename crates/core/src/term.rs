@@ -11,9 +11,12 @@ use std::collections::VecDeque;
 use vte::{Params, Parser, Perform};
 use zeroize::{Zeroize, Zeroizing};
 
+mod charset;
 pub mod keys;
 pub mod osc;
+mod palette;
 
+use charset::{dec_line_draw, is_variation_selector, Charset};
 pub use keys::{encode_key, encode_key_kitty, KeyEventKind, KeyModifiers, LogicalKey};
 use osc::{base64_decode, base64_encode, format_color_reply, parse_color_spec, Rgb};
 pub use osc::{
@@ -161,52 +164,6 @@ impl Default for DecModes {
     }
 }
 
-/// Builds the standard xterm 256-color palette as `(r, g, b)` triples.
-///
-/// 0-15 are the canonical xterm ANSI 16; 16-231 are the 6×6×6 color cube;
-/// 232-255 are the 24-step grayscale ramp. The palette seeds OSC 4 query
-/// replies so a program detecting colors gets sensible values before the host
-/// applies its own theme via the [`ColorSet`] drain. The host's theme is the
-/// source of truth for rendering — this palette is only the protocol-default
-/// baseline for query/reset.
-fn build_default_palette() -> [Rgb; 256] {
-    // Canonical xterm ANSI 0-15.
-    const ANSI16: [Rgb; 16] = [
-        (0, 0, 0),       // 0 black
-        (205, 0, 0),     // 1 red
-        (0, 205, 0),     // 2 green
-        (205, 205, 0),   // 3 yellow
-        (0, 0, 238),     // 4 blue
-        (205, 0, 205),   // 5 magenta
-        (0, 205, 205),   // 6 cyan
-        (229, 229, 229), // 7 white
-        (127, 127, 127), // 8 bright black
-        (255, 0, 0),     // 9 bright red
-        (0, 255, 0),     // 10 bright green
-        (255, 255, 0),   // 11 bright yellow
-        (92, 92, 255),   // 12 bright blue
-        (255, 0, 255),   // 13 bright magenta
-        (0, 255, 255),   // 14 bright cyan
-        (255, 255, 255), // 15 bright white
-    ];
-    let mut p: [Rgb; 256] = [(0, 0, 0); 256];
-    p[..16].copy_from_slice(&ANSI16);
-    // 6x6x6 cube: levels are 0, 95, 135, 175, 215, 255.
-    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
-    for i in 0..216usize {
-        let r = LEVELS[(i / 36) % 6];
-        let g = LEVELS[(i / 6) % 6];
-        let b = LEVELS[i % 6];
-        p[16 + i] = (r, g, b);
-    }
-    // Grayscale ramp 232-255: 8, 18, ..., 238 (step 10).
-    for i in 0..24usize {
-        let v = (8 + i * 10) as u8;
-        p[232 + i] = (v, v, v);
-    }
-    p
-}
-
 /// Saved primary-screen state captured when switching to the alternate screen.
 #[derive(Debug, Clone)]
 struct SavedScreen {
@@ -225,65 +182,6 @@ struct SavedCursor {
     col: usize,
     pen: Pen,
     charset_g0: Charset,
-}
-
-/// A G0/G1 charset designation. Only the two sets a real shell exercises are
-/// modelled: plain ASCII and the DEC Special Graphics (line-drawing) set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum Charset {
-    /// US-ASCII (`ESC ( B`) — the default.
-    #[default]
-    Ascii,
-    /// DEC Special Graphics / line drawing (`ESC ( 0`).
-    DecLineDrawing,
-}
-
-/// Map a printable byte (`0x60..=0x7e`) from the DEC Special Graphics set to its
-/// Unicode box-drawing equivalent. Characters outside that range pass through
-/// unchanged. This is the canonical VT100 line-drawing table.
-fn dec_line_draw(c: char) -> char {
-    match c {
-        '`' => '\u{25c6}', // ◆ diamond
-        'a' => '\u{2592}', // ▒ checkerboard
-        'b' => '\u{2409}', // ␉ HT
-        'c' => '\u{240c}', // ␌ FF
-        'd' => '\u{240d}', // ␍ CR
-        'e' => '\u{240a}', // ␊ LF
-        'f' => '\u{00b0}', // ° degree
-        'g' => '\u{00b1}', // ± plus/minus
-        'h' => '\u{2424}', // ␤ NL
-        'i' => '\u{240b}', // ␋ VT
-        'j' => '\u{2518}', // ┘ lower-right corner
-        'k' => '\u{2510}', // ┐ upper-right corner
-        'l' => '\u{250c}', // ┌ upper-left corner
-        'm' => '\u{2514}', // └ lower-left corner
-        'n' => '\u{253c}', // ┼ crossing
-        'o' => '\u{23ba}', // ⎺ scan line 1
-        'p' => '\u{23bb}', // ⎻ scan line 3
-        'q' => '\u{2500}', // ─ horizontal line
-        'r' => '\u{23bc}', // ⎼ scan line 7
-        's' => '\u{23bd}', // ⎽ scan line 9
-        't' => '\u{251c}', // ├ left tee
-        'u' => '\u{2524}', // ┤ right tee
-        'v' => '\u{2534}', // ┴ bottom tee
-        'w' => '\u{252c}', // ┬ top tee
-        'x' => '\u{2502}', // │ vertical line
-        'y' => '\u{2264}', // ≤ less-than-or-equal
-        'z' => '\u{2265}', // ≥ greater-than-or-equal
-        '{' => '\u{03c0}', // π pi
-        '|' => '\u{2260}', // ≠ not-equal
-        '}' => '\u{00a3}', // £ pound
-        '~' => '\u{00b7}', // · centre dot
-        other => other,
-    }
-}
-
-/// True for the Unicode variation selectors VS15 (U+FE0E, text presentation)
-/// and VS16 (U+FE0F, emoji presentation). They are treated as zero-width
-/// combining marks (C34) — they modify the previous grapheme's presentation
-/// rather than occupying a cell.
-fn is_variation_selector(c: char) -> bool {
-    matches!(c, '\u{FE0E}' | '\u{FE0F}')
 }
 
 /// Map a mode-active boolean to the DECRQM `Pv` value: 1 = set, 2 = reset.
@@ -543,8 +441,8 @@ impl Screen {
             pending_color_sets: Vec::new(),
             pending_notifications: Vec::new(),
             title_stack: Vec::new(),
-            palette: build_default_palette(),
-            default_palette: build_default_palette(),
+            palette: palette::build_default_palette(),
+            default_palette: palette::build_default_palette(),
             // xterm protocol defaults: white on black, white cursor.
             dynamic_fg: (229, 229, 229),
             dynamic_bg: (0, 0, 0),
