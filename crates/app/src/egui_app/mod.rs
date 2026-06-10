@@ -3458,16 +3458,22 @@ fn paint_grid_native(
     // Group the per-cell colour runs into ROWS (the `grid_spans` stream ends each
     // row with a `"\n"` run). Each row becomes one galley, painted at
     // `origin.y + row_idx * ch`.
-    let rows: Vec<Vec<ColorRun>> = match term.grid_spans() {
-        Some(runs) if !runs.is_empty() => split_runs_into_rows(runs),
+    // Damage-gated, already grouped per-row by [`PaneTerm::grid_rows`] (an `Rc`
+    // clone on the idle/blinking-cursor path — no per-frame grid clone, run
+    // rebuild, or newline-split). The fallback (dead session mid-frame) wraps the
+    // mono text in the same `Rc` shape so the paint loop below is uniform.
+    let rows: std::rc::Rc<Vec<Vec<ColorRun>>> = match term.grid_rows() {
+        Some(rows) if !rows.is_empty() => rows,
         _ => {
             // No colour runs (e.g. dead session mid-frame): mono fallback so the
             // pane is never blank. One row per text line, all in the default fg.
-            term.grid_text()
-                .unwrap_or_default()
-                .lines()
-                .map(|line| vec![(line.to_string(), default_fg)])
-                .collect()
+            std::rc::Rc::new(
+                term.grid_text()
+                    .unwrap_or_default()
+                    .lines()
+                    .map(|line| vec![(line.to_string(), default_fg)])
+                    .collect(),
+            )
         }
     };
 

@@ -2666,6 +2666,16 @@ impl Terminal {
         &mut self.screen.grid
     }
 
+    /// Clear the grid's per-row damage flags after the renderer has consumed
+    /// them. Call this exactly once per frame, immediately after snapshotting the
+    /// damaged rows, so the next frame's [`Grid::is_damaged`] reflects only writes
+    /// that happened since this snapshot. The reader thread re-marks rows dirty as
+    /// PTY output arrives, so a cell changed after this call is still redrawn next
+    /// frame.
+    pub fn clear_damage(&mut self) {
+        self.screen.grid.clear_damage();
+    }
+
     pub fn title(&self) -> &str {
         &self.screen.title
     }

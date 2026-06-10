@@ -21,6 +21,9 @@
 //! simulated input — which is exactly the "typing reaches the PTY and the grid
 //! updates" class of bug Milestone 2 must guard against.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use c0pl4nd_core::term::{encode_key, KeyModifiers, LogicalKey, MouseMode};
 use c0pl4nd_core::{Session, Theme};
 
@@ -29,6 +32,40 @@ use c0pl4nd_core::{Session, Theme};
 /// `Attrs`; keeping the type as a plain `(String, (u8,u8,u8))` keeps this module
 /// free of any glyphon/egui dependency (so it stays headlessly testable).
 pub type ColorRun = (String, (u8, u8, u8));
+
+/// Damage-gated cache of the visible grid as per-row colour runs (the output of
+/// [`PaneTerm::grid_rows`]). The renderer calls `grid_rows` every frame; this
+/// cache lets an UNCHANGED pane (the blinking-cursor / idle-effect case) skip the
+/// whole snapshot-and-group pass and reuse the previous frame's rows.
+///
+/// Validity is keyed on everything that can change the *rendered* runs without
+/// going through a grid cell-write: the grid's own per-row damage bits
+/// ([`Grid::is_damaged`]), the scrollback `view_offset`, the grid dimensions, the
+/// DECSCNM reverse-screen flag (swaps default fg/bg without touching cells), and
+/// the active theme (set out-of-band via [`PaneTerm::set_theme`], which clears
+/// this cache). Anything that edits a cell already marks its row dirty, so a
+/// cell change forces a rebuild.
+struct RowSpanCache {
+    rows: Rc<Vec<Vec<ColorRun>>>,
+    view_offset: usize,
+    cols: usize,
+    grid_rows: usize,
+    reverse: bool,
+    valid: bool,
+}
+
+impl Default for RowSpanCache {
+    fn default() -> Self {
+        Self {
+            rows: Rc::new(Vec::new()),
+            view_offset: 0,
+            cols: 0,
+            grid_rows: 0,
+            reverse: false,
+            valid: false,
+        }
+    }
+}
 
 /// The cell metrics (in physical pixels) used to map a pane's pixel rect onto a
 /// terminal `(cols, rows)` grid. Derived from the glyphon font metrics; a
@@ -70,6 +107,12 @@ pub struct PaneTerm {
     /// frame); the flag makes [`PaneTerm::wire_wake`] idempotent so the per-frame
     /// sweep does not re-register a fresh closure every frame.
     wake_wired: bool,
+    /// Damage-gated cache of the last `grid_rows()` snapshot. Interior-mutable so
+    /// the per-frame `grid_rows(&self)` read path can refresh it without forcing a
+    /// `&mut` on every chrome accessor. `PaneTerm` lives on the UI thread only
+    /// (the cross-thread boundary is the terminal's own `Mutex`), so a `RefCell`
+    /// is sound here.
+    span_cache: RefCell<RowSpanCache>,
 }
 
 impl PaneTerm {
@@ -84,6 +127,7 @@ impl PaneTerm {
                 theme,
                 size: (cols, rows),
                 wake_wired: false,
+                span_cache: RefCell::new(RowSpanCache::default()),
             },
             Err(e) => Self {
                 session: None,
@@ -91,6 +135,7 @@ impl PaneTerm {
                 theme,
                 size: (cols, rows),
                 wake_wired: false,
+                span_cache: RefCell::new(RowSpanCache::default()),
             },
         }
     }
@@ -110,6 +155,7 @@ impl PaneTerm {
                 theme,
                 size: (cols, rows),
                 wake_wired: false,
+                span_cache: RefCell::new(RowSpanCache::default()),
             },
             Err(e) => Self {
                 session: None,
@@ -117,6 +163,7 @@ impl PaneTerm {
                 theme,
                 size: (cols, rows),
                 wake_wired: false,
+                span_cache: RefCell::new(RowSpanCache::default()),
             },
         }
     }
@@ -306,36 +353,68 @@ impl PaneTerm {
         Some((cols, rows))
     }
 
-    /// Snapshot the visible grid into per-row colour runs ready for a glyphon
-    /// `Buffer::set_rich_text`. Each row is grouped into runs of consecutive
-    /// same-colour glyphs (cheap; one `Attrs` per run, not per glyph), and the
-    /// rows are joined by `'\n'` so glyphon lays them out as lines. Honours
-    /// DECSCNM reverse-screen and SGR inverse via [`Theme::cell_colors`].
-    /// Returns `None` only when the session is dead (no terminal to read).
-    pub fn grid_spans(&self) -> Option<Vec<ColorRun>> {
+    /// Snapshot the visible grid into per-row colour runs ready for the egui paint
+    /// layer. Each row is grouped into runs of consecutive same-colour glyphs
+    /// (cheap; one `Attrs` per run, not per glyph). Honours DECSCNM reverse-screen
+    /// and SGR inverse via [`Theme::cell_colors`]. Returns `None` only when the
+    /// session is dead (no terminal to read).
+    ///
+    /// **Damage-gated.** The grid tracks per-row damage; when nothing changed
+    /// since the last call — no dirty rows, same scrollback `view_offset`, same
+    /// dimensions, same reverse-screen flag — this returns the cached rows (an
+    /// `Rc` clone, no grid work). That is the idle path: a pane with only a
+    /// blinking cursor or a running CRT effect repaints from cache instead of
+    /// re-grouping every row every frame (the cursor is an overlay drawn
+    /// separately, not part of these runs, so it animates without dirtying the
+    /// grid). On a miss it rebuilds, clears the grid's damage bits, and refreshes
+    /// the cache. A theme change bypasses the grid (cells are unchanged), so
+    /// [`PaneTerm::set_theme`] invalidates this cache explicitly.
+    pub fn grid_rows(&self) -> Option<Rc<Vec<Vec<ColorRun>>>> {
         let session = self.session.as_ref()?;
         let term = session.terminal();
-        let guard = term.lock().ok()?;
+        let mut guard = term.lock().ok()?;
+
+        let view_offset = guard.view_offset();
+        let reverse = guard.reverse_screen();
+        let cols = guard.grid().cols();
+        let grid_rows = guard.grid().rows();
+        let damaged = guard.grid().is_damaged();
+
+        // Cache hit: nothing that affects the rendered runs has changed.
+        {
+            let cache = self.span_cache.borrow();
+            if cache.valid
+                && !damaged
+                && cache.view_offset == view_offset
+                && cache.cols == cols
+                && cache.grid_rows == grid_rows
+                && cache.reverse == reverse
+            {
+                return Some(Rc::clone(&cache.rows));
+            }
+        }
+
+        // Miss: rebuild the per-row runs from the borrowing visible-rows iterator
+        // (no whole-grid clone). History rows shorter than the grid width are
+        // padded-on-read — columns at/past `row.len()` are treated as
+        // `Cell::default()` so the output matches a width-padded grid without ever
+        // materialising a padded `Vec`. Rows are grouped DIRECTLY into the final
+        // `Vec<Vec<ColorRun>>` (one inner Vec per visible row) — no flat stream +
+        // newline-split round-trip.
         let theme_fg =
             c0pl4nd_core::theme::parse_hex(&self.theme.foreground).unwrap_or((232, 230, 240));
         let theme_bg =
             c0pl4nd_core::theme::parse_hex(&self.theme.background).unwrap_or((18, 18, 18));
         // DECSCNM (`?5`): reverse-video screen swaps the default fg/bg.
-        let (default_fg, default_bg) = if guard.reverse_screen() {
+        let (default_fg, default_bg) = if reverse {
             (theme_bg, theme_fg)
         } else {
             (theme_fg, theme_bg)
         };
-        // Drive the borrowing visible-rows iterator instead of cloning the whole
-        // grid via `display_rows()`. Each row is grouped into colour runs in
-        // place. History rows shorter than the grid width are padded-on-read:
-        // columns at/past `row.len()` are treated as `Cell::default()` so the
-        // output stays byte-identical to the old `display_rows()`-padded path
-        // without ever materialising a padded `Vec`.
-        let cols = guard.grid().cols();
         let default_cell = c0pl4nd_core::Cell::default();
-        let mut out: Vec<ColorRun> = Vec::new();
+        let mut rows_out: Vec<Vec<ColorRun>> = Vec::with_capacity(grid_rows);
         guard.for_visible_rows(|_, row| {
+            let mut runs: Vec<ColorRun> = Vec::new();
             let mut run = String::new();
             let mut run_color: Option<(u8, u8, u8)> = None;
             for col in 0..cols {
@@ -343,18 +422,32 @@ impl PaneTerm {
                 let (fg, _bg) = self.theme.cell_colors(cell, default_fg, default_bg);
                 if run_color != Some(fg) {
                     if let Some(pc) = run_color.take() {
-                        out.push((std::mem::take(&mut run), pc));
+                        runs.push((std::mem::take(&mut run), pc));
                     }
                     run_color = Some(fg);
                 }
                 run.push(cell.c);
             }
             if let Some(pc) = run_color {
-                out.push((run, pc));
+                runs.push((run, pc));
             }
-            out.push(("\n".to_string(), default_fg));
+            rows_out.push(runs);
         });
-        Some(out)
+        // The renderer has now consumed this frame's damage; clear it so the next
+        // frame's `is_damaged()` reflects only writes that arrive after this point.
+        guard.clear_damage();
+        drop(guard);
+
+        let rc = Rc::new(rows_out);
+        *self.span_cache.borrow_mut() = RowSpanCache {
+            rows: Rc::clone(&rc),
+            view_offset,
+            cols,
+            grid_rows,
+            reverse,
+            valid: true,
+        };
+        Some(rc)
     }
 
     /// The cursor cell as `(row, col)` (0-based, within the visible grid) when
@@ -388,12 +481,18 @@ impl PaneTerm {
     }
 
     /// Swap the pane's active colour theme. Existing panes hold their OWN theme
-    /// clone (both [`grid_spans`](Self::grid_spans) glyph colours AND
+    /// clone (both [`grid_rows`](Self::grid_rows) glyph colours AND
     /// [`background_rgb`](Self::background_rgb) resolve from it), so a theme
     /// change in settings must be propagated here for the live panes to repaint
     /// in the new colours — otherwise the picker appears to do nothing.
+    ///
+    /// A theme change recolours every cell WITHOUT touching the grid (no cell
+    /// write, no damage bit), so the [`grid_rows`](Self::grid_rows) damage cache
+    /// would otherwise serve stale-coloured rows. Invalidate it here so the next
+    /// frame rebuilds in the new colours.
     pub fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
+        self.span_cache.borrow_mut().valid = false;
     }
 
     /// Test-only handle to the shared terminal, so a unit test can drive escape
