@@ -2258,6 +2258,27 @@ impl eframe::App for C0pl4ndApp {
         window_clear_color(&self.config, &self.theme)
     }
 
+    /// Do NOT persist egui `Memory` to disk (privacy F1).
+    ///
+    /// eframe's default `App::persist_egui_memory()` is `true`, which serializes
+    /// the entire egui [`egui::Memory`] — including every widget's
+    /// `TextEditState` and its `Undoer<(CCursorRange, String)>` undo stack — into
+    /// `app.ron` under the `with_app_id` storage folder
+    /// (`%APPDATA%\com.itashacorp.c0pl4nd\data\app.ron` on Windows;
+    /// `~/.local/share/com.itashacorp.c0pl4nd/app.ron` on Linux). The undo stack
+    /// stores the ACTUAL typed text, so fragments of the find overlay, the command
+    /// palette, and the settings search — all of which are substrings of the
+    /// user's scrollback — would land on disk in plaintext RON. Returning `false`
+    /// keeps that typed-text undo history entirely in memory.
+    ///
+    /// Window geometry (position + size) is NOT lost by this: it is persisted
+    /// independently via [`c0pl4nd_core::Config::persist_geometry`] into the
+    /// config TOML AND by eframe's own `persist_window` native-window state, both
+    /// of which are unaffected by `persist_egui_memory`.
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
     /// eframe 0.34's `App` main entry is `ui(&mut self, &mut Ui, &mut Frame)`;
     /// the top-level panels are driven through the (deprecated-but-functional)
     /// `Panel::show(ctx, …)` path via a cloned `ctx`, matching the reference

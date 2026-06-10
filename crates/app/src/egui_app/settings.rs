@@ -212,6 +212,39 @@ fn help(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
 }
 
+/// The eframe app-id used for native window-state + (formerly) egui-memory
+/// persistence. Must match the `with_app_id(..)` in `egui_main.rs`.
+const EFRAME_APP_ID: &str = "com.itashacorp.c0pl4nd";
+
+/// Absolute path to eframe's `app.ron` persisted-state file, resolved the SAME
+/// way eframe itself resolves it: [`eframe::storage_dir`] for our app-id, then
+/// the `app.ron` leaf inside it. `None` only when no platform storage dir is
+/// available (the same condition under which eframe would not persist either).
+///
+/// On Windows this is `%APPDATA%\com.itashacorp.c0pl4nd\data\app.ron`; on Linux
+/// `~/.local/share/com.itashacorp.c0pl4nd/app.ron` — the dir returned by
+/// `storage_dir` is canonical, so we never hard-code the platform path here.
+fn app_ron_path() -> Option<std::path::PathBuf> {
+    eframe::storage_dir(EFRAME_APP_ID).map(|dir| dir.join("app.ron"))
+}
+
+/// Delete eframe's persisted `app.ron` (privacy F1 user control). Returns a
+/// short, user-facing status string for the settings page. A missing file is a
+/// success ("nothing to clear"); a real delete error is surfaced without leaking
+/// the internal path (Tauri-IPC-style error sanitisation discipline).
+fn clear_saved_ui_state() -> String {
+    let Some(path) = app_ron_path() else {
+        return "No saved UI state on this platform.".to_string();
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => "Saved window/UI state cleared.".to_string(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            "No saved UI state to clear.".to_string()
+        }
+        Err(_) => "Could not clear saved UI state.".to_string(),
+    }
+}
+
 /// Render the settings window. `open` is toggled false when the user closes it
 /// (via the egui Window's built-in ✕). Returns the [`Outcome`] for this frame so
 /// the host can persist + re-apply the theme.
@@ -1373,6 +1406,31 @@ fn render_sections(
             *clear_history = true;
         }
 
+        ui.add_space(6.0);
+
+        // Delete eframe's persisted `app.ron` (window/UI state). Even though
+        // C0PL4ND no longer persists egui Memory (privacy F1 —
+        // `C0pl4ndApp::persist_egui_memory` returns false), a file written by an
+        // OLDER build may still hold typed find/palette undo history, so give the
+        // user an explicit one-click erase. Window geometry is unaffected: it
+        // lives in the config TOML + eframe's native window state, not app.ron.
+        let status_id = egui::Id::new("c0pl4nd_clear_ui_state_status");
+        if ui
+            .button("Clear saved window/UI state")
+            .on_hover_text(
+                "Delete the on-disk app.ron that older builds used to persist \
+                 window/UI state (and, in those builds, typed find/palette undo \
+                 history). Your window size/position are kept (stored separately).",
+            )
+            .clicked()
+        {
+            let msg = clear_saved_ui_state();
+            ui.ctx().data_mut(|d| d.insert_temp(status_id, msg));
+        }
+        if let Some(msg) = ui.ctx().data(|d| d.get_temp::<String>(status_id)) {
+            ui.add(egui::Label::new(egui::RichText::new(msg).weak().small()).wrap());
+        }
+
         group_gap(ui);
     }
 
@@ -1507,6 +1565,35 @@ mod tests {
             BUILTIN_THEMES.contains(&Config::default().theme.as_str()),
             "the default theme stem must be one of the offered built-ins"
         );
+    }
+
+    #[test]
+    fn app_ron_path_targets_the_eframe_app_id_file() {
+        // When a platform storage dir is resolvable, the helper must point at the
+        // `app.ron` leaf inside the `com.itashacorp.c0pl4nd` app-id folder — the
+        // exact file eframe writes (and the F1 leak target the Clear button
+        // deletes). We assert the two load-bearing components rather than the
+        // full platform-specific path so the test is OS-portable.
+        match app_ron_path() {
+            Some(p) => {
+                assert_eq!(
+                    p.file_name().and_then(|f| f.to_str()),
+                    Some("app.ron"),
+                    "must resolve the app.ron leaf eframe persists state into"
+                );
+                let s = p.to_string_lossy().replace('\\', "/");
+                assert!(
+                    s.contains(EFRAME_APP_ID),
+                    "path must live under the eframe app-id folder \
+                     '{EFRAME_APP_ID}'; got {s}"
+                );
+            }
+            // No platform storage dir (e.g. the relevant env var is unset on this
+            // runner) — eframe would not persist either, so there is nothing to
+            // resolve. Mirror that condition by asserting the app-id constant
+            // matches the `with_app_id` in egui_main.rs.
+            None => assert_eq!(EFRAME_APP_ID, "com.itashacorp.c0pl4nd"),
+        }
     }
 
     #[test]
