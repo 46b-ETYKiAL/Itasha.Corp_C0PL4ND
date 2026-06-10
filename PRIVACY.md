@@ -62,16 +62,26 @@ nothing to it.
 
 ## Data-at-rest inventory: what is written to disk
 
-C0PL4ND writes very little to disk, and nothing that contains your shell session
-contents.
+**This table is the source of truth for everything C0PL4ND writes to disk.** It
+enumerates *every* file the app creates, grounded in the write call sites in the
+source (`std::fs::write`, `atomic_write*`, `File::create`, and eframe's
+persistence store). C0PL4ND writes very little, and **nothing that contains your
+shell session contents** — no scrollback, no command output, no keystrokes.
 
 ### What IS written
 
-| Data | Where | Format | Protection |
-| --- | --- | --- | --- |
-| Settings (font, theme, update mode, etc.) | `~/.config/c0pl4nd/config.toml` (Unix), `%APPDATA%\c0pl4nd\config.toml` (Windows) | TOML | Owner-only: `0600` on Unix; on Windows, the file lives in your per-user profile and inheritance is stripped to grant only your account (best-effort `icacls`). See `restrict_to_owner` in `crates/core/src/config/mod.rs`. |
-| Window geometry + egui UI state | the eframe `persistence` store under the app's stable app-id folder (`com.itashacorp.c0pl4nd`) | RON | Stored in your per-user application-data directory. |
-| A verified update download (transient) | a per-run, owner-only temporary staging directory (`tempfile`, `0700` on Unix) | binary archive | Created fresh per download and deleted after the update is applied. |
+| Data | Path (Windows) | Path (Linux) | Format | Contents | Sensitivity | Protection |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Settings** | `%APPDATA%\c0pl4nd\config.toml` | `~/.config/c0pl4nd/config.toml` (or `$XDG_CONFIG_HOME/c0pl4nd/config.toml`) | TOML | Font, theme, update mode, keybindings, window geometry, transparency/effects toggles. No shell content. | Low — reflects your preferences and last window position. | Owner-only: `0600` on Unix; on Windows inheritance is stripped to grant only your account (best-effort `icacls`). See `restrict_to_owner` → `crates/core/src/fs_perms.rs`; written by `Config::save_to` in `crates/core/src/config/mod.rs`. |
+| **Window/UI state** (eframe persistence) | `%APPDATA%\com.itashacorp.c0pl4nd\data\app.ron` | `~/.local/share/com.itashacorp.c0pl4nd/app.ron` | RON | **Native window geometry only** (position + size, via eframe `persist_window`). **egui in-memory UI state is NOT persisted** — `App::persist_egui_memory()` returns `false` (`crates/app/src/egui_app/mod.rs`), so widget undo stacks / typed-text fragments (find overlay, command palette, settings search) stay in memory and never reach this file. | Low — window geometry only. | Stored in your per-user application-data directory under the stable app-id `com.itashacorp.c0pl4nd`. A "Clear saved window/UI state" control in **Settings → Privacy** deletes this file (`clear_saved_ui_state` in `crates/app/src/egui_app/settings.rs`). |
+| **Updater high-water record** | `<install-dir>\.c0pl4nd-installed-version` (next to `c0pl4nd.exe`) | `<install-dir>/.c0pl4nd-installed-version` (next to the binary) | plain text (one line) | A single semver string: the highest version ever installed (anti-rollback floor). **No identifiers, no PII** — just a version number. | None. | Written next to the executable, only ever advanced upward (monotonic). See `INSTALLED_VERSION_FILE` / `record_installed` in `crates/app/src/update_engine/rollback_guard.rs`. |
+| **Saved workspace layouts** (opt-in) | `%APPDATA%\c0pl4nd\workspaces\<name>.layout.json` | `~/.config/c0pl4nd/workspaces/<name>.layout.json` | JSON | Pane/tab tree geometry plus **each pane's working directory (cwd)** and shell profile, so a restored workspace relaunches where you left it. Created only when you use "Save Layout / Save Workspace"; absent otherwise. | Medium — a saved cwd can reveal a project/path on your machine (no command content, no scrollback). | Owner-only via `atomic_write_owner_only` (`0600` on Unix; owner-only ACL on Windows). See `save_workspace` / `workspaces_dir` in `crates/app/src/window.rs` and `crates/core/src/layout_persist.rs`. |
+| **Update download** (transient) | a per-run temporary staging directory | a per-run temporary staging directory (`0700` on Unix) | binary archive | The verified release archive being installed. | None — deleted after apply. | Created fresh per download (`tempfile`), removed once the update is applied. See `crates/app/src/update_engine/net.rs`. |
+
+> **Note on screenshots:** the `c0pl4nd screenshot` path writes a PNG to a
+> path **you supply explicitly** on the command line. It is a user-directed
+> output, not background data-at-rest — C0PL4ND never writes a screenshot on
+> its own. (`crates/app/src/screenshot.rs`.)
 
 ### What is NOT written
 
@@ -86,6 +96,23 @@ contents.
   configured to write only to **stderr** (`crates/app/src/egui_main.rs`,
   `crates/app/src/main.rs`); there is **no file log appender**, and PTY
   input/output is not routed into the logs.
+- **egui UI memory is not persisted.** Widget undo stacks and in-progress text
+  in the find overlay, command palette, and settings search live only in memory.
+  `App::persist_egui_memory()` returns `false`, so none of that typed text is
+  written to `app.ron` — only native window geometry is.
+
+> **Keeping this inventory honest.** The table above is meant to list *every*
+> write target. If you are auditing or contributing, you can re-derive the set
+> of write sinks with:
+>
+> ```
+> grep -rn "fs::write\|atomic_write\|File::create" crates/*/src
+> ```
+>
+> Every hit should map to a row in the inventory table — the config writer, the
+> workspace writer, the high-water record, and the updater archive read-back in
+> `net.rs` — or to the user-directed screenshot note above it. A new write
+> target that maps to none of these means the inventory needs updating.
 
 ---
 
@@ -101,6 +128,35 @@ contents.
   surfaced in app settings as those controls ship; see the app's Settings.)*
 - **Delete your settings.** Removing `config.toml` (and the eframe persistence
   folder) resets the app to defaults; nothing else about you is stored.
+- **Clear saved window/UI state from inside the app.** **Settings → Privacy**
+  has a "Clear saved window/UI state" button that deletes `app.ron` for you
+  (`clear_saved_ui_state`).
+
+### Removing all data on uninstall
+
+The Windows installer removes the program files but, by design, **does not delete
+your per-user settings** — so reinstalling or upgrading never wipes your
+preferences. To remove *everything* C0PL4ND has written, delete these paths after
+uninstalling. (You can paste a path into the Explorer address bar or a shell.)
+
+**Windows:**
+
+| What | Path |
+| --- | --- |
+| Settings + saved workspaces | `%APPDATA%\c0pl4nd\` |
+| Window/UI state (`app.ron`) | `%APPDATA%\com.itashacorp.c0pl4nd\` |
+
+**Linux:**
+
+| What | Path |
+| --- | --- |
+| Settings + saved workspaces | `~/.config/c0pl4nd/` (or `$XDG_CONFIG_HOME/c0pl4nd/`) |
+| Window/UI state (`app.ron`) | `~/.local/share/com.itashacorp.c0pl4nd/` |
+
+The updater high-water record (`.c0pl4nd-installed-version`) lives next to the
+installed binary and is removed when you uninstall the program files. The update
+staging directory is transient and already gone. None of these files contain
+your shell session contents.
 
 ---
 
