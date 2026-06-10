@@ -3403,7 +3403,7 @@ fn grid_text_origin(rect: egui::Rect, padding: f32) -> egui::Pos2 {
 }
 
 /// Paint a pane's visible grid with egui's NATIVE text painter, using the
-/// per-cell colour runs from [`PaneTerm::grid_spans`]. This is the single,
+/// per-row colour runs from [`PaneTerm::grid_rows`]. This is the single,
 /// engine-agnostic render path for BOTH the live window and the headless
 /// snapshot tests — identical code, so a passing test faithfully proves the
 /// live render. It deliberately uses egui's own glyph rasteriser (the same one
@@ -3455,19 +3455,23 @@ fn paint_grid_native(
     // search highlight, and hyperlink hit-test use, so every Y stays aligned.
     let (cw, ch) = monospace_cell_points(painter, font_size, line_height_px);
 
-    // Group the per-cell colour runs into ROWS (the `grid_spans` stream ends each
-    // row with a `"\n"` run). Each row becomes one galley, painted at
-    // `origin.y + row_idx * ch`.
-    let rows: Vec<Vec<ColorRun>> = match term.grid_spans() {
-        Some(runs) if !runs.is_empty() => split_runs_into_rows(runs),
+    // Each row becomes one galley, painted at `origin.y + row_idx * ch`.
+    // Damage-gated, already grouped per-row by [`PaneTerm::grid_rows`] (an `Rc`
+    // clone on the idle/blinking-cursor path — no per-frame grid clone, run
+    // rebuild, or newline-split). The fallback (dead session mid-frame) wraps the
+    // mono text in the same `Rc` shape so the paint loop below is uniform.
+    let rows: std::rc::Rc<Vec<Vec<ColorRun>>> = match term.grid_rows() {
+        Some(rows) if !rows.is_empty() => rows,
         _ => {
             // No colour runs (e.g. dead session mid-frame): mono fallback so the
             // pane is never blank. One row per text line, all in the default fg.
-            term.grid_text()
-                .unwrap_or_default()
-                .lines()
-                .map(|line| vec![(line.to_string(), default_fg)])
-                .collect()
+            std::rc::Rc::new(
+                term.grid_text()
+                    .unwrap_or_default()
+                    .lines()
+                    .map(|line| vec![(line.to_string(), default_fg)])
+                    .collect(),
+            )
         }
     };
 
@@ -3603,37 +3607,6 @@ fn paint_grid_native(
         paint_crt_scanlines(painter, rect, ppp, t, effects.scanline_darkness);
         painter.ctx().request_repaint();
     }
-}
-
-/// Split a flat colour-run stream (as produced by [`PaneTerm::grid_spans`],
-/// which terminates each grid row with a `"\n"` run) into per-row run lists. The
-/// newline marker runs are dropped; an embedded newline inside a run's text
-/// (defensive — `grid_spans` does not produce these, but a fallback might) also
-/// splits the row. Pure → unit-testable without a painter.
-fn split_runs_into_rows(runs: Vec<ColorRun>) -> Vec<Vec<ColorRun>> {
-    let mut rows: Vec<Vec<ColorRun>> = vec![Vec::new()];
-    for (text, color) in runs {
-        // A run is usually either a pure `"\n"` row terminator or newline-free
-        // glyph text; handle the general case by splitting on '\n'.
-        let mut parts = text.split('\n').peekable();
-        while let Some(part) = parts.next() {
-            if !part.is_empty() {
-                rows.last_mut()
-                    .expect("seeded with one row")
-                    .push((part.to_string(), color));
-            }
-            // Every '\n' boundary (i.e. every gap BETWEEN parts) starts a new row.
-            if parts.peek().is_some() {
-                rows.push(Vec::new());
-            }
-        }
-    }
-    // A trailing newline leaves an empty final row; drop it so a blank line at
-    // the end does not add phantom vertical space.
-    if rows.last().is_some_and(Vec::is_empty) {
-        rows.pop();
-    }
-    rows
 }
 
 /// Build the [`egui::text::LayoutJob`] for one grid row's colour runs (a single
@@ -4874,45 +4847,6 @@ mod tests {
         assert!(
             effective_row_pitch(0.0, LINE_HEIGHT_ANCHOR_PX) >= 1.0,
             "the pitch floors at 1px so a row is always drawable"
-        );
-    }
-
-    // ---- Grid run → row grouping (per-row galley positioning) ----
-
-    #[test]
-    fn split_runs_into_rows_groups_on_newline_terminators() {
-        // `grid_spans` ends each row with a "\n" run; the splitter drops those
-        // markers and keeps each row's colour runs together.
-        let runs = vec![
-            ("ab".to_string(), (1, 2, 3)),
-            ("cd".to_string(), (4, 5, 6)),
-            ("\n".to_string(), (0, 0, 0)),
-            ("ef".to_string(), (7, 8, 9)),
-            ("\n".to_string(), (0, 0, 0)),
-        ];
-        let rows = split_runs_into_rows(runs);
-        assert_eq!(rows.len(), 2, "two newline-terminated rows");
-        assert_eq!(rows[0].len(), 2, "first row keeps both colour runs");
-        assert_eq!(rows[0][0].0, "ab");
-        assert_eq!(rows[0][1].0, "cd");
-        assert_eq!(rows[1][0].0, "ef");
-    }
-
-    #[test]
-    fn split_runs_into_rows_handles_embedded_newline_and_no_trailing_phantom() {
-        // A run carrying an embedded '\n' (defensive) splits into two rows; a
-        // trailing newline must NOT leave a phantom empty final row.
-        let runs = vec![
-            ("foo\nbar".to_string(), (1, 1, 1)),
-            ("\n".to_string(), (0, 0, 0)),
-        ];
-        let rows = split_runs_into_rows(runs);
-        assert_eq!(rows.len(), 2, "embedded newline splits into two rows");
-        assert_eq!(rows[0][0].0, "foo");
-        assert_eq!(rows[1][0].0, "bar");
-        assert!(
-            rows.last().is_some_and(|r| !r.is_empty()),
-            "a trailing newline must not leave an empty phantom row"
         );
     }
 

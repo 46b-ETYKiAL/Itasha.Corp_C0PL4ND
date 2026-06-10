@@ -52,3 +52,7 @@ criterion = { version = "0.8", default-features = false }
 [[bench]]
 name = "throughput"
 harness = false
+
+[[bench]]
+name = "snapshot"
+harness = false
