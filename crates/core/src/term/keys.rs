@@ -159,6 +159,361 @@ pub fn encode_key(key: &LogicalKey, app_cursor: bool, mods: KeyModifiers) -> Opt
     }
 }
 
+/// A key event's transition kind, for the kitty keyboard protocol's
+/// REPORT-EVENT-TYPES (bit 2) progressive enhancement. Legacy encoding only
+/// ever produces presses; the kitty encoder additionally reports repeats and
+/// releases when the running program negotiated bit 2.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum KeyEventKind {
+    /// A key was pressed (the only event legacy encoding emits).
+    #[default]
+    Press,
+    /// A key auto-repeated while held.
+    Repeat,
+    /// A key was released.
+    Release,
+}
+
+/// Compute the kitty modifier value: `1 + shift + alt*2 + ctrl*4 + super*8`.
+/// (super = the logo/command key). A value of `1` means "no modifiers".
+fn kitty_mod_value(mods: KeyModifiers) -> u8 {
+    1 + (mods.shift as u8) + (mods.alt as u8) * 2 + (mods.ctrl as u8) * 4 + (mods.logo as u8) * 8
+}
+
+/// Encode the `<event>` sub-parameter for REPORT-EVENT-TYPES: `1` press
+/// (omitted), `2` repeat, `3` release.
+fn kitty_event_subparam(kind: KeyEventKind) -> u8 {
+    match kind {
+        KeyEventKind::Press => 1,
+        KeyEventKind::Repeat => 2,
+        KeyEventKind::Release => 3,
+    }
+}
+
+/// Assemble the kitty `CSI <number> ; <mods>[:<event>] u` form. When the
+/// modifier value is `1` (no modifiers) and the event is a plain press, the
+/// trailing `; <mods>` is omitted to match kitty's canonical minimal output
+/// (`CSI 27 u`, not `CSI 27 ; 1 u`). An event sub-param forces the `; <mods>`
+/// field to be present (kitty requires a modifier field of at least `1`
+/// alongside an event field).
+fn kitty_csi_u(
+    number: u32,
+    mods: KeyModifiers,
+    kind: KeyEventKind,
+    report_events: bool,
+) -> Vec<u8> {
+    let modv = kitty_mod_value(mods);
+    let emit_event = report_events && kind != KeyEventKind::Press;
+    let mut s = format!("\x1b[{number}");
+    if modv != 1 || emit_event {
+        s.push_str(&format!(";{modv}"));
+        if emit_event {
+            s.push_str(&format!(":{}", kitty_event_subparam(kind)));
+        }
+    }
+    s.push('u');
+    s.into_bytes()
+}
+
+/// Assemble the kitty cursor-key `CSI 1 ; <mods>[:<event>] <letter>` form for
+/// arrows / Home / End (the CSI-with-modifiers letter form, NOT the `u` form).
+fn kitty_csi_letter(
+    letter: u8,
+    mods: KeyModifiers,
+    kind: KeyEventKind,
+    report_events: bool,
+) -> Vec<u8> {
+    let modv = kitty_mod_value(mods);
+    let emit_event = report_events && kind != KeyEventKind::Press;
+    let mut s = format!("\x1b[1;{modv}");
+    if emit_event {
+        s.push_str(&format!(":{}", kitty_event_subparam(kind)));
+    }
+    s.push(letter as char);
+    s.into_bytes()
+}
+
+/// Assemble the kitty function-key tilde form `CSI <n> ; <mods>[:<event>] ~`
+/// (F5–F12 and the editing keys Insert/Delete/PageUp/PageDown).
+fn kitty_tilde(n: u32, mods: KeyModifiers, kind: KeyEventKind, report_events: bool) -> Vec<u8> {
+    let modv = kitty_mod_value(mods);
+    let emit_event = report_events && kind != KeyEventKind::Press;
+    let mut s = format!("\x1b[{n};{modv}");
+    if emit_event {
+        s.push_str(&format!(":{}", kitty_event_subparam(kind)));
+    }
+    s.push('~');
+    s.into_bytes()
+}
+
+/// Encode a logical key into kitty-keyboard-protocol (CSI u) bytes.
+///
+/// This is the progressive-enhancement path: it is consulted ONLY when a
+/// running program has negotiated the protocol (the terminal's flags are
+/// non-zero). The caller falls back to the legacy [`encode_key`] whenever this
+/// returns `None`.
+///
+/// `flags` is the negotiated bitset (top of the terminal's kitty flag stack):
+/// bit1(=1) DISAMBIGUATE, bit2(=2) REPORT-EVENT-TYPES, bit4(=4)
+/// report-alternate-keys, bit8(=8) report-all-keys-as-escape-codes, bit16(=16)
+/// report-associated-text.
+///
+/// # Encoder boundary (DEFINED behavior, not a TODO)
+///
+/// This encoder FULLY encodes the bits that carry the protocol's load-bearing
+/// value and falls through (returns `None` → legacy encoding) for the rest:
+///
+/// - **bit1 DISAMBIGUATE (fully encoded).** Enter / Tab / Backspace / Escape
+///   emit their unambiguous CSI-u numbers (`CSI 13 u`, `CSI 9 u`, `CSI 127 u`,
+///   `CSI 27 u`) so an app can tell Shift+Enter from Enter, Ctrl+I from Tab,
+///   and a lone Esc from the start of an escape sequence. Modified character
+///   keys emit `CSI <codepoint> ; <mods> u`.
+/// - **bit2 REPORT-EVENT-TYPES (fully encoded).** When set, releases and
+///   repeats are encoded with the `:<event>` sub-param; when UNSET, a `Release`
+///   returns `None` (silent, matching legacy/disambiguate-only behavior) and a
+///   `Repeat` is encoded identically to a `Press`.
+/// - **bit16 REPORT-ASSOCIATED-TEXT (encoded for single-codepoint keys).** When
+///   set, the associated text codepoint(s) are appended as `; <text>` before
+///   the `u`.
+/// - **bit4 report-alternate-keys / bit8 report-all-keys-as-escape-codes
+///   (fall-through).** These request the shifted/base-layout alternate
+///   codepoints (bit4) and that EVERY key — including plain unmodified
+///   printable text — be reported as an escape code (bit8). Encoding them
+///   correctly requires keyboard-layout data this UI-free core does not carry,
+///   so for keys where they would change the output this encoder returns `None`
+///   and the legacy text/encoding path is used. The flags are still stored and
+///   reported faithfully by the terminal so the negotiation handshake stays
+///   honest — the program learns the terminal accepted the flags even though
+///   this build encodes the conservative subset.
+///
+/// Returns `None` (→ legacy fallback) when:
+/// - `flags == 0` (protocol not negotiated);
+/// - the key is an unmodified cursor / function / editing key with no event to
+///   report (the legacy form is already unambiguous — no CSI-u needed);
+/// - a `Release` arrives while bit2 is unset;
+/// - the key is multi-codepoint text (an IME commit) under a non-all-keys mode
+///   (it passes through as text);
+/// - an out-of-range function key.
+pub fn encode_key_kitty(
+    key: &LogicalKey,
+    mods: KeyModifiers,
+    flags: u8,
+    kind: KeyEventKind,
+) -> Option<Vec<u8>> {
+    if flags == 0 {
+        return None;
+    }
+    let disambiguate = flags & 1 != 0;
+    let report_events = flags & 2 != 0;
+    let report_text = flags & 16 != 0;
+
+    // Releases are silent unless the program asked for event types.
+    if kind == KeyEventKind::Release && !report_events {
+        return None;
+    }
+
+    let modv = kitty_mod_value(mods);
+    let modified = modv != 1;
+    let need_event = report_events && kind != KeyEventKind::Press;
+
+    match key {
+        // Cursor keys + Home/End: CSI-with-mods letter form. Unmodified with no
+        // event → legacy form is unambiguous, so fall through to legacy.
+        LogicalKey::ArrowUp => {
+            csi_letter_or_fallback(b'A', mods, kind, report_events, modified, need_event)
+        }
+        LogicalKey::ArrowDown => {
+            csi_letter_or_fallback(b'B', mods, kind, report_events, modified, need_event)
+        }
+        LogicalKey::ArrowRight => {
+            csi_letter_or_fallback(b'C', mods, kind, report_events, modified, need_event)
+        }
+        LogicalKey::ArrowLeft => {
+            csi_letter_or_fallback(b'D', mods, kind, report_events, modified, need_event)
+        }
+        LogicalKey::Home => {
+            csi_letter_or_fallback(b'H', mods, kind, report_events, modified, need_event)
+        }
+        LogicalKey::End => {
+            csi_letter_or_fallback(b'F', mods, kind, report_events, modified, need_event)
+        }
+
+        // The disambiguation core: Enter / Tab / Backspace / Escape as CSI-u
+        // numbers when bit1 is set OR a modifier/event is present. Without
+        // disambiguate and unmodified with no event, fall through to legacy.
+        LogicalKey::Escape => csi_u_or_fallback(
+            27,
+            mods,
+            kind,
+            report_events,
+            disambiguate || modified || need_event,
+        ),
+        LogicalKey::Enter => csi_u_or_fallback(
+            13,
+            mods,
+            kind,
+            report_events,
+            disambiguate || modified || need_event,
+        ),
+        LogicalKey::Tab => csi_u_or_fallback(
+            9,
+            mods,
+            kind,
+            report_events,
+            disambiguate || modified || need_event,
+        ),
+        LogicalKey::Backspace => csi_u_or_fallback(
+            127,
+            mods,
+            kind,
+            report_events,
+            disambiguate || modified || need_event,
+        ),
+
+        // Editing keys: tilde form when modified or an event must be reported;
+        // otherwise the legacy tilde form already disambiguates → fall through.
+        LogicalKey::Insert => tilde_or_fallback(2, mods, kind, report_events, modified, need_event),
+        LogicalKey::Delete => tilde_or_fallback(3, mods, kind, report_events, modified, need_event),
+        LogicalKey::PageUp => tilde_or_fallback(5, mods, kind, report_events, modified, need_event),
+        LogicalKey::PageDown => {
+            tilde_or_fallback(6, mods, kind, report_events, modified, need_event)
+        }
+
+        // Function keys: F1–F4 use the CSI-1-letter P/Q/R/S form; F5–F12 use the
+        // tilde form. Unmodified with no event → legacy form is fine, fall
+        // through to legacy.
+        LogicalKey::Function(n) => {
+            if !modified && !need_event {
+                return None; // legacy form is unambiguous
+            }
+            match n {
+                1 => Some(kitty_csi_letter(b'P', mods, kind, report_events)),
+                2 => Some(kitty_csi_letter(b'Q', mods, kind, report_events)),
+                3 => Some(kitty_csi_letter(b'R', mods, kind, report_events)),
+                4 => Some(kitty_csi_letter(b'S', mods, kind, report_events)),
+                5 => Some(kitty_tilde(15, mods, kind, report_events)),
+                6 => Some(kitty_tilde(17, mods, kind, report_events)),
+                7 => Some(kitty_tilde(18, mods, kind, report_events)),
+                8 => Some(kitty_tilde(19, mods, kind, report_events)),
+                9 => Some(kitty_tilde(20, mods, kind, report_events)),
+                10 => Some(kitty_tilde(21, mods, kind, report_events)),
+                11 => Some(kitty_tilde(23, mods, kind, report_events)),
+                12 => Some(kitty_tilde(24, mods, kind, report_events)),
+                _ => None,
+            }
+        }
+
+        // Space is a plain character key (codepoint 32). Only encode CSI-u when
+        // modified or an event is reported; otherwise let legacy emit ' '.
+        LogicalKey::Space => {
+            if !modified && !need_event {
+                return None;
+            }
+            Some(encode_char_key(' ', mods, kind, report_events, report_text))
+        }
+
+        // Character / text keys.
+        LogicalKey::Text(s) => {
+            let mut chars = s.chars();
+            let (Some(c), None) = (chars.next(), chars.clone().next()) else {
+                // Empty or multi-codepoint (IME commit): pass through as text.
+                return None;
+            };
+            // Single codepoint. Encode CSI-u only when it carries kitty value:
+            // a modifier is held, or an event must be reported. Plain unmodified
+            // text passes through legacy (bit8 all-keys-as-escape is a documented
+            // fall-through — see the boundary note above).
+            if !modified && !need_event {
+                return None;
+            }
+            Some(encode_char_key(c, mods, kind, report_events, report_text))
+        }
+    }
+}
+
+/// Encode a single character key in the CSI-u form. The CSI-u *number* is the
+/// UNSHIFTED base codepoint (ASCII letters are lowercased so Ctrl+Shift+A and
+/// Ctrl+A share base 97, per the kitty spec); when REPORT-ASSOCIATED-TEXT is
+/// active the original character's codepoint is appended as the text field.
+fn encode_char_key(
+    c: char,
+    mods: KeyModifiers,
+    kind: KeyEventKind,
+    report_events: bool,
+    report_text: bool,
+) -> Vec<u8> {
+    let base = if c.is_ascii_uppercase() {
+        c.to_ascii_lowercase()
+    } else {
+        c
+    };
+    let number = base as u32;
+    let modv = kitty_mod_value(mods);
+    let emit_event = report_events && kind != KeyEventKind::Press;
+    let mut s = format!("\x1b[{number}");
+    // A text field forces the modifier field to be present.
+    if modv != 1 || emit_event || report_text {
+        s.push_str(&format!(";{modv}"));
+        if emit_event {
+            s.push_str(&format!(":{}", kitty_event_subparam(kind)));
+        }
+    }
+    if report_text {
+        s.push_str(&format!(";{}", c as u32));
+    }
+    s.push('u');
+    s.into_bytes()
+}
+
+/// CSI-u letter (cursor-key) form, or `None` to fall through to legacy when the
+/// key is unmodified with no event to report.
+fn csi_letter_or_fallback(
+    letter: u8,
+    mods: KeyModifiers,
+    kind: KeyEventKind,
+    report_events: bool,
+    modified: bool,
+    need_event: bool,
+) -> Option<Vec<u8>> {
+    if !modified && !need_event {
+        None
+    } else {
+        Some(kitty_csi_letter(letter, mods, kind, report_events))
+    }
+}
+
+/// CSI-u number form, or `None` to fall through to legacy when `emit` is false.
+fn csi_u_or_fallback(
+    number: u32,
+    mods: KeyModifiers,
+    kind: KeyEventKind,
+    report_events: bool,
+    emit: bool,
+) -> Option<Vec<u8>> {
+    if emit {
+        Some(kitty_csi_u(number, mods, kind, report_events))
+    } else {
+        None
+    }
+}
+
+/// CSI-u tilde (editing/function-key) form, or `None` to fall through to legacy
+/// when the key is unmodified with no event to report.
+fn tilde_or_fallback(
+    n: u32,
+    mods: KeyModifiers,
+    kind: KeyEventKind,
+    report_events: bool,
+    modified: bool,
+    need_event: bool,
+) -> Option<Vec<u8>> {
+    if !modified && !need_event {
+        None
+    } else {
+        Some(kitty_tilde(n, mods, kind, report_events))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +615,353 @@ mod tests {
             encode_key(&LogicalKey::ArrowUp, false, alt),
             Some(b"\x1b[A".to_vec())
         );
+    }
+
+    // ---- kitty keyboard protocol (CSI u) encoder ----
+
+    /// Disambiguate-only flags (bit1).
+    const DISAMB: u8 = 1;
+    /// Disambiguate + report-event-types (bit1 | bit2).
+    const DISAMB_EVENTS: u8 = 3;
+
+    fn ctrl() -> KeyModifiers {
+        KeyModifiers {
+            ctrl: true,
+            ..KeyModifiers::NONE
+        }
+    }
+    fn shift() -> KeyModifiers {
+        KeyModifiers {
+            shift: true,
+            ..KeyModifiers::NONE
+        }
+    }
+    fn ctrl_shift() -> KeyModifiers {
+        KeyModifiers {
+            ctrl: true,
+            shift: true,
+            ..KeyModifiers::NONE
+        }
+    }
+
+    #[test]
+    fn kitty_flags_zero_returns_none() {
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Escape,
+                KeyModifiers::NONE,
+                0,
+                KeyEventKind::Press
+            ),
+            None
+        );
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Text("a".into()),
+                ctrl(),
+                0,
+                KeyEventKind::Press
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn kitty_modifier_value() {
+        assert_eq!(kitty_mod_value(KeyModifiers::NONE), 1);
+        assert_eq!(kitty_mod_value(shift()), 2);
+        assert_eq!(kitty_mod_value(ctrl()), 5);
+        assert_eq!(kitty_mod_value(ctrl_shift()), 6);
+        let alt = KeyModifiers {
+            alt: true,
+            ..KeyModifiers::NONE
+        };
+        assert_eq!(kitty_mod_value(alt), 3);
+        let logo = KeyModifiers {
+            logo: true,
+            ..KeyModifiers::NONE
+        };
+        assert_eq!(kitty_mod_value(logo), 9);
+    }
+
+    #[test]
+    fn kitty_escape_disambiguates() {
+        // Esc under disambiguate → CSI 27 u (no trailing ; 1).
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Escape,
+                KeyModifiers::NONE,
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            Some(b"\x1b[27u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_tab_vs_ctrl_i() {
+        // Plain Tab disambiguates to CSI 9 u; Ctrl+I (encoded as Tab + ctrl)
+        // becomes CSI 9 ; 5 u — the two are now distinguishable.
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Tab,
+                KeyModifiers::NONE,
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            Some(b"\x1b[9u".to_vec())
+        );
+        assert_eq!(
+            encode_key_kitty(&LogicalKey::Tab, ctrl(), DISAMB, KeyEventKind::Press),
+            Some(b"\x1b[9;5u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_shift_enter() {
+        // Shift+Enter → CSI 13 ; 2 u (the canonical "can't tell from Enter" fix).
+        assert_eq!(
+            encode_key_kitty(&LogicalKey::Enter, shift(), DISAMB, KeyEventKind::Press),
+            Some(b"\x1b[13;2u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_backspace_disambiguates() {
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Backspace,
+                KeyModifiers::NONE,
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            Some(b"\x1b[127u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_modified_letter() {
+        // Ctrl+Shift+a → CSI 97 ; 6 u (base codepoint is lowercase 'a' = 97).
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Text("a".into()),
+                ctrl_shift(),
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            Some(b"\x1b[97;6u".to_vec())
+        );
+        // Uppercase commit text is lowercased to the base codepoint too.
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Text("A".into()),
+                ctrl_shift(),
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            Some(b"\x1b[97;6u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_unmodified_text_falls_through() {
+        // Plain unmodified printable text is NOT escape-encoded (bit8 fall-through);
+        // returns None so the caller sends it as legacy text.
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Text("a".into()),
+                KeyModifiers::NONE,
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn kitty_multi_codepoint_text_falls_through() {
+        // An IME commit (multi-char) passes through as text.
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Text("漢字".into()),
+                ctrl(),
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn kitty_release_silent_without_event_bit() {
+        // Release with bit2 UNSET → None (legacy/disambiguate-only is press-only).
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Escape,
+                KeyModifiers::NONE,
+                DISAMB,
+                KeyEventKind::Release
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn kitty_release_encoded_with_event_bit() {
+        // Release with bit2 SET → CSI 27 ; 1 : 3 u (mod field forced to 1).
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Escape,
+                KeyModifiers::NONE,
+                DISAMB_EVENTS,
+                KeyEventKind::Release
+            ),
+            Some(b"\x1b[27;1:3u".to_vec())
+        );
+        // Modified release carries the real modifier.
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Enter,
+                shift(),
+                DISAMB_EVENTS,
+                KeyEventKind::Release
+            ),
+            Some(b"\x1b[13;2:3u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_repeat_event() {
+        // Repeat with bit2 SET → :2 event sub-param.
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Tab,
+                KeyModifiers::NONE,
+                DISAMB_EVENTS,
+                KeyEventKind::Repeat
+            ),
+            Some(b"\x1b[9;1:2u".to_vec())
+        );
+        // Repeat WITHOUT bit2 encodes identically to a press (no event field).
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Tab,
+                KeyModifiers::NONE,
+                DISAMB,
+                KeyEventKind::Repeat
+            ),
+            Some(b"\x1b[9u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_unmodified_cursor_key_falls_through() {
+        // Unmodified arrow with no event → legacy form is unambiguous → None.
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::ArrowUp,
+                KeyModifiers::NONE,
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn kitty_modified_cursor_key() {
+        // Shift+ArrowUp → CSI 1 ; 2 A (CSI-with-mods letter form).
+        assert_eq!(
+            encode_key_kitty(&LogicalKey::ArrowUp, shift(), DISAMB, KeyEventKind::Press),
+            Some(b"\x1b[1;2A".to_vec())
+        );
+        // Ctrl+End → CSI 1 ; 5 F.
+        assert_eq!(
+            encode_key_kitty(&LogicalKey::End, ctrl(), DISAMB, KeyEventKind::Press),
+            Some(b"\x1b[1;5F".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_function_keys() {
+        // Unmodified F1 with no event → legacy form → None.
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Function(1),
+                KeyModifiers::NONE,
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            None
+        );
+        // Ctrl+F1 → CSI 1 ; 5 P.
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Function(1),
+                ctrl(),
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            Some(b"\x1b[1;5P".to_vec())
+        );
+        // Shift+F5 → CSI 15 ; 2 ~.
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Function(5),
+                shift(),
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            Some(b"\x1b[15;2~".to_vec())
+        );
+        // Out-of-range function key → None.
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Function(99),
+                ctrl(),
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn kitty_modified_editing_key() {
+        // Ctrl+Delete → CSI 3 ; 5 ~ (tilde form).
+        assert_eq!(
+            encode_key_kitty(&LogicalKey::Delete, ctrl(), DISAMB, KeyEventKind::Press),
+            Some(b"\x1b[3;5~".to_vec())
+        );
+        // Unmodified Delete falls through (legacy CSI 3 ~ is unambiguous).
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Delete,
+                KeyModifiers::NONE,
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn kitty_report_associated_text() {
+        // bit1 | bit16: a Ctrl+'a' carries the text codepoint appended.
+        let flags = 1 | 16;
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Text("a".into()),
+                ctrl(),
+                flags,
+                KeyEventKind::Press
+            ),
+            Some(b"\x1b[97;5;97u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_default_event_kind_is_press() {
+        assert_eq!(KeyEventKind::default(), KeyEventKind::Press);
     }
 }
