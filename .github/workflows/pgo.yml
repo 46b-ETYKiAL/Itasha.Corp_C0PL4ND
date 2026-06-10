@@ -73,12 +73,9 @@ jobs:
         with:
           tool: cargo-pgo
 
-      - name: Cache cargo registry and target
-        # Swatinem/rust-cache@v2.9.1
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
-        with:
-          workspaces: ". -> target"
-          key: pgo
+      # NOTE: no Swatinem/rust-cache here — the dependency-review gate rejects it
+      # as LGPL-3.0. PGO is an opt-in manual workflow, so a cold build is
+      # acceptable; correctness over cache speed.
 
       - name: Install Linux GUI/display build dependencies
         run: |
