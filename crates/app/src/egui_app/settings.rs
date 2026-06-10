@@ -567,24 +567,6 @@ fn render_sections(
                 ui.end_row();
             }
 
-            // ---- UI scale (F2-3): persisted accessibility zoom for the UI ----
-            if row_visible(q, "ui scale zoom accessibility size") {
-                ui.label("UI scale").on_hover_text(
-                    "Accessibility zoom for the WHOLE interface (chrome + grid), \
-                     persisted across launches. 1.0 = 100%. (Ctrl+/- also zooms, \
-                     but is not saved.)",
-                );
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut config.ui_scale, 0.5..=3.0)
-                            .fixed_decimals(2)
-                            .suffix("×"),
-                    )
-                    .changed();
-                changed |= reset_to_default(ui, &mut config.ui_scale, &def.ui_scale);
-                ui.end_row();
-            }
-
             // ---- Transparency / glass (SCR1B3-parity model) ----
             // Master on/off switch for the whole transparency system. Off by
             // default: a solid window is fast and never leaves a DWM ghost on
@@ -724,6 +706,26 @@ fn render_sections(
                         .changed();
                     changed |= reset_to_default(ui, &mut config.tint_strength, &def.tint_strength);
                 });
+                ui.end_row();
+            }
+
+            // ---- UI scale (F2-3): persisted accessibility zoom for the UI ----
+            // Placed AFTER opacity + tint so the existing slider-order assertions
+            // in egui_settings.rs (opacity = slider 0, tint = slider 1) hold.
+            if row_visible(q, "ui scale zoom accessibility size") {
+                ui.label("UI scale").on_hover_text(
+                    "Accessibility zoom for the WHOLE interface (chrome + grid), \
+                     persisted across launches. 1.0 = 100%. (Ctrl+/- also zooms, \
+                     but is not saved.)",
+                );
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut config.ui_scale, 0.5..=3.0)
+                            .fixed_decimals(2)
+                            .suffix("×"),
+                    )
+                    .changed();
+                changed |= reset_to_default(ui, &mut config.ui_scale, &def.ui_scale);
                 ui.end_row();
             }
 
