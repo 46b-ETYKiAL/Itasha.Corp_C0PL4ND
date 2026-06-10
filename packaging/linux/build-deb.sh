@@ -25,6 +25,7 @@ ARCH="${ARCH:-amd64}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 DESKTOP="${SCRIPT_DIR}/c0pl4nd.desktop"
 ICON="${SCRIPT_DIR}/../icons/c0pl4nd.png"
+MANPAGE="${SCRIPT_DIR}/../../man/c0pl4nd.1"
 
 BIN_PATH="${TARGET_DIR}/${BIN}"
 if [ ! -f "${BIN_PATH}" ]; then
@@ -46,6 +47,7 @@ mkdir -p "${PKG_ROOT}/usr/bin"
 mkdir -p "${PKG_ROOT}/usr/share/applications"
 mkdir -p "${PKG_ROOT}/usr/share/icons/hicolor/256x256/apps"
 mkdir -p "${PKG_ROOT}/usr/share/doc/${BIN}"
+mkdir -p "${PKG_ROOT}/usr/share/man/man1"
 
 install -m 0755 "${BIN_PATH}" "${PKG_ROOT}/usr/bin/${BIN}"
 install -m 0644 "${DESKTOP}" "${PKG_ROOT}/usr/share/applications/c0pl4nd.desktop"
@@ -54,6 +56,19 @@ if [ -f "${ICON}" ]; then
 		"${PKG_ROOT}/usr/share/icons/hicolor/256x256/apps/c0pl4nd.png"
 else
 	echo "warning: icon ${ICON} missing; run packaging/gen-icons.sh first" >&2
+fi
+
+# Man page: gzip into the standard man1 location so `man c0pl4nd` works after
+# install. Best-effort — a missing gzip leaves the uncompressed page.
+if [ -f "${MANPAGE}" ]; then
+	if command -v gzip >/dev/null 2>&1; then
+		gzip -9 -c -n "${MANPAGE}" > "${PKG_ROOT}/usr/share/man/man1/c0pl4nd.1.gz"
+		chmod 0644 "${PKG_ROOT}/usr/share/man/man1/c0pl4nd.1.gz"
+	else
+		install -m 0644 "${MANPAGE}" "${PKG_ROOT}/usr/share/man/man1/c0pl4nd.1"
+	fi
+else
+	echo "warning: man page ${MANPAGE} missing; skipping" >&2
 fi
 
 # Generate the binary control file.

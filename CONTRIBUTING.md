@@ -52,6 +52,11 @@ Run the locally-built terminal:
 cargo run
 ```
 
+If you hit a runtime issue while developing (colour/`TERM` detection, GPU or
+transparency fallback, or where config and logs live), see
+**[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**. The default keybindings are
+documented in **[docs/KEYBINDINGS.md](docs/KEYBINDINGS.md)**.
+
 ---
 
 ## Build, test, lint, and format

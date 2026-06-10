@@ -1,0 +1,136 @@
+.\" Manpage for c0pl4nd.
+.\" Generated to match the real CLI surface in crates/app/src/egui_main.rs
+.\" (canonical binary) and crates/app/src/main.rs (legacy binary).
+.TH C0PL4ND 1 "2026-06-10" "c0pl4nd 0.3.0" "User Commands"
+.SH NAME
+c0pl4nd \- fast, GPU-accelerated, local-first terminal emulator
+.SH SYNOPSIS
+.B c0pl4nd
+.RB [ \-\-version ]
+.RB [ update ]
+.RB [ \-\-screenshot
+.IR PATH ]
+.SH DESCRIPTION
+.B c0pl4nd
+is a cross-platform terminal emulator written in Rust, with a
+GPU-accelerated (wgpu) rendering pipeline, built-in tabs and splits, and a
+single readable TOML configuration file. It runs on Windows, Linux, and
+macOS, requires no account, and sends no telemetry.
+.PP
+Run with no arguments,
+.B c0pl4nd
+launches the windowed terminal. The options and the
+.B update
+subcommand below run a one-shot action and exit without opening a window.
+.SH OPTIONS
+.TP
+.BR \-\-version ", " \-V
+Print the product name and version, then exit.
+.TP
+.BI \-\-screenshot " PATH"
+Render the terminal to a PNG at
+.I PATH
+without opening a window (headless render, used for documentation and CI
+media). If
+.I PATH
+is omitted, the image is written to
+.IR c0pl4nd.png .
+.SH SUBCOMMANDS
+.TP
+.B update
+Perform an explicit, user-initiated update check against the public GitHub
+Releases API for the configured release channel, then exit. The check is
+offline-graceful: a failed network check prints a notice and exits
+successfully rather than erroring. The release channel is read from the
+persisted configuration file (default channel:
+.IR stable ).
+.SH LEGACY BINARY
+A second binary,
+.BR c0pl4nd\-legacy ,
+ships side by side. It is the older winit-driven terminal and additionally
+accepts:
+.TP
+.BR \-\-demo ", " \-\-headless
+Run a headless demo: spawn the shell, run a deterministic command, and print
+the rendered grid to standard output. Verifies the core engine (PTY + VT +
+grid) end to end without a GPU or display.
+.PP
+The canonical
+.B c0pl4nd
+binary does not accept
+.BR \-\-demo .
+.SH CONFIGURATION
+.B c0pl4nd
+works with no configuration. To customize it, edit a single TOML file:
+.TP
+.B Linux/macOS
+.I ~/.config/c0pl4nd/config.toml
+.RI ( $XDG_CONFIG_HOME/c0pl4nd/config.toml
+when
+.B XDG_CONFIG_HOME
+is set)
+.TP
+.B Windows
+.I %APPDATA%\\c0pl4nd\\config.toml
+.PP
+Changes are applied live on save. See the
+.B CONFIG.md
+reference shipped with the project for the full set of keys (fonts, themes,
+keybindings, scrollback, opacity, cursor styles, and the CRT/scanline
+effect), and
+.B docs/KEYBINDINGS.md
+for the default keyboard shortcuts.
+.SH ENVIRONMENT
+.TP
+.B C0PL4ND_LOG
+Tracing filter for the canonical binary's diagnostic log (written to standard
+error). Uses the
+.B tracing
+env-filter syntax (e.g.
+.IR debug ,
+.IR c0pl4nd_core=trace ).
+The legacy binary defaults to
+.I warn
+when unset.
+.TP
+.B RUST_LOG
+Honoured as the default tracing filter by the canonical binary when
+.B C0PL4ND_LOG
+is not set.
+.TP
+.B C0PL4ND_REDUCED_MOTION
+When set, honours the reduced-motion convention: animated chrome (such as the
+drag-ghost glide) is suppressed.
+.TP
+.B WGPU_BACKEND
+Overrides the wgpu backend selection (e.g.
+.IR vulkan ,
+.IR dx12 ,
+.IR gl ).
+On Windows, transparency requires the Vulkan backend; opaque windows default
+to DX12. Set this to force a specific backend if a third-party Vulkan overlay
+layer causes a crash.
+.SH FILES
+.TP
+.I ~/.config/c0pl4nd/config.toml
+Per-user configuration file (Unix).
+.TP
+.I %APPDATA%\\c0pl4nd\\config.toml
+Per-user configuration file (Windows).
+.SH EXIT STATUS
+.B c0pl4nd
+exits
+.B 0
+on success. A failed
+.B update
+check is reported but still exits
+.BR 0 ,
+because a failed check is not a crash.
+.SH SEE ALSO
+The project README, CONFIG.md, docs/KEYBINDINGS.md, docs/LAYOUT.md, and
+TROUBLESHOOTING.md shipped with the source distribution.
+.SH BUGS
+Report issues at
+.UR https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/issues
+the project issue tracker
+.UE .

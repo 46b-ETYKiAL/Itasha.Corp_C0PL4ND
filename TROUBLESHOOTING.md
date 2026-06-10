@@ -1,0 +1,171 @@
+# Troubleshooting
+
+Common issues and how to resolve them. If your problem isn't here, please open
+an issue on the [tracker](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/issues)
+and include your OS, the `c0pl4nd --version` output, and (if relevant) the log
+output described under [Diagnostic logging](#diagnostic-logging) below.
+
+## Colours look wrong, or a TUI program won't use colour
+
+Symptoms: `vim`, `tmux`, `less`, `htop`, or another `ncurses`/terminfo program
+shows no colour, the wrong colours, or a monochrome fallback — even though
+C0PL4ND itself renders full 256-colour and truecolor.
+
+Cause: terminfo-based programs key their capabilities off the `TERM`
+environment variable (and `COLORTERM` for truecolor). A child process spawned
+by C0PL4ND inherits whatever `TERM`/`COLORTERM` the launching process had. When
+C0PL4ND is launched from a GUI shortcut (Start menu, Explorer, a desktop
+launcher) there is often **no `TERM` set at all**, so programs fall back to a
+dumb/`vt100` path or refuse colour.
+
+C0PL4ND answers terminfo and Device-Attributes queries as `xterm-256color`
+(see `crates/core/src/term.rs`), so setting `TERM` to match resolves the
+mismatch.
+
+Fix — set the variables in the child shell yourself:
+
+- **Linux / macOS** (`~/.bashrc`, `~/.zshrc`, or your shell rc):
+
+  ```sh
+  export TERM=xterm-256color
+  export COLORTERM=truecolor
+  ```
+
+- **Windows** — set them for your shell. For PowerShell (`$PROFILE`):
+
+  ```powershell
+  $env:TERM = "xterm-256color"
+  $env:COLORTERM = "truecolor"
+  ```
+
+  Or set them as user environment variables via *System → Environment
+  Variables* so every shell inherits them.
+
+After setting them, restart the shell (or the pane) so the program re-reads the
+environment.
+
+## CJK / IME input: Japanese, Chinese, or Korean text won't type
+
+Symptoms: pressing an IME-composed key produces nothing, or only the committed
+romaji, and the OS candidate window does not appear over the terminal.
+
+Cause: the terminal grid is a custom-painted surface rather than a standard
+text input, so the operating system's input-method editor (IME) candidate
+window is not yet wired to the terminal caret. Latin (direct) input works
+normally; composed CJK / complex-script input does not.
+
+Workarounds:
+
+- Compose the text in another application (a text editor, the OS IME pad, or a
+  browser field), then **paste** it into C0PL4ND with the paste binding
+  (`Ctrl+Shift+V` / `Cmd+Shift+V`). Paste delivers the committed Unicode text
+  directly. If the paste contains a newline, a confirm overlay appears first —
+  this is the multi-line-paste safety guard (see below).
+- For shells that support it, type the codepoint directly (e.g. a shell's
+  Unicode escape) rather than via the OS IME.
+
+This is a known limitation tracked for the input layer; East-Asian *width*
+(wide characters occupying two cells) is already handled correctly, so pasted
+CJK text displays with the right column widths.
+
+## GPU, transparency, or the window appears as a solid dark box
+
+Symptoms: window transparency / acrylic blur is enabled in the config but the
+window renders fully opaque; or the app crashes at startup on a machine with a
+third-party GPU overlay layer installed.
+
+Cause and fixes:
+
+- **Transparency requires Vulkan on Windows.** A wgpu swapchain bound to a
+  Win32 window through DX12/DXGI cannot per-pixel alpha-composite with the
+  desktop, so `transparency_enabled = true` is a silent no-op under DX12.
+  C0PL4ND automatically selects the Vulkan backend when transparency is enabled
+  and DX12 otherwise. If transparency still doesn't take effect, confirm
+  `transparency_enabled = true` in your `config.toml` and relaunch (the backend
+  is chosen at startup).
+- **A Vulkan overlay layer crashes startup.** Some third-party Vulkan overlay
+  layers (e.g. game/store overlays) corrupt the Vulkan instance and crash the
+  renderer. Force the more robust DX12 backend by setting the `WGPU_BACKEND`
+  environment variable before launching — this trades transparency for
+  stability:
+
+  ```sh
+  WGPU_BACKEND=dx12 c0pl4nd      # Linux/macOS shells
+  ```
+
+  ```powershell
+  $env:WGPU_BACKEND = "dx12"; c0pl4nd   # PowerShell
+  ```
+
+  Other accepted values include `vulkan` and `gl`. `WGPU_BACKEND` always
+  overrides the automatic choice.
+
+## Animations / the CRT effect cause discomfort (reduced motion)
+
+C0PL4ND honours a reduced-motion preference via the `C0PL4ND_REDUCED_MOTION`
+environment variable. Set it (to any value) before launching to suppress
+animated chrome such as the drag-ghost glide:
+
+```sh
+C0PL4ND_REDUCED_MOTION=1 c0pl4nd
+```
+
+The CRT/scanline post-effect is **off by default**; if you enabled it and find
+the motion uncomfortable, turn it off again in the Effects settings or set
+`crt = false` under `[effects]` in your `config.toml`.
+
+## Multi-line paste seems blocked or shows a confirm prompt
+
+By default, pasting clipboard text that contains a newline shows a confirm
+overlay first (`paste_warn_multiline = true`). This is a deliberate security
+feature: a multi-line paste can run shell commands the instant it lands. Press
+`Enter` to confirm the paste or `Esc` to cancel. To paste multi-line content
+without confirmation, set `paste_warn_multiline = false` under your config.
+
+## My config edit didn't take effect / I think it's invalid
+
+- Config changes are applied live on save; if nothing changed, double-check you
+  edited the file at the active path (below) and that the TOML is well-formed.
+- C0PL4ND works with **no** config file — an empty or missing file falls back
+  to built-in defaults, so a syntax error in your file is the likeliest cause
+  of "my setting is ignored." Compare against the full example in
+  [CONFIG.md](CONFIG.md).
+- For the default keybindings and how to override them, see
+  [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md). The command palette
+  (`Ctrl+Shift+P` / `Cmd+Shift+P`) always shows the live bindings.
+
+## Where do config and logs live?
+
+**Configuration file:**
+
+- **Linux / macOS:** `~/.config/c0pl4nd/config.toml`
+  (or `$XDG_CONFIG_HOME/c0pl4nd/config.toml` when `XDG_CONFIG_HOME` is set)
+- **Windows:** `%APPDATA%\c0pl4nd\config.toml`
+
+**Native window geometry** (size/position) is persisted by the app framework
+under a per-app folder keyed on the app id `com.itashacorp.c0pl4nd`, alongside
+the platform's application-state directory.
+
+### Diagnostic logging
+
+C0PL4ND writes diagnostic/tracing output to **standard error**. To capture it,
+launch from a terminal with the log filter set:
+
+```sh
+C0PL4ND_LOG=debug c0pl4nd 2> c0pl4nd.log
+```
+
+`C0PL4ND_LOG` (and `RUST_LOG` as a fallback) accept the standard `tracing`
+env-filter syntax — for example `C0PL4ND_LOG=c0pl4nd_core=trace` to trace just
+the core engine. Attach the captured log to any bug report.
+
+> Note: release builds run as a GUI-subsystem application and do not attach a
+> console window, so redirect standard error to a file (as above) or run a
+> debug build to see the log live.
+
+## See also
+
+- [CONFIG.md](CONFIG.md) — full configuration reference.
+- [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) — default keyboard shortcuts.
+- [docs/LAYOUT.md](docs/LAYOUT.md) — tabs, splits, and workspace layout.
+- [SECURITY.md](SECURITY.md) — security disclosure process.

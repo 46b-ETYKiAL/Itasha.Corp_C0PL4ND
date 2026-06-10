@@ -21,6 +21,11 @@ use std::thread::JoinHandle;
 /// which is documented to be safe to call from any thread.
 pub type WakeFn = Arc<dyn Fn() + Send + Sync>;
 
+/// A live terminal session: a spawned PTY process, the [`Terminal`] model its
+/// output is parsed into, and a background reader thread that drains the PTY and
+/// updates the terminal. The session owns the write side of the PTY (keystrokes
+/// and pastes are sent through it) and tracks process liveness so the UI can
+/// degrade a dead pane gracefully.
 pub struct Session {
     pty: PtyProcess,
     terminal: Arc<Mutex<Terminal>>,

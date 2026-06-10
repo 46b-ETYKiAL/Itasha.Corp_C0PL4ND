@@ -27,8 +27,11 @@ pub const DEFAULT_SCROLLBACK: usize = 10_000;
 /// A decoded inline image anchored to a grid position (absolute line + column).
 #[derive(Debug, Clone)]
 pub struct TerminalImage {
+    /// The decoded image pixels.
     pub image: crate::image::DecodedImage,
+    /// Absolute grid line the image's top-left anchor sits on.
     pub line: usize,
+    /// Grid column the image's top-left anchor sits on.
     pub col: usize,
 }
 
@@ -322,8 +325,11 @@ fn default_tab_stops(cols: usize) -> Vec<bool> {
 /// A mouse button (or wheel direction) for [`Terminal::encode_mouse`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseButton {
+    /// Left button (button 0).
     Left,
+    /// Middle button (button 1).
     Middle,
+    /// Right button (button 2).
     Right,
     /// Wheel scrolled up (button 4).
     WheelUp,
@@ -348,8 +354,11 @@ pub enum MouseEventKind {
 /// per the xterm protocol (shift=4, meta/alt=8, control=16).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MouseModifiers {
+    /// Shift held during the event (adds 4 to the button byte).
     pub shift: bool,
+    /// Alt/Meta held during the event (adds 8 to the button byte).
     pub alt: bool,
+    /// Control held during the event (adds 16 to the button byte).
     pub control: bool,
 }
 
@@ -2486,6 +2495,9 @@ pub struct Terminal {
 }
 
 impl Terminal {
+    /// Construct a terminal of `rows` × `cols` with the default scrollback cap
+    /// ([`DEFAULT_SCROLLBACK`]). Use [`Terminal::with_scrollback`] for an
+    /// explicit cap.
     pub fn new(rows: usize, cols: usize) -> Self {
         Self::with_scrollback(rows, cols, DEFAULT_SCROLLBACK)
     }
@@ -2658,10 +2670,12 @@ impl Terminal {
         self.apc_state = ApcFilter::Normal;
     }
 
+    /// Borrow the active screen grid (the cell matrix the renderer reads).
     pub fn grid(&self) -> &Grid {
         &self.screen.grid
     }
 
+    /// Mutably borrow the active screen grid.
     pub fn grid_mut(&mut self) -> &mut Grid {
         &mut self.screen.grid
     }
@@ -2676,10 +2690,13 @@ impl Terminal {
         self.screen.grid.clear_damage();
     }
 
+    /// The current window title, as set by the program via OSC 0/2.
     pub fn title(&self) -> &str {
         &self.screen.title
     }
 
+    /// The current working directory reported by the shell (OSC 7), or `None`
+    /// if the shell has not reported one.
     pub fn cwd(&self) -> Option<&str> {
         self.screen.cwd.as_deref()
     }
@@ -3228,6 +3245,9 @@ impl Terminal {
         lines
     }
 
+    /// Resize the terminal to `rows` × `cols` (each clamped to a minimum of 1),
+    /// reflowing the primary screen and adjusting the scroll region. The
+    /// alternate screen is resized without reflow per the usual VT semantics.
     pub fn resize(&mut self, rows: usize, cols: usize) {
         let rows = rows.max(1);
         let cols = cols.max(1);
