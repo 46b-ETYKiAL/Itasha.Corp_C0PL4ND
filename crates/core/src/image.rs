@@ -62,11 +62,33 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
     const MAX_SIXEL_DIM: usize = 4096;
     const MAX_SIXEL_PIXELS: usize = 16 * 1024 * 1024;
 
+    // Total-WORK budget (audit P3-#3). The per-axis dim clamp + pixel-map cap
+    // bound the OUTPUT, but they do NOT bound the amount of WORK a hostile stream
+    // can demand: `$` (graphics CR) resets `x` to 0, so a stream of the form
+    // `$!4096~$!4096~…` re-plots a full band on every cycle while the *unique*
+    // pixel set (and thus the map) stays tiny — the same (x,y) keys are
+    // overwritten. Within the 8 MiB input cap that is on the order of 4 billion
+    // plot operations: bounded, but enough to pin a core for a noticeable stall.
+    // `MAX_SIXEL_OPS` is a hard ceiling on the number of band-plot operations
+    // (`plot` calls); decoding aborts (returns `None`) the moment it is exceeded.
+    // 16 Mi ops covers the densest legitimate image — a full 4096×4096 surface is
+    // 4096 cols × ⌈4096/6⌉ = 683 bands ≈ 2.8 Mi band plots, so the ceiling leaves
+    // ≈5.7× headroom — while capping the adversarial re-plot loop. Deterministic +
+    // input-bounded (no wall-clock, no threads) so it is exactly reproducible in
+    // tests.
+    const MAX_SIXEL_OPS: u64 = 16 * 1024 * 1024;
+    let mut ops: u64 = 0;
+
     let mut i = 0;
     while i < data.len() {
         // Backstop: never let the sparse pixel map exceed the output ceiling,
         // regardless of how the bytes try to grow it.
         if pixels.len() > MAX_SIXEL_PIXELS {
+            return None;
+        }
+        // Work-budget backstop: abort once the cumulative band-plot count exceeds
+        // the ceiling, defeating the `$`-reset re-plot DoS described above.
+        if ops > MAX_SIXEL_OPS {
             return None;
         }
         let b = data[i];
@@ -119,6 +141,7 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
                         // Clamp the repeat so `x` can never exceed the per-axis
                         // ceiling — bounds the loop AND the pixel map.
                         let reps = (count.max(1) as usize).min(MAX_SIXEL_DIM.saturating_sub(x));
+                        ops = ops.saturating_add(reps as u64);
                         for _ in 0..reps {
                             plot(
                                 &mut pixels,
@@ -138,6 +161,7 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
                 // A sixel: 6 vertical pixels.
                 let bits = b - 0x3f;
                 if x < MAX_SIXEL_DIM {
+                    ops = ops.saturating_add(1);
                     plot(
                         &mut pixels,
                         &mut max_x,
@@ -503,6 +527,32 @@ mod tests {
                 img.height
             );
         }
+    }
+
+    #[test]
+    fn sixel_replot_work_budget_aborts_over_budget_stream() {
+        // Audit P3-#3: the `$`-reset re-plot DoS. A stream of `$!4095~` cycles
+        // re-plots a full band on every cycle while the unique pixel set stays
+        // tiny (the same (x,y) keys are overwritten), so neither the per-axis
+        // clamp nor the pixel-map cap stops it — only the total-WORK budget does.
+        // Each cycle costs ~4095 plot ops; ~4200 cycles (~29 KiB, far under the
+        // 8 MiB input cap) pushes the running total past the 16 Mi MAX_SIXEL_OPS
+        // ceiling so decode aborts → None.
+        let mut data = b"#0;2;100;100;100".to_vec();
+        for _ in 0..4_200 {
+            data.extend_from_slice(b"$!4095~");
+        }
+        assert!(
+            decode_sixel(&data).is_none(),
+            "an over-work-budget re-plot stream must be rejected (returns None)"
+        );
+
+        // A legitimate, modest image still decodes fine — the budget is generous
+        // and only the adversarial re-plot loop hits it.
+        let mut ok = b"#0;2;100;0;0".to_vec();
+        ok.extend_from_slice(b"!64~"); // 64-wide solid band, ~384 ops — trivially under budget
+        let img = decode_sixel(&ok).expect("normal sixel decodes");
+        assert_eq!(img.width, 64);
     }
 
     #[test]

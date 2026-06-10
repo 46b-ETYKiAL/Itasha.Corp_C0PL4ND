@@ -580,25 +580,30 @@ impl Config {
     /// Used by the settings panel and the window-geometry persistence so the
     /// config file stays the single source of truth.
     ///
-    /// After writing, the file is locked down to **owner-only** access
-    /// (roadmap P-V2): `0600` on Unix, an owner-only DACL on Windows. The config
-    /// may reflect the user's environment, so other local accounts should not be
-    /// able to read it. Permission tightening is BEST-EFFORT — a failure is
-    /// logged and ignored, never propagated, so a restrictive/locked filesystem
-    /// can never block a settings save.
+    /// The file is created **owner-only** from the start (roadmap P-V2): `0600`
+    /// on Unix, an owner-only DACL on Windows. The config may reflect the user's
+    /// environment, so other local accounts should not be able to read it.
+    ///
+    /// The write goes through [`atomic_write_owner_only`], which writes the body
+    /// to a sibling temp file, tightens it (on Unix `0600` is applied to the temp
+    /// file **before** the rename), then atomically renames it over the
+    /// destination. This closes the previous race where `std::fs::write` then
+    /// `restrict_to_owner` left a brief window in which the file carried default
+    /// (umask/inherited) permissions (audit P3-#2). Permission tightening itself
+    /// remains BEST-EFFORT — a restrictive filesystem can never block a save —
+    /// but is no longer applied after the content already exists world-readable.
     pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| ConfigError::Io {
-                path: parent.to_path_buf(),
-                source: e,
-            })?;
-        }
         let body = self.to_toml()?;
-        std::fs::write(path, body).map_err(|e| ConfigError::Io {
-            path: path.to_path_buf(),
-            source: e,
+        // `atomic_write_owner_only` creates parent dirs, writes to a sibling
+        // temp file, tightens perms (Unix: on the temp file pre-rename; Windows:
+        // on the final path post-rename), and renames atomically — so the
+        // destination never exists in a world-readable, default-perms state.
+        crate::atomic_write::atomic_write_owner_only(path, body.as_bytes()).map_err(|e| {
+            ConfigError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            }
         })?;
-        restrict_to_owner(path);
         Ok(())
     }
 
@@ -620,18 +625,6 @@ impl Config {
         cfg.save_to(&path).ok()?;
         Some(path)
     }
-}
-
-/// Best-effort tighten `path` to **owner-only** access (roadmap P-V2): `0600` on
-/// Unix, an inheritance-stripped owner-only ACL on Windows. The config can
-/// reflect the user's environment, so other local accounts should not read it.
-/// Failure is intentionally swallowed — a restrictive / locked-down filesystem
-/// must never block a settings save (the write already succeeded by here).
-///
-/// Delegates to the shared [`crate::fs_perms::restrict_to_owner`] so the config
-/// file and saved workspace layouts are tightened by the identical code path.
-fn restrict_to_owner(path: &Path) {
-    crate::fs_perms::restrict_to_owner(path);
 }
 
 #[cfg(test)]
@@ -911,5 +904,46 @@ mod tests {
         assert!((c.effects.scanline_darkness - 0.55).abs() < f32::EPSILON);
         assert!(c.effects.chromatic_aberration_enabled);
         assert!((c.effects.effective_chromatic() - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn save_to_round_trips_and_creates_parent_dirs() {
+        // A save followed by a load reproduces the persisted fields, and the
+        // missing parent directory is created (the atomic-write path handles it).
+        let dir = std::env::temp_dir()
+            .join(format!("c0pl4nd-cfg-{}-rt", std::process::id()))
+            .join("nested");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        let path = dir.join("config.toml");
+        let c = Config {
+            theme: "ghost-paper".to_string(),
+            ..Config::default()
+        };
+        c.save_to(&path).expect("save");
+        let loaded = Config::load_from(&path).expect("load");
+        assert_eq!(loaded.theme, "ghost-paper");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_to_writes_owner_only_0600_no_race() {
+        // Audit P3-#2: the saved config must be owner-only (0600) — and because
+        // it is created via atomic_write_owner_only, the file NEVER exists in a
+        // world-readable default-perms state (the perms are applied to the temp
+        // file before the rename, not after the content already exists).
+        use std::os::unix::fs::PermissionsExt;
+        let path =
+            std::env::temp_dir().join(format!("c0pl4nd-cfg-{}-perms.toml", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        Config::default().save_to(&path).expect("save");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "saved config must be owner-only 0600, got {:o}",
+            mode & 0o777
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }
