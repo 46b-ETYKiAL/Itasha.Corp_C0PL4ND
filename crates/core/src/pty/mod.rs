@@ -31,8 +31,22 @@ impl PtyProcess {
         cols: u16,
         cwd: Option<&str>,
     ) -> Result<Self> {
+        Self::spawn_shell_in_with_term(shell, rows, cols, cwd, None)
+    }
+
+    /// Like [`PtyProcess::spawn_shell_in`] but with an explicit `TERM` override.
+    /// `term = None` uses the canonical [`DEFAULT_TERM`]; `Some(value)` sets that
+    /// value (the config-driven `term` key flows in here). An empty `term` is
+    /// treated as `None`.
+    pub fn spawn_shell_in_with_term(
+        shell: Option<&str>,
+        rows: u16,
+        cols: u16,
+        cwd: Option<&str>,
+        term: Option<&str>,
+    ) -> Result<Self> {
         let program = shell.map(str::to_string).unwrap_or_else(default_shell);
-        Self::spawn_program_in(&program, &[], rows, cols, cwd)
+        Self::spawn_program_in_with_term(&program, &[], rows, cols, cwd, term)
     }
 
     /// Spawn an explicit program (used by tests for deterministic one-shots).
@@ -48,6 +62,20 @@ impl PtyProcess {
         cols: u16,
         cwd: Option<&str>,
     ) -> Result<Self> {
+        Self::spawn_program_in_with_term(program, args, rows, cols, cwd, None)
+    }
+
+    /// Spawn an explicit program with an optional working directory and `TERM`
+    /// override. This is the single spawn implementation every other constructor
+    /// delegates to.
+    pub fn spawn_program_in_with_term(
+        program: &str,
+        args: &[&str],
+        rows: u16,
+        cols: u16,
+        cwd: Option<&str>,
+        term: Option<&str>,
+    ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -62,6 +90,7 @@ impl PtyProcess {
         for a in args {
             cmd.arg(a);
         }
+        apply_terminal_env(&mut cmd, term);
         apply_prompt_env(&mut cmd, program);
         // Prefer the requested cwd when it exists; else fall back to home.
         let dir = cwd
@@ -140,6 +169,59 @@ impl Drop for PtyProcess {
         // body runs, so by the time `ClosePseudoConsole` fires the child is gone.
         let _ = self.child.kill();
     }
+}
+
+/// The canonical `TERM` value C0PL4ND advertises. This is what the terminal
+/// emulator actually emulates on the wire — its DA (Device Attributes) response
+/// and XTGETTCAP replies describe an `xterm-256color`-class terminal — so the
+/// child's `TERM` must agree, or a freshly GUI-launched TUI mis-detects colour
+/// support (the F1-1 failure: a child spawned from a Windows GUI process inherits
+/// no `TERM`/`COLORTERM` at all).
+pub const DEFAULT_TERM: &str = "xterm-256color";
+
+/// The `COLORTERM` value C0PL4ND advertises. `truecolor` tells colour-aware
+/// programs the terminal renders 24-bit RGB (which it does), so they emit
+/// 24-bit SGR sequences instead of degrading to the 256-colour palette.
+const COLORTERM_VALUE: &str = "truecolor";
+
+/// Set the canonical terminal-identification environment on the child command:
+/// `TERM`, `COLORTERM`, `TERM_PROGRAM`, and `TERM_PROGRAM_VERSION`.
+///
+/// Why this is needed: on Windows a GUI-launched process inherits NO `TERM` /
+/// `COLORTERM` from its parent (those are POSIX-terminal conventions a desktop
+/// shell never sets), so a child shell — and every TUI it runs — has nothing to
+/// read and mis-detects the terminal's colour capability. The emulator already
+/// advertises an `xterm-256color`-class terminal over the wire (the DA / XTGETTCAP
+/// responses in `term.rs`), so the env must say the same thing the wire does.
+///
+/// User intent is honoured: `TERM` and `COLORTERM` are set only when the value
+/// is not ALREADY present in the inherited (base) environment — so a user who
+/// deliberately exported `TERM=screen-256color` (or similar) before launching
+/// keeps it. `CommandBuilder::new` seeds `envs` from the parent process, so
+/// `get_env` reflects the inherited value. `TERM_PROGRAM` /
+/// `TERM_PROGRAM_VERSION` always identify C0PL4ND (these name THIS emulator, so
+/// an inherited value from some other host would be wrong).
+fn apply_terminal_env(cmd: &mut CommandBuilder, term: Option<&str>) {
+    // The effective TERM: an explicit, non-empty config override wins; else the
+    // canonical default.
+    let term_value = match term {
+        Some(t) if !t.is_empty() => t,
+        _ => DEFAULT_TERM,
+    };
+
+    // Only set TERM/COLORTERM when the user has not already exported one — a
+    // deliberately-exported value is intent we must not clobber.
+    if cmd.get_env("TERM").is_none() {
+        cmd.env("TERM", term_value);
+    }
+    if cmd.get_env("COLORTERM").is_none() {
+        cmd.env("COLORTERM", COLORTERM_VALUE);
+    }
+
+    // These identify THIS emulator, so always set them (an inherited value would
+    // name a different host program and be misleading).
+    cmd.env("TERM_PROGRAM", "C0PL4ND");
+    cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
 }
 
 /// The default `PROMPT` we inject for a `cmd.exe`-family shell so there is a
@@ -264,9 +346,168 @@ mod tests {
             .map(|(_, v)| v.to_string())
     }
 
+    /// The value a given env key was INJECTED with (i.e. set via `env()`),
+    /// independent of any inherited base-environment value. `None` means no
+    /// injection happened for that key. `iter_extra_env_as_str` reports ONLY
+    /// caller-set vars (`is_from_base_env == false`), which is exactly the
+    /// `apply_terminal_env` injections we want to assert here.
+    fn injected_env(cmd: &CommandBuilder, key: &str) -> Option<String> {
+        cmd.iter_extra_env_as_str()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.to_string())
+    }
+
     #[test]
     fn default_shell_is_nonempty() {
         assert!(!default_shell().is_empty());
+    }
+
+    /// F1-1: with no `TERM` override, `apply_terminal_env` injects the canonical
+    /// `TERM=xterm-256color` + `COLORTERM=truecolor`, plus the C0PL4ND program
+    /// identity. We clear any inherited `TERM`/`COLORTERM` first so the assertion
+    /// is deterministic regardless of how the test runner was launched.
+    #[test]
+    fn apply_terminal_env_sets_canonical_defaults() {
+        let mut cmd = CommandBuilder::new("sh");
+        // Ensure no inherited value masks the injection in this test.
+        cmd.env_remove("TERM");
+        cmd.env_remove("COLORTERM");
+        super::apply_terminal_env(&mut cmd, None);
+
+        assert_eq!(
+            cmd.get_env("TERM").and_then(|v| v.to_str()),
+            Some(super::DEFAULT_TERM),
+            "default TERM must be xterm-256color (matches the on-the-wire DA/XTGETTCAP identity)"
+        );
+        assert_eq!(super::DEFAULT_TERM, "xterm-256color");
+        assert_eq!(
+            cmd.get_env("COLORTERM").and_then(|v| v.to_str()),
+            Some("truecolor"),
+            "COLORTERM must be truecolor so colour-aware TUIs emit 24-bit SGR"
+        );
+        assert_eq!(
+            injected_env(&cmd, "TERM_PROGRAM").as_deref(),
+            Some("C0PL4ND"),
+            "TERM_PROGRAM must identify this emulator"
+        );
+        assert_eq!(
+            injected_env(&cmd, "TERM_PROGRAM_VERSION").as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "TERM_PROGRAM_VERSION must be the crate version"
+        );
+    }
+
+    /// A non-empty `TERM` override (the config `term` key) is honoured verbatim;
+    /// `COLORTERM`/`TERM_PROGRAM`/`TERM_PROGRAM_VERSION` are unaffected.
+    #[test]
+    fn apply_terminal_env_honours_term_override() {
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.env_remove("TERM");
+        super::apply_terminal_env(&mut cmd, Some("screen-256color"));
+        assert_eq!(
+            cmd.get_env("TERM").and_then(|v| v.to_str()),
+            Some("screen-256color"),
+            "an explicit non-empty TERM override must be used verbatim"
+        );
+        // An empty override falls back to the canonical default (treated as None).
+        let mut cmd2 = CommandBuilder::new("sh");
+        cmd2.env_remove("TERM");
+        super::apply_terminal_env(&mut cmd2, Some(""));
+        assert_eq!(
+            cmd2.get_env("TERM").and_then(|v| v.to_str()),
+            Some(super::DEFAULT_TERM),
+            "an empty TERM override falls back to the canonical default"
+        );
+    }
+
+    /// User intent is preserved: a `TERM`/`COLORTERM` already present in the
+    /// (inherited) base environment is NOT clobbered by the injection. We
+    /// simulate the inherited value by setting it on the builder's base env via
+    /// `env()` before calling the helper — but since `apply_terminal_env` checks
+    /// `get_env`, a pre-set value is seen as "already present" and left alone.
+    #[test]
+    fn apply_terminal_env_does_not_clobber_exported_values() {
+        let mut cmd = CommandBuilder::new("sh");
+        // Simulate a user-exported TERM/COLORTERM already in the child's env.
+        cmd.env("TERM", "vt100");
+        cmd.env("COLORTERM", "256");
+        super::apply_terminal_env(&mut cmd, None);
+        assert_eq!(
+            cmd.get_env("TERM").and_then(|v| v.to_str()),
+            Some("vt100"),
+            "an already-present TERM (user intent) must be preserved"
+        );
+        assert_eq!(
+            cmd.get_env("COLORTERM").and_then(|v| v.to_str()),
+            Some("256"),
+            "an already-present COLORTERM (user intent) must be preserved"
+        );
+        // Program identity is still asserted (always set).
+        assert_eq!(
+            injected_env(&cmd, "TERM_PROGRAM").as_deref(),
+            Some("C0PL4ND")
+        );
+    }
+
+    /// End-to-end behavioural proof that the spawned child actually SEES the
+    /// canonical env: a one-shot shell echoes `$TERM`/`$COLORTERM` (or `%TERM%`
+    /// /`%COLORTERM%` on cmd.exe) and we assert the values land in the output.
+    /// Mirrors `spawn_one_shot_echo_round_trips`.
+    #[test]
+    fn spawned_child_sees_term_and_colorterm() {
+        #[cfg(windows)]
+        let mut proc = PtyProcess::spawn_program(
+            "cmd.exe",
+            &["/C", "echo TERM=%TERM% COLORTERM=%COLORTERM%"],
+            24,
+            80,
+        )
+        .expect("spawn cmd echo");
+        #[cfg(not(windows))]
+        let mut proc = PtyProcess::spawn_program(
+            "/bin/sh",
+            &[
+                "-c",
+                "printf 'TERM=%s COLORTERM=%s' \"$TERM\" \"$COLORTERM\"",
+            ],
+            24,
+            80,
+        )
+        .expect("spawn sh echo");
+
+        let mut reader = proc.reader().expect("reader");
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        let s = String::from_utf8_lossy(&buf);
+                        if s.contains("xterm-256color") && s.contains("truecolor") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = tx.send(buf);
+        });
+        let buf = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_default();
+        let _ = proc.wait();
+        let out = String::from_utf8_lossy(&buf);
+        assert!(
+            out.contains("TERM=xterm-256color"),
+            "child must see TERM=xterm-256color, got: {out:?}"
+        );
+        assert!(
+            out.contains("COLORTERM=truecolor"),
+            "child must see COLORTERM=truecolor, got: {out:?}"
+        );
     }
 
     /// `is_cmd_shell` matches the cmd-family by file stem (case-insensitive),

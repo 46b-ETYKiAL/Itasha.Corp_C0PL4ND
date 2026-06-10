@@ -1785,7 +1785,12 @@ impl App {
             },
             None => return,
         };
-        match Session::spawn_shell(self.config.shell.as_deref(), 24, 80) {
+        match Session::spawn_shell_with_term(
+            self.config.shell.as_deref(),
+            24,
+            80,
+            Some(self.config.term.as_str()),
+        ) {
             Ok(s) => {
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.cells.insert(new_leaf, Cell::single(new_leaf, s));
@@ -1809,7 +1814,12 @@ impl App {
     fn spawn_cell_tab(&mut self) {
         let content = self.content_rect();
         let (rows, cols) = self.focused_cell_dims(content);
-        match Session::spawn_shell(self.config.shell.as_deref(), rows, cols) {
+        match Session::spawn_shell_with_term(
+            self.config.shell.as_deref(),
+            rows,
+            cols,
+            Some(self.config.term.as_str()),
+        ) {
             Ok(s) => {
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     let f = tab.layout.focused;
@@ -1995,7 +2005,12 @@ impl App {
                     continue;
                 }
             }
-            match Session::spawn_shell(self.config.shell.as_deref(), rows, cols) {
+            match Session::spawn_shell_with_term(
+                self.config.shell.as_deref(),
+                rows,
+                cols,
+                Some(self.config.term.as_str()),
+            ) {
                 Ok(s) => {
                     cells.insert(id, Cell::single(id, s));
                 }
@@ -2139,11 +2154,12 @@ impl App {
         let (rows, cols) = self.preset_cell_dims(content, &restored.layout);
         let mut cells: HashMap<LeafId, Cell> = HashMap::new();
         for (id, view) in &restored.leaves {
-            match Session::spawn_shell_in(
+            match Session::spawn_shell_in_with_term(
                 self.config.shell.as_deref(),
                 rows,
                 cols,
                 view.cwd.as_deref(),
+                Some(self.config.term.as_str()),
             ) {
                 Ok(s) => {
                     let mut cell = Cell::single(*id, s);
@@ -2752,7 +2768,12 @@ impl App {
     fn spawn_tab(&mut self) {
         let (cols, rows) = self.grid_dims();
         let first = self.tabs.is_empty();
-        match Session::spawn_shell(self.config.shell.as_deref(), rows, cols) {
+        match Session::spawn_shell_with_term(
+            self.config.shell.as_deref(),
+            rows,
+            cols,
+            Some(self.config.term.as_str()),
+        ) {
             Ok(s) => {
                 self.tabs.push(Tab::single(s));
                 self.active = self.tabs.len() - 1;
