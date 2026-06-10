@@ -19,25 +19,29 @@ authors = ["Itasha.Corp"]
 description = "A fast, GPU-accelerated, local-first terminal emulator for Windows, Linux, and macOS."
 
 [workspace.dependencies]
-anyhow = "1"
-thiserror = "2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-serde = { version = "1", features = ["derive"] }
-toml = "1.1"
+# Production deps exact-pinned (=X.Y.Z) per dependency-management.md. The pinned
+# version IS the version already resolved in the committed Cargo.lock — this is a
+# manifest-only tightening (no lockfile change, no upgrade) that stops `cargo
+# update` from silently floating production deps (supply-chain drift defence).
+anyhow = "=1.0.102"
+thiserror = "=2.0.18"
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+toml = "=1.1.2"
 
 # --- GPU/windowing anchor (promoted to workspace so the egui bundle and the
 #     existing terminal-grid renderer share ONE pinned wgpu/winit/glyphon). ---
 # These resolve to wgpu 29.0.3 / winit 0.30.13 / glyphon 0.11.0 — the same set
 # the reference egui app (SCR1B3) locks, so eframe and glyphon can share one
 # wgpu::Device with no duplicate-wgpu-in-the-tree problem (recon dossier §0/§1).
-wgpu = "29"
-winit = "0.30"
-glyphon = "0.11"
+wgpu = "=29.0.3"
+winit = "=0.30.13"
+glyphon = "=0.11.0"
 
 # --- egui bundle (Milestone 1: chrome only) — versions proven mutually
 #     compatible with wgpu 29 by SCR1B3's Cargo.lock (recon dossier §1.1). ---
-eframe = { version = "0.34", default-features = false, features = [
+eframe = { version = "=0.34.3", default-features = false, features = [
     "wgpu",          # wgpu backend — shares Device/Queue with glyphon (Milestone 2)
     "default_fonts",
     "accesskit",     # a11y tree (also what egui_kittest queries in tests)
@@ -45,10 +49,10 @@ eframe = { version = "0.34", default-features = false, features = [
     "x11",
     "persistence",   # native window pos+size restore (#24/#25) + App::save() firing on exit/interval — ron state stored under the with_app_id folder
 ] }
-egui = "0.34"
-egui-wgpu = "0.34"
-egui_tiles = "0.15"
-egui-phosphor = { version = "0.12", default-features = false, features = ["thin", "fill"] }
+egui = "=0.34.3"
+egui-wgpu = "=0.34.3"
+egui_tiles = "=0.15.0"
+egui-phosphor = { version = "=0.12.0", default-features = false, features = ["thin", "fill"] }
 window-vibrancy = "=0.7.1" # OS glass/acrylic/mica/vibrancy (MIT/Apache-2.0); exact-pinned per dependency-management.md
 
 [profile.release]
