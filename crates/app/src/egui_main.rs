@@ -23,9 +23,11 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod diagnostics;
 mod dll_hardening;
 #[path = "egui_app/mod.rs"]
 mod egui_app;
+mod panic_hook;
 #[path = "update/mod.rs"]
 mod update;
 
@@ -38,6 +40,12 @@ fn main() -> eframe::Result<()> {
     // lives in `dll_hardening` so this `#![forbid(unsafe_code)]` binary stays
     // unsafe-free. No-op off Windows.
     dll_hardening::harden_dll_search_order();
+
+    // Install the unexpected-panic crash hook early (before the window /
+    // event-loop): `panic = "abort"` otherwise kills the GUI with no diagnostic.
+    // The hook writes a rotating crash log (and, on Windows, shows a MessageBox)
+    // then chains to the default hook — it runs before the abort fires.
+    panic_hook::install();
 
     // Best-effort tracing; the env filter mirrors the legacy binary.
     let _ = tracing_subscriber::fmt()
@@ -52,6 +60,14 @@ fn main() -> eframe::Result<()> {
     // `c0pl4nd --version` — print and exit (no window).
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("{} {}", c0pl4nd_core::PRODUCT_NAME, c0pl4nd_core::version());
+        return Ok(());
+    }
+
+    // `c0pl4nd --diagnostics` (alias `--doctor`) — print a one-shot env/config
+    // dump and exit BEFORE any window/GPU init. IME text routing is always
+    // compiled into the egui app (it handles `egui::Event::Text`).
+    if diagnostics::requested(&args) {
+        diagnostics::run(true, panic_hook::crash_log_dir());
         return Ok(());
     }
 
