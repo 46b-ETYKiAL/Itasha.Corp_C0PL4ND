@@ -226,7 +226,7 @@ impl Updater {
     /// live executable we re-evaluate the strictly-monotonic freshness rule via
     /// [`super::rollback_guard`] against the highest version this installation
     /// has ever run. A candidate that is older (or an unparseable version) is
-    /// REFUSED here, even though it would pass `verify_artifact` — integrity ≠
+    /// REFUSED here, even though it would pass `verify_artifact_bound` — integrity ≠
     /// freshness. An equal version is a no-op (already installed). This is the
     /// security boundary that complements `net::select_update`'s check-time
     /// `latest <= current` rejection, closing the check→apply replay window.

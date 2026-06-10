@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use super::verify::{verify_artifact, EMBEDDED_PUBLIC_KEY};
+use super::verify::{verify_artifact_bound, EMBEDDED_PUBLIC_KEY};
 
 /// Decompression-bomb guard: hard cap on the TOTAL number of uncompressed bytes
 /// any single archive may expand to during extraction (S-4). A legitimate
@@ -553,7 +553,7 @@ fn extract_binary_zip(archive_bytes: &[u8], dir: &Path) -> Result<PathBuf, Strin
 /// asset name), returning the extracted path. Split out from
 /// [`download_verify_extract`] so it can be unit-tested directly (no network,
 /// no signature) — the production path NEVER reaches here without a passing
-/// `verify_artifact`.
+/// `verify_artifact_bound`.
 fn extract_binary(archive_bytes: &[u8], asset_name: &str, dir: &Path) -> Result<PathBuf, String> {
     if asset_name.ends_with(".zip") {
         extract_binary_zip(archive_bytes, dir)
@@ -615,8 +615,17 @@ fn download_verify_extract_inner(
     let sig_str =
         String::from_utf8(sig_bytes).map_err(|e| format!("minisig is not valid UTF-8: {e}"))?;
 
-    // SHA-256 THEN minisign against the embedded public key. Fails closed.
-    verify_artifact(&asset_bytes, expected_sha, &sig_str, EMBEDDED_PUBLIC_KEY)?;
+    // SHA-256 THEN minisign against the embedded public key, with the
+    // signature's trusted-comment `file:` token bound to the resolved asset
+    // name (defense-in-depth against same-key wrong-artifact substitution).
+    // Fails closed.
+    verify_artifact_bound(
+        &asset_bytes,
+        expected_sha,
+        &sig_str,
+        EMBEDDED_PUBLIC_KEY,
+        &info.asset_name,
+    )?;
 
     // Only reached when verification passed.
     extract_binary(&asset_bytes, &info.asset_name, staging_dir)

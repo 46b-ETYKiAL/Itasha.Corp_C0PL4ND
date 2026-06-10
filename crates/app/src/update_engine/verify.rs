@@ -49,20 +49,81 @@ pub fn verify_signature(bytes: &[u8], sig_str: &str, public_key_box: &str) -> Re
         .map_err(|e| format!("signature verification failed: {e}"))
 }
 
+/// Defense-in-depth (audit P3-#1): assert the signature's *trusted comment* binds
+/// to the asset we believe we downloaded. The trusted comment is part of the
+/// cryptographically-signed blob (minisign signs `signature || trusted_comment`),
+/// so a same-key signature produced over a DIFFERENT asset (e.g. signing the
+/// Windows archive and serving it as the Linux one) carries that asset's name in
+/// its trusted comment and is caught here — a layer above the `.sha256` sidecar +
+/// target-triple asset matching that already constrain this.
+///
+/// `rsign2`/`minisign` write a default trusted comment of the form
+/// `timestamp:<unix>\tfile:<basename>[\tprehashed]` when no explicit `-t` is
+/// given (the C0PL4ND release workflow signs exactly this way). We bind on the
+/// `file:` token: if present, its value MUST equal `expected_asset` (the asset
+/// basename the updater resolved from the target-triple-named release asset).
+///
+/// Conservative-by-construction so a legitimate update is never broken: if the
+/// trusted comment carries NO `file:` token (a hand-rolled custom comment), the
+/// binding is skipped rather than failed — the cryptographic signature + checksum
+/// remain the load-bearing gates and this is purely additive. A `file:` token
+/// that is PRESENT but MISMATCHED is a hard failure (fail-closed).
+pub fn verify_signature_bound(
+    bytes: &[u8],
+    sig_str: &str,
+    public_key_box: &str,
+    expected_asset: &str,
+) -> Result<(), String> {
+    // Cryptographic check first — a bad signature is rejected before we even
+    // look at the (now-trusted) comment.
+    verify_signature(bytes, sig_str, public_key_box)?;
+
+    let sig =
+        minisign_verify::Signature::decode(sig_str).map_err(|e| format!("bad signature: {e}"))?;
+    let trusted = sig.trusted_comment();
+    // The trusted comment is `\t`-separated `key:value` fields. Find `file:`.
+    if let Some(signed_file) = trusted
+        .split('\t')
+        .find_map(|field| field.trim().strip_prefix("file:"))
+    {
+        let signed_file = signed_file.trim();
+        // Compare against the basename only — the trusted comment records the
+        // bare filename passed to the signer, never a directory path.
+        let expected = expected_asset
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(expected_asset)
+            .trim();
+        if !signed_file.eq_ignore_ascii_case(expected) {
+            return Err(format!(
+                "signature trusted-comment file mismatch: signed for {signed_file:?}, \
+                 expected {expected:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Full gate (fails closed): an artifact is acceptable IFF its checksum matches
 /// (SHA-256 first — catches corruption) AND its signature verifies against the
-/// embedded public key (then minisign — catches tampering). Returns `Err` the
-/// moment either check fails; the caller NEVER returns an unverified binary.
-pub fn verify_artifact(
+/// embedded public key with the signed trusted-comment `file:` token bound to
+/// `expected_asset` (then minisign — catches tampering + same-key wrong-artifact
+/// substitution). Returns `Err` the moment any check fails; the caller NEVER
+/// returns an unverified binary. The `_bound` suffix denotes the trusted-comment
+/// asset binding added in audit P3-#1 (see [`verify_signature_bound`]); the
+/// updater always knows the asset name it resolved, so this is the only gate it
+/// needs.
+pub fn verify_artifact_bound(
     bytes: &[u8],
     expected_sha256: &str,
     sig_str: &str,
     public_key_box: &str,
+    expected_asset: &str,
 ) -> Result<(), String> {
     if !verify_checksum(bytes, expected_sha256) {
         return Err("checksum mismatch".to_string());
     }
-    verify_signature(bytes, sig_str, public_key_box)
+    verify_signature_bound(bytes, sig_str, public_key_box, expected_asset)
 }
 
 #[cfg(test)]
@@ -117,7 +178,9 @@ mod tests {
     #[test]
     fn verify_artifact_requires_both_checksum_and_signature() {
         // A full round-trip through the combined gate: correct sha + valid sig
-        // accepts; a wrong sha rejects BEFORE the signature is even checked.
+        // accepts; a wrong sha rejects BEFORE the signature is even checked. Uses
+        // a trusted comment with no `file:` token, so the asset binding is a
+        // no-op here and this exercises the checksum+signature path in isolation.
         let kp = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
         let pk_box = kp.pk.to_box().unwrap().to_string();
         let data = b"c0pl4nd-x86_64-pc-windows-msvc.tar.gz bytes";
@@ -131,15 +194,123 @@ mod tests {
         .unwrap();
         let sig_str = sig_box.to_string();
         let sha = sha256_hex(data);
+        let asset = "c0pl4nd-x86_64-pc-windows-msvc.tar.gz";
 
-        assert!(verify_artifact(data, &sha, &sig_str, &pk_box).is_ok());
+        assert!(verify_artifact_bound(data, &sha, &sig_str, &pk_box, asset).is_ok());
         // Wrong checksum fails closed even with a valid signature.
         assert_eq!(
-            verify_artifact(data, "deadbeef", &sig_str, &pk_box).unwrap_err(),
+            verify_artifact_bound(data, "deadbeef", &sig_str, &pk_box, asset).unwrap_err(),
             "checksum mismatch"
         );
         // Right checksum but a bogus signature also fails closed.
-        assert!(verify_artifact(data, &sha, "untrusted comment: x\nbogus", &pk_box).is_err());
+        assert!(
+            verify_artifact_bound(data, &sha, "untrusted comment: x\nbogus", &pk_box, asset)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn trusted_comment_binding_accepts_match_rejects_mismatch() {
+        // The release workflow signs with rsign2's DEFAULT trusted comment,
+        // which embeds `file:<basename>`. We bind on that token: a signature
+        // whose trusted comment names a DIFFERENT asset is rejected even though
+        // it verifies cryptographically against the same key (the same-key
+        // wrong-artifact substitution this layer defends against).
+        let kp = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let pk_box = kp.pk.to_box().unwrap().to_string();
+        let data = b"the linux archive bytes";
+
+        // Sign with a trusted comment naming the LINUX asset (mirrors the
+        // rsign2 default `file:<basename>` shape).
+        let sig_linux = minisign::sign(
+            Some(&kp.pk),
+            &kp.sk,
+            std::io::Cursor::new(&data[..]),
+            Some("timestamp:1700000000\tfile:c0pl4nd-v1.0.0-x86_64-unknown-linux-gnu.tar.gz"),
+            Some("comment"),
+        )
+        .unwrap()
+        .to_string();
+
+        // Matching asset name -> accepted.
+        assert!(verify_signature_bound(
+            data,
+            &sig_linux,
+            &pk_box,
+            "c0pl4nd-v1.0.0-x86_64-unknown-linux-gnu.tar.gz",
+        )
+        .is_ok());
+
+        // Same key, same bytes, but we expected the WINDOWS asset -> the
+        // trusted-comment `file:` token mismatches -> rejected.
+        let err = verify_signature_bound(
+            data,
+            &sig_linux,
+            &pk_box,
+            "c0pl4nd-v1.0.0-x86_64-pc-windows-msvc.zip",
+        )
+        .unwrap_err();
+        assert!(err.contains("trusted-comment file mismatch"), "{err}");
+
+        // A staging-dir-prefixed expected name still binds on the basename.
+        assert!(verify_signature_bound(
+            data,
+            &sig_linux,
+            &pk_box,
+            "/tmp/staging/c0pl4nd-v1.0.0-x86_64-unknown-linux-gnu.tar.gz",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn trusted_comment_binding_is_skipped_when_no_file_token() {
+        // Conservative-by-construction: a custom trusted comment with NO `file:`
+        // token does NOT break verification — the binding is purely additive on
+        // top of the load-bearing checksum + signature gates.
+        let kp = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let pk_box = kp.pk.to_box().unwrap().to_string();
+        let data = b"archive bytes with custom comment";
+        let sig = minisign::sign(
+            Some(&kp.pk),
+            &kp.sk,
+            std::io::Cursor::new(&data[..]),
+            Some("c0pl4nd v1.2.3"), // no `file:` token
+            Some("comment"),
+        )
+        .unwrap()
+        .to_string();
+        // Binding skipped -> any expected asset name passes (crypto still gates).
+        assert!(verify_signature_bound(data, &sig, &pk_box, "anything.tar.gz").is_ok());
+        // But tampered bytes still fail closed.
+        assert!(verify_signature_bound(b"tampered", &sig, &pk_box, "anything.tar.gz").is_err());
+    }
+
+    #[test]
+    fn verify_artifact_bound_requires_checksum_signature_and_asset_binding() {
+        let kp = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let pk_box = kp.pk.to_box().unwrap().to_string();
+        let data = b"c0pl4nd-v2.0.0-x86_64-pc-windows-msvc.zip bytes";
+        let sig = minisign::sign(
+            Some(&kp.pk),
+            &kp.sk,
+            std::io::Cursor::new(&data[..]),
+            Some("timestamp:1700000001\tfile:c0pl4nd-v2.0.0-x86_64-pc-windows-msvc.zip"),
+            Some("c"),
+        )
+        .unwrap()
+        .to_string();
+        let sha = sha256_hex(data);
+        let asset = "c0pl4nd-v2.0.0-x86_64-pc-windows-msvc.zip";
+
+        // Correct sha + valid sig + matching asset name -> accepted.
+        assert!(verify_artifact_bound(data, &sha, &sig, &pk_box, asset).is_ok());
+        // Wrong checksum fails closed BEFORE the signature is even checked.
+        assert_eq!(
+            verify_artifact_bound(data, "deadbeef", &sig, &pk_box, asset).unwrap_err(),
+            "checksum mismatch"
+        );
+        // Right sha + valid sig but the WRONG expected asset -> rejected.
+        assert!(verify_artifact_bound(data, &sha, &sig, &pk_box, "wrong-asset.tar.gz").is_err());
     }
 
     #[test]

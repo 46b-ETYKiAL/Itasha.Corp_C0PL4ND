@@ -3,9 +3,9 @@
 //! (which handles the Windows locked-file rename-aside trick); the testable
 //! backup/install/rollback logic operates on arbitrary paths.
 //!
-//! The caller MUST have verified `new` (checksum + minisign) via
-//! [`super::verify::verify_artifact`] before any function here touches the live
-//! executable — verify-before-swap.
+//! The caller MUST have verified `new` (checksum + minisign + asset binding) via
+//! [`super::verify::verify_artifact_bound`] before any function here touches the
+//! live executable — verify-before-swap.
 
 use std::fs;
 use std::io;
