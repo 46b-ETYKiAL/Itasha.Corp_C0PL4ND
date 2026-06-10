@@ -15,6 +15,7 @@
 //!
 //! eframe owns the event loop; no winit plumbing here.
 
+pub mod bidi;
 pub mod chrome;
 pub mod fonts;
 pub mod grid;
