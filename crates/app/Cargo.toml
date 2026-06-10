@@ -7,7 +7,11 @@ repository.workspace = true
 description = "C0PL4ND — a fast, local-first, GPU-accelerated terminal emulator."
 # The modern eframe/egui app is the canonical `c0pl4nd` binary (what `cargo run`,
 # `release.yml`, and the installer ship). The original winit/wgpu/glyphon
-# terminal is preserved, buildable as `c0pl4nd-legacy`.
+# terminal is preserved (not deleted) and buildable on demand as `c0pl4nd-legacy`
+# behind the `legacy-winit` feature (default OFF) — so a routine `cargo build`
+# does NOT recompile its ~2.8k lines (the F6-2 maintenance-tax reduction), while
+# it stays a real, buildable comparison/fallback target. CI keeps it healthy via
+# a dedicated `--features legacy-winit` lint/build step (see ci.yml).
 default-run = "c0pl4nd"
 
 # The modern eframe/egui chrome shell — the canonical C0PL4ND app. It draws each
@@ -18,10 +22,19 @@ name = "c0pl4nd"
 path = "src/egui_main.rs"
 
 # The original winit/wgpu/glyphon terminal, preserved (not deleted) and
-# buildable on demand for comparison / fallback.
+# buildable on demand for comparison / fallback. Gated behind `legacy-winit`
+# (default OFF) so it is skipped by a routine `cargo build`/`clippy`; build it
+# with `cargo build --features legacy-winit --bin c0pl4nd-legacy`.
 [[bin]]
 name = "c0pl4nd-legacy"
 path = "src/main.rs"
+required-features = ["legacy-winit"]
+
+[features]
+# OFF by default: opting in compiles the preserved legacy winit binary. The deps
+# it uses (winit/wgpu/glyphon) are already pulled by the egui binary via eframe,
+# so this feature gates only the legacy binary's own ~2.8k lines, not the graph.
+legacy-winit = []
 
 [lints]
 workspace = true

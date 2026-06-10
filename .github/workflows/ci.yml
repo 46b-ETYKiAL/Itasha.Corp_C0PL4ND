@@ -132,6 +132,13 @@ jobs:
       - name: cargo clippy (deny warnings)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # The preserved legacy winit binary is gated behind `legacy-winit` (OFF by
+      # default, F6-2) so routine builds skip its ~2.8k lines. Lint it here under
+      # the feature so it can never silently rot — it stays a real, healthy
+      # comparison/fallback target.
+      - name: cargo clippy (preserved legacy-winit binary)
+        run: cargo clippy -p c0pl4nd --bin c0pl4nd-legacy --features legacy-winit --locked -- -D warnings
+
   msrv:
     name: MSRV (rust-version floor)
     runs-on: ubuntu-latest
