@@ -44,6 +44,28 @@ const MAX_EXTRACTED_BYTES: u64 = 256 * 1024 * 1024;
 /// archive with thousands of entries is a zip-bomb / resource-exhaustion shape.
 const MAX_ARCHIVE_ENTRIES: usize = 64;
 
+/// Download-DoS guard: hard ceiling on the asset download. The verify gate
+/// (SHA-256 + minisign) only runs AFTER the body is buffered, so a body that is
+/// hostile by SIZE (a MITM, a compromised asset, or a redirect to an
+/// endless-stream host) would OOM the process before integrity is ever checked.
+/// Enforced on the STREAMED read (never on a header), so a lying `Content-Length`
+/// cannot bypass it. Matches the post-download extraction cap.
+const MAX_DOWNLOAD_BYTES: u64 = MAX_EXTRACTED_BYTES;
+
+/// Download-DoS guard for the tiny sidecars: a `.minisig` is ~100 bytes and a
+/// `.sha256` ~80, so 64 KiB is comfortably above the real ceiling while refusing
+/// a multi-GB sidecar streamed by a hostile endpoint.
+const MAX_SIDECAR_BYTES: u64 = 64 * 1024;
+
+/// Download-DoS guard for the Releases API JSON. A real `releases/latest`
+/// response is a few KiB; 4 MiB is a generous ceiling that still refuses an
+/// unbounded JSON flood (which would also stress the serde parser).
+const MAX_RELEASE_JSON_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Redirect cap for the manually-followed, host-confined GET. GitHub asset
+/// downloads redirect 1–2 times (api → codeload/objects CDN); 4 is ample.
+const MAX_REDIRECTS: usize = 4;
+
 /// A bounded reader-copy that aborts once `limit` uncompressed bytes have been
 /// written, defending against decompression bombs whose declared size lies.
 /// Returns the number of bytes copied, or an error string if the cap is hit.
@@ -152,14 +174,21 @@ pub const fn archive_ext() -> &'static str {
 /// decode error is mapped to a human `String`; this function never panics.
 pub fn fetch_latest_release(owner: &str, repo: &str) -> Result<RawRelease, String> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
-    let body = ureq::get(&url)
-        .set("User-Agent", USER_AGENT)
-        .set("Accept", GITHUB_ACCEPT)
-        .set("X-GitHub-Api-Version", GITHUB_API_VERSION)
-        .call()
-        .map_err(|e| format!("failed to fetch latest release: {e}"))?
-        .into_string()
-        .map_err(|e| format!("failed to read release response: {e}"))?;
+    // Host-confined GET (https + GitHub allow-list at every redirect hop) and a
+    // hard JSON size cap: a MITM'd / hostile endpoint cannot stream an unbounded
+    // body that OOMs the process (or stresses serde) before parsing runs.
+    let mut body = String::new();
+    confined_get(
+        &url,
+        &[
+            ("Accept", GITHUB_ACCEPT),
+            ("X-GitHub-Api-Version", GITHUB_API_VERSION),
+        ],
+    )?
+    .into_reader()
+    .take(MAX_RELEASE_JSON_BYTES)
+    .read_to_string(&mut body)
+    .map_err(|e| format!("failed to read release response: {e}"))?;
     serde_json::from_str::<RawRelease>(&body)
         .map_err(|e| format!("failed to parse release JSON: {e}"))
 }
@@ -267,14 +296,110 @@ fn assert_https(url: &str) -> Result<(), String> {
     }
 }
 
-/// Blocking GET of a small file (sig / sha), returning its raw bytes.
+/// The ONLY hosts the updater will fetch from. GitHub serves the Releases API
+/// from `api.github.com` and redirects asset downloads to the codeload / objects
+/// CDN on `*.githubusercontent.com` (and `codeload.github.com`). Confining every
+/// request — and every redirect HOP — to this set means a MITM'd / malicious
+/// Releases JSON cannot point the download (and our `User-Agent`) at an arbitrary
+/// attacker host (SSRF / exfil shape), and turns the redirect path from an
+/// open-ended fetch into a closed one. Case-insensitive; exact host or a
+/// `.githubusercontent.com` subdomain.
+fn host_allowed(host: &str) -> bool {
+    let h = host.to_ascii_lowercase();
+    h == "github.com"
+        || h == "api.github.com"
+        || h == "codeload.github.com"
+        || h == "objects.githubusercontent.com"
+        || h.ends_with(".githubusercontent.com")
+}
+
+/// Extract the lowercased host from an `https://host[:port]/...` URL (strips any
+/// userinfo and port). `None` if the URL has no authority.
+fn url_host(url: &str) -> Option<String> {
+    let after = url.split_once("://")?.1;
+    let authority = after.split(['/', '?', '#']).next()?;
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = host_port.split(':').next()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
+/// Reject any URL whose host is not in the allow-list ([`host_allowed`]).
+fn assert_allowed_host(url: &str) -> Result<(), String> {
+    match url_host(url) {
+        Some(h) if host_allowed(&h) => Ok(()),
+        Some(h) => Err(format!("refusing download from non-allowlisted host: {h}")),
+        None => Err(format!("malformed download URL (no host): {url}")),
+    }
+}
+
+/// Resolve a redirect `Location` against the current URL. Absolute targets pass
+/// through (their host is re-validated by the caller); origin-relative (`/path`)
+/// targets keep the current scheme+host; anything else is refused.
+fn resolve_redirect(base: &str, loc: &str) -> Result<String, String> {
+    if loc.contains("://") {
+        Ok(loc.to_string())
+    } else if let Some(rest) = loc.strip_prefix('/') {
+        let (scheme, after) = base
+            .split_once("://")
+            .ok_or_else(|| format!("malformed base URL: {base}"))?;
+        let host = after.split(['/', '?', '#']).next().unwrap_or(after);
+        Ok(format!("{scheme}://{host}/{rest}"))
+    } else {
+        Err(format!("unsupported relative redirect target: {loc}"))
+    }
+}
+
+/// Issue a GET that follows redirects MANUALLY, re-asserting `https` AND an
+/// allow-listed host at EVERY hop. ureq's default agent follows up to 5 redirects
+/// to ARBITRARY hosts, and [`assert_https`] only guards the FIRST URL — so a
+/// `302 → http://evil/` or `302 → https://attacker/` would be followed
+/// transparently. This builds a `redirects(0)` agent and walks the chain itself,
+/// confining every hop to GitHub over https.
+fn confined_get(url: &str, headers: &[(&str, &str)]) -> Result<ureq::Response, String> {
+    assert_https(url)?;
+    assert_allowed_host(url)?;
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    let mut current = url.to_string();
+    for _ in 0..=MAX_REDIRECTS {
+        let mut req = agent.get(&current).set("User-Agent", USER_AGENT);
+        for (k, v) in headers {
+            req = req.set(k, v);
+        }
+        // With redirects(0) a 3xx returns Ok (status in 300..400); ureq still
+        // maps >=400 to Err(Status). Accept a 3xx from either shape.
+        let resp = match req.call() {
+            Ok(r) => r,
+            Err(ureq::Error::Status(code, r)) if (300..400).contains(&code) => r,
+            Err(e) => return Err(format!("download failed for {current}: {e}")),
+        };
+        if (300..400).contains(&resp.status()) {
+            let loc = resp
+                .header("Location")
+                .ok_or_else(|| format!("redirect {} without Location", resp.status()))?;
+            let next = resolve_redirect(&current, loc)?;
+            assert_https(&next)?;
+            assert_allowed_host(&next)?;
+            current = next;
+            continue;
+        }
+        return Ok(resp);
+    }
+    Err(format!(
+        "too many redirects (> {MAX_REDIRECTS}) fetching {url}"
+    ))
+}
+
+/// Blocking GET of a small file (sig / sha), returning its raw bytes. Host-
+/// confined and size-capped ([`MAX_SIDECAR_BYTES`]) so a hostile endpoint cannot
+/// stream an unbounded sidecar into memory before verification runs.
 fn download_small(url: &str) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
-    ureq::get(url)
-        .set("User-Agent", USER_AGENT)
-        .call()
-        .map_err(|e| format!("download failed for {url}: {e}"))?
+    confined_get(url, &[])?
         .into_reader()
+        .take(MAX_SIDECAR_BYTES)
         .read_to_end(&mut buf)
         .map_err(|e| format!("read failed for {url}: {e}"))?;
     Ok(buf)
@@ -285,18 +410,25 @@ fn download_small(url: &str) -> Result<Vec<u8>, String> {
 /// is reported as `0` (the UI shows an indeterminate bar). Returns the full
 /// asset bytes.
 fn download_asset(url: &str, mut progress: impl FnMut(u64, u64)) -> Result<Vec<u8>, String> {
-    let resp = ureq::get(url)
-        .set("User-Agent", USER_AGENT)
-        .call()
-        .map_err(|e| format!("download failed for {url}: {e}"))?;
+    let resp = confined_get(url, &[])?;
 
     let total: u64 = resp
         .header("Content-Length")
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(0);
 
+    // SECURITY: reject early when the DECLARED size already exceeds the ceiling,
+    // and clamp the pre-allocation so a lying `Content-Length` cannot trigger a
+    // multi-GB up-front allocation (CWE-789). The header is never trusted for the
+    // real bound — the streamed cap in the read loop below is the load-bearing
+    // guard against a body that lies about (or omits) its length.
+    if total > MAX_DOWNLOAD_BYTES {
+        return Err(format!(
+            "refusing download: declared size {total} B exceeds cap {MAX_DOWNLOAD_BYTES} B"
+        ));
+    }
     let mut reader = resp.into_reader();
-    let mut buf: Vec<u8> = Vec::with_capacity(total as usize);
+    let mut buf: Vec<u8> = Vec::with_capacity(total.min(MAX_DOWNLOAD_BYTES) as usize);
     let mut chunk = [0u8; 64 * 1024];
     let mut downloaded: u64 = 0;
     progress(0, total);
@@ -537,6 +669,76 @@ mod tests {
         assert!(assert_https("file:///etc/passwd").is_err());
         assert!(assert_https("/relative/path").is_err());
         assert!(assert_https("httpsx://no-delim").is_err());
+    }
+
+    #[test]
+    fn host_allowed_confines_to_github_set() {
+        // The allow-listed GitHub hosts pass (case-insensitive).
+        assert!(host_allowed("github.com"));
+        assert!(host_allowed("api.github.com"));
+        assert!(host_allowed("codeload.github.com"));
+        assert!(host_allowed("objects.githubusercontent.com"));
+        assert!(host_allowed("release-assets.githubusercontent.com"));
+        assert!(host_allowed("GITHUB.COM"));
+        // Everything else is refused — including look-alikes and sub-domain
+        // confusables that are NOT a *.githubusercontent.com suffix.
+        assert!(!host_allowed("evil.example"));
+        assert!(!host_allowed("github.com.evil.example"));
+        assert!(!host_allowed("githubusercontent.com.evil.example"));
+        assert!(!host_allowed("notgithub.com"));
+    }
+
+    #[test]
+    fn url_host_extracts_lowercased_host_only() {
+        assert_eq!(
+            url_host("https://API.GitHub.com/x").as_deref(),
+            Some("api.github.com")
+        );
+        assert_eq!(
+            url_host("https://github.com:443/o/r").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            url_host("https://user:pass@github.com/o/r").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(url_host("https://host/path?q=1#f").as_deref(), Some("host"));
+        assert_eq!(url_host("not-a-url"), None);
+        assert_eq!(url_host("https://"), None);
+    }
+
+    #[test]
+    fn assert_allowed_host_blocks_non_github() {
+        assert!(assert_allowed_host("https://objects.githubusercontent.com/x").is_ok());
+        assert!(assert_allowed_host("https://evil.example/x").is_err());
+        assert!(assert_allowed_host("https:///no-host").is_err());
+    }
+
+    #[test]
+    fn resolve_redirect_handles_absolute_and_origin_relative() {
+        // Absolute target passes through verbatim (host re-validated by caller).
+        assert_eq!(
+            resolve_redirect("https://api.github.com/x", "https://codeload.github.com/y").unwrap(),
+            "https://codeload.github.com/y"
+        );
+        // Origin-relative keeps the current scheme+host.
+        assert_eq!(
+            resolve_redirect("https://github.com/o/r", "/codeload/path").unwrap(),
+            "https://github.com/codeload/path"
+        );
+        // A non-absolute, non-origin-relative target is refused.
+        assert!(resolve_redirect("https://github.com/o/r", "../escape").is_err());
+    }
+
+    #[test]
+    fn download_caps_are_ordered_and_bounded() {
+        // Sidecars are tiny; the asset cap matches the extraction cap; the JSON
+        // cap sits between them. A regression that inverts these is a bug. These
+        // are compile-time invariants — `const` blocks keep clippy's
+        // assertions-on-constants lint satisfied.
+        const { assert!(MAX_SIDECAR_BYTES < MAX_RELEASE_JSON_BYTES) };
+        const { assert!(MAX_RELEASE_JSON_BYTES < MAX_DOWNLOAD_BYTES) };
+        const { assert!(MAX_DOWNLOAD_BYTES == MAX_EXTRACTED_BYTES) };
     }
 
     #[test]
