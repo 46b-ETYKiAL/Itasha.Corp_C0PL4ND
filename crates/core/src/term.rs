@@ -14,7 +14,7 @@ use zeroize::{Zeroize, Zeroizing};
 pub mod keys;
 pub mod osc;
 
-pub use keys::{encode_key, KeyModifiers, LogicalKey};
+pub use keys::{encode_key, encode_key_kitty, KeyEventKind, KeyModifiers, LogicalKey};
 use osc::{base64_decode, base64_encode, format_color_reply, parse_color_spec, Rgb};
 pub use osc::{
     ClipboardSelection, ClipboardWrite, ColorSet, CommandMark, CommandMarkKind, DynamicColor,
@@ -23,6 +23,12 @@ pub use osc::{
 
 /// Default scrollback line cap when not configured.
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
+
+/// Maximum depth of the kitty keyboard-protocol flag stack
+/// (`CSI > flags u` push / `CSI < n u` pop). Bounds memory against a hostile
+/// program issuing an unbalanced stream of pushes; when the cap is reached the
+/// oldest entry is dropped rather than growing without limit.
+const KITTY_KBD_STACK_MAX: usize = 16;
 
 /// A decoded inline image anchored to a grid position (absolute line + column).
 #[derive(Debug, Clone)]
@@ -446,6 +452,15 @@ struct Screen {
     /// DECOM origin mode (`?6`, C25). When set, cursor row addressing (CUP/VPA)
     /// is relative to the scroll region's top margin and clamped to it.
     origin_mode: bool,
+    /// Kitty keyboard-protocol progressive-enhancement flag stack
+    /// (<https://sw.kovidgoyal.net/kitty/keyboard-protocol/>). The CURRENT flags
+    /// are `*kitty_kbd_stack.last().unwrap_or(&0)` — an empty stack means the
+    /// legacy encoding is in force. Pushed by `CSI > flags u`, popped by
+    /// `CSI < n u`, replaced/ORed/cleared by `CSI = flags ; mode u`, and queried
+    /// by `CSI ? u`. Depth is capped at `KITTY_KBD_STACK_MAX` (bounded memory:
+    /// a hostile program cannot grow it without limit — the oldest entry is
+    /// dropped when the cap is reached, mirroring kitty's own bounded stack).
+    kitty_kbd_stack: Vec<u8>,
     /// OSC 9 ; 4 progress reports (`ConEmu`/Windows-Terminal taskbar progress),
     /// drained by the app to drive a tab/taskbar indicator (C26).
     pending_progress: Vec<osc::Progress>,
@@ -519,6 +534,7 @@ impl Screen {
             insert_mode: false,
             reverse_screen: false,
             origin_mode: false,
+            kitty_kbd_stack: Vec::new(),
             pending_progress: Vec::new(),
             command_marks: Vec::new(),
             pty_response: Vec::new(),
@@ -1514,6 +1530,67 @@ impl Screen {
             v as usize
         }
     }
+
+    /// The current kitty keyboard-protocol flags (top of the stack, or 0).
+    fn kitty_kbd_flags(&self) -> u8 {
+        *self.kitty_kbd_stack.last().unwrap_or(&0)
+    }
+
+    /// Handle a kitty-keyboard-protocol control sequence. The caller has already
+    /// established that `action == 'u'` and that a distinguishing intermediate
+    /// (`?` / `>` / `<` / `=`) is present, so the bare-`CSI u` SCORC alias never
+    /// reaches here. `nth_param` reads the n-th `;`-separated CSI parameter's
+    /// first value (kitty's control params carry no `:` sub-params).
+    fn kitty_keyboard_control(&mut self, params: &Params, intermediates: &[u8]) {
+        let nth_param = |n: usize| -> Option<u8> {
+            params
+                .iter()
+                .nth(n)
+                .and_then(|p| p.first().copied())
+                .map(|v| v as u8)
+        };
+        if intermediates.contains(&b'?') {
+            // Query current flags: reply `CSI ? <flags> u` (decimal).
+            let resp = format!("\x1b[?{}u", self.kitty_kbd_flags());
+            self.push_pty_response(resp.as_bytes());
+        } else if intermediates.contains(&b'>') {
+            // Push: param0 (default 0) onto the stack, bounded at the cap.
+            let flags = nth_param(0).unwrap_or(0);
+            if self.kitty_kbd_stack.len() >= KITTY_KBD_STACK_MAX {
+                // Drop the oldest entry to keep memory bounded under a hostile
+                // unbalanced-push stream; kitty's own stack is likewise bounded.
+                self.kitty_kbd_stack.remove(0);
+            }
+            self.kitty_kbd_stack.push(flags);
+        } else if intermediates.contains(&b'<') {
+            // Pop: n (default 1) entries, saturating to an empty stack.
+            let n = nth_param(0)
+                .map(|v| v as usize)
+                .filter(|&v| v != 0)
+                .unwrap_or(1);
+            let new_len = self.kitty_kbd_stack.len().saturating_sub(n);
+            self.kitty_kbd_stack.truncate(new_len);
+        } else if intermediates.contains(&b'=') {
+            // Set: flags = param0 (default 0), mode = param1 (default 1).
+            //   mode 1 = replace all bits; 2 = OR (set the given bits);
+            //   3 = AND-NOT (clear the given bits). Operates on the current top;
+            //   when the stack is empty the current value is treated as 0 and the
+            //   result is pushed so the negotiation takes effect immediately.
+            let flags = nth_param(0).unwrap_or(0);
+            let mode = nth_param(1).filter(|&v| v != 0).unwrap_or(1);
+            let current = self.kitty_kbd_flags();
+            let next = match mode {
+                2 => current | flags,
+                3 => current & !flags,
+                _ => flags, // mode 1 (and any unrecognised mode) replaces.
+            };
+            if let Some(top) = self.kitty_kbd_stack.last_mut() {
+                *top = next;
+            } else {
+                self.kitty_kbd_stack.push(next);
+            }
+        }
+    }
 }
 
 impl Perform for Screen {
@@ -1720,6 +1797,20 @@ impl Perform for Screen {
         // DECSTR soft reset: `CSI ! p` — the `!` is the intermediate.
         if action == 'p' && intermediates.contains(&b'!') {
             self.reset_state(false);
+            return;
+        }
+        // Kitty keyboard protocol progressive-enhancement control sequences
+        // (<https://sw.kovidgoyal.net/kitty/keyboard-protocol/>). These ALL carry
+        // a distinguishing intermediate (`?`, `>`, `<`, or `=`); the bare `CSI u`
+        // with NO intermediate is the unrelated ANSI.SYS SCORC cursor-restore
+        // alias handled in the `match action` below — it MUST stay untouched.
+        if action == 'u'
+            && (intermediates.contains(&b'?')
+                || intermediates.contains(&b'>')
+                || intermediates.contains(&b'<')
+                || intermediates.contains(&b'='))
+        {
+            self.kitty_keyboard_control(params, intermediates);
             return;
         }
         match action {
@@ -2791,6 +2882,18 @@ impl Terminal {
     /// (normal) arrow-key encodings.
     pub fn application_cursor_keys(&self) -> bool {
         self.screen.dec_modes.application_cursor_keys
+    }
+
+    /// The current kitty keyboard-protocol progressive-enhancement flags
+    /// (<https://sw.kovidgoyal.net/kitty/keyboard-protocol/>). `0` means no
+    /// program has negotiated the protocol and the legacy key encoding is in
+    /// force; a non-zero value is the bitset on top of the flag stack
+    /// (bit1 disambiguate, bit2 report-event-types, bit4 report-alternate-keys,
+    /// bit8 report-all-keys-as-escape-codes, bit16 report-associated-text). The
+    /// host reads this to decide whether to route key events through the CSI-u
+    /// encoder (`encode_key_kitty`) instead of the legacy `encode_key`.
+    pub fn kitty_keyboard_flags(&self) -> u8 {
+        self.screen.kitty_kbd_flags()
     }
 
     /// Whether autowrap (DECAWM `?7`) is enabled. Default `true`.
@@ -5762,5 +5865,96 @@ mod tests {
             t.grid().to_text().contains(run),
             "a pure plain run must reach the grid unchanged"
         );
+    }
+
+    // ---- kitty keyboard protocol (CSI u progressive enhancement) ----
+
+    #[test]
+    fn kitty_flags_default_to_zero() {
+        let t = Terminal::new(4, 20);
+        assert_eq!(t.kitty_keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn kitty_push_sets_current_flags() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[>5u"); // push flags=5 (disambiguate | alternate-keys)
+        assert_eq!(t.kitty_keyboard_flags(), 5);
+    }
+
+    #[test]
+    fn kitty_push_defaults_to_zero_flags() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[>u"); // push with no param → flags 0
+        assert_eq!(t.kitty_keyboard_flags(), 0);
+        // But it DID push an entry — popping reveals the empty stack.
+        t.advance(b"\x1b[>9u");
+        assert_eq!(t.kitty_keyboard_flags(), 9);
+        t.advance(b"\x1b[<u"); // pop 1 → back to the flags-0 entry
+        assert_eq!(t.kitty_keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn kitty_pop_restores_previous() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[>1u");
+        t.advance(b"\x1b[>3u");
+        assert_eq!(t.kitty_keyboard_flags(), 3);
+        t.advance(b"\x1b[<u"); // pop 1 (default)
+        assert_eq!(t.kitty_keyboard_flags(), 1);
+        t.advance(b"\x1b[<5u"); // pop more than remaining → saturates to empty
+        assert_eq!(t.kitty_keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn kitty_set_mode_replace_or_clear() {
+        let mut t = Terminal::new(4, 20);
+        // Set on an empty stack pushes the result (mode 1 replace, flags=5).
+        t.advance(b"\x1b[=5;1u");
+        assert_eq!(t.kitty_keyboard_flags(), 5);
+        // Mode 2 = OR in bit2.
+        t.advance(b"\x1b[=2;2u");
+        assert_eq!(t.kitty_keyboard_flags(), 7);
+        // Mode 3 = clear bit1.
+        t.advance(b"\x1b[=1;3u");
+        assert_eq!(t.kitty_keyboard_flags(), 6);
+        // Mode defaults to 1 (replace) when omitted.
+        t.advance(b"\x1b[=8u");
+        assert_eq!(t.kitty_keyboard_flags(), 8);
+    }
+
+    #[test]
+    fn kitty_query_replies_with_current_flags() {
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"\x1b[>13u");
+        t.advance(b"\x1b[?u"); // query
+        assert_eq!(t.take_pty_response(), b"\x1b[?13u".to_vec());
+    }
+
+    #[test]
+    fn kitty_stack_depth_is_capped() {
+        let mut t = Terminal::new(4, 20);
+        // Push the cap + extra; the oldest is dropped, never grows unbounded.
+        for i in 0..(KITTY_KBD_STACK_MAX + 5) {
+            let seq = format!("\x1b[>{}u", (i % 7) + 1);
+            t.advance(seq.as_bytes());
+        }
+        assert_eq!(t.screen.kitty_kbd_stack.len(), KITTY_KBD_STACK_MAX);
+    }
+
+    #[test]
+    fn bare_csi_u_is_still_scorc_cursor_restore() {
+        // The bare `CSI u` (no intermediate) MUST remain the ANSI.SYS SCORC
+        // cursor-restore alias and NOT be hijacked by the kitty handler.
+        let mut t = Terminal::new(8, 40);
+        t.advance(b"\x1b[3;5H"); // move cursor to row 3, col 5 (1-based)
+        t.advance(b"\x1b[s"); // SCOSC — save cursor
+        t.advance(b"\x1b[1;1H"); // move to home
+        assert_eq!(t.cursor_position(), Some((0, 0)));
+        t.advance(b"\x1b[u"); // bare CSI u → SCORC restore
+        assert_eq!(t.cursor_position(), Some((2, 4)));
+        // And it left the kitty stack untouched + emitted NO query reply.
+        assert_eq!(t.kitty_keyboard_flags(), 0);
+        assert!(t.take_pty_response().is_empty());
     }
 }
