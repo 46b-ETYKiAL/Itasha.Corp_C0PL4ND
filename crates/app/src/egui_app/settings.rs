@@ -1168,6 +1168,17 @@ fn render_sections(
             keybind_row!(increase_font, "Increase font", "increase font");
             keybind_row!(decrease_font, "Decrease font", "decrease font");
         });
+        // F5-1: surface keybinding conflicts + blank bindings inline. The combos
+        // are free-text, so two actions can collide on one combo (only one wins)
+        // or a binding can be left empty (the action becomes unreachable) — both
+        // silently. validate() makes that explicit right under the editor instead
+        // of the user wondering why a shortcut "does nothing".
+        for issue in config.keybindings.validate() {
+            ui.colored_label(
+                egui::Color32::from_rgb(0xff, 0xb0, 0x00),
+                format!("\u{26a0} {}", issue.message()),
+            );
+        }
         group_gap(ui);
     }
 
