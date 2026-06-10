@@ -119,8 +119,26 @@ impl PaneTerm {
     /// Spawn a pane backed by the platform default shell at `(cols, rows)`.
     /// Never panics: a spawn failure yields a pane whose [`PaneTerm::error`] is
     /// set and whose body renders an error label instead of a grid.
+    ///
+    /// Uses the canonical [`c0pl4nd_core::pty::DEFAULT_TERM`]; the shipping app
+    /// goes through [`PaneTerm::spawn_with_term`] so the user's `term` config
+    /// override is honoured.
+    ///
+    /// `allow(dead_code)`: the shipping `c0pl4nd-egui` binary spawns via
+    /// [`PaneTerm::spawn_with_term`] (so the `term` config override applies); the
+    /// no-override `spawn` is retained for the deterministic interaction tests.
+    #[allow(dead_code)]
     pub fn spawn(theme: Theme, cols: u16, rows: u16) -> Self {
-        match Session::spawn_shell(None, rows, cols) {
+        Self::spawn_with_term(theme, cols, rows, None)
+    }
+
+    /// Like [`PaneTerm::spawn`] but with an explicit `TERM` override (the
+    /// config-driven `term` key). `term = None` / `Some("")` uses the canonical
+    /// [`c0pl4nd_core::pty::DEFAULT_TERM`]. This is the path the shipping
+    /// `c0pl4nd-egui` binary takes so the child PTY's `TERM` matches the user's
+    /// configuration.
+    pub fn spawn_with_term(theme: Theme, cols: u16, rows: u16, term: Option<&str>) -> Self {
+        match Session::spawn_shell_with_term(None, rows, cols, term) {
             Ok(session) => Self {
                 session: Some(session),
                 error: None,

@@ -444,6 +444,14 @@ pub struct Config {
     pub startup_panel: bool,
     /// Override shell program; `None` = use the platform default shell.
     pub shell: Option<String>,
+    /// The `TERM` value advertised to the spawned child shell (and every TUI it
+    /// runs). Defaults to [`DEFAULT_TERM`] (`xterm-256color`), which matches what
+    /// the emulator advertises on the wire (its DA / XTGETTCAP responses). Set
+    /// this only if you need the child to see a different terminfo entry; an
+    /// empty string falls back to the default. `COLORTERM` is always `truecolor`
+    /// (the emulator renders 24-bit colour) and is not configurable.
+    #[serde(default = "default_term")]
+    pub term: String,
     /// Enable font ligatures / complex text shaping in the renderer.
     ///
     /// Core-side preference flag only — the actual shaping is the renderer's
@@ -477,6 +485,13 @@ fn default_true() -> bool {
     true
 }
 
+/// serde default for [`Config::term`] — the canonical `TERM` the emulator
+/// advertises. Delegates to [`crate::pty::DEFAULT_TERM`] so the config default
+/// and the PTY spawn default share one source of truth.
+fn default_term() -> String {
+    crate::pty::DEFAULT_TERM.to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -498,6 +513,7 @@ impl Default for Config {
             view_mode: ViewMode::default(),
             startup_panel: true,
             shell: None,
+            term: default_term(),
             ligatures: false,
             copy_on_select: false,
             paste_warn_multiline: true,
@@ -724,6 +740,29 @@ mod tests {
         assert!(c.ligatures);
         // Untouched fields keep their defaults.
         assert_eq!(c.theme, "itasha-corp");
+    }
+
+    #[test]
+    fn term_defaults_to_xterm_256color() {
+        let c = Config::default();
+        assert_eq!(
+            c.term, "xterm-256color",
+            "default TERM must match the emulator's on-the-wire identity"
+        );
+        // The config default shares one source of truth with the PTY spawn default.
+        assert_eq!(c.term, crate::pty::DEFAULT_TERM);
+    }
+
+    #[test]
+    fn term_parses_from_partial_toml_and_old_configs_backfill() {
+        // An explicit override parses.
+        let p = PathBuf::from("test.toml");
+        let c = Config::from_toml("term = \"screen-256color\"\n", &p).unwrap();
+        assert_eq!(c.term, "screen-256color");
+        assert_eq!(c.theme, "itasha-corp"); // untouched
+                                            // A config file with no `term` key backfills the default via serde(default).
+        let c2 = Config::from_toml("theme = \"ghost-paper\"\n", &p).unwrap();
+        assert_eq!(c2.term, "xterm-256color");
     }
 
     #[test]

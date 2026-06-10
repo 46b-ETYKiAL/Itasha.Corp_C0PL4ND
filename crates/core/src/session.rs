@@ -44,6 +44,19 @@ impl Session {
         Self::from_pty(pty, rows, cols)
     }
 
+    /// Spawn the platform default (or configured) shell with an explicit `TERM`
+    /// override (the config-driven `term` key flows in here). `term = None` /
+    /// `Some("")` uses the canonical [`crate::pty::DEFAULT_TERM`].
+    pub fn spawn_shell_with_term(
+        shell: Option<&str>,
+        rows: u16,
+        cols: u16,
+        term: Option<&str>,
+    ) -> Result<Self> {
+        let pty = PtyProcess::spawn_shell_in_with_term(shell, rows, cols, None, term)?;
+        Self::from_pty(pty, rows, cols)
+    }
+
     /// Spawn the shell in an explicit working directory (session restore). A
     /// `cwd` that no longer exists falls back to home (never wedges the launch).
     pub fn spawn_shell_in(
@@ -53,6 +66,20 @@ impl Session {
         cwd: Option<&str>,
     ) -> Result<Self> {
         let pty = PtyProcess::spawn_shell_in(shell, rows, cols, cwd)?;
+        Self::from_pty(pty, rows, cols)
+    }
+
+    /// Like [`Session::spawn_shell_in`] but with an explicit `TERM` override
+    /// (the config-driven `term` key). `term = None` / `Some("")` uses the
+    /// canonical [`crate::pty::DEFAULT_TERM`].
+    pub fn spawn_shell_in_with_term(
+        shell: Option<&str>,
+        rows: u16,
+        cols: u16,
+        cwd: Option<&str>,
+        term: Option<&str>,
+    ) -> Result<Self> {
+        let pty = PtyProcess::spawn_shell_in_with_term(shell, rows, cols, cwd, term)?;
         Self::from_pty(pty, rows, cols)
     }
 

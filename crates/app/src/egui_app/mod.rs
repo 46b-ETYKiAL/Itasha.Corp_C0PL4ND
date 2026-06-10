@@ -483,7 +483,12 @@ impl C0pl4ndApp {
                 let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 PaneTerm::spawn_program(theme, &program, &arg_refs, SPAWN_COLS, SPAWN_ROWS)
             }
-            None => PaneTerm::spawn(theme, SPAWN_COLS, SPAWN_ROWS),
+            None => PaneTerm::spawn_with_term(
+                theme,
+                SPAWN_COLS,
+                SPAWN_ROWS,
+                Some(self.config.term.as_str()),
+            ),
         };
         self.terms.insert(pid, term);
     }
@@ -746,6 +751,9 @@ impl C0pl4ndApp {
         pending_spawn: &mut HashSet<PaneId>,
         galley_cache: &mut GalleyCache,
         theme: &c0pl4nd_core::Theme,
+        // The configured `TERM` advertised to a deferred-first-spawn pane, so the
+        // initial pane's child PTY sees the same `TERM` as every later pane.
+        term: &str,
         font_size: f32,
         line_height_px: f32,
         cursor_cfg: c0pl4nd_core::config::CursorConfig,
@@ -782,7 +790,10 @@ impl C0pl4ndApp {
         // is a no-op, so cmd's banner/prompt cursor never snaps home to (0,0).
         if pending_spawn.remove(&pane_id) {
             let (cols, rows) = cell_metrics.cols_rows(px_w, px_h);
-            terms.insert(pane_id, PaneTerm::spawn(theme.clone(), cols, rows));
+            terms.insert(
+                pane_id,
+                PaneTerm::spawn_with_term(theme.clone(), cols, rows, Some(term)),
+            );
         }
 
         // --- background quad (theme bg) + focus ring ---
@@ -919,6 +930,23 @@ impl C0pl4ndApp {
                 }
             }
         }
+
+        // --- accessibility (F2-1): expose the grid text to screen readers ---
+        // The terminal grid is custom-painted, so without an explicit AccessKit
+        // node a screen reader perceives only an empty interactive region — the
+        // terminal's actual content is invisible to assistive tech. Attach the
+        // visible grid text as the pane's accessible value, marking the focused
+        // pane active. egui invokes this closure LAZILY and ONLY while building an
+        // AccessKit tree (i.e. when a screen reader / `egui_kittest` is attached),
+        // so the full-grid `grid_text()` snapshot costs nothing in the common
+        // no-assistive-tech case.
+        resp.widget_info(|| {
+            let text = terms
+                .get(&pane_id)
+                .and_then(PaneTerm::grid_text)
+                .unwrap_or_default();
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, focused, text)
+        });
 
         PaneBodyOutcome {
             drag_started: resp.drag_started(),
@@ -1108,6 +1136,9 @@ impl C0pl4ndApp {
             // disjointly from `terms` AND from `grid_tree` (audit #2).
             let galley_cache = &mut self.galley_cache;
             let theme = &self.theme;
+            // The configured TERM, read alongside the other LIVE config reads so a
+            // deferred-first-spawn pane advertises the same `TERM` as later panes.
+            let term = self.config.term.as_str();
             let font_size = self.config.font.size;
             // Read the line-height LIVE from the config so a Settings change
             // reflows the row pitch (and the PTY rows/cursor/highlight) without a
@@ -1154,6 +1185,7 @@ impl C0pl4ndApp {
                     pending_spawn,
                     galley_cache,
                     theme,
+                    term,
                     font_size,
                     line_height_px,
                     cursor_cfg,

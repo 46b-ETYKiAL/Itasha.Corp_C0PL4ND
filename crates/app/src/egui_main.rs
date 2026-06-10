@@ -23,9 +23,11 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod diagnostics;
 mod dll_hardening;
 #[path = "egui_app/mod.rs"]
 mod egui_app;
+mod panic_hook;
 #[path = "update/mod.rs"]
 mod update;
 
@@ -39,11 +41,22 @@ fn main() -> eframe::Result<()> {
     // unsafe-free. No-op off Windows.
     dll_hardening::harden_dll_search_order();
 
-    // Best-effort tracing; the env filter mirrors the legacy binary.
+    // Install the unexpected-panic crash hook early (before the window /
+    // event-loop): `panic = "abort"` otherwise kills the GUI with no diagnostic.
+    // The hook writes a rotating crash log (and, on Windows, shows a MessageBox)
+    // then chains to the default hook — it runs before the abort fires.
+    panic_hook::install();
+
+    // Best-effort tracing. Mirror the legacy binary EXACTLY (F9-2): read the
+    // `C0PL4ND_LOG` env var (NOT the default `RUST_LOG`) and default to `warn`.
+    // The two binaries previously diverged — this one read `RUST_LOG` and
+    // defaulted to the noisier `info` — so a user setting `C0PL4ND_LOG` saw it
+    // honoured by the legacy binary but ignored by the canonical one, which also
+    // logged at `info` in release. Both now share one contract: C0PL4ND_LOG/warn.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            tracing_subscriber::EnvFilter::try_from_env("C0PL4ND_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .try_init();
 
@@ -52,6 +65,14 @@ fn main() -> eframe::Result<()> {
     // `c0pl4nd --version` — print and exit (no window).
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("{} {}", c0pl4nd_core::PRODUCT_NAME, c0pl4nd_core::version());
+        return Ok(());
+    }
+
+    // `c0pl4nd --diagnostics` (alias `--doctor`) — print a one-shot env/config
+    // dump and exit BEFORE any window/GPU init. IME text routing is always
+    // compiled into the egui app (it handles `egui::Event::Text`).
+    if diagnostics::requested(&args) {
+        diagnostics::run(true, panic_hook::crash_log_dir());
         return Ok(());
     }
 
@@ -211,13 +232,53 @@ fn prefer_backend_on_windows(options: &mut eframe::NativeOptions, want_transpare
             } else {
                 Backends::DX12
             };
-            setup.instance_descriptor.backends = Backends::from_env().unwrap_or(default);
+            let resolved = Backends::from_env().unwrap_or(default);
+            setup.instance_descriptor.backends = resolved;
+            // F4-3: if transparency was requested but the resolved backend is not
+            // Vulkan (e.g. the user forced `WGPU_BACKEND=dx12` to dodge a
+            // Vulkan-overlay crash), the window will be opaque. Tell them why and
+            // how to recover, instead of leaving them to wonder why "transparency
+            // does nothing". Pairs with the F4-1 crash hook: a Vulkan-overlay
+            // panic now also self-diagnoses via the crash log.
+            if let Some(msg) = transparency_fallback_warning(
+                want_transparency,
+                resolved.contains(Backends::VULKAN),
+            ) {
+                tracing::warn!("{msg}");
+            }
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = want_transparency;
         let _ = options; // used on every platform; backend default is correct off Windows
+    }
+}
+
+/// F4-3 — the user-facing notice for the transparency/Vulkan dependency.
+///
+/// Returns the warning to surface when window transparency was requested but a
+/// non-Vulkan GPU backend ended up selected. In that case the window is OPAQUE:
+/// real transparency needs Vulkan's WSI alpha; a DX12 swapchain is opaque to
+/// DWM. Pure (no I/O, no wgpu types) so it is unit-testable on every platform;
+/// the Windows caller passes `resolved.contains(Backends::VULKAN)`.
+///
+/// Only CALLED on Windows (the backend-selection logic above is Windows-only),
+/// but defined cross-platform so the `#[cfg(test)]` unit tests exercise it on
+/// every OS — hence `allow(dead_code)` off Windows, where there is no caller.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn transparency_fallback_warning(
+    want_transparency: bool,
+    backend_is_vulkan: bool,
+) -> Option<&'static str> {
+    if want_transparency && !backend_is_vulkan {
+        Some(
+            "window transparency was requested but a non-Vulkan GPU backend was selected; \
+             the window will be OPAQUE — real transparency requires the Vulkan backend. \
+             Unset WGPU_BACKEND (or set WGPU_BACKEND=vulkan) to enable transparency.",
+        )
+    } else {
+        None
     }
 }
 
@@ -234,4 +295,27 @@ fn load_app_icon() -> Option<egui::IconData> {
         width,
         height,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transparency_fallback_warning;
+
+    #[test]
+    fn warns_only_when_transparency_wanted_but_backend_not_vulkan() {
+        // Transparency requested + non-Vulkan backend → opaque-window warning.
+        assert!(transparency_fallback_warning(true, false).is_some());
+        // Transparency requested + Vulkan backend → no warning (it will work).
+        assert!(transparency_fallback_warning(true, true).is_none());
+        // Opaque window requested → never warn, regardless of backend.
+        assert!(transparency_fallback_warning(false, false).is_none());
+        assert!(transparency_fallback_warning(false, true).is_none());
+    }
+
+    #[test]
+    fn warning_text_names_the_recovery_lever() {
+        let msg = transparency_fallback_warning(true, false).unwrap();
+        assert!(msg.contains("WGPU_BACKEND"));
+        assert!(msg.to_lowercase().contains("vulkan"));
+    }
 }
