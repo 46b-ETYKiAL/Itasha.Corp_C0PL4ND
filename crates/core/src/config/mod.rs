@@ -9,23 +9,40 @@ use std::path::{Path, PathBuf};
 /// offending line — never a bare panic on a malformed file.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    /// The config file did not exist at the resolved path; built-in defaults
+    /// are used instead.
     #[error("config file not found at {0} (using built-in defaults)")]
     NotFound(PathBuf),
+    /// The config file exists but could not be read (I/O error).
     #[error("could not read config file {path}: {source}")]
     Io {
+        /// Path that failed to read.
         path: PathBuf,
+        /// Underlying I/O error.
         source: std::io::Error,
     },
+    /// The config file could not be parsed as TOML.
     #[error("config parse error in {path}: {message}")]
-    Parse { path: PathBuf, message: String },
+    Parse {
+        /// Path that failed to parse.
+        path: PathBuf,
+        /// Human-readable parse-error message, including line context.
+        message: String,
+    },
+    /// The config parsed but failed semantic validation (e.g. an out-of-range
+    /// value).
     #[error("config validation error: {0}")]
     Invalid(String),
 }
 
+/// Font configuration: the primary family, size, line height, and glyph
+/// fallback chain.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FontConfig {
+    /// Primary font family name.
     pub family: String,
+    /// Font size in points.
     pub size: f32,
     /// Line height in pixels (cell vertical advance).
     pub line_height: f32,
@@ -121,18 +138,29 @@ pub enum PanelSide {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Keybindings {
+    /// Copy the selection to the clipboard.
     pub copy: String,
+    /// Paste from the clipboard.
     pub paste: String,
+    /// Open a new tab.
     pub new_tab: String,
+    /// Close the current tab.
     pub close_tab: String,
+    /// Switch to the next tab.
     pub next_tab: String,
+    /// Split the focused pane to the right.
     pub split_right: String,
+    /// Split the focused pane downward.
     pub split_down: String,
+    /// Open the in-buffer find / search overlay.
     pub search: String,
+    /// Open the command palette.
     pub command_palette: String,
     /// Toggle the command-history quick-run sidebar (`#21`).
     pub history_sidebar: String,
+    /// Increase the font size.
     pub increase_font: String,
+    /// Decrease the font size.
     pub decrease_font: String,
 }
 
@@ -267,18 +295,25 @@ impl Keybindings {
     }
 }
 
+/// The shape of the text cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CursorStyle {
+    /// A filled block covering the whole cell.
     Block,
+    /// A thin vertical bar at the cell's left edge.
     Bar,
+    /// A horizontal underline at the cell's baseline.
     Underline,
 }
 
+/// Cursor appearance configuration: shape and blink behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CursorConfig {
+    /// The cursor shape.
     pub style: CursorStyle,
+    /// Whether the cursor blinks.
     pub blink: bool,
 }
 
@@ -291,11 +326,16 @@ impl Default for CursorConfig {
     }
 }
 
+/// Window configuration: the initial terminal dimensions, inner padding, and
+/// the persisted geometry restored on the next launch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowConfig {
+    /// Initial terminal width in columns.
     pub cols: u16,
+    /// Initial terminal height in rows.
     pub rows: u16,
+    /// Inner padding between the window edge and the grid, in pixels.
     pub padding: u16,
     /// Remembered window geometry (physical pixels), persisted on resize/move/
     /// exit and restored on launch. `None` = use the cols/rows-derived default.
@@ -378,6 +418,8 @@ impl ViewMode {
     }
 }
 
+/// Visual post-effects configuration: the CRT/scanline overlay and
+/// chromatic-aberration controls. All effects are OFF by default.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EffectsConfig {
@@ -451,6 +493,7 @@ fn default_tint() -> String {
 pub struct Config {
     /// Name of the theme to load (matches a file stem in the themes dir).
     pub theme: String,
+    /// Font configuration (family, size, line height, fallback chain).
     pub font: FontConfig,
     /// Persisted UI scale / accessibility zoom (F2-3): a multiplier applied to
     /// the WHOLE interface (chrome + grid), distinct from the transient Ctrl+/-
@@ -459,6 +502,7 @@ pub struct Config {
     /// can never make the UI unusably tiny or huge. Defaults to `1.0`.
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
+    /// Number of scrollback lines retained per pane.
     pub scrollback_lines: usize,
     /// Window opacity 0.0..=1.0. Below 1.0 the window is created translucent
     /// (applies next launch); the desktop / acrylic backdrop shows through.

@@ -115,7 +115,11 @@ C0PL4ND works perfectly with no configuration. When you want to customize it, ed
 
 Changes are applied live on save. See **[CONFIG.md](CONFIG.md)** for the full reference, including fonts, themes, keybindings, scrollback, opacity, cursor styles, and the CRT/scanline effect.
 
+For the default keyboard shortcuts (and how to rebind them), see **[docs/KEYBINDINGS.md](docs/KEYBINDINGS.md)**.
+
 For multiplexing and layout — the split-tree grid, nested tabs, drag-to-rearrange, quick-layout presets, and named-workspace save/restore — see **[docs/LAYOUT.md](docs/LAYOUT.md)**.
+
+Hit a snag? See **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** for fixes to common issues — colour/`TERM` detection, CJK/IME input, GPU and transparency fallback, and where config and logs live.
 
 ---
 
