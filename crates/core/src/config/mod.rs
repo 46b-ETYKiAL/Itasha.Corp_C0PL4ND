@@ -157,6 +157,116 @@ impl Default for Keybindings {
     }
 }
 
+/// A problem found in a [`Keybindings`] set by [`Keybindings::validate`] (F5-1).
+///
+/// The bindings are user-editable, so two actions can end up bound to the SAME
+/// combo (only one would ever fire) or a binding can be left blank (the action
+/// becomes unreachable) — both silently, with no surfacing. `validate` makes
+/// these explicit so the settings UI can warn instead of the user wondering why
+/// a shortcut "does nothing".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeybindingIssue {
+    /// `action` has an empty / whitespace-only combo — it can never trigger.
+    Empty { action: &'static str },
+    /// `actions` (≥2) are all bound to the same `combo` (normalized) — they
+    /// collide; at most one can win.
+    Conflict {
+        combo: String,
+        actions: Vec<&'static str>,
+    },
+}
+
+impl KeybindingIssue {
+    /// A human-readable, settings-surfaceable description of the issue.
+    pub fn message(&self) -> String {
+        match self {
+            KeybindingIssue::Empty { action } => {
+                format!("'{action}' has no key bound — it cannot be triggered")
+            }
+            KeybindingIssue::Conflict { combo, actions } => {
+                format!(
+                    "'{combo}' is bound to multiple actions: {}",
+                    actions.join(", ")
+                )
+            }
+        }
+    }
+}
+
+impl Keybindings {
+    /// Every (action-name, combo) pair, in a stable declaration order. The
+    /// single source of truth both [`Keybindings::validate`] and any UI iteration
+    /// key off, so a new binding is covered by adding ONE line here.
+    pub fn entries(&self) -> [(&'static str, &str); 12] {
+        [
+            ("copy", &self.copy),
+            ("paste", &self.paste),
+            ("new_tab", &self.new_tab),
+            ("close_tab", &self.close_tab),
+            ("next_tab", &self.next_tab),
+            ("split_right", &self.split_right),
+            ("split_down", &self.split_down),
+            ("search", &self.search),
+            ("command_palette", &self.command_palette),
+            ("history_sidebar", &self.history_sidebar),
+            ("increase_font", &self.increase_font),
+            ("decrease_font", &self.decrease_font),
+        ]
+    }
+
+    /// Canonical form of a combo for conflict comparison: lowercased, trimmed,
+    /// split on `+`, empties dropped, tokens sorted — so `"shift+mod+c"` and
+    /// `"mod+shift+c"` compare equal. An all-empty combo normalizes to `""`.
+    fn normalize_combo(combo: &str) -> String {
+        let mut parts: Vec<String> = combo
+            .split('+')
+            .map(|p| p.trim().to_ascii_lowercase())
+            .filter(|p| !p.is_empty())
+            .collect();
+        parts.sort();
+        parts.join("+")
+    }
+
+    /// Detect keybinding issues: blank bindings (unreachable actions) and combos
+    /// bound to more than one action (collisions). Returns an empty Vec when the
+    /// set is clean — the default set is clean by construction. Pure + order-
+    /// deterministic (empties first in declaration order, then conflicts sorted
+    /// by combo) so the settings surfacing is stable frame-to-frame.
+    pub fn validate(&self) -> Vec<KeybindingIssue> {
+        let entries = self.entries();
+        let mut issues = Vec::new();
+
+        // Blank bindings: an action with no resolvable combo can never fire.
+        for (name, combo) in entries.iter() {
+            if Self::normalize_combo(combo).is_empty() {
+                issues.push(KeybindingIssue::Empty { action: name });
+            }
+        }
+
+        // Collisions: group non-empty bindings by their normalized combo.
+        let mut groups: Vec<(String, Vec<&'static str>)> = Vec::new();
+        for (name, combo) in entries.iter() {
+            let norm = Self::normalize_combo(combo);
+            if norm.is_empty() {
+                continue;
+            }
+            if let Some(slot) = groups.iter_mut().find(|(c, _)| *c == norm) {
+                slot.1.push(name);
+            } else {
+                groups.push((norm, vec![name]));
+            }
+        }
+        groups.sort_by(|a, b| a.0.cmp(&b.0));
+        for (combo, actions) in groups {
+            if actions.len() > 1 {
+                issues.push(KeybindingIssue::Conflict { combo, actions });
+            }
+        }
+
+        issues
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CursorStyle {
@@ -724,6 +834,58 @@ mod tests {
     #[test]
     fn view_mode_defaults_to_grid() {
         assert_eq!(Config::default().view_mode, ViewMode::Grid);
+    }
+
+    #[test]
+    fn default_keybindings_have_no_conflicts() {
+        // The shipped default set must be clean — no collisions, no blanks.
+        assert!(Keybindings::default().validate().is_empty());
+    }
+
+    #[test]
+    fn validate_detects_a_duplicate_combo_collision() {
+        // Bind `paste` to the SAME combo as `copy` (order-insensitive form to
+        // prove normalization): copy = "mod+shift+c".
+        let kb = Keybindings {
+            paste: "shift+mod+c".into(),
+            ..Default::default()
+        };
+        let issues = kb.validate();
+        assert_eq!(issues.len(), 1, "exactly one conflict expected: {issues:?}");
+        match &issues[0] {
+            KeybindingIssue::Conflict { combo, actions } => {
+                assert_eq!(combo, "c+mod+shift"); // normalized: sorted tokens
+                assert!(actions.contains(&"copy") && actions.contains(&"paste"));
+            }
+            other => panic!("expected a Conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_detects_an_empty_binding() {
+        let kb = Keybindings {
+            search: "   ".into(), // whitespace-only → unreachable
+            ..Default::default()
+        };
+        let issues = kb.validate();
+        assert!(
+            issues
+                .iter()
+                .any(|i| matches!(i, KeybindingIssue::Empty { action } if *action == "search")),
+            "an empty binding must be reported: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn keybinding_issue_messages_are_human_readable() {
+        let empty = KeybindingIssue::Empty { action: "copy" };
+        assert!(empty.message().contains("copy"));
+        let conflict = KeybindingIssue::Conflict {
+            combo: "mod+shift+c".into(),
+            actions: vec!["copy", "paste"],
+        };
+        let m = conflict.message();
+        assert!(m.contains("copy") && m.contains("paste") && m.contains("mod+shift+c"));
     }
 
     #[test]
