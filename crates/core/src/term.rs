@@ -2478,6 +2478,11 @@ pub struct Terminal {
     apc_state: ApcFilter,
     /// Accumulated bytes of the in-progress APC body (between `ESC _` and ST).
     apc_accum: Vec<u8>,
+    /// Reusable scratch for the slow-path [`Terminal::advance`] passthrough
+    /// batch. Logically per-`advance`-scoped (cleared at the top of the slow
+    /// path, exactly like `apc_accum`), but owned by the terminal so the
+    /// allocation amortises across calls instead of being remade every frame.
+    passthrough: Vec<u8>,
 }
 
 impl Terminal {
@@ -2492,6 +2497,7 @@ impl Terminal {
             screen: Screen::new(rows, cols, max_scrollback),
             apc_state: ApcFilter::Normal,
             apc_accum: Vec::new(),
+            passthrough: Vec::new(),
         }
     }
 
@@ -2513,7 +2519,12 @@ impl Terminal {
             return;
         }
 
-        let mut passthrough: Vec<u8> = Vec::new();
+        // Reuse the terminal-owned scratch instead of allocating a fresh Vec
+        // every slow-path call. Move it out so the loop can also `&mut self`
+        // (`self.parser`/`self.apc_*`), clear it (keeps the capacity), and put
+        // it back at the end — the grown allocation survives to the next call.
+        let mut passthrough = std::mem::take(&mut self.passthrough);
+        passthrough.clear();
         // Index-based walk so the `Normal` state can SIMD-skip runs of plain
         // (non-ESC) bytes via `memchr` instead of pushing one byte at a time —
         // byte-for-byte identical to the per-byte loop, just bulk-copied.
@@ -2629,6 +2640,11 @@ impl Terminal {
         if !passthrough.is_empty() {
             self.parser.advance(&mut self.screen, &passthrough);
         }
+
+        // Hand the (now-grown) scratch back to the terminal so its capacity is
+        // reused next call. Logically per-`advance`-scoped — it is cleared at
+        // the top of the slow path, never read across calls.
+        self.passthrough = passthrough;
     }
 
     /// Complete an APC body: dispatch Kitty graphics, swallow everything else
@@ -3129,29 +3145,64 @@ impl Terminal {
         }
     }
 
-    /// The `rows` rows currently visible, accounting for scrollback offset.
-    /// When `view_offset == 0` this is exactly the live grid.
-    pub fn display_rows(&self) -> Vec<Vec<Cell>> {
+    /// Walk the `rows` rows currently visible (accounting for scrollback offset)
+    /// WITHOUT cloning, invoking `f(visible_row_index, row_cells)` for each.
+    ///
+    /// Zero-allocation: history rows are borrowed straight from the `history`
+    /// deque (`&hist[line]`) and grid rows straight from `grid.row(..)` (which
+    /// already returns `&[Cell]`). A history row that is shorter than the grid
+    /// width is passed AS-IS — the caller is responsible for treating columns at
+    /// or past `row.len()` as [`Cell::default()`] (pad-on-read), so no padded
+    /// `Vec` is ever materialised. `cols()` is available on [`Terminal::grid`]
+    /// for callers that need the full visible width.
+    ///
+    /// The closure runs while the terminal is borrowed; keep it allocation-light
+    /// and NEVER re-enter the terminal (e.g. re-lock) from inside it.
+    ///
+    /// When `view_offset == 0` this walks exactly the live grid.
+    pub fn for_visible_rows(&self, mut f: impl FnMut(usize, &[Cell])) {
         let rows = self.screen.grid.rows();
-        let cols = self.screen.grid.cols();
         let hist = &self.screen.history;
         let total = hist.len() + rows;
         // Bottom-anchored window of `rows` lines, shifted up by view_offset.
         let end = total.saturating_sub(self.screen.view_offset);
         let start = end.saturating_sub(rows);
-        let mut out = Vec::with_capacity(rows);
+        let mut visible = 0;
         for line in start..end {
             if line < hist.len() {
-                let mut row = hist[line].clone();
-                row.resize(cols, Cell::default());
-                out.push(row);
+                // History row borrowed in place; may be shorter than `cols` —
+                // the caller pads-on-read.
+                f(visible, &hist[line]);
             } else {
-                out.push(self.screen.grid.row(line - hist.len()).to_vec());
+                f(visible, self.screen.grid.row(line - hist.len()));
             }
+            visible += 1;
         }
-        while out.len() < rows {
-            out.push(vec![Cell::default(); cols]);
+        // Pad with empty rows only when the visible window is short (total <
+        // rows); normally never fires because the grid alone has `rows` rows.
+        while visible < rows {
+            f(visible, &[]);
+            visible += 1;
         }
+    }
+
+    /// The `rows` rows currently visible, accounting for scrollback offset.
+    /// When `view_offset == 0` this is exactly the live grid.
+    ///
+    /// Thin allocating wrapper over [`Terminal::for_visible_rows`]: each borrowed
+    /// row is cloned and padded to the grid width so the returned matrix is
+    /// always `rows` × `cols`. Output is byte-identical to the historical
+    /// hand-rolled implementation — callers on a hot path should prefer the
+    /// borrowing iterator and pad-on-read instead.
+    pub fn display_rows(&self) -> Vec<Vec<Cell>> {
+        let rows = self.screen.grid.rows();
+        let cols = self.screen.grid.cols();
+        let mut out = Vec::with_capacity(rows);
+        self.for_visible_rows(|_, row| {
+            let mut owned = row.to_vec();
+            owned.resize(cols, Cell::default());
+            out.push(owned);
+        });
         out
     }
 

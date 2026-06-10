@@ -326,12 +326,20 @@ impl PaneTerm {
         } else {
             (theme_fg, theme_bg)
         };
-        let rows = guard.display_rows();
+        // Drive the borrowing visible-rows iterator instead of cloning the whole
+        // grid via `display_rows()`. Each row is grouped into colour runs in
+        // place. History rows shorter than the grid width are padded-on-read:
+        // columns at/past `row.len()` are treated as `Cell::default()` so the
+        // output stays byte-identical to the old `display_rows()`-padded path
+        // without ever materialising a padded `Vec`.
+        let cols = guard.grid().cols();
+        let default_cell = c0pl4nd_core::Cell::default();
         let mut out: Vec<ColorRun> = Vec::new();
-        for row in &rows {
+        guard.for_visible_rows(|_, row| {
             let mut run = String::new();
             let mut run_color: Option<(u8, u8, u8)> = None;
-            for cell in row {
+            for col in 0..cols {
+                let cell = row.get(col).unwrap_or(&default_cell);
                 let (fg, _bg) = self.theme.cell_colors(cell, default_fg, default_bg);
                 if run_color != Some(fg) {
                     if let Some(pc) = run_color.take() {
@@ -345,7 +353,7 @@ impl PaneTerm {
                 out.push((run, pc));
             }
             out.push(("\n".to_string(), default_fg));
-        }
+        });
         Some(out)
     }
 
