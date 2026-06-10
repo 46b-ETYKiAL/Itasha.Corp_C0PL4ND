@@ -118,12 +118,12 @@ fn wgpu_backend_choice() -> String {
     }
 }
 
-/// Reduced-motion state via the `C0PL4ND_REDUCED_MOTION` env convention (the
-/// same predicate the renderer uses: set + non-zero + non-empty).
+/// Reduced-motion state — the `C0PL4ND_REDUCED_MOTION` env override OR the OS
+/// accessibility setting (F2-2). Delegates to the single source of truth the
+/// renderer also uses, so `--diagnostics` reports exactly what the CRT effect
+/// honours.
 fn reduced_motion_enabled() -> bool {
-    std::env::var("C0PL4ND_REDUCED_MOTION")
-        .map(|v| v != "0" && !v.is_empty())
-        .unwrap_or(false)
+    c0pl4nd_core::reduced_motion::reduced_motion()
 }
 
 /// Build the plain-text diagnostics report. Pure: deterministic given its input.
