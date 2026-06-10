@@ -183,6 +183,12 @@ pub struct C0pl4ndApp {
     /// single live re-install of the font stack — and the (expensive) system-font
     /// load runs ONLY on an actual change, never per frame.
     applied_font_family: String,
+    /// The UI scale (F2-3) currently applied to the egui context, tracked so
+    /// `frame_tick` re-applies `set_zoom_factor` ONLY when the configured
+    /// `ui_scale` actually changes (not every frame, and without fighting the
+    /// transient Ctrl+/- keyboard zoom, which never writes `config.ui_scale`).
+    /// Initialised to a sentinel `NaN` so the first frame always applies.
+    applied_ui_scale: f32,
     /// Whether the settings window is open.
     settings_open: bool,
     /// Recently-run commands, surfaced by the command palette for quick
@@ -356,7 +362,28 @@ impl C0pl4ndApp {
         // Load persisted settings from disk so a user's saved theme / opacity /
         // font / cursor / update prefs take effect across launches. The headless
         // `bootstrap()` path keeps `Config::default()` for deterministic tests.
-        let mut app = Self::bootstrap_with(load_config());
+        // F5-2: load config AND capture any parse error, so a broken config file
+        // surfaces as a visible toast instead of the silent fallback-to-defaults
+        // that previously only `eprintln`'d (invisible to a GUI-launched user).
+        let (cfg, config_error) = load_config_with_status();
+        let mut app = Self::bootstrap_with(cfg);
+        if let Some(err) = config_error {
+            app.toast = Some(err);
+        }
+        // F5-3: first-run affordance. A fresh install has no config file yet —
+        // and "zero-config is a first-class goal", so we deliberately do NOT
+        // write one (that would defeat it). Surface a one-time welcome toast
+        // pointing at Settings + the docs; it naturally stops once the user saves
+        // any setting (which is what first writes the config file). Skipped when a
+        // config-parse error already claimed the toast.
+        if app.toast.is_none() && c0pl4nd_core::Config::default_path().is_some_and(|p| !p.exists())
+        {
+            app.toast = Some(
+                "Welcome to C0PL4ND — open Settings (the gear) to customise; \
+                 see TROUBLESHOOTING.md if anything looks off."
+                    .to_string(),
+            );
+        }
         // Install the chrome icon fonts so the very first frame renders. When the
         // configured monospace family is a built-in choice this is the complete
         // install. When it names a SYSTEM family (the default config does —
@@ -440,6 +467,7 @@ impl C0pl4ndApp {
             active_shell: 0,
             fonts_installed: false,
             applied_font_family: String::new(),
+            applied_ui_scale: f32::NAN,
             settings_open: false,
             cmd_history: c0pl4nd_core::command_history::CommandHistory::default(),
             input_line: String::new(),
@@ -2382,6 +2410,18 @@ impl C0pl4ndApp {
             self.applied_font_family = font_apply_key(&self.config.font);
             self.fonts_installed = true;
         }
+        // F2-3: apply the persisted UI scale (accessibility zoom) to the whole
+        // egui context — ONLY when the configured value changed since last
+        // applied, so it is a no-op on steady-state frames and never overrides
+        // the transient Ctrl+/- keyboard zoom (which does not write
+        // `config.ui_scale`). The NaN-initialised `applied_ui_scale` guarantees
+        // the first frame applies; `set_zoom_factor` is itself a no-op when the
+        // value is unchanged.
+        let ui_scale = self.config.effective_ui_scale();
+        if ui_scale != self.applied_ui_scale {
+            ctx.set_zoom_factor(ui_scale);
+            self.applied_ui_scale = ui_scale;
+        }
         // Wire each live pane's UI-wake callback (once) so live PTY output wakes
         // the render loop — the other half of the damage-tracked-redraw scheme
         // whose idle side lives in `idle_repaint_interval`. Real window only:
@@ -3795,23 +3835,39 @@ fn egui_key_to_logical(
     Some(lk)
 }
 
-/// Load the persisted user config from its canonical path, falling back to
-/// defaults when it is absent or unreadable. Without this the egui app started
-/// from `Config::default()` every launch, so on-disk settings (theme, opacity,
-/// font, cursor, transparency, update prefs) the settings panel WROTE never
-/// took effect across launches — the same bug the legacy binary's `main` had
-/// already fixed for itself. Pure `core` APIs, so it is available in every
-/// binary that includes this module (incl. the `#[path]`-included test bins).
-fn load_config() -> c0pl4nd_core::Config {
-    match c0pl4nd_core::Config::default_path().filter(|p| p.exists()) {
-        Some(p) => std::fs::read_to_string(&p)
+/// Load the persisted user config from its canonical path, returning the config
+/// AND a parse-error message (F5-2) when a config file EXISTS but fails to
+/// read/parse — so the caller can surface it as a visible toast instead of the
+/// silent fallback-to-defaults that previously only `eprintln`'d (invisible to a
+/// GUI-launched user). Without loading at all the egui app would start from
+/// `Config::default()` every launch, so on-disk settings the panel WROTE never
+/// took effect. `None` error means the file was absent (normal zero-config
+/// start) or parsed cleanly. Pure `core` APIs, available in every binary that
+/// includes this module (incl. the `#[path]`-included test bins).
+fn load_config_with_status() -> (c0pl4nd_core::Config, Option<String>) {
+    load_config_from(c0pl4nd_core::Config::default_path().filter(|p| p.exists()))
+}
+
+/// Pure core of config loading, parameterised on the path so it is unit-testable
+/// (the real entry resolves `Config::default_path()`). An absent path → defaults
+/// with no error; a present-but-invalid file → defaults WITH an error message
+/// (the F5-2 surfacing contract).
+fn load_config_from(path: Option<std::path::PathBuf>) -> (c0pl4nd_core::Config, Option<String>) {
+    match path {
+        Some(p) => match std::fs::read_to_string(&p)
             .map_err(|e| e.to_string())
             .and_then(|s| c0pl4nd_core::Config::from_toml(&s, &p).map_err(|e| e.to_string()))
-            .unwrap_or_else(|e| {
+        {
+            Ok(cfg) => (cfg, None),
+            Err(e) => {
                 eprintln!("c0pl4nd: failed to load config {p:?}: {e}; using defaults");
-                c0pl4nd_core::Config::default()
-            }),
-        None => c0pl4nd_core::Config::default(),
+                (
+                    c0pl4nd_core::Config::default(),
+                    Some(format!("config error — using defaults: {e}")),
+                )
+            }
+        },
+        None => (c0pl4nd_core::Config::default(), None),
     }
 }
 
@@ -5172,5 +5228,50 @@ mod tests {
                 "master-off {mode:?} stays fully opaque"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod config_load_tests {
+    //! F5-2: a present-but-broken config file must surface an error (so the host
+    //! can toast it), an absent file must NOT, and a valid file parses cleanly.
+    use super::load_config_from;
+
+    #[test]
+    fn absent_config_yields_defaults_with_no_error() {
+        let (cfg, err) = load_config_from(None);
+        assert_eq!(cfg, c0pl4nd_core::Config::default());
+        assert!(
+            err.is_none(),
+            "an absent config is normal — no error surfaced"
+        );
+    }
+
+    #[test]
+    fn corrupt_config_yields_defaults_with_a_surfaced_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "this is = not valid toml [[[").unwrap();
+        let (cfg, err) = load_config_from(Some(path));
+        assert_eq!(
+            cfg,
+            c0pl4nd_core::Config::default(),
+            "falls back to defaults"
+        );
+        assert!(
+            err.is_some(),
+            "a present-but-invalid config MUST surface an error for the toast"
+        );
+        assert!(err.unwrap().to_lowercase().contains("config"));
+    }
+
+    #[test]
+    fn valid_config_parses_with_no_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "theme = \"ghost-paper\"\n").unwrap();
+        let (cfg, err) = load_config_from(Some(path));
+        assert_eq!(cfg.theme, "ghost-paper");
+        assert!(err.is_none());
     }
 }

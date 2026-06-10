@@ -452,6 +452,13 @@ pub struct Config {
     /// Name of the theme to load (matches a file stem in the themes dir).
     pub theme: String,
     pub font: FontConfig,
+    /// Persisted UI scale / accessibility zoom (F2-3): a multiplier applied to
+    /// the WHOLE interface (chrome + grid), distinct from the transient Ctrl+/-
+    /// keyboard zoom which is not persisted. `1.0` = 100%. Clamped to
+    /// `0.5..=3.0` on use via [`Config::effective_ui_scale`] so a malformed value
+    /// can never make the UI unusably tiny or huge. Defaults to `1.0`.
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f32,
     pub scrollback_lines: usize,
     /// Window opacity 0.0..=1.0. Below 1.0 the window is created translucent
     /// (applies next launch); the desktop / acrylic backdrop shows through.
@@ -558,11 +565,17 @@ fn default_term() -> String {
     crate::pty::DEFAULT_TERM.to_string()
 }
 
+/// serde default for [`Config::ui_scale`] — 100% (no scaling).
+fn default_ui_scale() -> f32 {
+    1.0
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
             theme: "itasha-corp".to_string(),
             font: FontConfig::default(),
+            ui_scale: default_ui_scale(),
             scrollback_lines: 10_000,
             opacity: 1.0,
             acrylic: false,
@@ -589,6 +602,18 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The UI scale to actually apply (F2-3), clamped to a safe `0.5..=3.0` and
+    /// guarded against a non-finite (NaN/inf) value from a malformed config — so
+    /// a bad `ui_scale` can never render the interface unusably tiny, huge, or
+    /// blank. `1.0` = 100%.
+    pub fn effective_ui_scale(&self) -> f32 {
+        if self.ui_scale.is_finite() {
+            self.ui_scale.clamp(0.5, 3.0)
+        } else {
+            default_ui_scale()
+        }
+    }
+
     /// Parse a TOML string into a `Config`, surfacing a readable error.
     pub fn from_toml(src: &str, path: &Path) -> Result<Config, ConfigError> {
         let mut cfg: Config = toml::from_str(src).map_err(|e| ConfigError::Parse {
@@ -840,6 +865,28 @@ mod tests {
     fn default_keybindings_have_no_conflicts() {
         // The shipped default set must be clean — no collisions, no blanks.
         assert!(Keybindings::default().validate().is_empty());
+    }
+
+    #[test]
+    fn ui_scale_defaults_to_one_and_backfills_for_old_configs() {
+        assert_eq!(Config::default().ui_scale, 1.0);
+        // A config file with no `ui_scale` key backfills via serde(default).
+        let p = PathBuf::from("test.toml");
+        let c = Config::from_toml("theme = \"ghost-paper\"\n", &p).unwrap();
+        assert_eq!(c.ui_scale, 1.0);
+    }
+
+    #[test]
+    fn effective_ui_scale_clamps_and_guards_against_garbage() {
+        let mk = |s: f32| Config {
+            ui_scale: s,
+            ..Config::default()
+        };
+        assert_eq!(mk(1.5).effective_ui_scale(), 1.5); // in-range passes through
+        assert_eq!(mk(0.1).effective_ui_scale(), 0.5); // clamped up to the floor
+        assert_eq!(mk(99.0).effective_ui_scale(), 3.0); // clamped down to the ceil
+        assert_eq!(mk(f32::NAN).effective_ui_scale(), 1.0); // garbage → safe default
+        assert_eq!(mk(f32::INFINITY).effective_ui_scale(), 1.0);
     }
 
     #[test]
