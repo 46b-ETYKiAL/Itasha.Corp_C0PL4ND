@@ -29,6 +29,11 @@ fn main() -> Result<()> {
     // untrusted directory (e.g. Downloads). No-op off Windows.
     dll_hardening::harden_dll_search_order();
 
+    // Install the unexpected-panic crash hook early: `panic = "abort"` otherwise
+    // kills the GUI with no diagnostic. Writes a rotating crash log (and, on
+    // Windows, a MessageBox) before chaining to the default hook and aborting.
+    panic_hook::install();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("C0PL4ND_LOG")
@@ -41,6 +46,17 @@ fn main() -> Result<()> {
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("{} {}", c0pl4nd_core::PRODUCT_NAME, c0pl4nd_core::version());
+        return Ok(());
+    }
+
+    // `c0pl4nd-legacy --diagnostics` (alias `--doctor`) — one-shot env/config
+    // dump, exit before window init. The legacy winit binary handles only
+    // `KeyboardInput` (no `WindowEvent::Ime` arm), so composed-text/IME routing
+    // is NOT compiled into this binary — reported honestly as `false`.
+    if diagnostics::requested(&args) {
+        // `run` prints the report and returns the exit code (0); a non-zero code
+        // would surface as a process failure, but the dump never fails.
+        let _code = diagnostics::run(false, panic_hook::crash_log_dir());
         return Ok(());
     }
 
@@ -95,10 +111,12 @@ fn main() -> Result<()> {
     crate::run_gui(&config)
 }
 
+mod diagnostics;
 mod dll_hardening;
 mod drag;
 mod image_render;
 mod pane_render;
+mod panic_hook;
 mod screenshot;
 mod update;
 #[cfg(windows)]
