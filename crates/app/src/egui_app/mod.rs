@@ -931,6 +931,23 @@ impl C0pl4ndApp {
             }
         }
 
+        // --- accessibility (F2-1): expose the grid text to screen readers ---
+        // The terminal grid is custom-painted, so without an explicit AccessKit
+        // node a screen reader perceives only an empty interactive region — the
+        // terminal's actual content is invisible to assistive tech. Attach the
+        // visible grid text as the pane's accessible value, marking the focused
+        // pane active. egui invokes this closure LAZILY and ONLY while building an
+        // AccessKit tree (i.e. when a screen reader / `egui_kittest` is attached),
+        // so the full-grid `grid_text()` snapshot costs nothing in the common
+        // no-assistive-tech case.
+        resp.widget_info(|| {
+            let text = terms
+                .get(&pane_id)
+                .and_then(PaneTerm::grid_text)
+                .unwrap_or_default();
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, focused, text)
+        });
+
         PaneBodyOutcome {
             drag_started: resp.drag_started(),
             clicked: resp.clicked(),

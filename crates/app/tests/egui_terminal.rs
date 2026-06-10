@@ -425,3 +425,43 @@ fn incognito_blocks_history_and_clear_empties_it() {
         "clear_command_history empties the history"
     );
 }
+
+/// ACCESSIBILITY (F2-1): the terminal grid is custom-painted, so without an
+/// explicit AccessKit node a screen reader perceives an empty interactive
+/// region and the terminal's content is invisible to assistive tech. This test
+/// drives the REAL frame loop, gets a deterministic marker into the focused
+/// pane's grid, then asserts the marker is present in the AccessKit tree the
+/// app exposes (`query_by_label_contains`) — i.e. a screen reader would read
+/// the grid content. Without the `resp.widget_info(..)` fix in
+/// `render_pane_body`, no node carries the grid text and this query is `None`.
+#[test]
+fn grid_text_is_exposed_to_accesskit_screen_readers() {
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    {
+        let a = app.borrow();
+        let focused = a.focused_pane();
+        if a.pane_grid_text(focused).is_none() {
+            eprintln!("no live PTY on this platform; skipping a11y grid-text exposure");
+            return;
+        }
+    }
+    let mut h = harness(&app);
+
+    let token = "c0pl4nd_a11y_marker";
+    type_text(&mut h, &format!("echo {token}"));
+    press_enter(&mut h);
+    let seen = poll_focused_contains(&mut h, &app, token, Duration::from_secs(8));
+    assert!(
+        seen,
+        "pre-condition: the marker must reach the focused pane's grid"
+    );
+
+    // Build one more frame so the AccessKit tree reflects the grid that now
+    // contains the marker, then assert the marker is exposed accessibly.
+    h.step();
+    assert!(
+        h.query_by_label_contains(token).is_some(),
+        "the terminal grid text must be exposed to AccessKit (screen readers) — \
+         no accessible node carried the marker '{token}'"
+    );
+}
