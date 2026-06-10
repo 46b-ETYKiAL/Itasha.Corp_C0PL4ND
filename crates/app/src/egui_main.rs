@@ -262,6 +262,11 @@ fn prefer_backend_on_windows(options: &mut eframe::NativeOptions, want_transpare
 /// real transparency needs Vulkan's WSI alpha; a DX12 swapchain is opaque to
 /// DWM. Pure (no I/O, no wgpu types) so it is unit-testable on every platform;
 /// the Windows caller passes `resolved.contains(Backends::VULKAN)`.
+///
+/// Only CALLED on Windows (the backend-selection logic above is Windows-only),
+/// but defined cross-platform so the `#[cfg(test)]` unit tests exercise it on
+/// every OS — hence `allow(dead_code)` off Windows, where there is no caller.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn transparency_fallback_warning(
     want_transparency: bool,
     backend_is_vulkan: bool,
