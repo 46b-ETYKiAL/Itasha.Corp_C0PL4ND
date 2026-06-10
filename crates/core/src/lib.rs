@@ -18,6 +18,7 @@ pub mod layout;
 pub mod layout_persist;
 pub mod plugin;
 pub mod pty;
+pub mod reduced_motion;
 pub mod search;
 pub mod session;
 pub mod term;

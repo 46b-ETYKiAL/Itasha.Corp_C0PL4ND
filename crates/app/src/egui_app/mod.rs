@@ -2890,8 +2890,10 @@ impl C0pl4ndApp {
         use std::time::Duration;
         // The CRT scanline post-effect is a continuous animation — keep it smooth
         // by ticking every frame while it is enabled (the scanline painter also
-        // self-requests a repaint, so this just matches that cadence).
-        if self.config.effects.crt_scanlines {
+        // self-requests a repaint, so this just matches that cadence). F2-2: under
+        // reduced-motion the roll band is frozen and does not self-request, so do
+        // NOT pump the animation here either — fall through to the idle cadence.
+        if self.config.effects.crt_scanlines && !c0pl4nd_core::reduced_motion::reduced_motion() {
             return Duration::ZERO; // == request_repaint(): animate at display rate
         }
         // A blink-enabled cursor must keep blinking on an otherwise-idle screen;
@@ -3669,9 +3671,22 @@ fn paint_grid_native(
     // Drawn only when the setting is on (strictly zero-cost otherwise); the
     // repaint request keeps the roll animating without an explicit timer.
     if effects.crt_scanlines {
-        let t = painter.ctx().input(|i| i.time) as f32;
+        // F2-2: honour the user's reduced-motion preference (env override OR the
+        // OS accessibility setting). When reduced motion is requested, FREEZE the
+        // rolling scan band (`t = 0` → a static frame; the dark scan-line bands
+        // are a texture, not motion, so they remain) and STOP the per-frame
+        // animation repaint. This makes the "Auto-disabled under reduced-motion"
+        // promise the settings UI already shows actually true.
+        let reduce = c0pl4nd_core::reduced_motion::reduced_motion();
+        let t = if reduce {
+            0.0
+        } else {
+            painter.ctx().input(|i| i.time) as f32
+        };
         paint_crt_scanlines(painter, rect, ppp, t, effects.scanline_darkness);
-        painter.ctx().request_repaint();
+        if !reduce {
+            painter.ctx().request_repaint();
+        }
     }
 }
 
