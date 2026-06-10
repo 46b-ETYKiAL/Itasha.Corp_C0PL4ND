@@ -10,6 +10,7 @@ pub mod atomic_write;
 pub mod command_history;
 pub mod config;
 pub mod fetch;
+pub mod fs_perms;
 pub mod fuzzy;
 pub mod grid;
 pub mod image;

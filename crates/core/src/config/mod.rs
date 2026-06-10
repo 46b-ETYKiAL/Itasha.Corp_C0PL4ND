@@ -627,36 +627,11 @@ impl Config {
 /// reflect the user's environment, so other local accounts should not read it.
 /// Failure is intentionally swallowed — a restrictive / locked-down filesystem
 /// must never block a settings save (the write already succeeded by here).
+///
+/// Delegates to the shared [`crate::fs_perms::restrict_to_owner`] so the config
+/// file and saved workspace layouts are tightened by the identical code path.
 fn restrict_to_owner(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // 0600 = owner read/write, no group/other.
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(windows)]
-    {
-        // The file lives under the per-user `%APPDATA%` profile, whose NTFS ACLs
-        // already deny other standard users; as defense-in-depth we additionally
-        // remove inheritance and grant only the current user, best-effort via
-        // `icacls`. Output is discarded and any failure is ignored.
-        if let Ok(user) = std::env::var("USERNAME") {
-            if !user.is_empty() {
-                let _ = std::process::Command::new("icacls")
-                    .arg(path)
-                    .arg("/inheritance:r")
-                    .arg("/grant:r")
-                    .arg(format!("{user}:F"))
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-            }
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = path;
-    }
+    crate::fs_perms::restrict_to_owner(path);
 }
 
 #[cfg(test)]

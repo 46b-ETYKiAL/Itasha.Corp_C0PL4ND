@@ -513,9 +513,14 @@ impl WorkspaceSnapshot {
     }
 
     /// Atomically write the workspace to `path` as pretty JSON via the
-    /// crash-safe [`crate::atomic_write::atomic_write`] helper (temp-file +
-    /// rename), creating parent dirs. A crash mid-save leaves the previous file
-    /// intact, never a torn one.
+    /// crash-safe [`crate::atomic_write::atomic_write_owner_only`] helper
+    /// (temp-file + rename), creating parent dirs. A crash mid-save leaves the
+    /// previous file intact, never a torn one.
+    ///
+    /// The file is tightened to **owner-only** access because each leaf records
+    /// its `cwd` (a real filesystem path that reveals usernames and project
+    /// names); other local accounts must not be able to read it. This mirrors
+    /// the config-file tightening (`restrict_to_owner`).
     ///
     /// # Errors
     ///
@@ -523,7 +528,7 @@ impl WorkspaceSnapshot {
     /// if the write/rename fails.
     pub fn save_atomic(&self, path: &Path) -> Result<(), LoadError> {
         let json = self.to_json()?;
-        crate::atomic_write::atomic_write(path, json.as_bytes())
+        crate::atomic_write::atomic_write_owner_only(path, json.as_bytes())
             .map_err(|e| LoadError::Io(e.to_string()))
     }
 
