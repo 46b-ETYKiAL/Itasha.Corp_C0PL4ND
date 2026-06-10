@@ -53,8 +53,22 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
     let mut max_x = 0usize;
     let mut max_y = 0usize;
 
+    // Per-axis ceiling so a hostile RLE run (`!Pn`) or a long column of band-LFs
+    // cannot grow `x` / `band_top` (and thus the sparse pixel map) without bound
+    // before the final whole-canvas check. 4096 per axis keeps the dense worst
+    // case at the 16 Mpx `MAX_SIXEL_PIXELS` ceiling. Found by `fuzz_sixel`: a
+    // tiny payload of repeated max-count RLE tokens otherwise pins a core thread
+    // and balloons the pixel HashMap.
+    const MAX_SIXEL_DIM: usize = 4096;
+    const MAX_SIXEL_PIXELS: usize = 16 * 1024 * 1024;
+
     let mut i = 0;
     while i < data.len() {
+        // Backstop: never let the sparse pixel map exceed the output ceiling,
+        // regardless of how the bytes try to grow it.
+        if pixels.len() > MAX_SIXEL_PIXELS {
+            return None;
+        }
         let b = data[i];
         match b {
             b'#' => {
@@ -84,10 +98,13 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
                 x = 0;
             }
             b'-' => {
-                // Graphics LF: move down one band (6 px).
+                // Graphics LF: move down one band (6 px). Capped per-axis so a
+                // long column of LFs cannot grow the canvas without bound.
                 i += 1;
                 x = 0;
-                band_top += 6;
+                if band_top < MAX_SIXEL_DIM {
+                    band_top += 6;
+                }
             }
             b'!' => {
                 // RLE: !Pn <sixel> repeats the sixel Pn times.
@@ -99,7 +116,10 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
                     i += 1;
                     if (0x3f..=0x7e).contains(&sx) {
                         let bits = sx - 0x3f;
-                        for _ in 0..count.max(1) {
+                        // Clamp the repeat so `x` can never exceed the per-axis
+                        // ceiling — bounds the loop AND the pixel map.
+                        let reps = (count.max(1) as usize).min(MAX_SIXEL_DIM.saturating_sub(x));
+                        for _ in 0..reps {
                             plot(
                                 &mut pixels,
                                 &mut max_x,
@@ -117,16 +137,18 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
             0x3f..=0x7e => {
                 // A sixel: 6 vertical pixels.
                 let bits = b - 0x3f;
-                plot(
-                    &mut pixels,
-                    &mut max_x,
-                    &mut max_y,
-                    x,
-                    band_top,
-                    bits,
-                    color,
-                );
-                x += 1;
+                if x < MAX_SIXEL_DIM {
+                    plot(
+                        &mut pixels,
+                        &mut max_x,
+                        &mut max_y,
+                        x,
+                        band_top,
+                        bits,
+                        color,
+                    );
+                    x += 1;
+                }
                 i += 1;
             }
             b'"' => {
@@ -145,11 +167,10 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
     }
     let width = max_x + 1;
     let height = max_y + 1;
-    // Cap the total pixel count to bound the output allocation against a hostile
-    // stream. The input is already capped at 8 MiB, but a sparse plot could
-    // still imply a very large canvas; 16 Mpx (≈ 4096×4096) is the practical
-    // Sixel ceiling. Mirrors `decode_kitty`'s checked-multiply guard.
-    const MAX_SIXEL_PIXELS: usize = 16 * 1024 * 1024;
+    // Final whole-canvas guard: bound the output allocation against a hostile
+    // stream (the per-axis `MAX_SIXEL_DIM` clamp above already bounds each
+    // dimension; this is the belt-and-suspenders product check). Mirrors
+    // `decode_kitty`'s checked-multiply guard.
     if width
         .checked_mul(height)
         .is_none_or(|n| n > MAX_SIXEL_PIXELS)
@@ -188,14 +209,25 @@ fn plot(
 }
 
 /// Parse a leading run of ASCII digits as a u16; returns (value, bytes_read).
+///
+/// SECURITY: the accumulation is **saturating** and clamped to `u16::MAX` on
+/// every step. A naive `v = v * 10 + d` overflows `u32` on a long digit run
+/// (e.g. a hostile `#999999999999...` colour index or `!999999999999...` RLE
+/// count) — which panics under overflow-checks (the cargo-fuzz profile) and
+/// silently wraps to a wrong value in release. Saturating keeps the parser
+/// position correct (every digit is still consumed, so `n` advances past the
+/// whole run) while bounding the value. Found by `fuzz_sixel`.
 fn parse_u16(data: &[u8]) -> (u16, usize) {
     let mut v: u32 = 0;
     let mut n = 0;
     while n < data.len() && data[n].is_ascii_digit() {
-        v = v * 10 + (data[n] - b'0') as u32;
+        v = v
+            .saturating_mul(10)
+            .saturating_add((data[n] - b'0') as u32)
+            .min(u16::MAX as u32);
         n += 1;
     }
-    (v.min(u16::MAX as u32) as u16, n)
+    (v as u16, n)
 }
 
 /// A parsed Kitty graphics command (control keys + raw payload).
@@ -424,6 +456,53 @@ mod tests {
     #[test]
     fn sixel_empty_is_none() {
         assert!(decode_sixel(b"").is_none());
+    }
+
+    #[test]
+    fn parse_u16_saturates_long_digit_run_without_overflow() {
+        // Regression (fuzz_sixel): a digit run longer than u32 can hold must
+        // NOT overflow the accumulator — it saturates to u16::MAX and still
+        // consumes every digit so the parser position is correct.
+        let long = b"99999999999999999999rest";
+        let (v, n) = parse_u16(long);
+        assert_eq!(v, u16::MAX);
+        assert_eq!(n, 20); // all 20 nines consumed, stops at 'r'
+    }
+
+    #[test]
+    fn sixel_hostile_rle_count_is_bounded_no_panic() {
+        // Regression (fuzz_sixel): a huge RLE count (`!<many digits>~`) must not
+        // overflow parse_u16 NOR grow the canvas/pixel-map without bound. The
+        // per-axis clamp keeps width within MAX_SIXEL_DIM; decode returns
+        // bounded output (or None) and never panics or hangs.
+        let mut data = b"#0;2;100;0;0!".to_vec();
+        data.extend_from_slice(b"99999999999999999999"); // count overflows u32 pre-fix
+        data.push(b'~');
+        let img = decode_sixel(&data).expect("bounded decode");
+        assert!(img.width <= 4096, "width clamped to MAX_SIXEL_DIM");
+    }
+
+    #[test]
+    fn sixel_hostile_band_advance_is_bounded_no_panic() {
+        // Regression (fuzz_sixel): a long column of graphics-LFs cannot grow the
+        // canvas height past the per-axis ceiling.
+        let mut data = b"#0;2;0;0;100~".to_vec();
+        for _ in 0..10000 {
+            data.push(b'-'); // 10000 band advances * 6 = 60000 px without the cap
+            data.push(b'~');
+        }
+        let img = decode_sixel(&data);
+        if let Some(img) = img {
+            // Bounded near MAX_SIXEL_DIM (the cap stops at the first band_top
+            // step >= the ceiling, so a small overshoot of one band + 6 rows is
+            // expected). The point: it is NOT the 60000 px an unbounded decoder
+            // would reach from 10000 band advances.
+            assert!(
+                img.height < 4200,
+                "height bounded near MAX_SIXEL_DIM, got {}",
+                img.height
+            );
+        }
     }
 
     #[test]

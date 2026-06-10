@@ -22,6 +22,19 @@
 #                  config files). Drives
 #                  `c0pl4nd_core::layout_persist::{WorkspaceSnapshot,
 #                  LayoutSnapshot}::from_json` + the reconstruction paths.
+#   * fuzz_sixel — the hand-written Sixel byte state-machine. Inline-image data
+#                  arrives over the PTY as a DCS payload from any program, so it
+#                  is fully untrusted. Drives `c0pl4nd_core::image::decode_sixel`.
+#   * fuzz_kitty — the Kitty graphics control-string parser + per-format pixel
+#                  decoder (f=24 RGB / f=32 RGBA / f=100 PNG). Same untrusted-PTY
+#                  surface. Drives `c0pl4nd_core::image::{parse_kitty, decode_kitty}`.
+#   * fuzz_archive — the update-engine archive extractor SHAPE (zip / tar.gz over
+#                  arbitrary bytes). The real `extract_binary_{zip,targz}` live in
+#                  the app BINARY crate (no lib target ⇒ not importable), so this
+#                  target drives a self-contained shim that faithfully mirrors the
+#                  bounded-extraction logic (entry-count cap, copy-capped inflate,
+#                  enclosed_name traversal-skip) over the SAME exact-pinned
+#                  zip/tar/flate2 crates. See the target's module doc-comment.
 
 [package]
 name = "c0pl4nd-fuzz"
@@ -43,6 +56,14 @@ libfuzzer-sys = "=0.4.10"
 # churn and so `cargo fuzz`'s structured-input idioms are available.
 arbitrary = { version = "=1.4.2", features = ["derive"] }
 
+# Archive crates for the `fuzz_archive` target's extraction shim. Pinned to the
+# EXACT versions the app crate uses (crates/app/Cargo.toml) so the fuzzed shape
+# matches the production decompression-path SHAPE byte-for-byte — a fuzz harness
+# that drifts from the real crate version is fuzzing the wrong code.
+flate2 = "=1.1.9"
+tar = { version = "=0.4.46", default-features = false }
+zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
+
 [dependencies.c0pl4nd-core]
 path = "../crates/core"
 
@@ -59,6 +80,27 @@ bench = false
 [[bin]]
 name = "state_json"
 path = "fuzz_targets/state_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sixel"
+path = "fuzz_targets/fuzz_sixel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_kitty"
+path = "fuzz_targets/fuzz_kitty.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_archive"
+path = "fuzz_targets/fuzz_archive.rs"
 test = false
 doc = false
 bench = false
