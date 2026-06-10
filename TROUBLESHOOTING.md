@@ -12,37 +12,37 @@ shows no colour, the wrong colours, or a monochrome fallback — even though
 C0PL4ND itself renders full 256-colour and truecolor.
 
 Cause: terminfo-based programs key their capabilities off the `TERM`
-environment variable (and `COLORTERM` for truecolor). A child process spawned
-by C0PL4ND inherits whatever `TERM`/`COLORTERM` the launching process had. When
-C0PL4ND is launched from a GUI shortcut (Start menu, Explorer, a desktop
-launcher) there is often **no `TERM` set at all**, so programs fall back to a
-dumb/`vt100` path or refuse colour.
+environment variable (and `COLORTERM` for truecolor).
 
-C0PL4ND answers terminfo and Device-Attributes queries as `xterm-256color`
-(see `crates/core/src/term.rs`), so setting `TERM` to match resolves the
-mismatch.
+C0PL4ND sets these for the child shell **automatically**: every spawned shell
+gets `TERM=xterm-256color` and `COLORTERM=truecolor` (matching the
+`xterm-256color`-class terminal C0PL4ND advertises over the wire — its
+Device-Attributes / `XTGETTCAP` replies in `crates/core/src/term.rs`). So colour
+works out of the box even when C0PL4ND is launched from a GUI shortcut (Start
+menu, Explorer, a desktop launcher), where the launching process usually has no
+`TERM` at all.
 
-Fix — set the variables in the child shell yourself:
+C0PL4ND never clobbers a `TERM`/`COLORTERM` you exported yourself before
+launching — a deliberately-set value is honoured. To verify what the child
+actually sees, run:
 
-- **Linux / macOS** (`~/.bashrc`, `~/.zshrc`, or your shell rc):
+```sh
+c0pl4nd --diagnostics
+```
 
-  ```sh
-  export TERM=xterm-256color
-  export COLORTERM=truecolor
-  ```
+which prints the `TERM` / `COLORTERM` / `TERM_PROGRAM` values in effect (among
+other environment facts).
 
-- **Windows** — set them for your shell. For PowerShell (`$PROFILE`):
+If you need a different terminfo identity (e.g. `screen-256color` under a
+multiplexer), set the `term` key in your config:
 
-  ```powershell
-  $env:TERM = "xterm-256color"
-  $env:COLORTERM = "truecolor"
-  ```
+```toml
+term = "screen-256color"
+```
 
-  Or set them as user environment variables via *System → Environment
-  Variables* so every shell inherits them.
-
-After setting them, restart the shell (or the pane) so the program re-reads the
-environment.
+(`COLORTERM` stays `truecolor` — C0PL4ND renders 24-bit colour.) An empty value
+falls back to the `xterm-256color` default. After changing it, restart the pane
+so the new child shell picks up the value.
 
 ## CJK / IME input: Japanese, Chinese, or Korean text won't type
 

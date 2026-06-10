@@ -7,6 +7,7 @@ c0pl4nd \- fast, GPU-accelerated, local-first terminal emulator
 .SH SYNOPSIS
 .B c0pl4nd
 .RB [ \-\-version ]
+.RB [ \-\-diagnostics ]
 .RB [ update ]
 .RB [ \-\-screenshot
 .IR PATH ]
@@ -35,6 +36,13 @@ media). If
 .I PATH
 is omitted, the image is written to
 .IR c0pl4nd.png .
+.TP
+.BR \-\-diagnostics ", " \-\-doctor
+Print a one-shot environment and configuration report \(em product version,
+OS and architecture, the resolved config path and its parse status, and the
+.BR TERM ", " COLORTERM ", and " TERM_PROGRAM
+values the child shell sees \(em then exit without opening a window. Intended
+to be pasted into a bug report.
 .SH SUBCOMMANDS
 .TP
 .B update
