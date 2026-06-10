@@ -15,6 +15,7 @@
 //!
 //! eframe owns the event loop; no winit plumbing here.
 
+pub mod bidi;
 pub mod chrome;
 pub mod fonts;
 pub mod grid;
@@ -183,6 +184,12 @@ pub struct C0pl4ndApp {
     /// single live re-install of the font stack — and the (expensive) system-font
     /// load runs ONLY on an actual change, never per frame.
     applied_font_family: String,
+    /// The UI scale (F2-3) currently applied to the egui context, tracked so
+    /// `frame_tick` re-applies `set_zoom_factor` ONLY when the configured
+    /// `ui_scale` actually changes (not every frame, and without fighting the
+    /// transient Ctrl+/- keyboard zoom, which never writes `config.ui_scale`).
+    /// Initialised to a sentinel `NaN` so the first frame always applies.
+    applied_ui_scale: f32,
     /// Whether the settings window is open.
     settings_open: bool,
     /// Recently-run commands, surfaced by the command palette for quick
@@ -300,6 +307,15 @@ pub struct C0pl4ndApp {
     /// harness (no `live_window`), which keeps the synchronous path for
     /// deterministic tests.
     pending_fonts: Option<std::sync::mpsc::Receiver<egui::FontDefinitions>>,
+    /// The in-progress IME pre-edit (composition) string for the focused pane,
+    /// or `None` when no composition is active (F3-1). egui routes composed CJK /
+    /// complex-script input through `Event::Ime` — the not-yet-committed
+    /// candidate text arrives as `ImeEvent::Preedit` and is BUFFERED here for
+    /// display only; it is NEVER sent to the PTY (only `ImeEvent::Commit` text
+    /// reaches the shell). Painted underlined at the cursor by
+    /// [`Self::render_pane_body`] so the user sees what they are composing before
+    /// commit. Cleared on `ImeEvent::Enabled` / `Disabled` and on commit.
+    ime_preedit: Option<String>,
 }
 
 /// The PTY grid size used to spawn a pane before its real pixel rect is known.
@@ -356,7 +372,28 @@ impl C0pl4ndApp {
         // Load persisted settings from disk so a user's saved theme / opacity /
         // font / cursor / update prefs take effect across launches. The headless
         // `bootstrap()` path keeps `Config::default()` for deterministic tests.
-        let mut app = Self::bootstrap_with(load_config());
+        // F5-2: load config AND capture any parse error, so a broken config file
+        // surfaces as a visible toast instead of the silent fallback-to-defaults
+        // that previously only `eprintln`'d (invisible to a GUI-launched user).
+        let (cfg, config_error) = load_config_with_status();
+        let mut app = Self::bootstrap_with(cfg);
+        if let Some(err) = config_error {
+            app.toast = Some(err);
+        }
+        // F5-3: first-run affordance. A fresh install has no config file yet —
+        // and "zero-config is a first-class goal", so we deliberately do NOT
+        // write one (that would defeat it). Surface a one-time welcome toast
+        // pointing at Settings + the docs; it naturally stops once the user saves
+        // any setting (which is what first writes the config file). Skipped when a
+        // config-parse error already claimed the toast.
+        if app.toast.is_none() && c0pl4nd_core::Config::default_path().is_some_and(|p| !p.exists())
+        {
+            app.toast = Some(
+                "Welcome to C0PL4ND — open Settings (the gear) to customise; \
+                 see TROUBLESHOOTING.md if anything looks off."
+                    .to_string(),
+            );
+        }
         // Install the chrome icon fonts so the very first frame renders. When the
         // configured monospace family is a built-in choice this is the complete
         // install. When it names a SYSTEM family (the default config does —
@@ -440,6 +477,7 @@ impl C0pl4ndApp {
             active_shell: 0,
             fonts_installed: false,
             applied_font_family: String::new(),
+            applied_ui_scale: f32::NAN,
             settings_open: false,
             cmd_history: c0pl4nd_core::command_history::CommandHistory::default(),
             input_line: String::new(),
@@ -467,6 +505,7 @@ impl C0pl4ndApp {
             fullscreen: false,
             galley_cache: GalleyCache::default(),
             pending_fonts: None,
+            ime_preedit: None,
         }
     }
 
@@ -762,6 +801,10 @@ impl C0pl4ndApp {
         bg_alpha: u8,
         search: Option<SearchHighlight<'_>>,
         links: &[(CellSpan, String)],
+        // The focused pane's in-progress IME pre-edit (composition) string, for
+        // display at the cursor (F3-1). `None` for non-focused panes and when no
+        // composition is active. Never sent to the PTY — display only.
+        ime_preedit: Option<&str>,
     ) -> PaneBodyOutcome {
         let (rect, resp) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -948,11 +991,51 @@ impl C0pl4ndApp {
             egui::WidgetInfo::labeled(egui::WidgetType::Label, focused, text)
         });
 
+        // --- IME composition (F3-1): cursor rect + pre-edit display ---
+        // Compute the focused pane's terminal-cursor cell rect in screen space
+        // using the SAME geometry the glyph painter, cursor, and link hit-test
+        // share (`origin + (col*cw, row*ch)`). The caller hands this rect to
+        // `ctx.output_mut(|o| o.ime = Some(IMEOutput {..}))` so winit's
+        // `set_ime_cursor_area` places the OS candidate window AT the caret.
+        // Only the focused pane reports a rect (the OS tracks a single caret).
+        let mut ime_cursor_rect = None;
+        if focused {
+            if let Some((row, col)) = terms.get(&pane_id).and_then(PaneTerm::cursor_cell) {
+                let (cw, ch) = monospace_cell_points(&painter, font_size, line_height_px);
+                let origin = grid_text_origin(rect, pad);
+                let cell_min = origin + egui::vec2(col as f32 * cw, row as f32 * ch);
+                ime_cursor_rect = Some(egui::Rect::from_min_size(cell_min, egui::vec2(cw, ch)));
+
+                // Paint the in-progress pre-edit string at the cursor, underlined
+                // and in the theme fg, so the user sees what they are composing
+                // before commit. The candidate window (positioned via the rect
+                // above) shows the IME's own suggestion list; this is the inline
+                // composition echo at the caret. The pre-edit is DISPLAY-ONLY —
+                // it is never forwarded to the PTY (only `ImeEvent::Commit` is).
+                if let Some(pre) = ime_preedit.filter(|s| !s.is_empty()) {
+                    let fg = theme::ChromeColors::from_theme(theme).fg;
+                    let font = egui::FontId::monospace(font_size);
+                    let galley = painter.layout_no_wrap(pre.to_string(), font, fg);
+                    let text_pos = origin + egui::vec2(col as f32 * cw, row as f32 * ch);
+                    let galley_w = galley.size().x;
+                    painter.galley(text_pos, galley, fg);
+                    // Underline the composition span (the conventional pre-edit
+                    // affordance), one device-px line at the cell baseline.
+                    let underline = egui::Rect::from_min_size(
+                        text_pos + egui::vec2(0.0, ch - 1.0),
+                        egui::vec2(galley_w, 1.0),
+                    );
+                    painter.rect_filled(underline, 0.0, fg);
+                }
+            }
+        }
+
         PaneBodyOutcome {
             drag_started: resp.drag_started(),
             clicked: resp.clicked(),
             size: rect.size(),
             opened_url,
+            ime_cursor_rect,
         }
     }
 
@@ -977,6 +1060,10 @@ impl C0pl4ndApp {
         // mutate the PTY (egui forbids re-entrant input borrows).
         let mut keys: Vec<(LogicalKey, KeyModifiers, KeyEventKind)> = Vec::new();
         let mut pastes: Vec<String> = Vec::new();
+        // The pre-edit (composition) string to store on `self` after the input
+        // borrow closes. `Some(Some(s))` = set/replace the preedit; `Some(None)`
+        // = clear it; `None` = no IME event this frame, leave it as-is (F3-1).
+        let mut ime_update: Option<Option<String>> = None;
         ctx.input(|i| {
             let mods = KeyModifiers {
                 ctrl: i.modifiers.ctrl,
@@ -992,6 +1079,46 @@ impl C0pl4ndApp {
                     egui::Event::Text(t) if !mods.ctrl && !mods.logo => {
                         keys.push((LogicalKey::Text(t.clone()), mods, KeyEventKind::Press));
                     }
+                    // IME composition (F3-1). When an IME (CJK / complex-script)
+                    // is active, egui routes composed text through `Event::Ime`
+                    // INSTEAD of `Event::Text`, so without this arm CJK input is
+                    // impossible. The OS candidate-window position is set
+                    // separately each frame via `ctx.output_mut(|o| o.ime = ...)`
+                    // in `render_pane_body` (so the popup tracks the caret).
+                    egui::Event::Ime(ime) => match ime {
+                        // Final composed result: send it to the PTY exactly as
+                        // ordinary `Event::Text` would, and clear the pre-edit.
+                        // Commit text is final and MUST reach the shell
+                        // regardless of modifier state (an IME commit is not a
+                        // shortcut chord), so — unlike `Event::Text` above — it
+                        // is forwarded even while Ctrl/logo is held.
+                        egui::ImeEvent::Commit(text) => {
+                            if !text.is_empty() {
+                                keys.push((
+                                    LogicalKey::Text(text.clone()),
+                                    mods,
+                                    KeyEventKind::Press,
+                                ));
+                            }
+                            ime_update = Some(None);
+                        }
+                        // In-progress candidate text: buffer for DISPLAY only —
+                        // never sent to the PTY. An empty pre-edit ends the
+                        // current composition without committing.
+                        egui::ImeEvent::Preedit(text) => {
+                            ime_update = Some(if text.is_empty() {
+                                None
+                            } else {
+                                Some(text.clone())
+                            });
+                        }
+                        // Composition session boundaries: clear any stale
+                        // pre-edit so a cancelled composition leaves nothing
+                        // painted at the cursor.
+                        egui::ImeEvent::Enabled | egui::ImeEvent::Disabled => {
+                            ime_update = Some(None);
+                        }
+                    },
                     egui::Event::Paste(s) => pastes.push(s.clone()),
                     egui::Event::Key {
                         key,
@@ -1026,6 +1153,13 @@ impl C0pl4ndApp {
                 }
             }
         });
+
+        // Apply the buffered IME pre-edit change now the input borrow is closed
+        // (F3-1). `None` means no IME event this frame — leave the pre-edit as-is
+        // so a composition spanning multiple frames is not dropped.
+        if let Some(new_preedit) = ime_update {
+            self.ime_preedit = new_preedit;
+        }
 
         // Tab/arrows must reach the PTY, not drive egui focus — consume them so
         // egui's built-in navigation does not also act on them.
@@ -1127,6 +1261,10 @@ impl C0pl4ndApp {
         let mut clicked: Option<PaneId> = None;
         let mut focused_size: Option<(f32, f32)> = None;
         let mut opened_url: Option<String> = None;
+        // The focused pane's IME cursor rect, captured from the render closure
+        // and fed into `ctx.output_mut(|o| o.ime = ...)` AFTER the disjoint-
+        // borrow block so the OS candidate window tracks the caret (F3-1).
+        let mut ime_cursor_rect: Option<egui::Rect> = None;
 
         // The find overlay highlights the FOCUSED pane only, and only while open.
         // Build the cell spans HERE (before the disjoint-borrow block takes
@@ -1195,6 +1333,11 @@ impl C0pl4ndApp {
             let search_spans = &search_spans;
             let link_spans = &link_spans;
             let empty_links: &[(CellSpan, String)] = &[];
+            // The active IME pre-edit, borrowed for the focused pane only (F3-1).
+            // A `&str` borrow of `self.ime_preedit` is disjoint from the field
+            // borrows above and from `grid_tree`, so it joins the closure cleanly.
+            let ime_preedit = self.ime_preedit.as_deref();
+            let ime_rect_out = &mut ime_cursor_rect;
             let mut render_body = |ui: &mut egui::Ui, pid: PaneId| -> bool {
                 let search = if pid == focused && !search_spans.is_empty() {
                     Some(SearchHighlight {
@@ -1228,6 +1371,7 @@ impl C0pl4ndApp {
                     bg_alpha,
                     search,
                     links,
+                    if pid == focused { ime_preedit } else { None },
                 );
                 if outcome.clicked {
                     clicked = Some(pid);
@@ -1237,6 +1381,9 @@ impl C0pl4ndApp {
                 }
                 if pid == focused {
                     focused_size = Some((outcome.size.x, outcome.size.y));
+                    // The focused pane's caret rect drives IME candidate-window
+                    // placement (set on the context after this block closes).
+                    *ime_rect_out = outcome.ime_cursor_rect;
                 }
                 outcome.drag_started
             };
@@ -1272,6 +1419,20 @@ impl C0pl4ndApp {
         self.galley_cache.prune_unseen();
         if let Some(s) = focused_size {
             self.last_focused_size = Some(s);
+        }
+        // Tell the OS where the IME candidate window should appear (F3-1): the
+        // focused pane's terminal-cursor cell. Without this, `output.ime` stays
+        // `None` (the grid is a custom-painted region, not an egui `TextEdit`,
+        // so egui never sets it for us) and the candidate window anchors at the
+        // screen origin or fails to appear. Setting `rect` (the cell) and
+        // `cursor_rect` (the caret) drives winit's `set_ime_cursor_area`.
+        if let Some(cursor_rect) = ime_cursor_rect {
+            ui.ctx().output_mut(|o| {
+                o.ime = Some(egui::output::IMEOutput {
+                    rect: cursor_rect,
+                    cursor_rect,
+                });
+            });
         }
         // Record a Ctrl-clicked URL (the browser open already fired in-render);
         // most-recent-wins, observable for the interaction test.
@@ -2416,6 +2577,18 @@ impl C0pl4ndApp {
             self.applied_font_family = font_apply_key(&self.config.font);
             self.fonts_installed = true;
         }
+        // F2-3: apply the persisted UI scale (accessibility zoom) to the whole
+        // egui context — ONLY when the configured value changed since last
+        // applied, so it is a no-op on steady-state frames and never overrides
+        // the transient Ctrl+/- keyboard zoom (which does not write
+        // `config.ui_scale`). The NaN-initialised `applied_ui_scale` guarantees
+        // the first frame applies; `set_zoom_factor` is itself a no-op when the
+        // value is unchanged.
+        let ui_scale = self.config.effective_ui_scale();
+        if ui_scale != self.applied_ui_scale {
+            ctx.set_zoom_factor(ui_scale);
+            self.applied_ui_scale = ui_scale;
+        }
         // Wire each live pane's UI-wake callback (once) so live PTY output wakes
         // the render loop — the other half of the damage-tracked-redraw scheme
         // whose idle side lives in `idle_repaint_interval`. Real window only:
@@ -2890,8 +3063,10 @@ impl C0pl4ndApp {
         use std::time::Duration;
         // The CRT scanline post-effect is a continuous animation — keep it smooth
         // by ticking every frame while it is enabled (the scanline painter also
-        // self-requests a repaint, so this just matches that cadence).
-        if self.config.effects.crt_scanlines {
+        // self-requests a repaint, so this just matches that cadence). F2-2: under
+        // reduced-motion the roll band is frozen and does not self-request, so do
+        // NOT pump the animation here either — fall through to the idle cadence.
+        if self.config.effects.crt_scanlines && !c0pl4nd_core::reduced_motion::reduced_motion() {
             return Duration::ZERO; // == request_repaint(): animate at display rate
         }
         // A blink-enabled cursor must keep blinking on an otherwise-idle screen;
@@ -3059,6 +3234,12 @@ struct PaneBodyOutcome {
     /// caller records it in [`C0pl4ndApp::last_opened_url`]; the OS-opener call
     /// (`ctx.open_url`) already happened inside the render.
     opened_url: Option<String>,
+    /// The screen-space rect of the terminal cursor cell for this pane, in
+    /// points (F3-1). `Some` only for the FOCUSED pane that has a live cursor;
+    /// the caller feeds it into `ctx.output_mut(|o| o.ime = Some(IMEOutput {..}))`
+    /// so the OS IME candidate window tracks the caret instead of anchoring at
+    /// the screen origin.
+    ime_cursor_rect: Option<egui::Rect>,
 }
 
 /// One find-overlay match converted to CELL coordinates: the visual row and the
@@ -3669,9 +3850,22 @@ fn paint_grid_native(
     // Drawn only when the setting is on (strictly zero-cost otherwise); the
     // repaint request keeps the roll animating without an explicit timer.
     if effects.crt_scanlines {
-        let t = painter.ctx().input(|i| i.time) as f32;
+        // F2-2: honour the user's reduced-motion preference (env override OR the
+        // OS accessibility setting). When reduced motion is requested, FREEZE the
+        // rolling scan band (`t = 0` → a static frame; the dark scan-line bands
+        // are a texture, not motion, so they remain) and STOP the per-frame
+        // animation repaint. This makes the "Auto-disabled under reduced-motion"
+        // promise the settings UI already shows actually true.
+        let reduce = c0pl4nd_core::reduced_motion::reduced_motion();
+        let t = if reduce {
+            0.0
+        } else {
+            painter.ctx().input(|i| i.time) as f32
+        };
         paint_crt_scanlines(painter, rect, ppp, t, effects.scanline_darkness);
-        painter.ctx().request_repaint();
+        if !reduce {
+            painter.ctx().request_repaint();
+        }
     }
 }
 
@@ -3829,23 +4023,39 @@ fn egui_key_to_logical(
     Some(lk)
 }
 
-/// Load the persisted user config from its canonical path, falling back to
-/// defaults when it is absent or unreadable. Without this the egui app started
-/// from `Config::default()` every launch, so on-disk settings (theme, opacity,
-/// font, cursor, transparency, update prefs) the settings panel WROTE never
-/// took effect across launches — the same bug the legacy binary's `main` had
-/// already fixed for itself. Pure `core` APIs, so it is available in every
-/// binary that includes this module (incl. the `#[path]`-included test bins).
-fn load_config() -> c0pl4nd_core::Config {
-    match c0pl4nd_core::Config::default_path().filter(|p| p.exists()) {
-        Some(p) => std::fs::read_to_string(&p)
+/// Load the persisted user config from its canonical path, returning the config
+/// AND a parse-error message (F5-2) when a config file EXISTS but fails to
+/// read/parse — so the caller can surface it as a visible toast instead of the
+/// silent fallback-to-defaults that previously only `eprintln`'d (invisible to a
+/// GUI-launched user). Without loading at all the egui app would start from
+/// `Config::default()` every launch, so on-disk settings the panel WROTE never
+/// took effect. `None` error means the file was absent (normal zero-config
+/// start) or parsed cleanly. Pure `core` APIs, available in every binary that
+/// includes this module (incl. the `#[path]`-included test bins).
+fn load_config_with_status() -> (c0pl4nd_core::Config, Option<String>) {
+    load_config_from(c0pl4nd_core::Config::default_path().filter(|p| p.exists()))
+}
+
+/// Pure core of config loading, parameterised on the path so it is unit-testable
+/// (the real entry resolves `Config::default_path()`). An absent path → defaults
+/// with no error; a present-but-invalid file → defaults WITH an error message
+/// (the F5-2 surfacing contract).
+fn load_config_from(path: Option<std::path::PathBuf>) -> (c0pl4nd_core::Config, Option<String>) {
+    match path {
+        Some(p) => match std::fs::read_to_string(&p)
             .map_err(|e| e.to_string())
             .and_then(|s| c0pl4nd_core::Config::from_toml(&s, &p).map_err(|e| e.to_string()))
-            .unwrap_or_else(|e| {
+        {
+            Ok(cfg) => (cfg, None),
+            Err(e) => {
                 eprintln!("c0pl4nd: failed to load config {p:?}: {e}; using defaults");
-                c0pl4nd_core::Config::default()
-            }),
-        None => c0pl4nd_core::Config::default(),
+                (
+                    c0pl4nd_core::Config::default(),
+                    Some(format!("config error — using defaults: {e}")),
+                )
+            }
+        },
+        None => (c0pl4nd_core::Config::default(), None),
     }
 }
 
@@ -5206,5 +5416,50 @@ mod tests {
                 "master-off {mode:?} stays fully opaque"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod config_load_tests {
+    //! F5-2: a present-but-broken config file must surface an error (so the host
+    //! can toast it), an absent file must NOT, and a valid file parses cleanly.
+    use super::load_config_from;
+
+    #[test]
+    fn absent_config_yields_defaults_with_no_error() {
+        let (cfg, err) = load_config_from(None);
+        assert_eq!(cfg, c0pl4nd_core::Config::default());
+        assert!(
+            err.is_none(),
+            "an absent config is normal — no error surfaced"
+        );
+    }
+
+    #[test]
+    fn corrupt_config_yields_defaults_with_a_surfaced_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "this is = not valid toml [[[").unwrap();
+        let (cfg, err) = load_config_from(Some(path));
+        assert_eq!(
+            cfg,
+            c0pl4nd_core::Config::default(),
+            "falls back to defaults"
+        );
+        assert!(
+            err.is_some(),
+            "a present-but-invalid config MUST surface an error for the toast"
+        );
+        assert!(err.unwrap().to_lowercase().contains("config"));
+    }
+
+    #[test]
+    fn valid_config_parses_with_no_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "theme = \"ghost-paper\"\n").unwrap();
+        let (cfg, err) = load_config_from(Some(path));
+        assert_eq!(cfg.theme, "ghost-paper");
+        assert!(err.is_none());
     }
 }

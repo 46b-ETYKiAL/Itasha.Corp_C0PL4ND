@@ -503,6 +503,14 @@ impl PaneTerm {
             if let Some(pc) = run_color {
                 runs.push((run, pc));
             }
+            // BiDi (F3-2): reorder this row's logical-order runs into VISUAL
+            // order for right-to-left scripts (Arabic/Hebrew). The fast path
+            // returns the LTR-only row UNCHANGED (zero cost); only a row that
+            // actually contains RTL content is reordered. Display-only — the
+            // logical grid/cells are untouched (see `super::bidi`).
+            if let Some(visual) = super::bidi::reorder_runs_visual(&runs) {
+                runs = visual;
+            }
             rows_out.push(runs);
         });
         // The renderer has now consumed this frame's damage; clear it so the next
