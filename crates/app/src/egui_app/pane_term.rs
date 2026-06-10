@@ -12,8 +12,8 @@
 //! - [`PaneTerm::resize_to_px`] recomputes `(cols, rows)` from a pixel rect and
 //!   resizes the PTY + reflows the grid, but ONLY when the dimensions actually
 //!   change (debounced).
-//! - [`PaneTerm::grid_spans`] snapshots the visible grid into per-row colour
-//!   runs ready for a glyphon `Buffer`, reusing [`Theme::cell_colors`] so the
+//! - [`PaneTerm::grid_rows`] snapshots the visible grid into per-row colour
+//!   runs ready for the paint layer, reusing [`Theme::cell_colors`] so the
 //!   foreground/background/inverse handling matches the winit renderer exactly.
 //!
 //! The glyphon GPU paint itself lives in [`super::term_render`]; this module is
@@ -682,5 +682,56 @@ mod tests {
         // 200px / 10 = 20 cols ; 200px / 20 = 10 rows.
         assert_eq!(pane.resize_to_px(200.0, 200.0, m), Some((20, 10)));
         assert_eq!(pane.size(), (20, 10));
+    }
+
+    /// `grid_rows` is damage-gated: an unchanged grid reuses the cached `Rc`
+    /// (a real cache hit — zero rebuild), and the rebuilt rows carry the text
+    /// that was written. The cache-hit identity check is guarded on "still
+    /// clean" so a racing async shell-prompt write can never flake it.
+    #[test]
+    fn grid_rows_is_damage_gated_and_content_correct() {
+        let pane = PaneTerm::spawn(void_theme(), 80, 24);
+        // If the shell could not spawn on this box there is no terminal to read.
+        let Some(term) = pane.terminal_for_test() else {
+            return;
+        };
+        term.lock().unwrap().advance(b"hello world");
+        let r1 = pane.grid_rows().expect("live session yields rows");
+        // r1 cleared the grid's damage. If no async PTY output has arrived since,
+        // a second call with NO new writes must reuse the cached Rc.
+        if !term.lock().unwrap().grid().is_damaged() {
+            let r2 = pane.grid_rows().expect("live session yields rows");
+            assert!(
+                Rc::ptr_eq(&r1, &r2),
+                "an unchanged, undamaged grid reuses the cached rows (no rebuild)"
+            );
+        }
+        let joined: String = r1
+            .iter()
+            .flat_map(|row| row.iter().map(|(t, _)| t.as_str()))
+            .collect();
+        assert!(
+            joined.contains("hello world"),
+            "rebuilt rows carry the written text; got {joined:?}"
+        );
+    }
+
+    /// A theme change recolours cells WITHOUT a grid write (no damage bit), so
+    /// `set_theme` must invalidate the row cache — otherwise stale-coloured rows
+    /// would be served. This holds regardless of any async reader activity.
+    #[test]
+    fn grid_rows_cache_invalidated_by_set_theme() {
+        let mut pane = PaneTerm::spawn(void_theme(), 80, 24);
+        let Some(term) = pane.terminal_for_test() else {
+            return;
+        };
+        term.lock().unwrap().advance(b"x");
+        let r1 = pane.grid_rows().expect("live session yields rows");
+        pane.set_theme(Theme::builtin_named("itasha-void").unwrap());
+        let r2 = pane.grid_rows().expect("live session yields rows");
+        assert!(
+            !Rc::ptr_eq(&r1, &r2),
+            "set_theme invalidates the damage-gated row cache"
+        );
     }
 }

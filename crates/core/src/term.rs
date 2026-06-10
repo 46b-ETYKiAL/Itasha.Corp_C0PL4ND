@@ -3291,6 +3291,26 @@ mod tests {
     }
 
     #[test]
+    fn clear_damage_resets_until_next_write() {
+        // The renderer's damage gate (PaneTerm::grid_rows) relies on this:
+        // clear_damage() must reset is_damaged(), and a later write must re-mark
+        // it so the next frame redraws.
+        let mut t = Terminal::new(4, 20);
+        t.advance(b"hi");
+        assert!(t.grid().is_damaged(), "a write marks the row dirty");
+        t.clear_damage();
+        assert!(
+            !t.grid().is_damaged(),
+            "clear_damage resets every per-row damage bit"
+        );
+        t.advance(b"x");
+        assert!(
+            t.grid().is_damaged(),
+            "a write after clear_damage re-marks the row dirty"
+        );
+    }
+
+    #[test]
     fn handles_crlf() {
         let mut t = Terminal::new(4, 20);
         t.advance(b"ab\r\ncd");
