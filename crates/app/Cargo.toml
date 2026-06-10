@@ -35,17 +35,17 @@ serde.workspace = true
 winit.workspace = true
 wgpu.workspace = true
 glyphon.workspace = true # used by the legacy winit-driven `c0pl4nd` binary's renderer
-pollster = "0.4"
+pollster = "=0.4.0"
 # HTTP client for the in-app updater. `tls` is ureq 2.x's DEFAULT TLS feature
 # and is rustls-backed (the lock graph resolves rustls, never native-tls);
 # declared explicitly with `default-features = false` + `["tls", "gzip"]` so the
 # rustls backend is pinned-by-manifest (audit #6) and a future default-feature
 # change cannot silently swap in native-tls. Exact-pinned per dependency-management.md.
 ureq = { version = "=2.12.1", default-features = false, features = ["tls", "gzip"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
 # BiDi/RTL: Unicode Bidirectional Algorithm for per-row visual reordering of
 # terminal text (right-to-left scripts). Already in the lock graph transitively.
-unicode-bidi = "0.3"
+unicode-bidi = "=0.3.18"
 # Installed-font enumeration + raw face bytes for the Font settings dropdowns
 # (Family + Fallback). Lists the system's MONOSPACE families and loads the
 # chosen face into egui's `FontFamily::Monospace`. Already in the lock graph

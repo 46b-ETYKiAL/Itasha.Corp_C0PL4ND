@@ -1,0 +1,133 @@
+# Profile-Guided-Optimization (PGO) build — OPT-IN, manual only.
+#
+# This workflow is `workflow_dispatch`-only by design: a full PGO cycle compiles
+# the workspace TWICE (instrumented build → representative-workload profiling run
+# → optimized rebuild), which is expensive, so it MUST NOT fire on every push or
+# PR. Trigger it by hand from the Actions tab when a PGO binary is wanted.
+#
+# Single-platform (ubuntu-latest) — PGO profiles are rustc-version-sensitive AND
+# platform/target-specific, so the profile gathered here only describes the
+# x86_64-unknown-linux-gnu binary. The pinned toolchain below keeps the profile
+# format stable; bump it in lockstep with rust-toolchain.toml when that changes.
+#
+# The profile MUST come from a representative workload, or PGO can pessimize cold
+# paths. We profile the existing `throughput` criterion bench in
+# `crates/core/benches/` (the "cat a large file" VT-parse hot path — the binary's
+# actual steady-state work), which `cargo pgo bench` runs under instrumentation.
+#
+# This is NOT a required check and does NOT touch branch protection. It produces
+# an artifact for inspection/benchmarking, not a release gate.
+
+name: PGO (opt-in)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pgo-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # CI runners are headless; display/GPU-dependent tests opt into skipping.
+  C0PL4ND_HEADLESS: "1"
+  # Pin the toolchain used for BOTH the instrumented and optimized builds. PGO
+  # profile data is tied to the exact rustc version that produced the
+  # instrumented binary; a mismatch silently discards the profile. Keep in step
+  # with rust-toolchain.toml (channel = stable).
+  PGO_TOOLCHAIN: "1.95.0"
+
+jobs:
+  pgo:
+    name: PGO optimized build (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        # step-security/harden-runner@v2.19.4
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain (pinned for stable PGO profile format)
+        # dtolnay/rust-toolchain pinned to the master commit; channel selected via
+        # `toolchain:`. llvm-tools-preview supplies llvm-profdata, which cargo-pgo
+        # uses to merge the raw .profraw files into the .profdata PGO consumes.
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: ${{ env.PGO_TOOLCHAIN }}
+          components: llvm-tools-preview
+
+      - name: Install cargo-pgo
+        # taiki-e/install-action provides reproducible prebuilt-tool installs.
+        # taiki-e/install-action@v2.79.10
+        uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154
+        with:
+          tool: cargo-pgo
+
+      - name: Cache cargo registry and target
+        # Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          workspaces: ". -> target"
+          key: pgo
+
+      - name: Install Linux GUI/display build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libfontconfig1-dev
+
+      - name: Verify cargo-pgo can run (llvm-profdata present)
+        run: cargo pgo info
+
+      # 1) Build the workspace with PGO instrumentation injected.
+      - name: cargo pgo instrument build
+        run: cargo pgo instrument build -- --workspace --locked
+
+      # 2) Gather a profile from a REPRESENTATIVE workload. The `throughput`
+      #    criterion bench in crates/core is the VT-parse hot path (the binary's
+      #    steady-state work); running it instrumented writes .profraw files that
+      #    cargo-pgo merges into the PGO profile. `--bench throughput` targets the
+      #    single representative bench; the `--profile-time` keeps the run bounded
+      #    (criterion would otherwise loop for its full statistical budget).
+      - name: Generate PGO profile from representative workload
+        run: |
+          cargo pgo instrument bench -- \
+            -p c0pl4nd-core --bench throughput --locked -- --profile-time 10
+
+      # 3) Rebuild optimized, consuming the gathered profile.
+      - name: cargo pgo optimize build
+        run: cargo pgo optimize build -- --workspace --locked
+
+      - name: Locate the optimized binary
+        id: locate
+        run: |
+          set -euo pipefail
+          # cargo-pgo writes the optimized artifacts to the host-target release dir.
+          bin="target/x86_64-unknown-linux-gnu/release/c0pl4nd"
+          if [ ! -f "$bin" ]; then
+            echo "::error::optimized binary not found at $bin"
+            ls -la target/x86_64-unknown-linux-gnu/release/ || true
+            exit 1
+          fi
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+
+      - name: Upload optimized binary artifact
+        # actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: c0pl4nd-pgo-linux-x86_64
+          path: ${{ steps.locate.outputs.bin }}
+          if-no-files-found: error
+          retention-days: 14

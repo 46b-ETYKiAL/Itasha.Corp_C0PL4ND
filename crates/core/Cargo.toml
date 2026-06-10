@@ -14,9 +14,9 @@ anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
-serde_json = "1"
+serde_json = "=1.0.150"
 toml.workspace = true
-vte = "0.15"
+vte = "=0.15.0"
 # SIMD-accelerated byte search (BurntSushi) for the VT parser fast path: skip
 # runs of plain printable bytes to the next ESC/control byte instead of scanning
 # scalar. Already in the lock graph transitively (via `regex`); exact-pinned per
@@ -28,17 +28,17 @@ memchr = "=2.8.1"
 # (wezterm/wezterm#6783, OPEN as of 2026-05). The serial advisory is tracked
 # as an accepted risk in .cargo/audit.toml; bump to >=0.9.x only once #6783 is
 # fixed and the Windows PTY round-trip verifies green.
-portable-pty = "0.8"
-regex = "1"
+portable-pty = "=0.8.1"
+regex = "=1.12.3"
 # East-Asian / wide-character width lookup (wcwidth). Pure data table, no
 # transitive deps — used by every serious terminal to advance the cursor by
 # 1 or 2 columns per printed grapheme.
-unicode-width = "0.2"
-sysinfo = "0.39"
+unicode-width = "=0.2.2"
+sysinfo = "=0.39.3"
 # PNG decoding for the Kitty graphics protocol (f=100). Default features are
 # disabled and only the `png` codec is enabled to keep the dependency surface
 # minimal — Kitty f=24/f=32 are decoded in-house and need no codec.
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
 # Memory hygiene (P-V3): wipe transient sensitive buffers (OSC 52 clipboard
 # write payloads, paste-staging text) on drop/reset so plaintext does not linger
 # in freed allocations recoverable from a crash dump / pagefile. Already in the
