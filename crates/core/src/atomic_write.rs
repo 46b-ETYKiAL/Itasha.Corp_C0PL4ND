@@ -71,6 +71,61 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Atomically write `bytes` to `path` and tighten it to **owner-only** access.
+///
+/// Identical to [`atomic_write`] (same temp-file + rename never-corrupt
+/// contract), but additionally restricts the result so other local accounts
+/// cannot read it. Use this for state files that can reflect the user's
+/// environment — e.g. saved workspace layouts, which record each pane's `cwd`
+/// (revealing usernames and project paths).
+///
+/// On Unix the owner-only `0600` mode is applied to the **temp file before the
+/// rename**, so the file is never world-readable even for the brief window
+/// between create and rename. On Windows the inheritance-stripped owner-only
+/// ACL (via `icacls`) is applied to the final `path` after the rename, matching
+/// the config-file tightening exactly.
+///
+/// Permission tightening is best-effort and never fails the write: a restrictive
+/// filesystem must not block a state save. Only an I/O failure of the write or
+/// rename itself is surfaced.
+///
+/// # Errors
+///
+/// Returns the underlying [`io::Error`] if the parent dir cannot be created, the
+/// temp file cannot be written/flushed, or the rename fails.
+pub fn atomic_write_owner_only(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    let tmp = tmp_path_for(path);
+
+    if let Err(e) = write_and_sync(&tmp, bytes) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // Tighten on Unix BEFORE the rename so the file is never world-readable
+    // (closes the create→rename window). Windows owner-only ACL is path-based
+    // and is applied to the final path after the rename below.
+    #[cfg(unix)]
+    crate::fs_perms::restrict_to_owner(&tmp);
+
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // On Windows the icacls grant must reference the final path; on Unix this is
+    // a no-op cfg branch (perms were already applied to the temp file).
+    #[cfg(windows)]
+    crate::fs_perms::restrict_to_owner(path);
+
+    Ok(())
+}
+
 /// Write the payload to `tmp`, flush the userspace buffer, and `sync_all` so the
 /// bytes reach the device before the rename makes them visible at `path`.
 fn write_and_sync(tmp: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -151,5 +206,40 @@ mod tests {
             tmp.file_name().unwrap().to_string_lossy(),
             "workspace.json.tmp"
         );
+    }
+
+    #[test]
+    fn owner_only_writes_content_and_leaves_no_tmp() {
+        let p = scratch("owner-only.json");
+        let _ = fs::remove_file(&p);
+        atomic_write_owner_only(&p, b"{\"cwd\":\"/home/alice/proj\"}").expect("write");
+        assert_eq!(
+            fs::read(&p).expect("read"),
+            b"{\"cwd\":\"/home/alice/proj\"}"
+        );
+
+        // Same never-corrupt contract: no sibling .tmp left on success.
+        let tmp = tmp_path_for(&p);
+        assert!(!tmp.exists(), "temp file {tmp:?} must not remain");
+
+        let _ = fs::remove_file(&p);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_only_is_0600_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = scratch("owner-only-mode.json");
+        let _ = fs::remove_file(&p);
+        // Workspace files record per-pane cwd → must be owner-only.
+        atomic_write_owner_only(&p, b"workspace with /home/alice/secret cwd").expect("write");
+        let mode = fs::metadata(&p).expect("stat").permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "owner-only workspace file must be 0600, got {:o}",
+            mode & 0o777
+        );
+        let _ = fs::remove_file(&p);
     }
 }

@@ -2103,9 +2103,14 @@ impl App {
             tracing::warn!("no config dir; cannot save workspace");
             return;
         };
+        // Privacy (F2): a user-chosen workspace name can carry sensitive text
+        // (e.g. a client/project name), and `path.display()` embeds the config
+        // dir (which contains the username). Log neither the name nor the path —
+        // success drops to `debug` (off by default); the error path keeps
+        // error-level but logs only the error, not the name/path.
         match snap.save(&path) {
-            Ok(()) => tracing::info!("saved workspace {name:?} to {}", path.display()),
-            Err(e) => tracing::error!("failed to save workspace {name:?}: {e}"),
+            Ok(()) => tracing::debug!("saved workspace ({} bytes path)", path.as_os_str().len()),
+            Err(e) => tracing::error!("failed to save workspace: {e}"),
         }
     }
 
@@ -2117,7 +2122,9 @@ impl App {
             return;
         };
         if !path.exists() {
-            tracing::warn!("workspace {name:?} not found at {}", path.display());
+            // Privacy (F2): omit the user-chosen name and the username-bearing
+            // path; a missing workspace is benign and needs no identifying text.
+            tracing::debug!("requested workspace not found");
             return;
         }
         let restored = layout_persist::load(&path);
@@ -2352,11 +2359,12 @@ impl App {
                         redraw = true;
                     }
                     while let Some(n) = term.take_notification() {
-                        if n.title.is_empty() {
-                            tracing::info!("notification: {}", n.body);
-                        } else {
-                            tracing::info!("notification: {} — {}", n.title, n.body);
-                        }
+                        // Privacy (F2): OSC 9/777 notification title/body is
+                        // program-emitted content that can carry 2FA codes,
+                        // message bodies, or secret URLs. Never log the text —
+                        // and log only at `debug` (off by default) so the mere
+                        // occurrence does not reach default-on stderr.
+                        tracing::debug!("desktop notification received ({} bytes)", n.body.len());
                         notified = true;
                     }
                 }
