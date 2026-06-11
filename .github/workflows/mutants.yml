@@ -1,0 +1,64 @@
+name: Mutation Testing
+
+# Mutation testing (cargo-mutants) measures TEST EFFECTIVENESS, not line
+# coverage: it injects small code changes and verifies a test catches each one.
+# It runs DIFF-SCOPED on PRs (only changed lines are mutated) so it is fast and
+# directly answers "are the lines this PR changed actually asserted on?".
+
+on:
+  pull_request:
+    paths:
+      - "crates/core/src/**"
+      - "mutants.toml"
+      - ".github/workflows/mutants.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mutants:
+    name: cargo-mutants (diff-scoped, core)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout (full history for the PR diff)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154 # v2.79.10
+        with:
+          tool: cargo-mutants
+
+
+      - name: Compute the PR diff
+        run: git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
+
+      # Diff-scoped: mutate only lines this PR changed (mutants.toml restricts to
+      # crates/core/src). `--package c0pl4nd-core` keeps the test run GPU-free and
+      # deterministic. A surviving mutant in changed code fails the job — the
+      # author must add an assertion that kills it.
+      - name: Run cargo-mutants on the PR diff
+        run: cargo mutants --no-shuffle --in-diff pr.diff --package c0pl4nd-core
+
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mutants-report
+          path: mutants.out/
+          if-no-files-found: ignore

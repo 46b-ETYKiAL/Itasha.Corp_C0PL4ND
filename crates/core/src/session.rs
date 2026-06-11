@@ -290,11 +290,33 @@ mod tests {
         )
         .expect("spawn session");
 
-        let deadline = Instant::now() + Duration::from_secs(15);
+        // Robust polling (no fixed wall-clock flake): wait patiently WHILE the
+        // child is still emitting, and once it has EXITED do a bounded final
+        // drain before deciding. This decouples the assertion from system load —
+        // the only way to fail is genuine data loss (the tail never arriving),
+        // not "the shell was slow under a loaded CI box". The 60 s cap is a
+        // safety net for a wedged spawn; the normal path completes in well under
+        // a second.
+        let deadline = Instant::now() + Duration::from_secs(60);
         let mut seen = false;
-        while Instant::now() < deadline {
+        loop {
             if session.snapshot_text().contains(&last_token) {
                 seen = true;
+                break;
+            }
+            // Child finished: all its bytes are in the PTY. Give the reader
+            // thread a bounded grace to drain the tail, then stop polling.
+            if !session.is_alive() {
+                for _ in 0..80 {
+                    if session.snapshot_text().contains(&last_token) {
+                        seen = true;
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                break;
+            }
+            if Instant::now() >= deadline {
                 break;
             }
             std::thread::sleep(Duration::from_millis(25));

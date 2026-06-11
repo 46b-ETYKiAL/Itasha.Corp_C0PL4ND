@@ -2554,3 +2554,39 @@ fn bare_csi_u_is_still_scorc_cursor_restore() {
     assert_eq!(t.kitty_keyboard_flags(), 0);
     assert!(t.take_pty_response().is_empty());
 }
+
+#[cfg(test)]
+mod utf8_tail_boundary_tests {
+    use crate::term::utf8_tail_boundary;
+
+    #[test]
+    fn complete_or_ascii_tails_hold_nothing() {
+        // Empty, pure ASCII, and a complete multibyte tail all end on a boundary.
+        assert_eq!(utf8_tail_boundary(b""), 0);
+        assert_eq!(utf8_tail_boundary(b"abc"), 3);
+        assert_eq!(utf8_tail_boundary("Ŀ".as_bytes()), 2); // C4 BF complete
+        assert_eq!(utf8_tail_boundary("日".as_bytes()), 3); // E6 97 A5 complete
+        assert_eq!(utf8_tail_boundary("😀".as_bytes()), 4); // 4-byte complete
+        assert_eq!(utf8_tail_boundary(b"x\x1b[m"), 4); // ESC is ASCII — complete
+    }
+
+    #[test]
+    fn incomplete_multibyte_tails_are_held_from_their_lead() {
+        // Lone 2-byte lead: hold it.
+        assert_eq!(utf8_tail_boundary(&[0xC4]), 0);
+        assert_eq!(utf8_tail_boundary(b"A\xC4"), 1);
+        // 3-byte lead with only 1 of 2 continuations: hold both.
+        assert_eq!(utf8_tail_boundary(&[0xE3, 0x81]), 0);
+        assert_eq!(utf8_tail_boundary(b"Z\xE6\x97"), 1);
+        // 4-byte lead with 2 of 3 continuations: hold all three.
+        assert_eq!(utf8_tail_boundary(&[0xF0, 0x9F, 0x98]), 0);
+    }
+
+    #[test]
+    fn stray_continuations_are_not_held() {
+        // A trailing continuation byte with no lead in view is invalid, not a
+        // held partial — leave it so the parser emits a replacement char.
+        assert_eq!(utf8_tail_boundary(&[0x80]), 1);
+        assert_eq!(utf8_tail_boundary(b"a\xBF"), 2);
+    }
+}

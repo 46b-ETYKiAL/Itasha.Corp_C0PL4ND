@@ -64,3 +64,79 @@ pub(crate) fn dec_line_draw(c: char) -> char {
 pub(crate) fn is_variation_selector(c: char) -> bool {
     matches!(c, '\u{FE0E}' | '\u{FE0F}')
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn charset_defaults_to_ascii() {
+        assert_eq!(Charset::default(), Charset::Ascii);
+    }
+
+    #[test]
+    fn dec_line_draw_maps_every_special_graphics_glyph() {
+        // The complete canonical VT100 Special Graphics table (`0x60..=0x7e`).
+        // Asserting every arm pins the box-drawing output a real `tput smacs`
+        // session relies on, and covers the whole match.
+        let table: &[(char, char)] = &[
+            ('`', '\u{25c6}'),
+            ('a', '\u{2592}'),
+            ('b', '\u{2409}'),
+            ('c', '\u{240c}'),
+            ('d', '\u{240d}'),
+            ('e', '\u{240a}'),
+            ('f', '\u{00b0}'),
+            ('g', '\u{00b1}'),
+            ('h', '\u{2424}'),
+            ('i', '\u{240b}'),
+            ('j', '\u{2518}'),
+            ('k', '\u{2510}'),
+            ('l', '\u{250c}'),
+            ('m', '\u{2514}'),
+            ('n', '\u{253c}'),
+            ('o', '\u{23ba}'),
+            ('p', '\u{23bb}'),
+            ('q', '\u{2500}'),
+            ('r', '\u{23bc}'),
+            ('s', '\u{23bd}'),
+            ('t', '\u{251c}'),
+            ('u', '\u{2524}'),
+            ('v', '\u{2534}'),
+            ('w', '\u{252c}'),
+            ('x', '\u{2502}'),
+            ('y', '\u{2264}'),
+            ('z', '\u{2265}'),
+            ('{', '\u{03c0}'),
+            ('|', '\u{2260}'),
+            ('}', '\u{00a3}'),
+            ('~', '\u{00b7}'),
+        ];
+        for (input, expected) in table {
+            assert_eq!(
+                dec_line_draw(*input),
+                *expected,
+                "DEC line-draw for {input:?} wrong"
+            );
+        }
+    }
+
+    #[test]
+    fn dec_line_draw_passes_non_graphics_chars_through_unchanged() {
+        for c in ['A', 'Z', '0', '9', ' ', '\u{65e5}', '_', '^'] {
+            assert_eq!(dec_line_draw(c), c, "{c:?} must pass through unchanged");
+        }
+    }
+
+    #[test]
+    fn variation_selectors_are_recognised() {
+        assert!(is_variation_selector('\u{FE0E}'), "VS15 text presentation");
+        assert!(is_variation_selector('\u{FE0F}'), "VS16 emoji presentation");
+        for c in ['a', '\u{FE0D}', '\u{FE10}', '\u{200D}', '日'] {
+            assert!(
+                !is_variation_selector(c),
+                "{c:?} is not a variation selector"
+            );
+        }
+    }
+}
