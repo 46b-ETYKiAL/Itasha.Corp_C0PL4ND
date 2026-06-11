@@ -1,0 +1,64 @@
+name: Coverage
+
+# Line/region coverage of the deterministic core engine (the VT parser, grid,
+# config, theming, layout). Measured with cargo-llvm-cov and GATED with
+# `--fail-under-lines` so coverage cannot silently regress. Scoped to
+# `c0pl4nd-core` on purpose: it is GPU-free and deterministic, so the number is
+# stable in CI. The egui shell's behaviour is covered by the headed
+# egui_kittest interaction tests in `crates/app/tests` (which need a display and
+# are validated by the Build & Test matrix), not by this coverage gate.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: Core line coverage (>= 88%)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v5
+
+      - name: Install Rust toolchain (+ llvm-tools)
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154 # v2.79.10
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+
+      # The gate. Baseline at introduction was ~91% line coverage; 88% leaves a
+      # small ratchet of headroom while still failing on a real regression. Also
+      # emits an LCOV artifact for inspection.
+      - name: Measure + gate core coverage
+        run: |
+          cargo llvm-cov -p c0pl4nd-core --lcov --output-path lcov.info --fail-under-lines 88
+          cargo llvm-cov -p c0pl4nd-core --summary-only
+
+      - name: Upload LCOV report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: ignore
