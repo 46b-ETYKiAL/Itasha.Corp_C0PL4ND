@@ -25,7 +25,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use c0pl4nd_core::term::{
-    encode_key, encode_key_kitty, KeyEventKind, KeyModifiers, LogicalKey, MouseMode,
+    encode_key, encode_key_kitty, ColorSet, KeyEventKind, KeyModifiers, LogicalKey, MouseButton,
+    MouseEventKind, MouseMode, MouseModifiers,
 };
 use c0pl4nd_core::{Session, Theme};
 
@@ -89,6 +90,29 @@ impl CellMetrics {
         let rows = (px_h / self.line_h.max(1.0)).floor().max(1.0) as u16;
         (cols, rows)
     }
+}
+
+/// OS-level side effects drained from one pane's terminal in a single frame,
+/// returned by [`PaneTerm::pump_host_effects`] for the app shell to apply
+/// globally. PTY query replies (DA / DSR / cursor-position / OSC color-query /
+/// focus reports) are written straight back to the originating pane's own PTY
+/// inside `pump_host_effects`, so they are NOT surfaced here — only the effects
+/// that touch host-global state (the OS clipboard, the live theme, the taskbar)
+/// are returned.
+#[derive(Default)]
+pub struct HostEffects {
+    /// OSC 52 clipboard-write payloads (plaintext; the zeroizing buffer was
+    /// drained into these owned `String`s). The app writes them to the OS
+    /// clipboard.
+    pub clipboard_writes: Vec<String>,
+    /// OSC 4 / 10 / 11 / 12 / 104 color set/reset requests. The app applies each
+    /// to its live theme and repaints.
+    pub color_sets: Vec<ColorSet>,
+    /// `true` if a desktop notification (OSC 9 / OSC 777) fired this drain. The
+    /// app requests user attention (taskbar flash) when the window is unfocused.
+    /// The notification TEXT is deliberately not surfaced — it can carry 2FA
+    /// codes / secret URLs and must never be logged (privacy).
+    pub notified: bool,
 }
 
 /// One pane's live terminal. Owns the PTY session and the rendering inputs the
@@ -252,6 +276,119 @@ impl PaneTerm {
             .lock()
             .map(|t| t.mouse_mode())
             .unwrap_or(MouseMode::Off)
+    }
+
+    /// Drain this pane's terminal-owed effects ONCE for the current frame.
+    ///
+    /// Two distinct destinations:
+    /// - **PTY query replies** ([`Terminal::take_pty_response`]: device
+    ///   attributes, cursor-position reports, OSC 4/10/11/12 color *queries*,
+    ///   focus reports) are written STRAIGHT BACK to THIS pane's PTY — they are
+    ///   answers this terminal owes the program running in it.
+    /// - **Host-global effects** (OSC 52 clipboard writes, OSC 4/10/11/12/104
+    ///   color *sets*, OSC 9/777 notifications) are returned in [`HostEffects`]
+    ///   for the app shell to apply once.
+    ///
+    /// Also drains the `OSC 9 ; 4` taskbar-progress queue (currently no UI) so
+    /// it cannot grow without bound while a build tool streams progress. Without
+    /// this whole drain the egui shell silently dropped every reply AND leaked
+    /// the unread queues — the legacy winit shell drained them but the egui
+    /// rewrite never ported the wiring.
+    ///
+    /// No-op (empty effects) for a failed-spawn pane or a poisoned terminal lock.
+    pub fn pump_host_effects(&mut self) -> HostEffects {
+        let mut out = HostEffects::default();
+        let Some(session) = self.session.as_mut() else {
+            return out;
+        };
+        // `terminal()` clones the Arc, so the immutable borrow of `session` ends
+        // immediately — the `write_input(&mut self)` below is then free to take
+        // the mutable borrow. Compute the reply bytes under the lock, drop the
+        // lock, THEN write.
+        let term_arc = session.terminal();
+        let response = {
+            let Ok(mut term) = term_arc.lock() else {
+                return out;
+            };
+            let response = term.take_pty_response();
+            for mut cw in term.take_clipboard_writes() {
+                // `ClipboardWrite` zeroizes its buffer on drop; take the text out
+                // (leaving an empty buffer to drop) rather than moving the field
+                // out of the Drop type.
+                out.clipboard_writes.push(std::mem::take(&mut cw.text));
+            }
+            out.color_sets = term.take_color_sets();
+            if !term.take_notifications().is_empty() {
+                out.notified = true;
+            }
+            // Bounded-growth guard: drain the progress queue even though there is
+            // no taskbar-progress UI yet (matches the legacy shell, which also
+            // has none — but the legacy shell never let the queue accumulate).
+            let _ = term.take_progress();
+            response
+        };
+        if !response.is_empty() {
+            let _ = session.write_input(&response);
+        }
+        out
+    }
+
+    /// Report a mouse event to the program running in this pane, IFF that
+    /// program has grabbed the mouse (`?1000` / `?1002` / `?1003`, encoded per
+    /// the negotiated `?1006`/`?1015` mode). Maps to the SHARED core encoder
+    /// ([`Terminal::encode_mouse`]) so the wire bytes match the winit shell
+    /// exactly. `col`/`row` are 1-based grid coordinates.
+    ///
+    /// Returns `true` when the event was encoded and written to the PTY — the
+    /// caller then skips the local selection/scroll handling so the program owns
+    /// the gesture. Returns `false` (a no-op) when mouse reporting is Off, the
+    /// event encodes to nothing for the active mode, the lock is poisoned, or
+    /// the pane has no live session.
+    pub fn report_mouse(
+        &mut self,
+        button: MouseButton,
+        mods: MouseModifiers,
+        col: usize,
+        row: usize,
+        kind: MouseEventKind,
+    ) -> bool {
+        let Some(session) = self.session.as_mut() else {
+            return false;
+        };
+        let term_arc = session.terminal();
+        let bytes = {
+            let Ok(term) = term_arc.lock() else {
+                return false;
+            };
+            if term.mouse_mode() == MouseMode::Off {
+                return false;
+            }
+            term.encode_mouse(button, mods, col, row, kind)
+        };
+        match bytes {
+            Some(b) => {
+                let _ = session.write_input(&b);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Scroll the scrollback VIEW by `lines` (positive = back into older
+    /// history, negative = forward toward the live bottom). Used for local
+    /// mouse-wheel scrollback when the running program has NOT grabbed the mouse
+    /// ([`MouseMode::Off`]). No-op on a poisoned lock or a dead pane.
+    pub fn scroll_view(&mut self, lines: i32) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if let Ok(mut term) = session.terminal().lock() {
+            if lines > 0 {
+                term.scroll_up_view(lines as usize);
+            } else if lines < 0 {
+                term.scroll_down_view((-lines) as usize);
+            }
+        }
     }
 
     /// The terminal's current window title, as set by the running program via
@@ -684,6 +821,128 @@ mod tests {
             pane.mouse_mode(),
             MouseMode::Off,
             "after ?1003l the accessor must report Off (badge hidden)"
+        );
+    }
+
+    /// [`PaneTerm::report_mouse`] must gate on the program's mouse mode: a fresh
+    /// pane (`?1000` not requested) reports NOTHING (returns false), so the host
+    /// keeps the gesture for local selection/scroll; after the program enables
+    /// `?1000` a button press is encoded and written (returns true). This is the
+    /// wiring that makes the mouse work in vim/tmux/htop — the canonical egui
+    /// shell did not report mouse at all before it.
+    #[test]
+    fn report_mouse_gates_on_mouse_mode() {
+        let mut pane = PaneTerm::spawn(void_theme(), 80, 24);
+        let mods = MouseModifiers::default();
+        // Off by default → no report (host keeps the gesture).
+        assert!(
+            !pane.report_mouse(MouseButton::Left, mods, 3, 5, MouseEventKind::Press),
+            "a press while mouse mode is Off must not be reported"
+        );
+        // If the shell could not spawn there is no terminal to enable ?1000 on;
+        // the Off assertion above is still the meaningful one.
+        let Some(term) = pane.terminal_for_test() else {
+            return;
+        };
+        term.lock().unwrap().advance(b"\x1b[?1000h");
+        assert!(
+            pane.report_mouse(MouseButton::Left, mods, 3, 5, MouseEventKind::Press),
+            "after ?1000h a button press must be encoded and written to the PTY"
+        );
+        // ?1000 reports buttons only — a bare-motion event encodes to nothing, so
+        // it must NOT consume the gesture.
+        assert!(
+            !pane.report_mouse(MouseButton::None, mods, 3, 5, MouseEventKind::Motion),
+            "?1000 reports buttons only — bare motion must not be reported"
+        );
+    }
+
+    /// [`PaneTerm::pump_host_effects`] must drain ALL of the terminal's per-frame
+    /// queues in one call: write back the PTY query reply (so a program querying
+    /// the cursor position gets an answer), surface the OSC 52 clipboard write,
+    /// the OSC 4 color set, and the OSC 9 notification for the host, and leave
+    /// every queue empty so none can grow unbounded. The canonical egui shell
+    /// dropped (and leaked) every one of these before this wiring.
+    #[test]
+    fn pump_host_effects_drains_every_queue() {
+        let pane = PaneTerm::spawn(void_theme(), 80, 24);
+        let Some(term) = pane.terminal_for_test() else {
+            return;
+        };
+        {
+            let mut t = term.lock().unwrap();
+            t.advance(b"\x1b[6n"); // cursor-position report → pty_response
+            t.advance(b"\x1b]52;c;aGVsbG8=\x07"); // OSC 52 write "hello"
+            t.advance(b"\x1b]4;1;rgb:ff/00/00\x07"); // OSC 4 set index 1 = red
+            t.advance(b"\x1b]9;Build complete\x07"); // OSC 9 desktop notification
+        }
+        let mut pane = pane;
+        let fx = pane.pump_host_effects();
+        assert_eq!(
+            fx.clipboard_writes,
+            vec!["hello".to_string()],
+            "OSC 52 write must surface as a clipboard write"
+        );
+        assert_eq!(
+            fx.color_sets,
+            vec![ColorSet::Indexed {
+                index: 1,
+                rgb: (255, 0, 0),
+            }],
+            "OSC 4 set must surface as an indexed color set"
+        );
+        assert!(fx.notified, "OSC 9 must mark a notification as received");
+        // The PTY reply and every other queue must now be drained.
+        let mut t = term.lock().unwrap();
+        assert!(
+            t.take_pty_response().is_empty(),
+            "pump must have drained + written back the cursor-position reply"
+        );
+        assert!(
+            t.take_clipboard_writes().is_empty(),
+            "clipboard queue drained"
+        );
+        assert!(t.take_color_sets().is_empty(), "color-set queue drained");
+        assert!(
+            t.take_notifications().is_empty(),
+            "notification queue drained"
+        );
+    }
+
+    /// [`PaneTerm::scroll_view`] drives local scrollback: after enough output to
+    /// fill the scrollback, scrolling back raises the view offset off the live
+    /// bottom and scrolling forward past the bottom clamps to offset 0. This is
+    /// the mouse-wheel scrollback the canonical egui shell lacked (the wheel did
+    /// nothing — you could not scroll up to read history).
+    #[test]
+    fn scroll_view_moves_the_scrollback_offset() {
+        let pane = PaneTerm::spawn(void_theme(), 80, 6);
+        let Some(term) = pane.terminal_for_test() else {
+            return;
+        };
+        // Produce many more lines than the 6-row screen so there is scrollback.
+        {
+            let mut t = term.lock().unwrap();
+            for i in 0..40 {
+                t.advance(format!("line {i}\r\n").as_bytes());
+            }
+            assert_eq!(
+                t.view_offset(),
+                0,
+                "output pins the view to the live bottom"
+            );
+        }
+        let mut pane = pane;
+        pane.scroll_view(5); // back into history
+        assert!(
+            term.lock().unwrap().view_offset() > 0,
+            "scrolling back must raise the view offset off the bottom"
+        );
+        pane.scroll_view(-1000); // forward, clamped to the bottom
+        assert_eq!(
+            term.lock().unwrap().view_offset(),
+            0,
+            "scrolling forward past the bottom clamps to the live view"
         );
     }
 

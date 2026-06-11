@@ -30,6 +30,7 @@ use std::collections::{HashMap, HashSet};
 
 use eframe::egui;
 
+use c0pl4nd_core::term::ColorSet;
 use grid::{count_panes, GridBehavior, Pane, PaneId, PaneIdAllocator};
 use pane_term::{CellMetrics, ColorRun, PaneTerm};
 
@@ -974,6 +975,125 @@ impl C0pl4ndApp {
             }
         }
 
+        // --- mouse reporting (E6) + local wheel scrollback ---
+        // When the program in this pane has grabbed the mouse (?1000/?1002/?1003)
+        // translate pointer gestures into `encode_mouse` reports written to its
+        // PTY (mouse in vim/tmux/htop/less). Otherwise the wheel scrolls this
+        // pane's local scrollback. Two conventional overrides force LOCAL
+        // handling even while a program grabs the mouse: holding Shift (the
+        // standard "let me select/scroll" escape) and Ctrl-with-a-link-under-the-
+        // pointer (`links` is non-empty only then — that click opens the URL).
+        // Without this the canonical egui binary reported NO mouse at all and
+        // could not scroll back through history; the legacy winit shell did both.
+        let mut mouse_captured = false;
+        {
+            use c0pl4nd_core::term::{MouseButton, MouseEventKind, MouseMode, MouseModifiers};
+            let (cw, ch) = monospace_cell_points(&painter, font_size, line_height_px);
+            let origin = grid_text_origin(rect, pad);
+            // 1-based (col, row) of a screen-space point over the grid, if any.
+            let cell_of = |pos: egui::Pos2| -> Option<(usize, usize)> {
+                cell_at_pos(pos, origin, cw, ch).map(|(r, c)| (c + 1, r + 1))
+            };
+            let m = ui.input(|i| i.modifiers);
+            let mods = MouseModifiers {
+                shift: m.shift,
+                alt: m.alt,
+                control: m.ctrl,
+            };
+            let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
+            let mode = terms
+                .get(&pane_id)
+                .map(PaneTerm::mouse_mode)
+                .unwrap_or(MouseMode::Off);
+            // Report to the program only when it grabbed the mouse, Shift is not
+            // forcing local selection, and we are not in ctrl-click-link mode.
+            let report = mode != MouseMode::Off && !m.shift && links.is_empty();
+            if report {
+                // Button press/release at the interacted cell.
+                let buttons = [
+                    (egui::PointerButton::Primary, MouseButton::Left),
+                    (egui::PointerButton::Middle, MouseButton::Middle),
+                    (egui::PointerButton::Secondary, MouseButton::Right),
+                ];
+                let pos = resp
+                    .interact_pointer_pos()
+                    .or(resp.hover_pos())
+                    .or_else(|| ui.input(|i| i.pointer.latest_pos()));
+                if let Some(pos) = pos {
+                    if let Some((col, row)) = cell_of(pos) {
+                        if let Some(term) = terms.get_mut(&pane_id) {
+                            for (egui_btn, term_btn) in buttons {
+                                if ui.input(|i| i.pointer.button_pressed(egui_btn)) {
+                                    mouse_captured |= term.report_mouse(
+                                        term_btn,
+                                        mods,
+                                        col,
+                                        row,
+                                        MouseEventKind::Press,
+                                    );
+                                }
+                                if ui.input(|i| i.pointer.button_released(egui_btn)) {
+                                    term.report_mouse(
+                                        term_btn,
+                                        mods,
+                                        col,
+                                        row,
+                                        MouseEventKind::Release,
+                                    );
+                                }
+                            }
+                            // Motion: ?1002 reports drag (button held), ?1003 any
+                            // motion. encode_mouse gates by mode, so a bare hover
+                            // under ?1002 yields nothing.
+                            if resp.dragged() || resp.hovered() {
+                                let held = if ui.input(|i| i.pointer.primary_down()) {
+                                    MouseButton::Left
+                                } else if ui.input(|i| i.pointer.secondary_down()) {
+                                    MouseButton::Right
+                                } else if ui.input(|i| i.pointer.middle_down()) {
+                                    MouseButton::Middle
+                                } else {
+                                    MouseButton::None
+                                };
+                                if term.report_mouse(held, mods, col, row, MouseEventKind::Motion) {
+                                    mouse_captured = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Wheel → buttons 64/65 (one report per ~cell of travel, capped).
+                if scroll_y.abs() > f32::EPSILON {
+                    let pos = resp
+                        .hover_pos()
+                        .or_else(|| ui.input(|i| i.pointer.latest_pos()));
+                    if let (Some(pos), Some(term)) = (pos, terms.get_mut(&pane_id)) {
+                        if let Some((col, row)) = cell_of(pos) {
+                            let btn = if scroll_y > 0.0 {
+                                MouseButton::WheelUp
+                            } else {
+                                MouseButton::WheelDown
+                            };
+                            let ticks = ((scroll_y.abs() / ch.max(1.0)).round() as i32).clamp(1, 8);
+                            for _ in 0..ticks {
+                                term.report_mouse(btn, mods, col, row, MouseEventKind::Press);
+                            }
+                            mouse_captured = true;
+                        }
+                    }
+                }
+            } else if scroll_y.abs() > f32::EPSILON && resp.hovered() {
+                // Local scrollback: wheel up (positive y) goes BACK into history.
+                // One cell of pointer travel ≈ one scrollback line.
+                if let Some(term) = terms.get_mut(&pane_id) {
+                    let lines = (scroll_y / ch.max(1.0)).round() as i32;
+                    if lines != 0 {
+                        term.scroll_view(lines);
+                    }
+                }
+            }
+        }
+
         // --- accessibility (F2-1): expose the grid text to screen readers ---
         // The terminal grid is custom-painted, so without an explicit AccessKit
         // node a screen reader perceives only an empty interactive region — the
@@ -1031,7 +1151,10 @@ impl C0pl4ndApp {
         }
 
         PaneBodyOutcome {
-            drag_started: resp.drag_started(),
+            // A body-drag normally tells egui_tiles to REARRANGE the pane. When a
+            // program grabbed the mouse and we reported the drag to its PTY, the
+            // gesture belongs to the program — never rearrange panes underneath it.
+            drag_started: resp.drag_started() && !mouse_captured,
             clicked: resp.clicked(),
             size: rect.size(),
             opened_url,
@@ -2594,6 +2717,12 @@ impl C0pl4ndApp {
         // whose idle side lives in `idle_repaint_interval`. Real window only:
         // a wake that calls `request_repaint` would make headless `Harness::run`
         // loop until `max_steps`.
+        // Drain each pane's terminal-owed effects every frame (runs headless too,
+        // so interaction tests can assert a query reply reached the PTY): PTY
+        // query replies are written back to their own pane inside
+        // `pump_host_effects`; the host-global effects (clipboard / live theme /
+        // notification) are applied by `pump_pane_effects`.
+        self.pump_pane_effects(ctx);
         if self.live_window {
             self.wire_pane_wakes(ctx);
         }
@@ -3053,6 +3182,96 @@ impl C0pl4ndApp {
                 let ctx = ctx.clone();
                 std::sync::Arc::new(move || ctx.request_repaint())
             });
+        }
+    }
+
+    /// Drain every live pane's terminal-owed effects once per frame.
+    ///
+    /// PTY query replies (device attributes, cursor-position reports, OSC color
+    /// queries, focus reports) are written straight back to their originating
+    /// pane inside [`PaneTerm::pump_host_effects`]. The host-global effects it
+    /// returns are applied here:
+    /// - OSC 52 clipboard writes → the OS clipboard (`ctx.copy_text`).
+    /// - OSC 4/10/11/12/104 color sets → the live [`Self::theme`], re-pushed to
+    ///   every pane so the new palette shows the same frame.
+    /// - OSC 9/777 notifications → a taskbar attention request while unfocused.
+    ///
+    /// Without this the canonical egui binary silently dropped every reply AND
+    /// let the unread queues grow unbounded; the legacy winit shell drained them
+    /// each frame. Runs in the headless harness too so interaction tests can
+    /// assert a query reply reached the PTY.
+    fn pump_pane_effects(&mut self, ctx: &egui::Context) {
+        let mut clipboard: Vec<String> = Vec::new();
+        let mut colors: Vec<ColorSet> = Vec::new();
+        let mut notified = false;
+        for pane in self.terms.values_mut() {
+            let fx = pane.pump_host_effects();
+            clipboard.extend(fx.clipboard_writes);
+            colors.extend(fx.color_sets);
+            notified |= fx.notified;
+        }
+        // OSC 52 → OS clipboard (write only; reads stay default-off in core).
+        for text in clipboard {
+            ctx.copy_text(text);
+        }
+        // OSC 4/10/11/12/104 → live theme, then repaint so the new palette shows.
+        if !colors.is_empty() {
+            for set in colors {
+                self.apply_color_set(set);
+            }
+            for term in self.terms.values_mut() {
+                term.set_theme(self.theme.clone());
+            }
+            ctx.request_repaint();
+        }
+        // OSC 9/777 desktop notification while the window is unfocused → request
+        // user attention (taskbar flash). The notification TEXT is never read
+        // here (privacy: it can carry a 2FA code / secret URL — never log it).
+        // `focused` is `None` before the first focus event; treat that as focused
+        // so a notification at startup does not spuriously flash.
+        if notified && !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
+    }
+
+    /// Apply one drained [`ColorSet`] (OSC 4/10/11/12/104) to the live theme.
+    /// Mirrors the legacy winit shell's mapping exactly: dynamic fg/bg/cursor
+    /// update the theme's three core colors; indexed entries 0-15 update the
+    /// 16-slot ANSI palette; 256-cube entries (index ≥ 16) have no theme slot
+    /// and are ignored rather than misplaced.
+    fn apply_color_set(&mut self, set: ColorSet) {
+        use c0pl4nd_core::term::DynamicColor;
+        let hex = |(r, g, b): (u8, u8, u8)| format!("#{r:02x}{g:02x}{b:02x}");
+        match set {
+            ColorSet::Dynamic { which, rgb } => match which {
+                DynamicColor::Foreground => self.theme.foreground = hex(rgb),
+                DynamicColor::Background => self.theme.background = hex(rgb),
+                DynamicColor::Cursor => self.theme.cursor = hex(rgb),
+            },
+            ColorSet::Indexed { index, rgb } => {
+                let row = if index < 8 {
+                    &mut self.theme.normal
+                } else if index < 16 {
+                    &mut self.theme.bright
+                } else {
+                    // 256-color cube entries aren't represented in the 16-slot
+                    // theme; ignore rather than misplace them.
+                    return;
+                };
+                let slot = match index % 8 {
+                    0 => &mut row.black,
+                    1 => &mut row.red,
+                    2 => &mut row.green,
+                    3 => &mut row.yellow,
+                    4 => &mut row.blue,
+                    5 => &mut row.magenta,
+                    6 => &mut row.cyan,
+                    _ => &mut row.white,
+                };
+                *slot = hex(rgb);
+            }
         }
     }
 
