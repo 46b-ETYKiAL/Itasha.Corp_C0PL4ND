@@ -84,6 +84,43 @@ software path (recon §7) so the pixel render is 🟡 — verify via the offscre
 Headless logic also unit-tested in `pane_term`/`term_render`/`core::term::keys`
 (key→PTY encoding, debounced resize, pixel→cell mapping, payload geometry).
 
+## Milestone 2.2 — egui input/response parity with the legacy shell
+
+The PR #166 refactor brought up the egui shell but did NOT port the legacy
+`window.rs` per-frame terminal-effect draining or the pointer→PTY mouse path.
+The shipping egui binary therefore silently dropped every PTY query reply,
+OSC 52 clipboard write, OSC 4/10/11/12/104 colour set, and OSC 9/777
+notification, AND let those unread queues grow unbounded — and offered no
+mouse reporting or scrollback navigation at all. This milestone closes that
+parity gap (`pump_host_effects`/`pump_pane_effects`/`apply_color_set` +
+`report_mouse`/`scroll_view` in `pane_term.rs`/`mod.rs`).
+
+Coverage is **deterministic `pane_term` unit tests** that drive the REAL core
+`Terminal` (feed escape bytes, drain, assert the observable outcome) — not a
+live-PTY `egui_kittest` frame test, because reproducing mouse-mode/OSC escapes
+through a cross-platform live shell is non-deterministic. The frame-loop glue
+(read `ui.input` → call these methods) is thin and compile-checked against the
+production `frame_tick`.
+
+| Capability | Asserted outcome | Test | Status |
+|---|---|---|---|
+| OSC query reply → PTY | a `CSI 6n` cursor-position query is drained and the reply is written BACK to the pane's own PTY (queue emptied) | `pump_host_effects_drains_every_queue` | ✅ |
+| OSC 52 clipboard write → host | an `OSC 52` write surfaces as a `clipboard_writes` payload for `ctx.copy_text` (zeroizing buffer drained) | `pump_host_effects_drains_every_queue` | ✅ |
+| OSC 4/10/11/12/104 colour set → live theme | an `OSC 4` set surfaces as a `ColorSet::Indexed` applied via `apply_color_set` to the live `Theme` | `pump_host_effects_drains_every_queue` | ✅ |
+| OSC 9/777 notification → taskbar | an `OSC 9` notification marks `notified` (→ `RequestUserAttention` while unfocused); the text is never read (privacy) | `pump_host_effects_drains_every_queue` | ✅ |
+| OSC 9;4 progress drain (bounded growth) | the progress queue is drained each frame so it cannot grow without bound (no UI yet) | `pump_host_effects_drains_every_queue` | ✅ |
+| Mouse reporting → PTY (E6) | `report_mouse` encodes + writes to the PTY only when `mouse_mode() != Off`; a bare-motion event under `?1000` reports nothing | `report_mouse_gates_on_mouse_mode` | ✅ |
+| Mouse-wheel scrollback | `scroll_view(+n)` raises the view offset off the live bottom; scrolling forward past the bottom clamps to 0 | `scroll_view_moves_the_scrollback_offset` | ✅ |
+
+### Bugs/gaps caught by this discipline (Milestone 2.2)
+
+- **Every PTY query reply silently dropped in the egui shell.** A TUI that
+  queries device attributes / cursor position got no answer (misdetect/hang).
+  Now drained and written back to the originating pane's PTY each frame.
+- **Unbounded queue growth.** `take_*` drain internal `Vec`s via `mem::take`;
+  un-drained in the egui path they grew without bound (a slow memory leak on
+  top of the functional gap). Draining each frame fixes both at once.
+
 ## Milestone 3+ (planned controls — tests required before "done")
 
 | Control | Asserted outcome | Status |
@@ -95,5 +132,5 @@ Headless logic also unit-tested in `pane_term`/`term_render`/`core::term::keys`
 | Settings: acrylic toggle | backdrop toggles | ⬜ |
 | Settings: font size | grid cell size changes | ⬜ |
 | Command palette | command executes | ⬜ |
-| Scrollback | viewport scrolls | ⬜ |
+| Scrollback (mouse-wheel) | view offset moves off the live bottom (see Milestone 2.2 `scroll_view_moves_the_scrollback_offset`) | ✅ |
 | Copy / paste | clipboard round-trips to PTY | ⬜ |

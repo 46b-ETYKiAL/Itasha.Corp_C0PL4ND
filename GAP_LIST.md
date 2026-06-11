@@ -149,6 +149,28 @@ crates (`windows`, `unicode-bidi`) were already present in the lock graph, so
 all four were implemented and merged (PRs #34–#37 above). The environmental
 deferral reason is resolved.
 
+## egui-shell parity (2026-06-11)
+
+The earlier rows above track features against the **legacy `window.rs` (winit)**
+shell. The `PR #166` refactor stood up the new **egui shell** (the shipping
+`c0pl4nd` binary) but did not port the legacy per-frame terminal-effect draining
+or the pointer→PTY mouse path, so the egui binary silently regressed several
+already-shipped features. A whole-app audit found exactly **5 P0 egui-path gaps
+(and no others)**; all five are now wired, plus mouse reporting and mouse-wheel
+scrollback:
+
+- ✅ **OSC PTY-response draining** (DA/DSR/cursor/colour queries) → written back to the pane's PTY each frame (`pump_host_effects`). Was silently dropped → TUIs misdetect/hang.
+- ✅ **OSC 52 clipboard-write** → OS clipboard (`ctx.copy_text`).
+- ✅ **OSC 4/10/11/12/104 colour-set** → live theme (`apply_color_set`).
+- ✅ **OSC 9/777 notification** → taskbar attention while unfocused (text never read — privacy).
+- ✅ **OSC 9;4 progress drain** → bounded-growth guard (the un-drained queues were also a memory leak).
+- ✅ **E6 mouse reporting → PTY** (`report_mouse`, gated on `mouse_mode()`): mouse in vim/tmux/htop/less.
+- ✅ **Mouse-wheel scrollback** (`scroll_view`): scroll up into history when no program has grabbed the mouse.
+
+Coverage: deterministic `pane_term` unit tests (`pump_host_effects_drains_every_queue`,
+`report_mouse_gates_on_mouse_mode`, `scroll_view_moves_the_scrollback_offset`).
+See `docs/control-test-ledger.md` § Milestone 2.2.
+
 ### ❌ Remaining honest limitations (shipped features, documented gaps)
 - **BiDi cursor/selection stay logical-order**, and per-cell background quads are not reordered — only the displayed text run is reordered. The common RTL line (default background) is correct; an explicit per-cell background highlight on RTL text is the one divergence. Most grid terminals (Ghostty/Alacritty) omit BiDi entirely, so this is strictly ahead.
 - **Ligatures default OFF** (`Shaping::Basic`) to preserve strict monospace cell fidelity; opt-in via `ligatures = true`. This is intended behaviour, not a gap.
