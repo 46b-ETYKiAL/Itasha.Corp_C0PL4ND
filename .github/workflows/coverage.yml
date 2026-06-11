@@ -44,8 +44,6 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
 
       # The gate. Baseline at introduction was ~91% line coverage; 88% leaves a
       # small ratchet of headroom while still failing on a real regression. Also

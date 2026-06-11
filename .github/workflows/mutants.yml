@@ -44,8 +44,6 @@ jobs:
         with:
           tool: cargo-mutants
 
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
 
       - name: Compute the PR diff
         run: git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
