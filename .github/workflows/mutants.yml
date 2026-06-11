@@ -55,7 +55,7 @@ jobs:
       # deterministic. A surviving mutant in changed code fails the job — the
       # author must add an assertion that kills it.
       - name: Run cargo-mutants on the PR diff
-        run: cargo mutants --no-shuffle --in-diff pr.diff --package c0pl4nd-core --colored never
+        run: cargo mutants --no-shuffle --in-diff pr.diff --package c0pl4nd-core
 
       - name: Upload mutants report
         if: always()

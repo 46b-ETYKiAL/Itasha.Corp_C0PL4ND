@@ -48,9 +48,6 @@ zeroize = "=1.8.2"
 [dev-dependencies]
 toml.workspace = true
 criterion = { version = "0.8", default-features = false }
-# Property-based testing of the VT parser: random byte/UTF-8 streams must never
-# panic and must preserve grid invariants. Exact-pinned per dependency policy.
-proptest = "=1.11.0"
 
 [[bench]]
 name = "throughput"

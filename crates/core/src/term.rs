@@ -2481,6 +2481,51 @@ pub struct Terminal {
     /// path, exactly like `apc_accum`), but owned by the terminal so the
     /// allocation amortises across calls instead of being remade every frame.
     passthrough: Vec<u8>,
+    /// Trailing bytes of a multibyte UTF-8 codepoint whose sequence was split
+    /// across this `advance()` call and the next (the PTY reader's 64 KiB buffer
+    /// can split any char). Held back and prepended next call so the parser only
+    /// ever sees WHOLE codepoints — `vte` 0.15 otherwise drops the byte that
+    /// follows a partial codepoint completed at a call boundary (data loss for
+    /// accented-Latin / CJK / emoji at read boundaries). Bounded to < 4 bytes.
+    utf8_pending: Vec<u8>,
+}
+
+/// Index where a trailing INCOMPLETE UTF-8 sequence begins in `bytes`, or
+/// `bytes.len()` when the chunk already ends on a codepoint boundary. Only a
+/// genuinely incomplete multibyte tail (a lead byte missing some of its
+/// continuation bytes) is reported; complete codepoints and stray/invalid bytes
+/// are left in place (invalid-byte handling is position-dependent by nature and
+/// must NOT be buffered). Bounded: a UTF-8 codepoint is <= 4 bytes, so this
+/// scans at most the last 3 bytes.
+fn utf8_tail_boundary(bytes: &[u8]) -> usize {
+    let n = bytes.len();
+    // Walk back over up to 3 trailing continuation bytes (`0b10xx_xxxx`).
+    let mut cont = 0usize;
+    while cont < 3 && cont < n && (bytes[n - 1 - cont] & 0xC0) == 0x80 {
+        cont += 1;
+    }
+    if cont == n {
+        // Nothing but continuation bytes in view — not a held partial.
+        return n;
+    }
+    let lead = bytes[n - 1 - cont];
+    let needed = if lead < 0x80 {
+        1 // ASCII (includes ESC) — already complete
+    } else if lead >> 5 == 0b110 {
+        2
+    } else if lead >> 4 == 0b1110 {
+        3
+    } else if lead >> 3 == 0b1_1110 {
+        4
+    } else {
+        1 // stray continuation / invalid lead — leave as-is
+    };
+    if needed > cont + 1 {
+        // The trailing sequence is incomplete: hold from its lead byte.
+        n - 1 - cont
+    } else {
+        n
+    }
 }
 
 impl Terminal {
@@ -2499,6 +2544,7 @@ impl Terminal {
             apc_state: ApcFilter::Normal,
             apc_accum: Vec::new(),
             passthrough: Vec::new(),
+            utf8_pending: Vec::new(),
         }
     }
 
@@ -2510,6 +2556,33 @@ impl Terminal {
     /// Passthrough bytes are batched in a scratch buffer and flushed to the
     /// parser on each state transition so byte ordering is preserved exactly.
     pub fn advance(&mut self, bytes: &[u8]) {
+        // UTF-8 read-boundary reassembly. The PTY reader can split a multibyte
+        // codepoint's bytes across two `advance()` calls; `vte` 0.15 then drops
+        // the byte FOLLOWING a codepoint that completes at a call boundary (a
+        // real data-loss bug for accented-Latin / CJK / emoji at the 64 KiB
+        // boundary). We hold back any trailing INCOMPLETE UTF-8 sequence and
+        // prepend it next call, so the inner parser only ever sees whole
+        // codepoints. ESC (0x1b) is a complete ASCII byte and is never held, so
+        // escape-sequence handling is unaffected.
+        if self.utf8_pending.is_empty() {
+            let cut = utf8_tail_boundary(bytes);
+            if cut < bytes.len() {
+                self.utf8_pending.extend_from_slice(&bytes[cut..]);
+            }
+            self.advance_complete(&bytes[..cut]);
+        } else {
+            let mut combined = std::mem::take(&mut self.utf8_pending);
+            combined.extend_from_slice(bytes);
+            let cut = utf8_tail_boundary(&combined);
+            self.utf8_pending.extend_from_slice(&combined[cut..]);
+            self.advance_complete(&combined[..cut]);
+        }
+    }
+
+    /// Feed a chunk that is guaranteed to END on a UTF-8 codepoint boundary
+    /// (the [`Terminal::advance`] wrapper holds back any trailing partial
+    /// sequence). This is the real APC-prefilter + vte driver.
+    fn advance_complete(&mut self, bytes: &[u8]) {
         // Fast path: when no escape sequence is in flight and the chunk has no
         // ESC byte, hand it straight to vte (the overwhelmingly common case).
         // `memchr` is SIMD-accelerated (AVX2/NEON) — on a large paste / `cat
