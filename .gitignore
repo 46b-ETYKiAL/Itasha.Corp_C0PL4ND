@@ -13,3 +13,5 @@ relfinal.log
 egui-app.png
 
 egui-*.png
+# Stale-by-rename proptest seeds are noise; a real regression is pinned in the test itself.
+*.proptest-regressions
