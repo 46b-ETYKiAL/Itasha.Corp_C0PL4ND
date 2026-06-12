@@ -1662,7 +1662,12 @@ impl C0pl4ndApp {
             // blocks the live in-memory apply.
             if self.live_window {
                 if let Some(path) = c0pl4nd_core::Config::default_path() {
-                    let _ = self.config.save_to(&path);
+                    // Surface a persist failure (read-only %APPDATA%, full disk,
+                    // permission error) instead of silently dropping the user's
+                    // settings change — mirrors the legacy shell (window.rs).
+                    if let Err(e) = self.config.save_to(&path) {
+                        tracing::warn!("could not save config: {e}");
+                    }
                 }
             }
         }
@@ -2673,7 +2678,11 @@ impl C0pl4ndApp {
         //    never wedge the close path). Mirrors the settings-handler save.
         if self.live_window {
             if let Some(path) = c0pl4nd_core::Config::default_path() {
-                let _ = self.config.save_to(&path);
+                // Surface a persist failure instead of silently dropping the
+                // user's settings change — mirrors the legacy shell (window.rs).
+                if let Err(e) = self.config.save_to(&path) {
+                    tracing::warn!("could not save config: {e}");
+                }
             }
         }
         // 2) Drop every PaneTerm → each Session::Drop kills its PTY child. No
@@ -3093,7 +3102,12 @@ impl C0pl4ndApp {
             self.config.view_mode = self.config.view_mode.toggled();
             if self.live_window {
                 if let Some(path) = c0pl4nd_core::Config::default_path() {
-                    let _ = self.config.save_to(&path);
+                    // Surface a persist failure (read-only %APPDATA%, full disk,
+                    // permission error) instead of silently dropping the user's
+                    // settings change — mirrors the legacy shell (window.rs).
+                    if let Err(e) = self.config.save_to(&path) {
+                        tracing::warn!("could not save config: {e}");
+                    }
                 }
             }
         }

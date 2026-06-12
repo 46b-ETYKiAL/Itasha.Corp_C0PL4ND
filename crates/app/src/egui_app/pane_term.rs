@@ -115,6 +115,22 @@ pub struct HostEffects {
     pub notified: bool,
 }
 
+/// Write bytes to a pane's PTY, logging a failure ONLY when the session is
+/// still live. A dead/closing session legitimately drops the write (its child
+/// already exited — silent is correct there); a failure on a LIVE master (a
+/// momentarily-full pipe, EINTR) used to silently drop a keystroke or a query
+/// reply the running program may be blocking on, with no diagnostic. The
+/// `is_alive()` check is evaluated only on the error path, so the happy path is
+/// unchanged. `write_input` borrows `&mut` only for the call; the liveness probe
+/// borrows `&` afterwards.
+fn write_pty_logged(session: &mut Session, bytes: &[u8]) {
+    if let Err(e) = session.write_input(bytes) {
+        if session.is_alive() {
+            tracing::warn!("PTY write failed on a live session: {e}");
+        }
+    }
+}
+
 /// One pane's live terminal. Owns the PTY session and the rendering inputs the
 /// egui shell needs each frame.
 pub struct PaneTerm {
@@ -328,7 +344,7 @@ impl PaneTerm {
             response
         };
         if !response.is_empty() {
-            let _ = session.write_input(&response);
+            write_pty_logged(session, &response);
         }
         out
     }
@@ -367,7 +383,7 @@ impl PaneTerm {
         };
         match bytes {
             Some(b) => {
-                let _ = session.write_input(&b);
+                write_pty_logged(session, &b);
                 true
             }
             None => false,
@@ -436,7 +452,7 @@ impl PaneTerm {
             return;
         }
         if let Some(session) = &mut self.session {
-            let _ = session.write_input(bytes);
+            write_pty_logged(session, bytes);
         }
     }
 
@@ -461,7 +477,7 @@ impl PaneTerm {
             }
             Err(_) => return,
         };
-        let _ = session.write_input(&bytes);
+        write_pty_logged(session, &bytes);
     }
 
     /// The terminal's current kitty-keyboard-protocol flags (`0` = not
