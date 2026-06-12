@@ -303,10 +303,15 @@ fn geometry_on_screen(
 
 /// Find a URL spanning column `col` within a row of characters (E9). Expands
 /// left/right from the click column over non-whitespace, then accepts the token
-/// only if it begins with `http://`, `https://`, or `file://`. Trailing
-/// punctuation common in prose (`.,;:!?` and closing brackets/quotes) is
-/// trimmed so a URL at the end of a sentence opens cleanly. Returns `None` when
-/// no URL covers the column.
+/// only if it begins with `http://` or `https://`. Trailing punctuation common
+/// in prose (`.,;:!?` and closing brackets/quotes) is trimmed so a URL at the
+/// end of a sentence opens cleanly. Returns `None` when no URL covers the column.
+///
+/// SECURITY: `file://` is deliberately NOT accepted. PTY output is fully
+/// attacker-controlled, so auto-detecting a `file://host/share/evil.exe` URL
+/// and feeding it to `open_path` (`cmd /C start`) would let one ctrl-click
+/// launch an arbitrary local/UNC executable. The modern egui shell's
+/// `hyperlink::find_urls` is http(s)-only for the same reason; this matches it.
 fn find_url_in_line(chars: &[char], col: usize) -> Option<String> {
     if chars.is_empty() {
         return None;
@@ -335,9 +340,7 @@ fn find_url_in_line(chars: &[char], col: usize) -> Option<String> {
             break;
         }
     }
-    let is_url = token.starts_with("http://")
-        || token.starts_with("https://")
-        || token.starts_with("file://");
+    let is_url = token.starts_with("http://") || token.starts_with("https://");
     if is_url && token.len() > "https://".len() {
         Some(token)
     } else {
