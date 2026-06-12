@@ -270,6 +270,31 @@ fn dropped_path_never_contains_newline() {
 }
 
 #[test]
+fn find_url_accepts_http_but_rejects_file_scheme() {
+    let chars = |s: &str| s.chars().collect::<Vec<char>>();
+    // http(s) URLs are detected from the click column.
+    let c = chars("see https://example.com/x now");
+    assert_eq!(
+        find_url_in_line(&c, 6),
+        Some("https://example.com/x".to_string()),
+        "https URLs are clickable"
+    );
+    // SECURITY (the bug this fixes): a file:// URL printed by an
+    // attacker-controlled program must NOT be auto-detected — ctrl-clicking it
+    // would feed it to open_path (`cmd /C start`) and launch an executable.
+    assert_eq!(
+        find_url_in_line(&chars("file://attacker/share/evil.exe"), 5),
+        None,
+        "remote file:// (UNC) is never a clickable URL"
+    );
+    assert_eq!(
+        find_url_in_line(&chars("file:///C:/Windows/System32/calc.exe"), 5),
+        None,
+        "local file:// is rejected too"
+    );
+}
+
+#[test]
 fn bidi_ascii_row_skips_reorder() {
     let c = GColor::rgb(200, 200, 200);
     let row: Vec<(char, GColor)> = "hello -> world".chars().map(|ch| (ch, c)).collect();
