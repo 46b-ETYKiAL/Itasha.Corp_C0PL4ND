@@ -436,14 +436,24 @@ impl Grid {
             let src = r + n;
             for c in 0..self.cols {
                 let dst = self.idx(r, c);
-                let (cell, comb) = if src <= bottom {
+                // The continuation bitset (wide-glyph spacer flags) MUST move in
+                // lockstep with cells/combining — otherwise a CJK/emoji base or
+                // its spacer desyncs after a region scroll and the renderer
+                // skips/doubles the wide glyph. (`src` is read before it is
+                // overwritten because rows are processed top→bottom and src>dst.)
+                let (cell, comb, cont) = if src <= bottom {
                     let s = self.idx(src, c);
-                    (self.cells[s], self.combining[s].clone())
+                    (
+                        self.cells[s],
+                        self.combining[s].clone(),
+                        self.continuation[s],
+                    )
                 } else {
-                    (Cell::default(), None)
+                    (Cell::default(), None, false)
                 };
                 self.cells[dst] = cell;
                 self.combining[dst] = comb;
+                self.continuation[dst] = cont;
             }
             self.wrapped[r] = if src <= bottom {
                 self.wrapped[src]
@@ -471,14 +481,22 @@ impl Grid {
         for r in (top..=bottom).rev() {
             for c in 0..self.cols {
                 let dst = self.idx(r, c);
-                let (cell, comb) = if r >= top + n {
+                // Continuation bitset moves in lockstep (see scroll_region_up).
+                // `r-n` is read before being overwritten because rows are
+                // processed bottom→top and the source row is above the dest.
+                let (cell, comb, cont) = if r >= top + n {
                     let s = self.idx(r - n, c);
-                    (self.cells[s], self.combining[s].clone())
+                    (
+                        self.cells[s],
+                        self.combining[s].clone(),
+                        self.continuation[s],
+                    )
                 } else {
-                    (Cell::default(), None)
+                    (Cell::default(), None, false)
                 };
                 self.cells[dst] = cell;
                 self.combining[dst] = comb;
+                self.continuation[dst] = cont;
             }
             self.wrapped[r] = if r >= top + n {
                 self.wrapped[r - n]
@@ -497,17 +515,24 @@ impl Grid {
             return;
         }
         let count = count.min(self.cols - col);
-        // Shift right: walk from the right edge inward.
+        // Shift right: walk from the right edge inward. Continuation flags move
+        // in lockstep so a shifted wide glyph keeps its spacer (c-count is read
+        // before being overwritten because we walk right→left and src<dst).
         for c in (col..self.cols).rev() {
             let dst = self.idx(row, c);
-            let (cell, comb) = if c >= col + count {
+            let (cell, comb, cont) = if c >= col + count {
                 let s = self.idx(row, c - count);
-                (self.cells[s], self.combining[s].clone())
+                (
+                    self.cells[s],
+                    self.combining[s].clone(),
+                    self.continuation[s],
+                )
             } else {
-                (Cell::default(), None)
+                (Cell::default(), None, false)
             };
             self.cells[dst] = cell;
             self.combining[dst] = comb;
+            self.continuation[dst] = cont;
         }
         self.mark_row(row);
     }
@@ -519,16 +544,24 @@ impl Grid {
             return;
         }
         let count = count.min(self.cols - col);
+        // Continuation flags move in lockstep so a shifted wide glyph keeps its
+        // spacer (c+count is read before being overwritten because we walk
+        // left→right and src>dst).
         for c in col..self.cols {
             let dst = self.idx(row, c);
-            let (cell, comb) = if c + count < self.cols {
+            let (cell, comb, cont) = if c + count < self.cols {
                 let s = self.idx(row, c + count);
-                (self.cells[s], self.combining[s].clone())
+                (
+                    self.cells[s],
+                    self.combining[s].clone(),
+                    self.continuation[s],
+                )
             } else {
-                (Cell::default(), None)
+                (Cell::default(), None, false)
             };
             self.cells[dst] = cell;
             self.combining[dst] = comb;
+            self.continuation[dst] = cont;
         }
         self.mark_row(row);
     }
@@ -543,6 +576,9 @@ impl Grid {
             let dst = self.idx(row, c);
             self.cells[dst] = Cell::default();
             self.combining[dst] = None;
+            // Blanking a cell clears its wide-glyph spacer flag too (mirrors the
+            // normal `set` write path); otherwise a stale spacer survives ECH.
+            self.continuation[dst] = false;
         }
         self.mark_row(row);
     }
@@ -974,5 +1010,83 @@ mod tests {
         // is_row_dirty is in-range for the new height (no panic / stale length).
         assert!(g.is_row_dirty(6));
         assert!(!g.is_row_dirty(7), "out-of-range row reads clean");
+    }
+
+    // --- wide-glyph continuation-bitset must move in lockstep with cells ---
+    // Regression: scroll_region_up/down + insert_blanks/delete_chars moved
+    // `cells`/`combining` but NOT `continuation`, desyncing a wide glyph's
+    // spacer flag and corrupting CJK/emoji rendering after a line edit/scroll.
+
+    #[test]
+    fn scroll_region_up_moves_continuation_flags() {
+        let mut g = Grid::new(4, 2);
+        // Row 2 holds a wide glyph: base at col0, continuation spacer at col1.
+        put(&mut g, 2, 0, '世');
+        g.set_continuation(2, 1, Cell::default());
+        assert!(g.is_continuation(2, 1));
+        g.scroll_region_up(1, 2, 1); // row2 → row1
+        assert!(
+            g.is_continuation(1, 1),
+            "continuation flag must follow the cell up"
+        );
+        assert!(
+            !g.is_continuation(2, 1),
+            "vacated row's spacer flag is cleared"
+        );
+    }
+
+    #[test]
+    fn scroll_region_down_moves_continuation_flags() {
+        let mut g = Grid::new(4, 2);
+        put(&mut g, 1, 0, '世');
+        g.set_continuation(1, 1, Cell::default());
+        g.scroll_region_down(1, 2, 1); // row1 → row2
+        assert!(
+            g.is_continuation(2, 1),
+            "continuation flag must follow the cell down"
+        );
+        assert!(!g.is_continuation(1, 1), "vacated top-of-region cleared");
+    }
+
+    #[test]
+    fn insert_blanks_moves_continuation_flags() {
+        let mut g = Grid::new(1, 5);
+        // Wide glyph at cols 2-3 (base col2, spacer col3).
+        put(&mut g, 0, 2, '世');
+        g.set_continuation(0, 3, Cell::default());
+        g.insert_blanks(0, 0, 1); // shift right by 1: col3 spacer → col4
+        assert!(
+            g.is_continuation(0, 4),
+            "spacer shifts right with its glyph"
+        );
+        assert!(
+            !g.is_continuation(0, 3),
+            "old spacer position now holds the base, not a spacer"
+        );
+    }
+
+    #[test]
+    fn delete_chars_moves_continuation_flags() {
+        let mut g = Grid::new(1, 5);
+        put(&mut g, 0, 2, '世');
+        g.set_continuation(0, 3, Cell::default());
+        g.delete_chars(0, 0, 1); // shift left by 1: col3 spacer → col2
+        assert!(g.is_continuation(0, 2), "spacer shifts left with its glyph");
+        assert!(
+            !g.is_continuation(0, 3),
+            "old spacer position is no longer a continuation"
+        );
+    }
+
+    #[test]
+    fn erase_chars_clears_continuation_flags() {
+        let mut g = Grid::new(1, 5);
+        put(&mut g, 0, 2, '世');
+        g.set_continuation(0, 3, Cell::default());
+        g.erase_chars(0, 3, 1); // blank the spacer cell
+        assert!(
+            !g.is_continuation(0, 3),
+            "erased cell's spacer flag is cleared (mirrors the `set` write path)"
+        );
     }
 }
