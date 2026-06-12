@@ -2556,6 +2556,157 @@ fn bare_csi_u_is_still_scorc_cursor_restore() {
 }
 
 #[cfg(test)]
+#[test]
+fn cursor_up_down_respect_scroll_margins() {
+    // Regression: CUU/CUD clamped to the physical grid, ignoring DECSTBM
+    // margins, so relative motion walked into a reserved status-line region.
+    let mut t = Terminal::new(6, 10);
+    // DECSTBM rows 3..=5 (1-based) → 0-based scroll_top=2, scroll_bottom=4;
+    // DECSTBM homes the cursor to the top margin (row 2).
+    t.advance(b"\x1b[3;5r");
+    assert_eq!(
+        t.cursor_position(),
+        Some((2, 0)),
+        "DECSTBM homes to top margin"
+    );
+    // CUU by 5 from the top margin must STOP at the top margin (row 2), not run
+    // up to the physical top (row 0).
+    t.advance(b"\x1b[5A");
+    assert_eq!(
+        t.cursor_position(),
+        Some((2, 0)),
+        "CUU stops at the top scroll margin"
+    );
+    // CUD by 10 must STOP at the bottom margin (row 4), not the physical bottom
+    // (row 5) — otherwise it walks into the reserved region.
+    t.advance(b"\x1b[10B");
+    assert_eq!(
+        t.cursor_position(),
+        Some((4, 0)),
+        "CUD stops at the bottom scroll margin"
+    );
+}
+
+#[test]
+fn su_on_full_screen_feeds_scrollback() {
+    // Regression: SU (CSI S) discarded scrolled-off lines even on a full-screen
+    // region, where an LF-driven scroll preserves them in scrollback.
+    let mut t = Terminal::new(3, 5);
+    t.advance(b"a\r\nb\r\nc"); // fill 3 rows, no scroll yet
+    let before = t.scrollback_len();
+    t.advance(b"\x1b[2S"); // SU 2 — the 'a' and 'b' rows feed scrollback
+    assert_eq!(
+        t.scrollback_len(),
+        before + 2,
+        "full-screen SU feeds scrolled-off lines to scrollback"
+    );
+}
+
+#[test]
+fn su_within_margins_does_not_feed_scrollback() {
+    // A MARGINED region must NOT feed scrollback (only the full screen does).
+    let mut t = Terminal::new(5, 5);
+    t.advance(b"\x1b[2;4r"); // DECSTBM region rows 2..=4 (not full)
+    let before = t.scrollback_len();
+    t.advance(b"\x1b[2S");
+    assert_eq!(
+        t.scrollback_len(),
+        before,
+        "margined SU discards scrolled-off lines (no scrollback)"
+    );
+}
+
+// --- DoS / memory-amplification caps (every PTY-driven queue must be bounded) ---
+
+#[test]
+fn dsr_flood_is_bounded_by_pty_response_cap() {
+    let mut t = Terminal::new(4, 10);
+    // A hostile program streams cursor-position queries faster than the UI
+    // drains; each reply (~6 bytes) was appended WITHOUT the PTY_RESPONSE_MAX
+    // cap (DSR used extend_from_slice, not push_pty_response).
+    for _ in 0..20_000 {
+        t.advance(b"\x1b[6n");
+    }
+    assert!(
+        t.take_pty_response().len() <= 64 * 1024,
+        "DSR replies must honour the PTY_RESPONSE_MAX (64 KiB) cap"
+    );
+}
+
+#[test]
+fn title_stack_push_is_bounded() {
+    let mut t = Terminal::new(4, 10);
+    t.advance(b"\x1b]0;hi\x07"); // set a title to push
+    for _ in 0..1000 {
+        t.advance(b"\x1b[22t"); // XTWINOPS push-title, never popped
+    }
+    assert!(
+        t.title_stack_depth() <= 64,
+        "title stack must be bounded (TITLE_STACK_MAX)"
+    );
+}
+
+#[test]
+fn notification_queue_is_bounded() {
+    let mut t = Terminal::new(4, 10);
+    for _ in 0..1000 {
+        t.advance(b"\x1b]9;x\x07"); // OSC 9 desktop notification
+    }
+    assert!(
+        t.take_notifications().len() <= 256,
+        "notification queue must be bounded (NOTIFICATIONS_MAX)"
+    );
+}
+
+#[test]
+fn clipboard_write_queue_is_bounded() {
+    let mut t = Terminal::new(4, 10);
+    for _ in 0..500 {
+        t.advance(b"\x1b]52;c;aGk=\x07"); // OSC 52 write "hi"
+    }
+    assert!(
+        t.take_clipboard_writes().len() <= 64,
+        "clipboard-write queue must be bounded (CLIPBOARD_WRITES_MAX)"
+    );
+}
+
+#[test]
+fn progress_queue_is_bounded() {
+    let mut t = Terminal::new(4, 10);
+    for _ in 0..1000 {
+        t.advance(b"\x1b]9;4;1;50\x07"); // OSC 9;4 progress
+    }
+    assert!(
+        t.take_progress().len() <= 256,
+        "progress queue must be bounded (PROGRESS_MAX)"
+    );
+}
+
+#[test]
+fn frame_paste_strips_controls_but_keeps_tab_and_newline() {
+    let t = Terminal::new(4, 10);
+    // Default (unbracketed): ESC + BEL + C1 stripped; tab + newline kept.
+    let out = t.frame_paste("a\x1b[31mb\x07c\td\ne");
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "a[31mbc\td\ne",
+        "ESC and BEL are stripped; tab and newline survive"
+    );
+    // A C1 control (U+009B, raw CSI) is stripped too.
+    assert_eq!(
+        String::from_utf8(t.frame_paste("x\u{009b}y")).unwrap(),
+        "xy",
+        "C1 control characters are stripped"
+    );
+    // The bracketed-paste end-sentinel is still removed (replaced before the
+    // control filter runs, so the whole sentinel match is consumed).
+    assert_eq!(
+        String::from_utf8(t.frame_paste("a\x1b[201~b")).unwrap(),
+        "ab",
+        "embedded ESC[201~ end-sentinel is stripped"
+    );
+}
+
 mod utf8_tail_boundary_tests {
     use crate::term::utf8_tail_boundary;
 

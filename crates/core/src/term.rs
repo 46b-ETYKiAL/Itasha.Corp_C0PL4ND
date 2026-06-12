@@ -613,6 +613,9 @@ impl Screen {
             let text = String::from_utf8_lossy(&decoded).into_owned();
             self.pending_clipboard_writes
                 .push(ClipboardWrite { selection, text });
+            while self.pending_clipboard_writes.len() > Self::CLIPBOARD_WRITES_MAX {
+                self.pending_clipboard_writes.remove(0);
+            }
         }
     }
 
@@ -645,11 +648,20 @@ impl Screen {
             _ => percent,
         };
         self.pending_progress.push(osc::Progress { state, percent });
+        while self.pending_progress.len() > Self::PROGRESS_MAX {
+            self.pending_progress.remove(0);
+        }
     }
 
     /// Pushes the current title onto the title stack (XTWINOPS `CSI 22 t`).
     fn push_title(&mut self) {
         self.title_stack.push(self.title.clone());
+        // Bound the stack: an unbalanced `CSI 22 t` flood (push without a
+        // matching `CSI 23 t` pop) would otherwise grow it without limit. Drop
+        // the oldest saved title on overflow (xterm bounds its stack likewise).
+        while self.title_stack.len() > Self::TITLE_STACK_MAX {
+            self.title_stack.remove(0);
+        }
     }
 
     /// Pops a title from the title stack into the current title
@@ -1090,22 +1102,7 @@ impl Screen {
         // top line feeds scrollback (unless on the alt screen).
         if self.row == self.scroll_bottom {
             if self.region_is_full() {
-                // Capture the top row's soft-wrap flag BEFORE the scroll shifts
-                // the flags up, so history records whether the dropped line
-                // continued into the next.
-                let dropped_wrapped = self.grid.is_wrapped(0);
-                let dropped = self.grid.scroll_up_returning();
-                // The alternate screen must never feed the user's scrollback — a
-                // full-screen TUI (vim, less, htop) scrolling its own buffer
-                // would otherwise flood history with transient content.
-                if self.max_scrollback > 0 && self.saved_primary.is_none() {
-                    self.history.push_back(dropped);
-                    self.history_wrapped.push_back(dropped_wrapped);
-                    while self.history.len() > self.max_scrollback {
-                        self.history.pop_front();
-                        self.history_wrapped.pop_front();
-                    }
-                }
+                self.scroll_up_into_history(1);
             } else {
                 // Region scroll: top line is discarded (not scrollback).
                 self.grid
@@ -1113,6 +1110,27 @@ impl Screen {
             }
         } else if self.row + 1 < self.grid.rows() {
             self.row += 1;
+        }
+    }
+
+    /// Scroll the whole grid up by `n` lines, routing each dropped top line
+    /// (with its soft-wrap flag, captured BEFORE the scroll shifts the flags)
+    /// into scrollback. The grid always scrolls; the history push is suppressed
+    /// on the alternate screen — a full-screen TUI (vim/less/htop) scrolling its
+    /// own buffer must never flood the user's scrollback — and when scrollback
+    /// is disabled. Shared by LF (`newline`) and SU (`CSI S`) on a full region.
+    fn scroll_up_into_history(&mut self, n: usize) {
+        for _ in 0..n {
+            let dropped_wrapped = self.grid.is_wrapped(0);
+            let dropped = self.grid.scroll_up_returning();
+            if self.max_scrollback > 0 && self.saved_primary.is_none() {
+                self.history.push_back(dropped);
+                self.history_wrapped.push_back(dropped_wrapped);
+                while self.history.len() > self.max_scrollback {
+                    self.history.pop_front();
+                    self.history_wrapped.pop_front();
+                }
+            }
         }
     }
 
@@ -1729,8 +1747,33 @@ impl Perform for Screen {
                 self.row = self.resolve_row(row - 1);
                 self.col = (col - 1).min(self.grid.cols() - 1);
             }
-            'A' => self.row = self.row.saturating_sub(Self::first_param(params, 1)),
-            'B' => self.row = (self.row + Self::first_param(params, 1)).min(self.grid.rows() - 1),
+            'A' => {
+                // CUU — cursor up N. Stops at the TOP scroll margin when the
+                // cursor starts inside/below the region; a cursor above the
+                // region is bounded by the physical top (row 0). Per DEC STD
+                // 070 / xterm the cursor must not cross the margin it is bounded
+                // by — without this, relative motion below a DECSTBM status-line
+                // region walks into the reserved rows.
+                let n = Self::first_param(params, 1);
+                let floor = if self.row >= self.scroll_top {
+                    self.scroll_top
+                } else {
+                    0
+                };
+                self.row = self.row.saturating_sub(n).max(floor);
+            }
+            'B' => {
+                // CUD — cursor down N. Stops at the BOTTOM scroll margin when the
+                // cursor starts inside/above the region; below the region it is
+                // bounded by the physical bottom (xterm/DEC STD 070).
+                let n = Self::first_param(params, 1);
+                let ceil = if self.row <= self.scroll_bottom {
+                    self.scroll_bottom
+                } else {
+                    self.grid.rows() - 1
+                };
+                self.row = (self.row + n).min(ceil);
+            }
             'C' => self.col = (self.col + Self::first_param(params, 1)).min(self.grid.cols() - 1),
             'D' => self.col = self.col.saturating_sub(Self::first_param(params, 1)),
             'E' => {
@@ -1807,10 +1850,18 @@ impl Perform for Screen {
                     self.col = 0;
                 }
             'S' => {
-                // SU — scroll the scroll region up N lines.
+                // SU — scroll the scroll region up N lines. On a full-screen
+                // region (no margins) the scrolled-off top lines feed scrollback
+                // exactly like an LF-driven scroll (xterm behaviour) — a `tput
+                // indn`/pager `CSI n S` otherwise loses lines an LF would have
+                // preserved. A margined region discards them (no scrollback).
                 let n = Self::first_param(params, 1);
-                self.grid
-                    .scroll_region_up(self.scroll_top, self.scroll_bottom, n);
+                if self.region_is_full() {
+                    self.scroll_up_into_history(n);
+                } else {
+                    self.grid
+                        .scroll_region_up(self.scroll_top, self.scroll_bottom, n);
+                }
             }
             'T' => {
                 // SD — scroll the scroll region down N lines.
@@ -1877,12 +1928,17 @@ impl Perform for Screen {
                     .and_then(|p| p.first().copied())
                     .unwrap_or(0);
                 match ps {
-                    5 => self.pty_response.extend_from_slice(b"\x1b[0n"),
+                    // Route BOTH replies through push_pty_response so the
+                    // PTY_RESPONSE_MAX write-amplification cap is enforced — a
+                    // `\x1b[5n`/`\x1b[6n` flood between UI drains would otherwise
+                    // grow pty_response without bound (the cap's own doc claims
+                    // it is the single sink for every device reply).
+                    5 => self.push_pty_response(b"\x1b[0n"),
                     6 => {
                         // CPR: 1-based row;col. The DEC private form (`?6n`) uses
                         // the same body here.
                         let resp = format!("\x1b[{};{}R", self.row + 1, self.col + 1);
-                        self.pty_response.extend_from_slice(resp.as_bytes());
+                        self.push_pty_response(resp.as_bytes());
                     }
                     _ => {}
                 }
@@ -2077,6 +2133,9 @@ impl Perform for Screen {
                         title: String::new(),
                         body: body.to_string(),
                     });
+                    while self.pending_notifications.len() > Self::NOTIFICATIONS_MAX {
+                        self.pending_notifications.remove(0);
+                    }
                 }
             }
             // OSC 777: rxvt-unicode extension.
@@ -2095,6 +2154,9 @@ impl Perform for Screen {
                 if !title.is_empty() || !body.is_empty() {
                     self.pending_notifications
                         .push(Notification { title, body });
+                    while self.pending_notifications.len() > Self::NOTIFICATIONS_MAX {
+                        self.pending_notifications.remove(0);
+                    }
                 }
             }
             _ => {}
@@ -2185,6 +2247,17 @@ impl Screen {
                 // + dimensions ride on the FIRST chunk only (continuation
                 // chunks resend just `m` + payload), so capture them at creation
                 // and reuse them when the m=0 boundary finalises the image.
+                //
+                // Bound the number of distinct in-flight chunk sets: a hostile
+                // stream can open many ids and never send the finalizing m=0
+                // chunk. Refuse a NEW id once the in-flight count is at the cap
+                // (existing transfers still complete); each set's payload is
+                // independently byte-capped below.
+                if !self.kitty_chunks.contains_key(&cmd.id)
+                    && self.kitty_chunks.len() >= Self::KITTY_CHUNKS_MAX
+                {
+                    return;
+                }
                 let chunk = self
                     .kitty_chunks
                     .entry(cmd.id)
@@ -2326,6 +2399,28 @@ impl Screen {
     /// reply emission is bounded. 64 KiB is far above any legitimate burst of
     /// query replies for one frame.
     const PTY_RESPONSE_MAX: usize = 64 * 1024;
+    /// Max queued desktop notifications (OSC 9 / 777) between UI drains. The UI
+    /// drains every frame, so this only bounds a hostile flood of notification
+    /// escapes; the oldest is dropped on overflow (ring buffer, like the marks).
+    const NOTIFICATIONS_MAX: usize = 256;
+    /// Max queued OSC 52 clipboard-WRITE payloads between drains. A real yank is
+    /// occasional and the last write wins, so a small cap suffices; oldest
+    /// dropped on overflow. (Each payload is already byte-capped on entry.)
+    const CLIPBOARD_WRITES_MAX: usize = 64;
+    /// Max queued OSC 9;4 progress updates between drains. Only the latest state
+    /// is meaningful, so a small cap bounds a flood; oldest dropped on overflow.
+    const PROGRESS_MAX: usize = 256;
+    /// Max depth of the XTWINOPS title stack (`CSI 22 t` push). Every other
+    /// PTY-driven buffer is capped; an unbalanced `CSI 22 t` flood otherwise
+    /// grows this without bound. xterm bounds its title stack too; oldest entry
+    /// dropped on overflow.
+    const TITLE_STACK_MAX: usize = 64;
+    /// Max number of distinct in-flight Kitty chunked-transmission sets. Each
+    /// set's payload is already byte-capped, but a hostile stream that opens
+    /// many distinct ids and never sends the finalizing `m=0` chunk would grow
+    /// the chunk map without bound; the oldest in-flight set is dropped on
+    /// overflow (matches the kitty transmit-store eviction discipline).
+    const KITTY_CHUNKS_MAX: usize = 16;
 
     /// Append an inline image, then enforce the count + byte caps by dropping
     /// the oldest entries (ring-buffer). The single push path for both Sixel
@@ -2823,10 +2918,27 @@ impl Terminal {
     /// Pure (`&self`) so both the egui and the legacy winit UIs share ONE
     /// hardened implementation and the paths cannot drift apart again.
     pub fn frame_paste(&self, text: &str) -> Vec<u8> {
-        // Strip any embedded end-sentinel on BOTH paths (in bracketed mode it is
-        // the active injection vector; unbracketed it is inert but removing it
-        // keeps the two paths identical and audit-simple).
-        let cleaned = text.replace("\x1b[201~", "");
+        // Strip any embedded end-sentinel FIRST on BOTH paths (in bracketed mode
+        // it is the active injection vector; unbracketed it is inert but removing
+        // it keeps the two paths identical and audit-simple). The sentinel
+        // contains ESC, so this must run BEFORE the control-stripping filter
+        // below (which would otherwise remove the ESC and defeat the match).
+        let cleaned: String = text
+            .replace("\x1b[201~", "")
+            // Defense-in-depth: drop C0 (incl. ESC/BEL/DEL) and C1 control
+            // characters EXCEPT tab/newline/carriage-return, so a hostile
+            // clipboard payload cannot smuggle escape sequences through a paste
+            // even if the program is NOT in bracketed mode. Tab + newlines are
+            // kept because they are legitimate in multi-line/indented pastes
+            // (and the embedded-newline-executes risk is separately gated by the
+            // UI multi-line-paste confirm). Matches WezTerm's paste filter set.
+            .chars()
+            .filter(|&c| {
+                let cp = c as u32;
+                matches!(c, '\t' | '\n' | '\r')
+                    || (cp >= 0x20 && cp != 0x7f && !(0x80..=0x9f).contains(&cp))
+            })
+            .collect();
         if self.bracketed_paste() {
             let mut b = Vec::with_capacity(cleaned.len() + 12);
             b.extend_from_slice(b"\x1b[200~");
@@ -2957,7 +3069,10 @@ impl Terminal {
         };
         let encoded = base64_encode(text.as_bytes());
         let resp = format!("\x1b]52;{};{}\x07", sel, encoded);
-        self.screen.pty_response.extend_from_slice(resp.as_bytes());
+        // Route through the capped sink so PTY_RESPONSE_MAX is honoured
+        // uniformly (the cap's doc claims it is the single sink for every
+        // reply). This path is host-gated (clipboard_read_enabled, default-off).
+        self.screen.push_pty_response(resp.as_bytes());
     }
 
     /// Drains all pending color-set requests (OSC 4 / 10 / 11 / 12 / 104 / 11x).
