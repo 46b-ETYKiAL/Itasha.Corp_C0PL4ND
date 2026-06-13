@@ -1012,11 +1012,16 @@ fn render_sections(
 
             if row_visible(q, "startup panel neofetch logo") {
                 ui.label("Startup panel");
-                changed |= ui
-                    .toggle_value(&mut config.startup_panel, "Show logo + system info")
-                    .on_hover_text("A neofetch-style panel shown on launch.")
-                    .changed();
-                changed |= reset_to_default(ui, &mut config.startup_panel, &def.startup_panel);
+                // DISABLED: the neofetch-style launch splash is not drawn by the
+                // egui shell (only the legacy winit shell rendered it). Greyed
+                // with an honest tooltip rather than a dead toggle that silently
+                // does nothing — matching the ligatures / copy-on-select rows.
+                ui.add_enabled_ui(false, |ui| {
+                    ui.toggle_value(&mut config.startup_panel, "Show logo + system info")
+                        .on_hover_text(
+                            "Not available: the launch splash is not drawn in this shell yet.",
+                        );
+                });
                 ui.end_row();
             }
 
@@ -1168,27 +1173,30 @@ fn render_sections(
         ui.heading("Keybindings");
         help(
             ui,
-            "Editable key combos. \"mod\" is Ctrl+Shift on Windows/Linux, Cmd on macOS.",
+            "Reference — the shell's shortcuts are currently FIXED (not yet \
+             user-rebindable in this shell). \"mod\" is Ctrl+Shift on \
+             Windows/Linux, Cmd on macOS.",
         );
-        // Each row: action label + editable combo string + ↺. A `&mut String`
-        // per field keeps every binding live-editable.
+        // READ-ONLY: a configurable-keybinding dispatcher is not wired in the
+        // egui shell — the shortcuts are hardcoded in `frame_tick`. The rows are
+        // shown disabled (the active combo, for reference) rather than as
+        // editable fields that silently control nothing (the prior dead-editor
+        // state). Matches the ligatures / copy-on-select honest-disable pattern.
         grid("keybindings_grid").show(ui, |ui| {
             macro_rules! keybind_row {
                 ($field:ident, $label:literal, $search:literal) => {
                     if row_visible(q, $search) {
                         ui.label($label);
-                        changed |= ui
-                            .add(
+                        ui.add_enabled_ui(false, |ui| {
+                            ui.add(
                                 egui::TextEdit::singleline(&mut config.keybindings.$field)
                                     .desired_width(180.0)
                                     .font(egui::TextStyle::Monospace),
                             )
-                            .changed();
-                        changed |= reset_to_default(
-                            ui,
-                            &mut config.keybindings.$field,
-                            &def.keybindings.$field,
-                        );
+                            .on_hover_text(
+                                "Fixed shortcut — not yet user-rebindable in this shell.",
+                            );
+                        });
                         ui.end_row();
                     }
                 };
