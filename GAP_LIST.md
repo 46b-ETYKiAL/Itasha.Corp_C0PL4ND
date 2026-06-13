@@ -171,6 +171,35 @@ Coverage: deterministic `pane_term` unit tests (`pump_host_effects_drains_every_
 `report_mouse_gates_on_mouse_mode`, `scroll_view_moves_the_scrollback_offset`).
 See `docs/control-test-ledger.md` § Milestone 2.2.
 
+## Whole-app audit-and-fix program (2026-06-12)
+
+A 6-dimension read-only audit (VT-correctness, security/DoS, egui↔legacy parity,
+panics/overflow/locks, error-handling/lifecycle, coverage/perf) drove eight
+shipped PRs (#169–#175 + #168):
+
+**Core VT correctness + DoS hardening** (PR #169): wide-glyph continuation-bitset
+desync in scroll/insert/delete (corrupted CJK/emoji on edit); CUU/CUD now honour
+DECSTBM margins; SU feeds scrollback on a full region; DSR/notification/clipboard/
+progress/title-stack/kitty-chunks queues capped; `frame_paste` strips C0/C1.
+
+**Security** (PR #170): the legacy shell's `file://` URL auto-detection (ctrl-click
+→ `cmd /C start` executable launch) removed — http(s) only, matching the egui shell.
+
+**egui silent errors** (PR #171): config-write + live-PTY-write failures now logged.
+
+**egui parity** — features the egui shell had dropped/lacked: PTY-reply/clipboard/
+colour/notification/progress draining + mouse reporting + scrollback (#168); font
+zoom, drag-and-drop, focus-reporting `?1004`, jump-to-prompt (#172); window-mgmt
+keyboard shortcuts + honest read-only keybindings + greyed startup-panel (#173);
+**mouse text selection + copy** (#174 — the P0 baseline feature).
+
+**Coverage + perf** (PR #175): unit tests for the previously-untested
+`egui_key_to_logical` / `byte_to_col` / `tint_rgba`; deduped the per-frame
+grid-text clone shared by the find-highlight + hyperlink span builders.
+
+All eight PRs landed with regression tests, `clippy --workspace -D warnings`,
+`fmt`, full `cargo test`, and `cargo deny` green.
+
 ### ❌ Remaining honest limitations (shipped features, documented gaps)
 - **BiDi cursor/selection stay logical-order**, and per-cell background quads are not reordered — only the displayed text run is reordered. The common RTL line (default background) is correct; an explicit per-cell background highlight on RTL text is the one divergence. Most grid terminals (Ghostty/Alacritty) omit BiDi entirely, so this is strictly ahead.
 - **Ligatures default OFF** (`Shaping::Basic`) to preserve strict monospace cell fidelity; opt-in via `ligatures = true`. This is intended behaviour, not a gap.

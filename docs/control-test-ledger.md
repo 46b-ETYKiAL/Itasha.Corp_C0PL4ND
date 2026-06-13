@@ -121,6 +121,27 @@ production `frame_tick`.
   un-drained in the egui path they grew without bound (a slow memory leak on
   top of the functional gap). Draining each frame fixes both at once.
 
+## Milestone 2.3 — whole-app audit-and-fix program (2026-06-12)
+
+The 6-dimension audit's eight PRs each shipped with regression coverage. The
+egui-shell-facing ones driven through the real `frame_tick`:
+
+| Capability | Asserted outcome | Test | Status |
+|---|---|---|---|
+| Font zoom | Ctrl+Plus grows / Ctrl+Minus shrinks / Ctrl+0 resets the grid font | `ctrl_plus_minus_zero_zooms_the_grid_font` (egui_chrome) | ✅ |
+| New-pane shortcut | Ctrl+Shift+T opens a new pane (pane count +1) | `ctrl_shift_t_opens_a_new_pane_via_keyboard` (egui_chrome) | ✅ |
+| Focus reporting `?1004` | report only when armed; ESC[I focus-in / ESC[O focus-out | `report_focus_only_reports_when_armed` (pane_term) | ✅ |
+| Jump-to-prompt | view scrolls to a prior OSC 133 prompt mark | `jump_to_prompt_scrolls_to_a_prompt_mark` (pane_term) | ✅ |
+| Mouse selection copy | covered cells extracted, ordered, trimmed, newline-joined | `selection_text_extracts_ordered_trimmed_rows` (pane_term) | ✅ |
+| Keyboard→PTY map | named keys / F-keys / Ctrl-chords → correct `LogicalKey` | `egui_key_to_logical_maps_keys_and_ctrl_chords` (mod) | ✅ |
+| Search/link column map | UTF-8 byte offset → character column | `byte_to_col_counts_chars_to_the_byte_boundary` (mod) | ✅ |
+| Acrylic tint parse | `#rrggbb` + alpha → RGBA; non-hex → None | `tint_rgba_parses_hex_and_appends_alpha` (mod) | ✅ |
+
+The core VT-correctness + DoS-cap fixes (PR #169) carry their own
+`c0pl4nd-core` regression tests (continuation lockstep ×5, CUU/CUD margins, SU
+scrollback ×2, the six queue/cap DoS tests). See `GAP_LIST.md` §
+"Whole-app audit-and-fix program (2026-06-12)".
+
 ## Milestone 3+ (planned controls — tests required before "done")
 
 | Control | Asserted outcome | Status |
