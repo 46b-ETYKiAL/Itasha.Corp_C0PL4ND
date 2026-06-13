@@ -1113,38 +1113,43 @@ fn render_sections(
             // remembered separately (geometry persistence), so this is the
             // first-launch / no-saved-geometry size; it takes effect on restart.
             // Floor of 1 mirrors the core validator (cols/rows must be non-zero).
+            // DISABLED: this shell sizes the window in PIXELS and remembers the
+            // size across launches (drag the window edge; eframe persists it) —
+            // it has no columns/rows startup-size path, so these legacy fields are
+            // inert here. Greyed with an honest tooltip rather than left as live
+            // sliders that silently do nothing (matching the ligatures /
+            // startup-panel rows). The TOML fields remain for the legacy shell.
             if row_visible(q, "columns cols initial width grid size") {
-                ui.label("Initial columns").on_hover_text(
-                    "Terminal width (columns) used on first launch / when no window \
-                     size is remembered. Applies on restart.",
-                );
-                changed |= ui
-                    .add(
+                ui.label("Initial columns");
+                ui.add_enabled_ui(false, |ui| {
+                    ui.add(
                         egui::DragValue::new(&mut config.window.cols)
                             .range(1..=500)
                             .suffix(" cols"),
                     )
-                    .on_hover_text("Applies on the next launch.")
-                    .changed();
-                changed |= reset_to_default(ui, &mut config.window.cols, &def.window.cols);
+                    .on_hover_text(
+                        "Not used in this shell: the window is sized in pixels and \
+                         its size is remembered across launches (resize by dragging \
+                         the window edge).",
+                    );
+                });
                 ui.end_row();
             }
 
-            // Initial terminal grid height at launch (see cols above).
             if row_visible(q, "rows initial height grid size") {
-                ui.label("Initial rows").on_hover_text(
-                    "Terminal height (rows) used on first launch / when no window \
-                     size is remembered. Applies on restart.",
-                );
-                changed |= ui
-                    .add(
+                ui.label("Initial rows");
+                ui.add_enabled_ui(false, |ui| {
+                    ui.add(
                         egui::DragValue::new(&mut config.window.rows)
                             .range(1..=300)
                             .suffix(" rows"),
                     )
-                    .on_hover_text("Applies on the next launch.")
-                    .changed();
-                changed |= reset_to_default(ui, &mut config.window.rows, &def.window.rows);
+                    .on_hover_text(
+                        "Not used in this shell: the window is sized in pixels and \
+                         its size is remembered across launches (resize by dragging \
+                         the window edge).",
+                    );
+                });
                 ui.end_row();
             }
         });
