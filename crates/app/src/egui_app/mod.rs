@@ -1486,8 +1486,19 @@ impl C0pl4ndApp {
         // `&mut self.terms`), since `cell_spans_for_search` reads `self` via
         // `focused_grid_text`. Owned `Vec` + a copied index, so the render
         // closure borrows them disjointly from `self.grid_tree`.
+        // Snapshot the focused pane's grid text ONCE for both the find-highlight
+        // and the hyperlink spans below (perf, audit #2): each used to clone the
+        // whole grid into a fresh `Vec<String>` independently, so with the find
+        // overlay open AND Ctrl held the grid was cloned twice per frame. Compute
+        // it a single time only when at least one consumer needs it.
+        let link_modifier = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+        let search_lines: Vec<String> = if self.search_open || link_modifier {
+            self.focused_search_lines()
+        } else {
+            Vec::new()
+        };
         let search_spans: Vec<CellSpan> = if self.search_open {
-            self.cell_spans_for_search()
+            self.cell_spans_for_search(&search_lines)
         } else {
             Vec::new()
         };
@@ -1498,9 +1509,8 @@ impl C0pl4ndApp {
         // opens one — a plain click stays a normal pane interaction. Built HERE
         // (before the disjoint-borrow block) for the same reason as the search
         // spans; `find_urls` reads the focused grid via `focused_search_lines`.
-        let link_modifier = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
         let link_spans: Vec<(CellSpan, String)> = if link_modifier {
-            self.cell_spans_for_hyperlinks()
+            self.cell_spans_for_hyperlinks(&search_lines)
         } else {
             Vec::new()
         };
@@ -2364,7 +2374,8 @@ impl C0pl4ndApp {
     /// inert in the shipping binary (which never calls it).
     #[allow(dead_code)]
     pub fn test_open_url_at_cell(&mut self, row: usize, col: usize) -> Option<String> {
-        let links = self.cell_spans_for_hyperlinks();
+        let lines = self.focused_search_lines();
+        let links = self.cell_spans_for_hyperlinks(&lines);
         let url = link_url_at_cell(&links, row, col)?.to_string();
         self.last_opened_url = Some(url.clone());
         Some(url)
@@ -2641,11 +2652,10 @@ impl C0pl4ndApp {
     /// a multi-byte glyph before the match never offsets the highlight. A match
     /// whose `line` exceeds the visible rows (the grid scrolled since the set was
     /// computed) is dropped.
-    fn cell_spans_for_search(&self) -> Vec<CellSpan> {
+    fn cell_spans_for_search(&self, lines: &[String]) -> Vec<CellSpan> {
         if self.search_matches.is_empty() {
             return Vec::new();
         }
-        let lines = self.focused_search_lines();
         self.search_matches
             .iter()
             .filter_map(|m| {
@@ -2666,8 +2676,7 @@ impl C0pl4ndApp {
     /// character columns with [`byte_to_col`] so a multi-byte glyph before the
     /// URL never offsets the underline. Computed once per frame before the
     /// disjoint-borrow render block (mirrors [`Self::cell_spans_for_search`]).
-    fn cell_spans_for_hyperlinks(&self) -> Vec<(CellSpan, String)> {
-        let lines = self.focused_search_lines();
+    fn cell_spans_for_hyperlinks(&self, lines: &[String]) -> Vec<(CellSpan, String)> {
         let mut out = Vec::new();
         for (row, line) in lines.iter().enumerate() {
             for span in hyperlink::find_urls(line) {

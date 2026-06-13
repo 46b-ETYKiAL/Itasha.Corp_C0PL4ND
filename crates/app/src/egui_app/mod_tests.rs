@@ -937,3 +937,71 @@ fn opaque_pane_fill_is_byte_identical_regardless_of_mode() {
         );
     }
 }
+
+// --- pure-function coverage (Wave H): the keyboard→PTY map, the UTF-8
+//     search-highlight column map, and the acrylic tint parser were untested; a
+//     regression in any silently corrupts input / highlights / theming. ---
+
+#[test]
+fn egui_key_to_logical_maps_keys_and_ctrl_chords() {
+    use c0pl4nd_core::term::{KeyModifiers, LogicalKey};
+    let none = KeyModifiers::default();
+    let ctrl = KeyModifiers {
+        ctrl: true,
+        ..Default::default()
+    };
+    // Named keys map straight through.
+    assert_eq!(
+        egui_key_to_logical(egui::Key::ArrowUp, none),
+        Some(LogicalKey::ArrowUp)
+    );
+    assert_eq!(
+        egui_key_to_logical(egui::Key::Enter, none),
+        Some(LogicalKey::Enter)
+    );
+    assert_eq!(
+        egui_key_to_logical(egui::Key::F5, none),
+        Some(LogicalKey::Function(5))
+    );
+    // Ctrl+Space → NUL.
+    assert_eq!(
+        egui_key_to_logical(egui::Key::Space, ctrl),
+        Some(LogicalKey::Text("\0".to_string()))
+    );
+    // Ctrl+letter → the C0 control byte (Ctrl+C=0x03, Ctrl+A=0x01,
+    // Ctrl+M=0x0D='\r'). A regression in the `& 0x1f` mask corrupts every
+    // control chord.
+    assert_eq!(
+        egui_key_to_logical(egui::Key::C, ctrl),
+        Some(LogicalKey::Text("\u{3}".to_string()))
+    );
+    assert_eq!(
+        egui_key_to_logical(egui::Key::A, ctrl),
+        Some(LogicalKey::Text("\u{1}".to_string()))
+    );
+    assert_eq!(
+        egui_key_to_logical(egui::Key::M, ctrl),
+        Some(LogicalKey::Text("\r".to_string()))
+    );
+    // A bare (non-ctrl) letter is delivered via Event::Text, not here → None.
+    assert_eq!(egui_key_to_logical(egui::Key::C, none), None);
+}
+
+#[test]
+fn byte_to_col_counts_chars_to_the_byte_boundary() {
+    // 'é' is 2 bytes: byte 3 is the start of 'l', i.e. column 2.
+    assert_eq!(byte_to_col("héllo", 3), 2);
+    // '日' is 3 bytes: byte 3 is the start of '本', i.e. column 1.
+    assert_eq!(byte_to_col("日本", 3), 1);
+    // Past the end clamps to the char count.
+    assert_eq!(byte_to_col("abc", 99), 3);
+    assert_eq!(byte_to_col("", 0), 0);
+    assert_eq!(byte_to_col("abc", 0), 0);
+}
+
+#[test]
+fn tint_rgba_parses_hex_and_appends_alpha() {
+    assert_eq!(tint_rgba("#1a2b3c", 160), Some((0x1a, 0x2b, 0x3c, 160)));
+    assert_eq!(tint_rgba("nothex", 0), None);
+    assert_eq!(tint_rgba("", 255), None);
+}
