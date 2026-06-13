@@ -407,6 +407,58 @@ impl PaneTerm {
         }
     }
 
+    /// Report a window focus-in (`focused = true`) / focus-out to the running
+    /// program IFF it armed focus reporting (DEC `?1004`). The reply bytes are
+    /// queued into the terminal's PTY-response channel and delivered by
+    /// [`pump_host_effects`](Self::pump_host_effects). No-op for a dead pane, a
+    /// poisoned lock, or a program that did not arm `?1004` (so a focus change
+    /// never leaks stray bytes to a shell that did not ask for them). Without
+    /// this the egui shell never told vim/tmux about focus changes (FocusGained
+    /// / FocusLost), unlike the legacy shell.
+    pub fn report_focus(&mut self, focused: bool) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if let Ok(mut term) = session.terminal().lock() {
+            if term.focus_reporting() {
+                term.focus_report(focused);
+            }
+        }
+    }
+
+    /// Scroll the scrollback view to the previous (`forward = false`) or next
+    /// (`forward = true`) shell-prompt mark (OSC 133 ; A), relative to the line
+    /// at the top of the viewport. No-op when no mark lies in the requested
+    /// direction (or no live pane). Ported from the legacy shell's
+    /// `jump_to_prompt`; marks are captured for free by the OSC-133 handler.
+    /// Returns `true` when the view moved (the caller repaints).
+    pub fn jump_to_prompt(&mut self, forward: bool) -> bool {
+        let Some(session) = self.session.as_ref() else {
+            return false;
+        };
+        let term_arc = session.terminal();
+        let Ok(mut term) = term_arc.lock() else {
+            return false;
+        };
+        let scrollback = term.scrollback_len();
+        // Absolute line currently at the top of the visible window.
+        let top = scrollback.saturating_sub(term.view_offset());
+        let target = {
+            let marks = term.prompt_marks();
+            if forward {
+                marks.iter().copied().filter(|&m| m > top).min()
+            } else {
+                marks.iter().copied().filter(|&m| m < top).max()
+            }
+        };
+        if let Some(line) = target {
+            term.set_view_offset(scrollback.saturating_sub(line));
+            true
+        } else {
+            false
+        }
+    }
+
     /// The terminal's current window title, as set by the running program via
     /// an OSC 0/2 escape (`ESC ] 0 ; <title> BEL`). Locks the terminal briefly,
     /// mirroring [`app_cursor`](Self::app_cursor) / [`mouse_mode`](Self::mouse_mode),
@@ -1087,6 +1139,67 @@ mod tests {
         assert!(
             !Rc::ptr_eq(&r1, &r2),
             "set_theme invalidates the damage-gated row cache"
+        );
+    }
+
+    /// `report_focus` only emits a DEC ?1004 report when the program armed it;
+    /// armed, it queues ESC[I on focus-in and ESC[O on focus-out (the reply the
+    /// pump then writes back to the PTY). Without the arm-gate a focus change
+    /// would leak stray bytes to a shell that never asked for focus events.
+    #[test]
+    fn report_focus_only_reports_when_armed() {
+        let pane = PaneTerm::spawn(void_theme(), 80, 24);
+        let Some(term) = pane.terminal_for_test() else {
+            return;
+        };
+        let mut pane = pane;
+        // Not armed → no bytes queued.
+        pane.report_focus(false);
+        assert!(
+            term.lock().unwrap().take_pty_response().is_empty(),
+            "no focus report unless ?1004 is armed"
+        );
+        // Arm ?1004, then focus-out → ESC[O, focus-in → ESC[I.
+        term.lock().unwrap().advance(b"\x1b[?1004h");
+        pane.report_focus(false);
+        assert_eq!(
+            term.lock().unwrap().take_pty_response(),
+            b"\x1b[O",
+            "focus-out reports ESC[O"
+        );
+        pane.report_focus(true);
+        assert_eq!(
+            term.lock().unwrap().take_pty_response(),
+            b"\x1b[I",
+            "focus-in reports ESC[I"
+        );
+    }
+
+    /// `jump_to_prompt(false)` scrolls the view back to the previous OSC 133
+    /// prompt mark; with no mark in the requested direction it is a no-op.
+    #[test]
+    fn jump_to_prompt_scrolls_to_a_prompt_mark() {
+        let pane = PaneTerm::spawn(void_theme(), 80, 3);
+        let Some(term) = pane.terminal_for_test() else {
+            return;
+        };
+        {
+            let mut t = term.lock().unwrap();
+            // Several prompts (OSC 133;A) with output between them, so there is
+            // scrollback and multiple marks above the live bottom.
+            for _ in 0..10 {
+                t.advance(b"\x1b]133;A\x07prompt\r\nout\r\n");
+            }
+            assert_eq!(t.view_offset(), 0, "starts pinned to the live bottom");
+        }
+        let mut pane = pane;
+        assert!(
+            pane.jump_to_prompt(false),
+            "jumping back reaches an earlier prompt"
+        );
+        assert!(
+            term.lock().unwrap().view_offset() > 0,
+            "the view scrolled up off the live bottom to the prompt"
         );
     }
 }
