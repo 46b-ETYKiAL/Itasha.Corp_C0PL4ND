@@ -999,6 +999,11 @@ fn byte_to_col_counts_chars_to_the_byte_boundary() {
     assert_eq!(byte_to_col("abc", 0), 0);
 }
 
+// `tint_rgba` is `#[cfg(windows)]` (only Windows' acrylic backdrop takes a
+// tint), so this test must carry the SAME gate — otherwise it fails to compile
+// on macOS/Linux CI (`error[E0425]: cannot find function tint_rgba`), breaking
+// both the test build and `clippy --all-targets`.
+#[cfg(windows)]
 #[test]
 fn tint_rgba_parses_hex_and_appends_alpha() {
     assert_eq!(tint_rgba("#1a2b3c", 160), Some((0x1a, 0x2b, 0x3c, 160)));
