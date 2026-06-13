@@ -739,3 +739,46 @@ fn script_menu_button_is_present_in_the_titlebar() {
         "the titlebar must carry the script launcher menu button (#35)"
     );
 }
+
+/// Font zoom (E-parity): Ctrl/Cmd +/- changes the grid font size and Ctrl/Cmd 0
+/// resets it. Drives the REAL `frame_tick` with simulated key chords and asserts
+/// the observable config change — the wiring the egui shell lacked before.
+#[test]
+fn ctrl_plus_minus_zero_zooms_the_grid_font() {
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    let zoom_key = |h: &mut Harness<'_>, key: egui::Key| {
+        h.event(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        });
+        h.step();
+    };
+
+    let base = app.borrow().config_font_size();
+    zoom_key(&mut h, egui::Key::Plus);
+    let bigger = app.borrow().config_font_size();
+    assert!(
+        bigger > base,
+        "Ctrl+Plus increases the grid font size ({base} -> {bigger})"
+    );
+    zoom_key(&mut h, egui::Key::Minus);
+    zoom_key(&mut h, egui::Key::Minus);
+    assert!(
+        app.borrow().config_font_size() < bigger,
+        "Ctrl+Minus decreases the grid font size"
+    );
+    zoom_key(&mut h, egui::Key::Num0);
+    assert_eq!(
+        app.borrow().config_font_size(),
+        c0pl4nd_core::Config::default().font.size,
+        "Ctrl+0 resets to the default font size"
+    );
+}

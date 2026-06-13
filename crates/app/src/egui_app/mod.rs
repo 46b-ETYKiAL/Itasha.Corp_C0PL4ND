@@ -291,6 +291,11 @@ pub struct C0pl4ndApp {
     /// `i.viewport().fullscreen` lags a frame, which would flash the titlebar);
     /// it is reconciled from the OS value each frame to stay honest.
     fullscreen: bool,
+    /// Whether the OS window held focus on the previous frame. Drives DEC
+    /// `?1004` focus reporting: on a focus-in/out EDGE the focused pane's
+    /// terminal is told (so vim/tmux see FocusGained/FocusLost). Initialised
+    /// `true` so a window that starts focused does not emit a spurious report.
+    was_focused: bool,
     /// Per-(pane,row) laid-out galley cache for [`paint_grid_native`] (audit #2).
     /// A row's galley is re-laid-out only when its content/style key changes, so
     /// an idle or partially-changed grid does not re-run text layout for every
@@ -504,6 +509,7 @@ impl C0pl4ndApp {
             last_window_cmd: None,
             live_window: false,
             fullscreen: false,
+            was_focused: true,
             galley_cache: GalleyCache::default(),
             pending_fonts: None,
             ime_preedit: None,
@@ -1082,9 +1088,11 @@ impl C0pl4ndApp {
                         }
                     }
                 }
-            } else if scroll_y.abs() > f32::EPSILON && resp.hovered() {
+            } else if scroll_y.abs() > f32::EPSILON && resp.hovered() && !m.command {
                 // Local scrollback: wheel up (positive y) goes BACK into history.
-                // One cell of pointer travel ≈ one scrollback line.
+                // One cell of pointer travel ≈ one scrollback line. A Ctrl/Cmd-held
+                // wheel is reserved for font zoom (handled in frame_tick), so it
+                // does NOT scroll here.
                 if let Some(term) = terms.get_mut(&pane_id) {
                     let lines = (scroll_y / ch.max(1.0)).round() as i32;
                     if lines != 0 {
@@ -2895,6 +2903,120 @@ impl C0pl4ndApp {
             if let Some(os) = ctx.input(|i| i.viewport().fullscreen) {
                 self.fullscreen = os;
             }
+        }
+
+        // 0a'''') font zoom (E-parity): Ctrl/Cmd with +/=/-/0, or Ctrl/Cmd+wheel.
+        //         Mutates config.font.size (the renderer reads it every frame),
+        //         clamped to [6, 48] like the legacy shell. The chords are
+        //         consumed so they never reach the PTY; the pane's local wheel
+        //         scrollback skips a Ctrl-held wheel (see render_pane_body) so a
+        //         Ctrl+wheel only zooms.
+        {
+            let mut dz = 0.0_f32;
+            let mut reset = false;
+            ctx.input_mut(|i| {
+                i.events.retain(|ev| {
+                    if let egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } = ev
+                    {
+                        if modifiers.command && !modifiers.alt {
+                            match key {
+                                egui::Key::Plus | egui::Key::Equals => {
+                                    dz += 1.0;
+                                    return false;
+                                }
+                                egui::Key::Minus => {
+                                    dz -= 1.0;
+                                    return false;
+                                }
+                                egui::Key::Num0 => {
+                                    reset = true;
+                                    return false;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    true
+                });
+            });
+            let wheel = ctx.input(|i| {
+                if i.modifiers.command {
+                    i.smooth_scroll_delta.y
+                } else {
+                    0.0
+                }
+            });
+            if wheel.abs() > f32::EPSILON {
+                dz += (wheel / 40.0).clamp(-2.0, 2.0);
+            }
+            if reset {
+                self.config.font.size = c0pl4nd_core::Config::default().font.size;
+                ctx.request_repaint();
+            } else if dz != 0.0 {
+                self.config.font.size = (self.config.font.size + dz).clamp(6.0, 48.0);
+                ctx.request_repaint();
+            }
+        }
+
+        // 0a''''') drag-and-drop (E-parity): insert each dropped file's
+        //          shell-quoted path at the focused prompt as TEXT — never
+        //          executed (no trailing newline beyond a separating space),
+        //          matching the legacy shell. Routed through write_paste (the
+        //          pastejacking-safe path).
+        let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            let label = self.active_shell_label().to_string();
+            let text: String = dropped
+                .iter()
+                .map(|p| format!("{} ", quote_path_for_shell(p, &label)))
+                .collect();
+            if let Some(term) = self.terms.get_mut(&self.focused_pane) {
+                term.write_paste(&text);
+            }
+        }
+
+        // 0a'''''') jump-to-prompt (E-parity): Ctrl+Shift+PageUp/PageDown scrolls
+        //           the scrollback to the previous/next OSC 133 prompt mark. The
+        //           chord is consumed so PageUp/Down don't also reach the PTY.
+        let jump = ctx.input_mut(|i| {
+            let z = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+            if i.consume_key(z, egui::Key::PageUp) {
+                Some(false) // backward → older prompt
+            } else if i.consume_key(z, egui::Key::PageDown) {
+                Some(true) // forward → newer prompt
+            } else {
+                None
+            }
+        });
+        if let Some(forward) = jump {
+            if let Some(term) = self.terms.get_mut(&self.focused_pane) {
+                if term.jump_to_prompt(forward) {
+                    ctx.request_repaint();
+                }
+            }
+        }
+
+        // 0a''''''') DEC ?1004 focus reporting (E-parity): on a window focus-in/out
+        //            EDGE, tell the focused pane's program (so vim/tmux see
+        //            FocusGained/FocusLost). report_focus is a no-op unless the
+        //            program armed ?1004; the reply is drained by pump_host_effects.
+        let focused_now = ctx.input(|i| i.viewport().focused.unwrap_or(self.was_focused));
+        if focused_now != self.was_focused {
+            if let Some(term) = self.terms.get_mut(&self.focused_pane) {
+                term.report_focus(focused_now);
+            }
+            self.was_focused = focused_now;
         }
 
         // 0b) route this frame's input. When the palette is open, its navigation
