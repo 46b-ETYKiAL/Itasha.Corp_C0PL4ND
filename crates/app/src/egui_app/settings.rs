@@ -1050,18 +1050,18 @@ fn render_sections(
 
             if row_visible(q, "copy on select clipboard") {
                 ui.label("Copy on select");
-                // DISABLED: this depends on MOUSE TEXT-SELECTION (drag to select
-                // grid text), which the egui terminal surface does not implement
-                // yet — there is no selection for an auto-copy to act on. Greyed
-                // with an honest tooltip rather than a dead toggle. (When mouse
-                // selection lands, re-enable this and wire it to the drag-end.)
-                ui.add_enabled_ui(false, |ui| {
-                    ui.toggle_value(&mut config.copy_on_select, "X11-style auto-copy")
-                        .on_hover_text(
-                            "Not available yet: needs mouse text-selection (drag to \
-                             select), which this terminal does not support yet.",
-                        );
-                });
+                // Live again: mouse text-selection now exists in the egui shell
+                // (drag to select), so the drag-end can auto-copy. When OFF the
+                // selection is still made (and Ctrl/Cmd+Shift+C copies on demand);
+                // when ON the selection is copied to the clipboard on release.
+                changed |= ui
+                    .toggle_value(&mut config.copy_on_select, "X11-style auto-copy")
+                    .on_hover_text(
+                        "Copy a mouse selection to the clipboard automatically when \
+                         the drag is released.",
+                    )
+                    .changed();
+                changed |= reset_to_default(ui, &mut config.copy_on_select, &def.copy_on_select);
                 ui.end_row();
             }
 

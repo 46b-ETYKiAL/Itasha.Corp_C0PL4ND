@@ -459,6 +459,44 @@ impl PaneTerm {
         }
     }
 
+    /// Extract the text covered by a mouse selection between two 0-based
+    /// `(display-row, column)` points (in either order) over the CURRENT display
+    /// grid. Each selected row is collected left→right, trailing whitespace
+    /// trimmed, and rows joined with `\n` — the conventional terminal copy
+    /// shape. Returns `None` for an empty selection or a dead pane. Ported from
+    /// the legacy shell's `selection_text` so the two shells copy identically.
+    pub fn selection_text(&self, a: (usize, usize), b: (usize, usize)) -> Option<String> {
+        let (start, end) = if a <= b { (a, b) } else { (b, a) };
+        let session = self.session.as_ref()?;
+        let rows = session.terminal().lock().ok()?.display_rows();
+        let width = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+        let mut out = String::new();
+        for r in start.0..=end.0 {
+            let Some(row) = rows.get(r) else { break };
+            let lo = if r == start.0 { start.1 } else { 0 };
+            let hi = if r == end.0 {
+                end.1.min(width.saturating_sub(1))
+            } else {
+                width.saturating_sub(1)
+            };
+            let mut line = String::new();
+            for c in lo..=hi {
+                if let Some(cell) = row.get(c) {
+                    line.push(cell.c);
+                }
+            }
+            out.push_str(line.trim_end());
+            if r != end.0 {
+                out.push('\n');
+            }
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
     /// The terminal's current window title, as set by the running program via
     /// an OSC 0/2 escape (`ESC ] 0 ; <title> BEL`). Locks the terminal briefly,
     /// mirroring [`app_cursor`](Self::app_cursor) / [`mouse_mode`](Self::mouse_mode),
@@ -1201,5 +1239,35 @@ mod tests {
             term.lock().unwrap().view_offset() > 0,
             "the view scrolled up off the live bottom to the prompt"
         );
+    }
+
+    /// `selection_text` extracts the covered display cells, trims trailing
+    /// whitespace per row, joins rows with `\n`, and orders the endpoints (so a
+    /// bottom-up drag yields the same text as top-down). Empty selection → None.
+    #[test]
+    fn selection_text_extracts_ordered_trimmed_rows() {
+        let pane = PaneTerm::spawn(void_theme(), 80, 4);
+        let Some(term) = pane.terminal_for_test() else {
+            return;
+        };
+        {
+            let mut t = term.lock().unwrap();
+            t.advance(b"hello world\r\nsecond line\r\n");
+        }
+        // Single-row slice: cols 0..=4 of row 0 → "hello".
+        assert_eq!(
+            pane.selection_text((0, 0), (0, 4)).as_deref(),
+            Some("hello")
+        );
+        // Two-row selection, given BOTTOM-UP — must order to the same result and
+        // join with a newline; trailing blanks on each row are trimmed.
+        let two = pane.selection_text((1, 10), (0, 0));
+        assert_eq!(
+            two.as_deref(),
+            Some("hello world\nsecond line"),
+            "rows ordered + joined with newline, trailing blanks trimmed"
+        );
+        // An empty (zero-width, all-blank) selection on a blank row → None.
+        assert_eq!(pane.selection_text((3, 0), (3, 0)), None);
     }
 }
