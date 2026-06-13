@@ -3019,6 +3019,73 @@ impl C0pl4ndApp {
             self.was_focused = focused_now;
         }
 
+        // 0a'''''''') window-management keyboard shortcuts (F-parity): the egui
+        //            shell offered new/close/split ONLY as chrome buttons. Add
+        //            Ctrl/Cmd+Shift+{T,W,D,E} = new-pane / close-pane / split-right
+        //            / split-down, and Ctrl/Cmd+, = settings. Matched + consumed
+        //            via events.retain (the proven cross-platform chord-leak
+        //            discipline the find/history chords use) so the letters never
+        //            reach the PTY as control bytes.
+        let mut act_new = false;
+        let mut act_close = false;
+        let mut act_split_h = false;
+        let mut act_split_v = false;
+        let mut act_settings = false;
+        ctx.input_mut(|i| {
+            i.events.retain(|ev| {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = ev
+                {
+                    let cmd = modifiers.command || modifiers.ctrl;
+                    if cmd && modifiers.shift && !modifiers.alt {
+                        match key {
+                            egui::Key::T => {
+                                act_new = true;
+                                return false;
+                            }
+                            egui::Key::W => {
+                                act_close = true;
+                                return false;
+                            }
+                            egui::Key::D => {
+                                act_split_h = true;
+                                return false;
+                            }
+                            egui::Key::E => {
+                                act_split_v = true;
+                                return false;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if cmd && !modifiers.shift && !modifiers.alt && *key == egui::Key::Comma {
+                        act_settings = true;
+                        return false;
+                    }
+                }
+                true
+            });
+        });
+        if act_new {
+            self.new_terminal();
+        }
+        if act_split_h {
+            self.split(egui_tiles::LinearDir::Horizontal);
+        }
+        if act_split_v {
+            self.split(egui_tiles::LinearDir::Vertical);
+        }
+        if act_close {
+            self.close_pane(self.focused_pane);
+        }
+        if act_settings {
+            self.settings_open = !self.settings_open;
+        }
+
         // 0b) route this frame's input. When the palette is open, its navigation
         //     keys (↑/↓/Enter/Esc) are consumed here and the typed query is
         //     captured by the palette's focused TextEdit — NOT forwarded to the

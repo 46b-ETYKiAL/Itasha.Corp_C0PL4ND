@@ -782,3 +782,30 @@ fn ctrl_plus_minus_zero_zooms_the_grid_font() {
         "Ctrl+0 resets to the default font size"
     );
 }
+
+/// Ctrl/Cmd+Shift+T opens a new pane via the keyboard (F-parity: the egui shell
+/// offered new-pane only as the chrome `+` button). Drives the REAL frame_tick.
+#[test]
+fn ctrl_shift_t_opens_a_new_pane_via_keyboard() {
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    let before = app.borrow().pane_count();
+    h.event(egui::Event::Key {
+        key: egui::Key::T,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers {
+            command: true,
+            shift: true,
+            ..Default::default()
+        },
+    });
+    h.step();
+    assert_eq!(
+        app.borrow().pane_count(),
+        before + 1,
+        "Ctrl+Shift+T opens a new pane"
+    );
+}
