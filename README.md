@@ -70,39 +70,65 @@ teal/pink band — rendered via the GPU textured-quad image pipeline).
 
 ### Windows
 
-**Installer (recommended)** — download `c0pl4nd-<version>-x86_64.msi` from the
-[Releases](../../releases) page and run it. The MSI installs C0PL4ND under
+**Installer (recommended)** — download `c0pl4nd-<version>-x86_64-setup.exe` from
+the [Releases](../../releases) page and run it. It installs C0PL4ND under
 *Program Files*, adds it to your `PATH`, and creates a Start Menu entry.
 
-Or via [winget](https://learn.microsoft.com/windows/package-manager/):
-
-```powershell
-winget install Itasha.C0PL4ND
-```
+> **Heads-up: SmartScreen warning.** C0PL4ND is an open-source project and its
+> Windows installer is **not yet Authenticode-signed** (Windows-trusted code
+> signing for OSS is gated behind an approval process we haven't completed). So
+> on first run Windows SmartScreen will say *"Windows protected your PC"* /
+> *"unknown publisher"*. This is expected — click **More info → Run anyway**.
+> You can confirm the download is authentic first with the steps below.
 
 Or grab the portable `.zip` from [Releases](../../releases) and run
-`c0pl4nd.exe` directly — no install required.
+`c0pl4nd.exe` directly — no install required (same SmartScreen note applies).
 
-### macOS
+#### Verify your download
+
+Every release asset ships a `.sha256` checksum and a minisign `.minisig`
+signature so you can confirm the file is exactly what CI built.
+
+**Checksum (PowerShell):**
+
+```powershell
+# Compare the printed hash to the matching line in SHA256SUMS (or the .sha256 file)
+Get-FileHash .\c0pl4nd-<version>-x86_64-setup.exe -Algorithm SHA256
+```
+
+**Signature ([minisign](https://jedisct1.github.io/minisign/) / `rsign`):** the
+release is signed with C0PL4ND's minisign key (the same key the in-app updater
+trusts). Verify the installer against its `.minisig` with the public key below:
 
 ```bash
-brew install --cask c0pl4nd
+# public key (id A8D869E2B4DD3FD9)
+minisign -Vm c0pl4nd-<version>-x86_64-setup.exe \
+  -P RWTZP9204mnYqKT/TK6OfYG70QwFoHF5WuuxODg8tgPU+WdLRJYt6iNN
 ```
+
+A `Signature and comment signature verified` result means the file is genuine
+and untampered. (The in-app updater performs this same SHA-256 + minisign check
+automatically before applying any update — it refuses anything that fails.)
 
 ### Linux
 
-Download the latest AppImage from the [Releases](../../releases) page, make it executable, and run it:
+Download `c0pl4nd-<version>-x86_64-unknown-linux-gnu.tar.gz` from the
+[Releases](../../releases) page, extract it, and run the binary:
 
 ```bash
-chmod +x C0PL4ND-*.AppImage
-./C0PL4ND-*.AppImage
+tar -xzf c0pl4nd-*-x86_64-unknown-linux-gnu.tar.gz
+cd c0pl4nd-*-x86_64-unknown-linux-gnu
+./c0pl4nd
 ```
 
-Or use the install script:
+Each release asset has a `.sha256` and a minisign `.minisig` sibling — verify
+the same way as the [Windows steps above](#verify-your-download).
 
-```bash
-curl -fsSL https://get.c0pl4nd.dev/install.sh | sh
-```
+### macOS
+
+macOS binaries are not currently published — build from source (see
+[Building from source](#building-from-source)); the app compiles and runs on
+macOS, it just isn't part of the release matrix yet.
 
 ---
 
