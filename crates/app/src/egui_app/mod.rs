@@ -296,6 +296,10 @@ pub struct C0pl4ndApp {
     /// terminal is told (so vim/tmux see FocusGained/FocusLost). Initialised
     /// `true` so a window that starts focused does not emit a spurious report.
     was_focused: bool,
+    /// The active mouse text selection over a pane's grid (None when nothing is
+    /// selected). Drag selects; release copies (when `copy_on_select`); a plain
+    /// click clears it. Ctrl/Cmd+Shift+C copies the live selection on demand.
+    selection: Option<Selection>,
     /// Per-(pane,row) laid-out galley cache for [`paint_grid_native`] (audit #2).
     /// A row's galley is re-laid-out only when its content/style key changes, so
     /// an idle or partially-changed grid does not re-run text layout for every
@@ -510,6 +514,7 @@ impl C0pl4ndApp {
             live_window: false,
             fullscreen: false,
             was_focused: true,
+            selection: None,
             galley_cache: GalleyCache::default(),
             pending_fonts: None,
             ime_preedit: None,
@@ -812,6 +817,10 @@ impl C0pl4ndApp {
         // display at the cursor (F3-1). `None` for non-focused panes and when no
         // composition is active. Never sent to the PTY — display only.
         ime_preedit: Option<&str>,
+        // The app-wide mouse text selection state, updated here on drag and read
+        // by the selection painter below. Threaded as `&mut` (a separate field
+        // from `terms`/`theme`) so the egui_tiles disjoint-borrow split holds.
+        selection: &mut Option<Selection>,
     ) -> PaneBodyOutcome {
         let (rect, resp) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -992,6 +1001,7 @@ impl C0pl4ndApp {
         // Without this the canonical egui binary reported NO mouse at all and
         // could not scroll back through history; the legacy winit shell did both.
         let mut mouse_captured = false;
+        let mut copy_selection: Option<String> = None;
         {
             use c0pl4nd_core::term::{MouseButton, MouseEventKind, MouseMode, MouseModifiers};
             let (cw, ch) = monospace_cell_points(&painter, font_size, line_height_px);
@@ -1088,16 +1098,89 @@ impl C0pl4ndApp {
                         }
                     }
                 }
-            } else if scroll_y.abs() > f32::EPSILON && resp.hovered() && !m.command {
-                // Local scrollback: wheel up (positive y) goes BACK into history.
-                // One cell of pointer travel ≈ one scrollback line. A Ctrl/Cmd-held
-                // wheel is reserved for font zoom (handled in frame_tick), so it
-                // does NOT scroll here.
-                if let Some(term) = terms.get_mut(&pane_id) {
-                    let lines = (scroll_y / ch.max(1.0)).round() as i32;
-                    if lines != 0 {
-                        term.scroll_view(lines);
+            } else {
+                // Local gesture (the program has NOT grabbed the mouse, or Shift
+                // forces local): a primary-drag selects grid text and copies it on
+                // release; a plain click clears any selection; the wheel scrolls
+                // this pane's scrollback. This is the mouse text-selection the egui
+                // shell lacked entirely (the legacy shell had it).
+                let pos = resp
+                    .interact_pointer_pos()
+                    .or(resp.hover_pos())
+                    .or_else(|| ui.input(|i| i.pointer.latest_pos()));
+                let cell0 = pos.and_then(|p| cell_at_pos(p, origin, cw, ch));
+                if ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) {
+                    if let Some((r, c)) = cell0 {
+                        *selection = Some(Selection {
+                            pane: pane_id,
+                            anchor: (r, c),
+                            head: (r, c),
+                        });
+                        mouse_captured = true;
                     }
+                }
+                if resp.dragged() {
+                    if let (Some(sel), Some((r, c))) = (selection.as_mut(), cell0) {
+                        if sel.pane == pane_id {
+                            sel.head = (r, c);
+                            mouse_captured = true;
+                        }
+                    }
+                }
+                if ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary)) {
+                    if let Some(sel) = *selection {
+                        if sel.pane == pane_id {
+                            if sel.anchor == sel.head {
+                                // A plain click (no drag) clears any selection.
+                                *selection = None;
+                            } else if let Some(term) = terms.get(&pane_id) {
+                                copy_selection = term.selection_text(sel.anchor, sel.head);
+                            }
+                        }
+                    }
+                }
+                // Local scrollback: wheel up (positive y) goes BACK into history.
+                // A Ctrl/Cmd-held wheel is reserved for font zoom (frame_tick).
+                if scroll_y.abs() > f32::EPSILON && resp.hovered() && !m.command {
+                    if let Some(term) = terms.get_mut(&pane_id) {
+                        let lines = (scroll_y / ch.max(1.0)).round() as i32;
+                        if lines != 0 {
+                            term.scroll_view(lines);
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- selection wash (paint AFTER the grid so the translucent highlight
+        // sits ON TOP of the text, the standard selection look) ---
+        if let Some(sel) = *selection {
+            if sel.pane == pane_id && sel.anchor != sel.head {
+                let (cw, ch) = monospace_cell_points(&painter, font_size, line_height_px);
+                let origin = grid_text_origin(rect, pad);
+                let (start, end) = if sel.anchor <= sel.head {
+                    (sel.anchor, sel.head)
+                } else {
+                    (sel.head, sel.anchor)
+                };
+                let cols = terms.get(&pane_id).map(|t| t.size().0).unwrap_or(0) as usize;
+                let wash = egui::Color32::from_rgba_unmultiplied(0x60, 0x80, 0xc0, 0x60);
+                for r in start.0..=end.0 {
+                    let lo = if r == start.0 { start.1 } else { 0 };
+                    let hi = if r == end.0 {
+                        end.1
+                    } else {
+                        cols.saturating_sub(1)
+                    };
+                    if hi < lo {
+                        continue;
+                    }
+                    let x0 = origin.x + lo as f32 * cw;
+                    let x1 = origin.x + (hi as f32 + 1.0) * cw;
+                    let y0 = origin.y + r as f32 * ch;
+                    let sel_rect =
+                        egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y0 + ch));
+                    painter.rect_filled(sel_rect, 0.0, wash);
                 }
             }
         }
@@ -1167,6 +1250,7 @@ impl C0pl4ndApp {
             size: rect.size(),
             opened_url,
             ime_cursor_rect,
+            copy_selection,
         }
     }
 
@@ -1438,6 +1522,14 @@ impl C0pl4ndApp {
             // The per-row galley cache is a separate field, so it borrows
             // disjointly from `terms` AND from `grid_tree` (audit #2).
             let galley_cache = &mut self.galley_cache;
+            // Mouse text selection state: a separate field, disjoint from
+            // `terms`/`grid_tree`, threaded so a drag updates it and the painter
+            // reads it (Wave G — selection was entirely absent from the egui shell).
+            let selection = &mut self.selection;
+            // Auto-copy a completed selection to the OS clipboard only when the
+            // user opted into copy-on-select (else the selection is visible and
+            // Ctrl/Cmd+Shift+C copies it on demand — handled in frame_tick).
+            let copy_on_select = self.config.copy_on_select;
             let theme = &self.theme;
             // The configured TERM, read alongside the other LIVE config reads so a
             // deferred-first-spawn pane advertises the same `TERM` as later panes.
@@ -1503,12 +1595,20 @@ impl C0pl4ndApp {
                     search,
                     links,
                     if pid == focused { ime_preedit } else { None },
+                    selection,
                 );
                 if outcome.clicked {
                     clicked = Some(pid);
                 }
                 if let Some(url) = outcome.opened_url {
                     opened_url = Some(url);
+                }
+                // Copy-on-select: a just-completed selection goes to the OS
+                // clipboard only when the user enabled it.
+                if let Some(text) = outcome.copy_selection {
+                    if copy_on_select {
+                        ui.ctx().copy_text(text);
+                    }
                 }
                 if pid == focused {
                     focused_size = Some((outcome.size.x, outcome.size.y));
@@ -3086,6 +3186,37 @@ impl C0pl4ndApp {
             self.settings_open = !self.settings_open;
         }
 
+        // 0a''''''''') Ctrl/Cmd+Shift+C copies the live mouse selection to the
+        //             clipboard on demand (the MANUAL copy path; copy-on-select is
+        //             the auto path). Consumed so C never reaches the PTY as the
+        //             Ctrl+C interrupt byte.
+        let copy_sel = ctx.input_mut(|i| {
+            let mut hit = false;
+            i.events.retain(|ev| {
+                let m = matches!(
+                    ev,
+                    egui::Event::Key { key: egui::Key::C, pressed: true, modifiers, .. }
+                    if modifiers.shift && (modifiers.ctrl || modifiers.command) && !modifiers.alt
+                );
+                hit |= m;
+                !m
+            });
+            hit
+        });
+        if copy_sel {
+            if let Some(sel) = self.selection {
+                if sel.anchor != sel.head {
+                    if let Some(text) = self
+                        .terms
+                        .get(&sel.pane)
+                        .and_then(|t| t.selection_text(sel.anchor, sel.head))
+                    {
+                        ctx.copy_text(text);
+                    }
+                }
+            }
+        }
+
         // 0b) route this frame's input. When the palette is open, its navigation
         //     keys (↑/↓/Enter/Esc) are consumed here and the typed query is
         //     captured by the palette's focused TextEdit — NOT forwarded to the
@@ -3662,6 +3793,22 @@ struct PaneBodyOutcome {
     /// so the OS IME candidate window tracks the caret instead of anchoring at
     /// the screen origin.
     ime_cursor_rect: Option<egui::Rect>,
+    /// The text of a mouse selection that was just COMPLETED (drag released)
+    /// in this pane this frame, if non-empty. The caller copies it to the OS
+    /// clipboard when `config.copy_on_select` is enabled; an explicit
+    /// Ctrl/Cmd+Shift+C copies the live selection regardless.
+    copy_selection: Option<String>,
+}
+
+/// An in-progress or completed mouse text selection over a pane's DISPLAY grid.
+/// `anchor` is where the drag began, `head` the current end — both 0-based
+/// `(display-row, column)`. Ordered at extraction time. A selection where
+/// `anchor == head` is an empty (click, not drag) selection.
+#[derive(Clone, Copy, PartialEq)]
+struct Selection {
+    pane: PaneId,
+    anchor: (usize, usize),
+    head: (usize, usize),
 }
 
 /// One find-overlay match converted to CELL coordinates: the visual row and the
