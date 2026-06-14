@@ -1,9 +1,14 @@
 //! GPU textured-quad renderer for inline images (decoded Sixel/Kitty).
 //!
 //! Uploads each [`c0pl4nd_core::image::DecodedImage`] to a texture and draws it
-//! as an alpha-blended quad at a pixel position over the terminal grid. Kept
-//! deliberately simple: resources are rebuilt per frame (inline images are
-//! small and infrequent), so there is no texture-cache lifecycle to manage.
+//! as an alpha-blended quad at a pixel position over the terminal grid.
+//!
+//! NOTE: this is the LEGACY-winit GPU render path; the shipping `c0pl4nd` egui
+//! binary does NOT use it — it uploads inline images through the cached
+//! `ImageTextureCache` in `egui_app/mod.rs` (a seen-set + end-of-frame
+//! `prune_unseen`, i.e. there IS a cache lifecycle on the live path). This
+//! renderer is kept simple — resources rebuilt per frame — because the legacy
+//! path it serves is only built under the `legacy-winit` feature.
 
 use wgpu::util::DeviceExt;
 
@@ -110,6 +115,12 @@ impl ImageRenderer {
         surface_h: f32,
         quads: &[ImageQuad],
     ) -> Vec<Prepared> {
+        // Guard a degenerate surface: the NDC math in `prepare_one` divides by
+        // `surface_w`/`surface_h`, so a zero surface would yield inf/NaN verts.
+        // Mirrors `pane_render.rs::ChromeRenderer::prepare`.
+        if surface_w <= 0.0 || surface_h <= 0.0 {
+            return Vec::new();
+        }
         quads
             .iter()
             .filter(|q| q.width > 0 && q.height > 0)

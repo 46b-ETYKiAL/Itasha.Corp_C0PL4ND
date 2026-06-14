@@ -1151,9 +1151,29 @@ impl C0pl4ndApp {
             use c0pl4nd_core::term::{MouseButton, MouseEventKind, MouseMode, MouseModifiers};
             let (cw, ch) = monospace_cell_points(&painter, font_size, line_height_px);
             let origin = grid_text_origin(rect, pad);
+            // The pane's grid size (cols, rows), so a reported mouse cell can be
+            // clamped to the grid — `cell_at_pos` only guards the LOW edge.
+            let pane_size = terms.get(&pane_id).map(PaneTerm::size);
+            // The absolute line at the top of the visible window THIS frame, so a
+            // mouse selection is anchored to absolute scrollback lines (not the
+            // display row, which changes as the view scrolls).
+            let window_start = terms
+                .get(&pane_id)
+                .and_then(PaneTerm::window_start)
+                .unwrap_or(0);
             // 1-based (col, row) of a screen-space point over the grid, if any.
+            // Clamped to the grid's high edge too: a point over the trailing
+            // padding or a fractional last cell must not encode an out-of-range
+            // cell into the SGR/X10 mouse report (a conformant terminal clamps
+            // reported cells to the grid bounds; oversized values make TUIs like
+            // vim/tmux mis-parse the report).
             let cell_of = |pos: egui::Pos2| -> Option<(usize, usize)> {
-                cell_at_pos(pos, origin, cw, ch).map(|(r, c)| (c + 1, r + 1))
+                let (r, c) = cell_at_pos(pos, origin, cw, ch)?;
+                let (cols, rows) = pane_size?;
+                if cols == 0 || rows == 0 {
+                    return None;
+                }
+                Some(((c + 1).min(cols as usize), (r + 1).min(rows as usize)))
             };
             let m = ui.input(|i| i.modifiers);
             let mods = MouseModifiers {
@@ -1253,21 +1273,24 @@ impl C0pl4ndApp {
                     .interact_pointer_pos()
                     .or(resp.hover_pos())
                     .or_else(|| ui.input(|i| i.pointer.latest_pos()));
-                let cell0 = pos.and_then(|p| cell_at_pos(p, origin, cw, ch));
+                // Hit cell as an ABSOLUTE (line, col): display row + window_start.
+                let cell0 = pos
+                    .and_then(|p| cell_at_pos(p, origin, cw, ch))
+                    .map(|(r, c)| (window_start + r, c));
                 if ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) {
-                    if let Some((r, c)) = cell0 {
+                    if let Some((line, c)) = cell0 {
                         *selection = Some(Selection {
                             pane: pane_id,
-                            anchor: (r, c),
-                            head: (r, c),
+                            anchor: (line, c),
+                            head: (line, c),
                         });
                         mouse_captured = true;
                     }
                 }
                 if resp.dragged() {
-                    if let (Some(sel), Some((r, c))) = (selection.as_mut(), cell0) {
+                    if let (Some(sel), Some((line, c))) = (selection.as_mut(), cell0) {
                         if sel.pane == pane_id {
-                            sel.head = (r, c);
+                            sel.head = (line, c);
                             mouse_captured = true;
                         }
                     }
@@ -1279,7 +1302,15 @@ impl C0pl4ndApp {
                                 // A plain click (no drag) clears any selection.
                                 *selection = None;
                             } else if let Some(term) = terms.get(&pane_id) {
-                                copy_selection = term.selection_text(sel.anchor, sel.head);
+                                // Map the absolute selection to current display
+                                // rows (it may have scrolled since press); copy
+                                // the visible portion.
+                                let rows = pane_size.map(|(_, r)| r as usize).unwrap_or(0);
+                                if let Some((a, b)) =
+                                    selection_visible_rows(sel.anchor, sel.head, window_start, rows)
+                                {
+                                    copy_selection = term.selection_text(a, b);
+                                }
                             }
                         }
                     }
@@ -1314,6 +1345,18 @@ impl C0pl4ndApp {
                 let origin = grid_text_origin(rect, pad);
                 let ppp = ui.ctx().pixels_per_point().max(0.01);
                 for m in metas {
+                    // `display_row` may be NEGATIVE when a tall image's top has
+                    // scrolled above the window top; the image's visible remainder
+                    // must still draw (the painter clips the off-top portion).
+                    let min = origin + egui::vec2(m.col as f32 * cw, m.display_row as f32 * ch);
+                    // Native pixel size in points (physical px / ppp).
+                    let size = egui::vec2(m.width as f32 / ppp, m.height as f32 / ppp);
+                    // Skip an image whose BOTTOM edge is at/above the grid top —
+                    // it's fully scrolled off, so don't even upload its texture
+                    // (a partial top is kept and clipped by `painter_at(rect)`).
+                    if min.y + size.y <= origin.y {
+                        continue;
+                    }
                     let key: ImageKey = (pane_id, m.line, m.col, m.width, m.height);
                     // Pixels are fetched+cloned ONLY on a cache miss (the closure
                     // runs only then); an already-uploaded texture just returns
@@ -1324,9 +1367,6 @@ impl C0pl4ndApp {
                             .and_then(|t| t.image_rgba(m.line, m.col))
                     });
                     if let Some(tex_id) = tex_id {
-                        let min = origin + egui::vec2(m.col as f32 * cw, m.display_row as f32 * ch);
-                        // Native pixel size in points (physical px / ppp).
-                        let size = egui::vec2(m.width as f32 / ppp, m.height as f32 / ppp);
                         painter.image(
                             tex_id,
                             egui::Rect::from_min_size(min, size),
@@ -1344,29 +1384,41 @@ impl C0pl4ndApp {
             if sel.pane == pane_id && sel.anchor != sel.head {
                 let (cw, ch) = monospace_cell_points(&painter, font_size, line_height_px);
                 let origin = grid_text_origin(rect, pad);
-                let (start, end) = if sel.anchor <= sel.head {
-                    (sel.anchor, sel.head)
-                } else {
-                    (sel.head, sel.anchor)
-                };
-                let cols = terms.get(&pane_id).map(|t| t.size().0).unwrap_or(0) as usize;
-                let wash = egui::Color32::from_rgba_unmultiplied(0x60, 0x80, 0xc0, 0x60);
-                for r in start.0..=end.0 {
-                    let lo = if r == start.0 { start.1 } else { 0 };
-                    let hi = if r == end.0 {
-                        end.1
-                    } else {
-                        cols.saturating_sub(1)
-                    };
-                    if hi < lo {
-                        continue;
+                let (cols, rows) = terms
+                    .get(&pane_id)
+                    .map(|t| {
+                        let (c, r) = t.size();
+                        (c as usize, r as usize)
+                    })
+                    .unwrap_or((0, 0));
+                // Map the absolute selection to display rows for THIS frame's view
+                // — the wash tracks the selected content as the view scrolls.
+                let ws = terms
+                    .get(&pane_id)
+                    .and_then(PaneTerm::window_start)
+                    .unwrap_or(0);
+                if let Some((start, end)) = selection_visible_rows(sel.anchor, sel.head, ws, rows) {
+                    let wash = egui::Color32::from_rgba_unmultiplied(0x60, 0x80, 0xc0, 0x60);
+                    for r in start.0..=end.0 {
+                        let lo = if r == start.0 { start.1 } else { 0 };
+                        // `end.1` may be usize::MAX (selection end scrolled below
+                        // the bottom → to line end); clamp to the last column.
+                        let hi_raw = if r == end.0 {
+                            end.1
+                        } else {
+                            cols.saturating_sub(1)
+                        };
+                        let hi = hi_raw.min(cols.saturating_sub(1));
+                        if cols == 0 || hi < lo {
+                            continue;
+                        }
+                        let x0 = origin.x + lo as f32 * cw;
+                        let x1 = origin.x + (hi as f32 + 1.0) * cw;
+                        let y0 = origin.y + r as f32 * ch;
+                        let sel_rect =
+                            egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y0 + ch));
+                        painter.rect_filled(sel_rect, 0.0, wash);
                     }
-                    let x0 = origin.x + lo as f32 * cw;
-                    let x1 = origin.x + (hi as f32 + 1.0) * cw;
-                    let y0 = origin.y + r as f32 * ch;
-                    let sel_rect =
-                        egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y0 + ch));
-                    painter.rect_filled(sel_rect, 0.0, wash);
                 }
             }
         }
@@ -3425,12 +3477,18 @@ impl C0pl4ndApp {
         if copy_sel {
             if let Some(sel) = self.selection {
                 if sel.anchor != sel.head {
-                    if let Some(text) = self
-                        .terms
-                        .get(&sel.pane)
-                        .and_then(|t| t.selection_text(sel.anchor, sel.head))
-                    {
-                        ctx.copy_text(text);
+                    if let Some(term) = self.terms.get(&sel.pane) {
+                        // Selection anchors are ABSOLUTE lines; map to the current
+                        // display window before extracting (it may have scrolled
+                        // since the selection was made).
+                        let rows = term.size().1 as usize;
+                        let ws = term.window_start().unwrap_or(0);
+                        if let Some((a, b)) = selection_visible_rows(sel.anchor, sel.head, ws, rows)
+                        {
+                            if let Some(text) = term.selection_text(a, b) {
+                                ctx.copy_text(text);
+                            }
+                        }
                     }
                 }
             }
@@ -4019,15 +4077,61 @@ struct PaneBodyOutcome {
     copy_selection: Option<String>,
 }
 
-/// An in-progress or completed mouse text selection over a pane's DISPLAY grid.
-/// `anchor` is where the drag began, `head` the current end — both 0-based
-/// `(display-row, column)`. Ordered at extraction time. A selection where
-/// `anchor == head` is an empty (click, not drag) selection.
+/// An in-progress or completed mouse text selection over a pane.
+/// `anchor` is where the drag began, `head` the current end — both
+/// `(ABSOLUTE-line, column)`, where the absolute line is `window_start +
+/// display_row` at the moment the cell was hit. Anchoring to absolute scrollback
+/// lines (not display rows) keeps the selection over the SAME content as the
+/// view scrolls / jumps to a prompt / receives new output — the painter and copy
+/// map absolute → current display row via [`selection_visible_rows`]. A selection
+/// where `anchor == head` is an empty (click, not drag) selection.
 #[derive(Clone, Copy, PartialEq)]
 struct Selection {
     pane: PaneId,
     anchor: (usize, usize),
     head: (usize, usize),
+}
+
+/// Map an absolute-line selection to display-row endpoint tuples for the CURRENT
+/// visible window, or `None` when the whole selection has scrolled out of view.
+///
+/// `anchor`/`head` are `(absolute-line, col)` in either order; `window_start` is
+/// the absolute line at the top of the visible window; `rows` is the visible row
+/// count. Each endpoint's row becomes `absolute - window_start`; an endpoint that
+/// has scrolled ABOVE the top clamps to row 0 / col 0 (begin at the visible top),
+/// and one BELOW the bottom clamps to the last row / end-of-line (`usize::MAX`,
+/// which both consumers clamp to the real width). This keeps the highlight and
+/// the copied text tracking the selected content across any view change, copying
+/// the visible portion of a partly-scrolled-out selection. Pure + unit-tested.
+fn selection_visible_rows(
+    anchor: (usize, usize),
+    head: (usize, usize),
+    window_start: usize,
+    rows: usize,
+) -> Option<((usize, usize), (usize, usize))> {
+    if rows == 0 {
+        return None;
+    }
+    let (start, end) = if anchor <= head {
+        (anchor, head)
+    } else {
+        (head, anchor)
+    };
+    let win_end = window_start + rows; // exclusive
+    if end.0 < window_start || start.0 >= win_end {
+        return None; // entirely above or below the visible window
+    }
+    let start_disp = if start.0 >= window_start {
+        (start.0 - window_start, start.1)
+    } else {
+        (0, 0) // scrolled above the top → from the visible top-left
+    };
+    let end_disp = if end.0 < win_end {
+        (end.0 - window_start, end.1)
+    } else {
+        (rows - 1, usize::MAX) // scrolled below the bottom → last row, to line end
+    };
+    Some((start_disp, end_disp))
 }
 
 /// One find-overlay match converted to CELL coordinates: the visual row and the
