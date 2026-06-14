@@ -301,6 +301,17 @@ pub fn parse_color_spec(spec: &str) -> Option<Rgb> {
         return Some((r, g, b));
     }
     if let Some(rest) = spec.strip_prefix('#') {
+        // The `#` form matches on BYTE length and byte-slices per channel, which
+        // is only sound when every byte is a single ASCII char. The OSC 4/10/11/12
+        // callers decode the spec with `String::from_utf8_lossy`, so an untrusted
+        // PTY emitting `#<invalid-utf8>` yields a U+FFFD replacement char (3 bytes)
+        // — `rest.len() == 3` would pick `per = 1` and then `&rest[0..1]` would
+        // slice into the middle of that codepoint and PANIC. A real hex color spec
+        // is ASCII by definition, so reject non-ASCII up front (root cause: the
+        // length match + byte-slicing assume ASCII).
+        if !rest.is_ascii() {
+            return None;
+        }
         let per = match rest.len() {
             3 => 1,
             6 => 2,
@@ -414,6 +425,20 @@ mod tests {
         assert!(parse_color_spec("?").is_none());
         assert!(parse_color_spec("rgb:zz/00/00").is_none());
         assert!(parse_color_spec("#12345").is_none());
+    }
+
+    #[test]
+    fn test_parse_color_spec_non_ascii_hash_does_not_panic() {
+        // Regression: an untrusted PTY emitting `OSC 10 ; #<invalid-utf8> ST`
+        // decodes (lossily) to a U+FFFD replacement char after `#`. Its 3-byte
+        // length once matched `per = 1`, and `&rest[0..1]` sliced into the middle
+        // of the codepoint and panicked, crashing the terminal. Must now reject
+        // cleanly (None), never panic — for the 3/6/12-byte-length shapes that
+        // U+FFFD repetition can hit.
+        assert!(parse_color_spec("#\u{FFFD}").is_none()); // 3 bytes → old per=1
+        assert!(parse_color_spec("#\u{FFFD}\u{FFFD}").is_none()); // 6 bytes → old per=2
+        assert!(parse_color_spec("#\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}").is_none()); // 12 → per=4
+        assert!(parse_color_spec("#ff\u{FFFD}0").is_none()); // mixed ascii+multibyte
     }
 
     #[test]
