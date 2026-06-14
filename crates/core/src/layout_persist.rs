@@ -313,6 +313,12 @@ impl LayoutSnapshot {
     }
 
     /// Write the snapshot to `path` as pretty JSON, creating parent dirs.
+    ///
+    /// Uses the crash-safe, owner-only [`crate::atomic_write::atomic_write_owner_only`]
+    /// helper (temp + fsync + rename, 0600 / owner-ACL) — the same write the
+    /// sibling [`WorkspaceSnapshot::save_atomic`] uses, because a snapshot records
+    /// each pane's `cwd` (a path that can reveal usernames / project names), which
+    /// must not be written world-readable or left half-written on a crash.
     pub fn save(&self, path: &Path) -> Result<(), LoadError> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -320,7 +326,8 @@ impl LayoutSnapshot {
             }
         }
         let json = self.to_json()?;
-        std::fs::write(path, json).map_err(|e| LoadError::Io(e.to_string()))
+        crate::atomic_write::atomic_write_owner_only(path, json.as_bytes())
+            .map_err(|e| LoadError::Io(e.to_string()))
     }
 }
 

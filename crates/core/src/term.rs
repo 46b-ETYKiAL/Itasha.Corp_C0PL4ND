@@ -2631,6 +2631,17 @@ impl Terminal {
         Self::with_scrollback(rows, cols, DEFAULT_SCROLLBACK)
     }
 
+    /// Update the scrollback line cap on a live terminal (the user changed the
+    /// `scrollback_lines` config). Raising it takes effect immediately (future
+    /// lines are retained up to the new cap); lowering it is enforced LAZILY by
+    /// the existing eviction path as new lines scroll into history — eager
+    /// truncation here would have to replicate the eviction bookkeeping (image
+    /// line anchors, prompt marks) and risk desync, so the cap is simply lowered
+    /// and honoured on the next history push.
+    pub fn set_max_scrollback(&mut self, max_scrollback: usize) {
+        self.screen.max_scrollback = max_scrollback;
+    }
+
     /// Construct with an explicit scrollback line cap.
     pub fn with_scrollback(rows: usize, cols: usize, max_scrollback: usize) -> Self {
         Terminal {

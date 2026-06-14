@@ -543,6 +543,18 @@ impl PaneTerm {
         }
     }
 
+    /// Apply the configured scrollback line cap to this pane's live terminal.
+    /// No-op for a dead pane / poisoned lock. The app calls this when the
+    /// `scrollback_lines` config differs from what was last applied, so the
+    /// setting actually takes effect (it was previously persisted but ignored).
+    pub fn set_max_scrollback(&self, max_scrollback: usize) {
+        if let Some(session) = self.session.as_ref() {
+            if let Ok(mut term) = session.terminal().lock() {
+                term.set_max_scrollback(max_scrollback);
+            }
+        }
+    }
+
     /// The ABSOLUTE line at the top of the visible window (`scrollback_len −
     /// view_offset`). Mouse selections are anchored to absolute lines so they
     /// survive scrolling / jump-to-prompt / new output (the display row a cell
