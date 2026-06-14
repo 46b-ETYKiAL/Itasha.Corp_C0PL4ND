@@ -615,7 +615,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "c0pl4nd"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "anyhow",
  "c0pl4nd-core",
@@ -644,6 +644,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-bidi",
+ "unicode-width",
  "ureq",
  "wgpu",
  "window-vibrancy",
@@ -655,7 +656,7 @@ dependencies = [
 
 [[package]]
 name = "c0pl4nd-core"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "anyhow",
  "criterion",
@@ -676,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "c0pl4nd-renderer"
-version = "0.4.5"
+version = "0.4.6"
 
 [[package]]
 name = "calloop"
