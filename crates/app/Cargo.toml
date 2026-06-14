@@ -80,7 +80,6 @@ flate2 = "=1.1.9"                                         # gunzip the Unix `.ta
 tar = { version = "=0.4.46", default-features = false }   # untar the binary from the Unix archive
 zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }  # unzip the Windows `.zip` archive
 tempfile = "=3.27.0"                                      # per-run unique 0700 staging dir for the verified download (defense-in-depth TOCTOU fix; already in the lock graph)
-unicode-width = "=0.2.2"                                  # East-Asian cell-width for cell-accurate grid layout (same version core pins; already in the lock graph)
 
 # --- egui chrome bundle (Milestone 1) ---
 eframe.workspace = true

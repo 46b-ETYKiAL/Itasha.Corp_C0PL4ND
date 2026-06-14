@@ -644,7 +644,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-bidi",
- "unicode-width",
  "ureq",
  "wgpu",
  "window-vibrancy",
