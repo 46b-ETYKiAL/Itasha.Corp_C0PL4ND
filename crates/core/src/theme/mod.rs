@@ -98,6 +98,19 @@ impl Theme {
         ] {
             parse_hex(c)?;
         }
+        // The optional slots default to an empty string ("theme omits this slot",
+        // consumers fall back to a brand colour) — that empty case stays valid.
+        // But an explicitly-SET bad hex here should be rejected, not silently
+        // ignored, so the user gets feedback that the value was wrong.
+        for c in [
+            &self.cursor_text,
+            &self.selection_background,
+            &self.selection_foreground,
+        ] {
+            if !c.trim().is_empty() {
+                parse_hex(c)?;
+            }
+        }
         Ok(())
     }
 
@@ -373,5 +386,24 @@ mod tests {
         assert_eq!(t.ansi(6), (0x00, 0xff, 0xc8)); // cyan = brand mint
         assert_eq!(t.ansi(4), (0x77, 0x00, 0xff)); // blue = brand purple #7700FF
         assert_eq!(t.ansi(2), (0x00, 0xff, 0x90)); // green = brand green #00FF90
+    }
+
+    #[test]
+    fn validate_checks_optional_slots_when_set_but_allows_empty() {
+        // Empty optional slots (the "theme omits this slot" default) stay valid.
+        let t = Theme::builtin_void();
+        assert!(t.validate().is_ok());
+
+        // An explicitly-set BAD hex in an optional slot is now rejected (was
+        // silently ignored — the user got no feedback the value was wrong).
+        let mut bad = Theme::builtin_void();
+        bad.selection_background = "not-a-color".to_string();
+        assert!(matches!(bad.validate(), Err(ThemeError::BadHex(_))));
+
+        // A valid hex in an optional slot passes.
+        let mut good = Theme::builtin_void();
+        good.cursor_text = "#abcdef".to_string();
+        good.selection_foreground = "#012345".to_string();
+        assert!(good.validate().is_ok());
     }
 }

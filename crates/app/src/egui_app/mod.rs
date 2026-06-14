@@ -540,7 +540,7 @@ impl C0pl4ndApp {
     /// headless tests) and [`Self::new`] (which passes the config loaded from
     /// disk so persisted settings take effect across launches).
     pub fn bootstrap_with(config: c0pl4nd_core::Config) -> Self {
-        let theme = load_terminal_theme(&config);
+        let (theme, theme_notice) = load_terminal_theme(&config);
         let mut pane_alloc = PaneIdAllocator::default();
         let initial: Vec<PaneId> = (0..INITIAL_PANES).map(|_| pane_alloc.next()).collect();
         let focused_pane = initial[0];
@@ -587,7 +587,7 @@ impl C0pl4ndApp {
             search_matches: Vec::new(),
             search_sel: 0,
             search_test_corpus: None,
-            toast: None,
+            toast: theme_notice,
             update_rx: None,
             last_update_notice: None,
             last_window_cmd: None,
@@ -2003,7 +2003,13 @@ impl C0pl4ndApp {
             // the live PTY panes immediately (the chrome Visuals are re-applied
             // below; the grid glyph colours come from this `Theme`, not Visuals).
             if outcome.theme_changed {
-                self.theme = load_terminal_theme(&self.config);
+                let (theme, theme_notice) = load_terminal_theme(&self.config);
+                self.theme = theme;
+                if let Some(notice) = theme_notice {
+                    // A user-authored theme file existed but failed to parse —
+                    // surface it instead of silently showing fallback colours.
+                    self.toast = Some(notice);
+                }
                 // Propagate to the LIVE panes: each PaneTerm holds its own theme
                 // clone (glyph + background colours resolve from it), so without
                 // this the picker would change `self.theme` but no visible pane.
@@ -2029,9 +2035,12 @@ impl C0pl4ndApp {
                 if let Some(path) = c0pl4nd_core::Config::default_path() {
                     // Surface a persist failure (read-only %APPDATA%, full disk,
                     // permission error) instead of silently dropping the user's
-                    // settings change — mirrors the legacy shell (window.rs).
+                    // settings change — mirrors the legacy shell (window.rs). A
+                    // GUI user never sees stderr, so a visible toast (the same
+                    // channel the config-LOAD error uses) is the real surface.
                     if let Err(e) = self.config.save_to(&path) {
                         tracing::warn!("could not save config: {e}");
+                        self.toast = Some(format!("could not save settings: {e}"));
                     }
                 }
             }
@@ -3016,6 +3025,17 @@ impl eframe::App for C0pl4ndApp {
         );
     }
 
+    /// Run the shutdown side effects on EVERY exit path, including an OS-initiated
+    /// window close (titlebar ×, Alt+F4). The in-app quit button calls
+    /// `prepare_shutdown` itself before `process::exit`, but an OS close skipped
+    /// it — so the best-effort config save was lost on that path (only the layout
+    /// RON persisted via `save()`). `prepare_shutdown` is idempotent (saving
+    /// config twice / clearing already-cleared panes is harmless) and never calls
+    /// `process::exit`, so it is safe to invoke here.
+    fn on_exit(&mut self) {
+        self.prepare_shutdown();
+    }
+
     /// eframe 0.34's `App` main entry is `ui(&mut self, &mut Ui, &mut Frame)`;
     /// the top-level panels are driven through the (deprecated-but-functional)
     /// `Panel::show(ctx, …)` path via a cloned `ctx`, matching the reference
@@ -3099,6 +3119,18 @@ impl C0pl4ndApp {
         if ui_scale != self.applied_ui_scale {
             ctx.set_zoom_factor(ui_scale);
             self.applied_ui_scale = ui_scale;
+        }
+        // Apply the configured scrollback line cap to every live pane each frame.
+        // This is what makes `scrollback_lines` actually take effect — previously
+        // the value was persisted and shown in Settings but every pane stayed at
+        // the hard-coded default (a dead setting). Ungated because deferred /
+        // restored / split panes are created at different times (some during
+        // `grid_ui`, after this point), and a per-pane lock-and-set is trivially
+        // cheap (≤ MAX_PANES panes; the render path already locks each pane many
+        // times per frame) and idempotent. Clamped to the Settings slider range.
+        let scrollback = self.config.scrollback_lines.clamp(100, 1_000_000);
+        for term in self.terms.values() {
+            term.set_max_scrollback(scrollback);
         }
         // Wire each live pane's UI-wake callback (once) so live PTY output wakes
         // the render loop — the other half of the damage-tracked-redraw scheme
@@ -3701,9 +3733,12 @@ impl C0pl4ndApp {
                 if let Some(path) = c0pl4nd_core::Config::default_path() {
                     // Surface a persist failure (read-only %APPDATA%, full disk,
                     // permission error) instead of silently dropping the user's
-                    // settings change — mirrors the legacy shell (window.rs).
+                    // settings change — mirrors the legacy shell (window.rs). A
+                    // GUI user never sees stderr, so a visible toast (the same
+                    // channel the config-LOAD error uses) is the real surface.
                     if let Err(e) = self.config.save_to(&path) {
                         tracing::warn!("could not save config: {e}");
+                        self.toast = Some(format!("could not save view mode: {e}"));
                     }
                 }
             }
@@ -4981,14 +5016,33 @@ fn theme_candidate_paths(
     candidates
 }
 
-fn load_terminal_theme(config: &c0pl4nd_core::Config) -> c0pl4nd_core::Theme {
+/// Resolve the active terminal theme, returning the theme AND an optional
+/// user-facing notice when a theme file that EXISTS failed to load (a bad hex /
+/// broken TOML in a hand-authored override). The notice is surfaced as a toast
+/// by the caller — previously such a failure was swallowed by `if let Ok` and
+/// the user silently got the wrong (fallback) colors with no explanation. An
+/// ABSENT file is the normal case and stays silent.
+fn load_terminal_theme(config: &c0pl4nd_core::Config) -> (c0pl4nd_core::Theme, Option<String>) {
     let config_path = c0pl4nd_core::Config::default_path();
     let config_dir = config_path.as_deref().and_then(|p| p.parent());
     let exe = std::env::current_exe().ok();
     let exe_dir = exe.as_deref().and_then(|p| p.parent());
+    let mut notice = None;
     for c in theme_candidate_paths(&config.theme, config_dir, exe_dir) {
-        if let Ok(t) = c0pl4nd_core::Theme::load_from(&c) {
-            return t;
+        match c0pl4nd_core::Theme::load_from(&c) {
+            Ok(t) => return (t, None),
+            Err(e) => {
+                // A candidate that EXISTS but failed to parse is a real user
+                // error worth surfacing (distinct from the common "file absent"
+                // skip). Capture the first such error and keep falling through to
+                // a valid theme so the app never wedges on a bad override.
+                if notice.is_none() && c.exists() {
+                    notice = Some(format!(
+                        "theme '{}' failed to load ({e}); using fallback",
+                        config.theme
+                    ));
+                }
+            }
         }
     }
     // No on-disk file matched (the common case in the INSTALLED app, whose CWD
@@ -4997,9 +5051,9 @@ fn load_terminal_theme(config: &c0pl4nd_core::Config) -> c0pl4nd_core::Theme {
     // this is the fix for "the theme doesn't change". On-disk files above still
     // win when present, so a user can override a built-in or add their own.
     if let Some(t) = c0pl4nd_core::Theme::builtin_named(&config.theme) {
-        return t;
+        return (t, notice);
     }
-    c0pl4nd_core::Theme::builtin_void()
+    (c0pl4nd_core::Theme::builtin_void(), notice)
 }
 
 /// Build egui's base font set: the Phosphor icon font merged into BOTH the

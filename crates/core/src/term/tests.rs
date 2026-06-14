@@ -221,6 +221,49 @@ fn scrollback_cap_is_enforced() {
     assert!(t.scrollback_len() <= 2, "history must not exceed the cap");
 }
 
+#[test]
+fn set_max_scrollback_raises_the_cap_for_new_lines() {
+    // The `scrollback_lines` config is applied to live terminals via this setter
+    // (it was previously a dead setting — every pane was fixed at the default).
+    let mut t = Terminal::with_scrollback(1, 4, 2);
+    for i in 0..10 {
+        t.advance(format!("{i}\r\n").as_bytes());
+    }
+    assert!(t.scrollback_len() <= 2, "starts capped at 2");
+    t.set_max_scrollback(100);
+    for i in 0..50 {
+        t.advance(format!("L{i}\r\n").as_bytes());
+    }
+    assert!(
+        t.scrollback_len() > 2,
+        "raising the cap retains more history (got {})",
+        t.scrollback_len()
+    );
+    assert!(t.scrollback_len() <= 100, "still bounded by the new cap");
+}
+
+#[test]
+fn set_max_scrollback_lowers_the_cap_lazily() {
+    let mut t = Terminal::with_scrollback(1, 4, 100);
+    for i in 0..50 {
+        t.advance(format!("{i}\r\n").as_bytes());
+    }
+    assert!(
+        t.scrollback_len() > 5,
+        "history accumulated under the high cap"
+    );
+    // Lowering is enforced as new lines push old ones out of history.
+    t.set_max_scrollback(5);
+    for i in 0..20 {
+        t.advance(format!("N{i}\r\n").as_bytes());
+    }
+    assert!(
+        t.scrollback_len() <= 5,
+        "lowered cap enforced on subsequent output (got {})",
+        t.scrollback_len()
+    );
+}
+
 // ---- Audit finding #4: anchored-metadata Vecs are bounded under a flood ----
 
 #[test]
