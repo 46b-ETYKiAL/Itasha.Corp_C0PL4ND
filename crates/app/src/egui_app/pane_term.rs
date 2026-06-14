@@ -131,6 +131,39 @@ fn write_pty_logged(session: &mut Session, bytes: &[u8]) {
     }
 }
 
+/// Lightweight placement metadata for one inline image (Sixel / Kitty graphics)
+/// that is VISIBLE in the current display window — pixel data is NOT included, so
+/// the per-frame metadata sweep never clones image bytes. `(line, col, width,
+/// height)` is the texture-cache key: it is stable across a scrollback-view
+/// scroll (the absolute `line` only shifts on history eviction), so a visible
+/// image's GPU texture is uploaded once, not every frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisibleImageMeta {
+    /// Absolute grid line of the image's top-left anchor (cache key).
+    pub line: usize,
+    /// Grid column of the image's top-left anchor.
+    pub col: usize,
+    /// Image width in pixels.
+    pub width: usize,
+    /// Image height in pixels.
+    pub height: usize,
+    /// 0-based row within the visible display window where the image's top sits.
+    pub display_row: usize,
+}
+
+/// The 0-based display row for an image anchored at absolute `line`, given the
+/// `window_start` absolute line (top of the visible window = scrollback_len −
+/// view_offset) and the visible `rows`. `None` when the image is scrolled above
+/// (`line < window_start`) or below (`row >= rows`) the window. Pure so the
+/// off-by-one / bounds logic is unit-tested without a live terminal.
+fn image_display_row(line: usize, window_start: usize, rows: usize) -> Option<usize> {
+    if line < window_start {
+        return None;
+    }
+    let row = line - window_start;
+    (row < rows).then_some(row)
+}
+
 /// One pane's live terminal. Owns the PTY session and the rendering inputs the
 /// egui shell needs each frame.
 pub struct PaneTerm {
@@ -495,6 +528,58 @@ impl PaneTerm {
         } else {
             Some(out)
         }
+    }
+
+    /// Placement metadata for every inline image (Sixel / Kitty graphics)
+    /// currently VISIBLE in the display window. Computed under the terminal lock
+    /// WITHOUT cloning pixel data (the renderer fetches bytes via
+    /// [`image_rgba`](Self::image_rgba) only on a texture-cache miss). Empty for
+    /// a dead pane, a poisoned lock, or a pane with no on-screen images.
+    pub fn visible_image_metas(&self) -> Vec<VisibleImageMeta> {
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        let term_arc = session.terminal();
+        let Ok(term) = term_arc.lock() else {
+            return Vec::new();
+        };
+        let images = term.images();
+        if images.is_empty() {
+            return Vec::new();
+        }
+        let rows = term.grid().rows();
+        // Absolute line at the top of the visible window (mirrors the legacy
+        // shell's image draw): scrollback length minus how far we're scrolled up.
+        let window_start = term.scrollback_len().saturating_sub(term.view_offset());
+        images
+            .iter()
+            .filter_map(|img| {
+                image_display_row(img.line, window_start, rows).map(|display_row| {
+                    VisibleImageMeta {
+                        line: img.line,
+                        col: img.col,
+                        width: img.image.width,
+                        height: img.image.height,
+                        display_row,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Clone the RGBA pixels of the image anchored at absolute `(line, col)`, if
+    /// it is still present. Called ONLY on a texture-cache miss (first appearance
+    /// or after a history-eviction line shift), so pixel bytes are copied at most
+    /// once per uploaded texture rather than every frame. Returns
+    /// `(width, height, rgba)`.
+    pub fn image_rgba(&self, line: usize, col: usize) -> Option<(usize, usize, Vec<u8>)> {
+        let session = self.session.as_ref()?;
+        let term_arc = session.terminal();
+        let term = term_arc.lock().ok()?;
+        term.images()
+            .iter()
+            .find(|i| i.line == line && i.col == col)
+            .map(|i| (i.image.width, i.image.height, i.image.rgba.clone()))
     }
 
     /// The terminal's current window title, as set by the running program via
@@ -1269,5 +1354,17 @@ mod tests {
         );
         // An empty (zero-width, all-blank) selection on a blank row → None.
         assert_eq!(pane.selection_text((3, 0), (3, 0)), None);
+    }
+
+    /// `image_display_row` maps an absolute image line to a 0-based display row,
+    /// skipping images scrolled above or below the visible window.
+    #[test]
+    fn image_display_row_maps_and_bounds() {
+        // window covers absolute lines 100..=123 (window_start=100, rows=24).
+        assert_eq!(image_display_row(100, 100, 24), Some(0)); // top of window
+        assert_eq!(image_display_row(110, 100, 24), Some(10));
+        assert_eq!(image_display_row(123, 100, 24), Some(23)); // last visible row
+        assert_eq!(image_display_row(124, 100, 24), None); // one past the bottom
+        assert_eq!(image_display_row(99, 100, 24), None); // scrolled above the top
     }
 }

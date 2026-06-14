@@ -133,6 +133,60 @@ impl GalleyCache {
     }
 }
 
+/// Texture-cache key for an inline image: `(pane, abs line, col, width, height)`.
+/// Stable across a scrollback-view scroll (so a visible image uploads once), and
+/// distinct per pane so two panes' images never collide.
+type ImageKey = (PaneId, usize, usize, usize, usize);
+
+/// GPU-texture cache for inline images (Sixel / Kitty graphics), mirroring
+/// [`GalleyCache`]'s seen-set + end-of-frame prune so textures for images that
+/// scrolled off (or a closed pane) are dropped and GPU memory cannot grow
+/// without bound. An `egui::TextureHandle` frees its GPU texture on drop, so
+/// pruning an entry releases the texture.
+#[derive(Default)]
+struct ImageTextureCache {
+    map: HashMap<ImageKey, egui::TextureHandle>,
+    seen_this_frame: HashSet<ImageKey>,
+}
+
+impl ImageTextureCache {
+    /// Return the texture id for `key`, marking it seen this frame. On a cache
+    /// HIT the cached id is returned and `fetch` is NOT called. On a MISS `fetch`
+    /// is invoked to produce `(width, height, rgba)`, the texture is uploaded
+    /// once, and its id returned — so pixel bytes are copied at most once per
+    /// uploaded texture (never on a hit). `None` when `fetch` yields nothing
+    /// (e.g. the image was evicted between the metadata sweep and the fetch).
+    fn get_or_upload(
+        &mut self,
+        ctx: &egui::Context,
+        key: ImageKey,
+        fetch: impl FnOnce() -> Option<(usize, usize, Vec<u8>)>,
+    ) -> Option<egui::TextureId> {
+        self.seen_this_frame.insert(key);
+        if let Some(tex) = self.map.get(&key) {
+            return Some(tex.id());
+        }
+        let (w, h, rgba) = fetch()?;
+        // NEAREST keeps pixel art (sixel) crisp; the source is already RGBA.
+        let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+        let tex = ctx.load_texture(
+            format!("c0pl4nd-img-{}-{}-{}", key.0 .0, key.1, key.2),
+            image,
+            egui::TextureOptions::NEAREST,
+        );
+        let id = tex.id();
+        self.map.insert(key, tex);
+        Some(id)
+    }
+
+    /// Drop textures not touched this frame (images scrolled off / closed pane)
+    /// and reset the seen set. Called once at the end of `grid_ui`.
+    fn prune_unseen(&mut self) {
+        self.map.retain(|k, _| self.seen_this_frame.contains(k));
+        self.seen_this_frame.clear();
+    }
+}
+
 /// The modern egui chrome application. Holds the tiling grid, the focused pane,
 /// a settings-window toggle, and a transient status-bar toast.
 pub struct C0pl4ndApp {
@@ -307,6 +361,9 @@ pub struct C0pl4ndApp {
     /// default fg, and the chromatic ghost params); cleared wholesale on a font
     /// re-install (family/fallback change). Bounded by per-pane row pruning.
     galley_cache: GalleyCache,
+    /// GPU-texture cache for inline images (Sixel / Kitty graphics), pruned each
+    /// frame so textures for off-screen images are released.
+    image_textures: ImageTextureCache,
     /// Receiver for the off-thread system-font load (audit #3). When the default
     /// (or any custom) font config names a non-built-in family,
     /// `load_system_fonts()` (100s of ms) would block first paint; instead the
@@ -516,6 +573,7 @@ impl C0pl4ndApp {
             was_focused: true,
             selection: None,
             galley_cache: GalleyCache::default(),
+            image_textures: ImageTextureCache::default(),
             pending_fonts: None,
             ime_preedit: None,
         }
@@ -801,6 +859,7 @@ impl C0pl4ndApp {
         terms: &mut HashMap<PaneId, PaneTerm>,
         pending_spawn: &mut HashSet<PaneId>,
         galley_cache: &mut GalleyCache,
+        image_textures: &mut ImageTextureCache,
         theme: &c0pl4nd_core::Theme,
         // The configured `TERM` advertised to a deferred-first-spawn pane, so the
         // initial pane's child PTY sees the same `TERM` as every later pane.
@@ -1147,6 +1206,47 @@ impl C0pl4ndApp {
                         if lines != 0 {
                             term.scroll_view(lines);
                         }
+                    }
+                }
+            }
+        }
+
+        // --- inline images (Sixel / Kitty graphics), paint AFTER the grid text
+        // so the image covers the placeholder cells. Each visible image is drawn
+        // at native pixel size (ppp-corrected to physical pixels), anchored at
+        // its grid cell; the GPU texture is cached + pruned per frame. Core
+        // decodes + exposes these via Terminal::images(); the egui shell
+        // previously dropped them silently (the legacy winit shell rendered
+        // them). Clipped to the pane by `painter` (a painter_at(rect)).
+        {
+            let metas = terms
+                .get(&pane_id)
+                .map(PaneTerm::visible_image_metas)
+                .unwrap_or_default();
+            if !metas.is_empty() {
+                let (cw, ch) = monospace_cell_points(&painter, font_size, line_height_px);
+                let origin = grid_text_origin(rect, pad);
+                let ppp = ui.ctx().pixels_per_point().max(0.01);
+                for m in metas {
+                    let key: ImageKey = (pane_id, m.line, m.col, m.width, m.height);
+                    // Pixels are fetched+cloned ONLY on a cache miss (the closure
+                    // runs only then); an already-uploaded texture just returns
+                    // its id.
+                    let tex_id = image_textures.get_or_upload(ui.ctx(), key, || {
+                        terms
+                            .get(&pane_id)
+                            .and_then(|t| t.image_rgba(m.line, m.col))
+                    });
+                    if let Some(tex_id) = tex_id {
+                        let min = origin + egui::vec2(m.col as f32 * cw, m.display_row as f32 * ch);
+                        // Native pixel size in points (physical px / ppp).
+                        let size = egui::vec2(m.width as f32 / ppp, m.height as f32 / ppp);
+                        painter.image(
+                            tex_id,
+                            egui::Rect::from_min_size(min, size),
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
                     }
                 }
             }
@@ -1532,6 +1632,8 @@ impl C0pl4ndApp {
             // The per-row galley cache is a separate field, so it borrows
             // disjointly from `terms` AND from `grid_tree` (audit #2).
             let galley_cache = &mut self.galley_cache;
+            // Inline-image GPU-texture cache: a separate field, disjoint borrow.
+            let image_textures = &mut self.image_textures;
             // Mouse text selection state: a separate field, disjoint from
             // `terms`/`grid_tree`, threaded so a drag updates it and the painter
             // reads it (Wave G — selection was entirely absent from the egui shell).
@@ -1594,6 +1696,7 @@ impl C0pl4ndApp {
                     terms,
                     pending_spawn,
                     galley_cache,
+                    image_textures,
                     theme,
                     term,
                     font_size,
@@ -1658,6 +1761,7 @@ impl C0pl4ndApp {
         // a pane switched away from in Tabs view, or a closed pane) so the cache
         // tracks only the live grid and cannot grow without bound (audit #2).
         self.galley_cache.prune_unseen();
+        self.image_textures.prune_unseen();
         if let Some(s) = focused_size {
             self.last_focused_size = Some(s);
         }
