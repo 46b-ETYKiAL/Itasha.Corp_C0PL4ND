@@ -147,21 +147,28 @@ pub struct VisibleImageMeta {
     pub width: usize,
     /// Image height in pixels.
     pub height: usize,
-    /// 0-based row within the visible display window where the image's top sits.
-    pub display_row: usize,
+    /// Display row where the image's TOP sits, as an offset from the window top
+    /// (`line − window_start`). May be NEGATIVE when the anchor has scrolled
+    /// above the window top — a tall image is still partly visible, and the
+    /// painter's `painter_at(rect)` clips the off-top portion.
+    pub display_row: i32,
 }
 
-/// The 0-based display row for an image anchored at absolute `line`, given the
+/// The signed display row for an image anchored at absolute `line`, given the
 /// `window_start` absolute line (top of the visible window = scrollback_len −
-/// view_offset) and the visible `rows`. `None` when the image is scrolled above
-/// (`line < window_start`) or below (`row >= rows`) the window. Pure so the
-/// off-by-one / bounds logic is unit-tested without a live terminal.
-fn image_display_row(line: usize, window_start: usize, rows: usize) -> Option<usize> {
-    if line < window_start {
+/// view_offset) and the visible `rows`. Returns the offset of the image's TOP
+/// from the window top (`line − window_start`), which may be NEGATIVE when the
+/// anchor has scrolled above the top: a multi-row image whose top has left the
+/// viewport must still render its visible remainder (the painter clips the
+/// off-top portion). Returns `None` only when the anchor is at/below the window
+/// bottom (`row >= rows`) — the image starts off the bottom, so nothing shows.
+/// Pure so the bounds logic is unit-tested without a live terminal.
+fn image_display_row(line: usize, window_start: usize, rows: usize) -> Option<i32> {
+    let row = line as i64 - window_start as i64;
+    if row >= rows as i64 {
         return None;
     }
-    let row = line - window_start;
-    (row < rows).then_some(row)
+    Some(row as i32)
 }
 
 /// One pane's live terminal. Owns the PTY session and the rendering inputs the
@@ -534,6 +541,19 @@ impl PaneTerm {
         } else {
             false
         }
+    }
+
+    /// The ABSOLUTE line at the top of the visible window (`scrollback_len −
+    /// view_offset`). Mouse selections are anchored to absolute lines so they
+    /// survive scrolling / jump-to-prompt / new output (the display row a cell
+    /// occupies changes as the view moves, but its absolute line does not). The
+    /// painter and copy map absolute → current display row via this. Returns
+    /// `None` for a dead pane or poisoned lock.
+    pub fn window_start(&self) -> Option<usize> {
+        let session = self.session.as_ref()?;
+        let term_arc = session.terminal();
+        let term = term_arc.lock().ok()?;
+        Some(term.scrollback_len().saturating_sub(term.view_offset()))
     }
 
     /// Extract the text covered by a mouse selection between two 0-based
@@ -1409,6 +1429,11 @@ mod tests {
         assert_eq!(image_display_row(110, 100, 24), Some(10));
         assert_eq!(image_display_row(123, 100, 24), Some(23)); // last visible row
         assert_eq!(image_display_row(124, 100, 24), None); // one past the bottom
-        assert_eq!(image_display_row(99, 100, 24), None); // scrolled above the top
+                                                           // A tall image whose anchor has scrolled ABOVE the top stays renderable
+                                                           // with a NEGATIVE display row — the painter clips the off-top portion.
+                                                           // (Previously this returned None and the whole image vanished the instant
+                                                           // its top row left the viewport — the P1 bug.)
+        assert_eq!(image_display_row(99, 100, 24), Some(-1)); // anchor 1 row above top
+        assert_eq!(image_display_row(90, 100, 24), Some(-10)); // 10 rows above top
     }
 }

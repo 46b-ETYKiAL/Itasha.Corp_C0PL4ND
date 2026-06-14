@@ -1120,3 +1120,43 @@ fn capture_then_apply_round_trips_pane_structure() {
         captured_panes
     );
 }
+
+// --- selection absolute-line → display-row mapping (scroll-stable selection) ---
+
+#[test]
+fn selection_maps_absolute_lines_to_display_rows() {
+    // Window shows absolute lines 100..=123 (window_start=100, rows=24).
+    // A selection of absolute lines 105..=110 → display rows 5..=10.
+    let r = selection_visible_rows((105, 2), (110, 7), 100, 24);
+    assert_eq!(r, Some(((5, 2), (10, 7))));
+}
+
+#[test]
+fn selection_orders_endpoints_and_survives_reverse_drag() {
+    // head before anchor (dragged upward) still yields ordered display rows.
+    let r = selection_visible_rows((110, 7), (105, 2), 100, 24);
+    assert_eq!(r, Some(((5, 2), (10, 7))));
+}
+
+#[test]
+fn selection_clamps_a_partly_scrolled_out_selection_to_the_visible_window() {
+    // Selection absolute 90..=110, window starts at 100 (rows 24): the top
+    // (90..100) has scrolled above → clamp start to the visible top-left (0,0);
+    // the visible remainder maps 100..=110 → rows 0..=10.
+    let r = selection_visible_rows((90, 3), (110, 5), 100, 24);
+    assert_eq!(r, Some(((0, 0), (10, 5))));
+
+    // Selection whose END scrolled below the bottom → clamp to last row + EOL.
+    let r = selection_visible_rows((110, 1), (200, 4), 100, 24);
+    assert_eq!(r, Some(((10, 1), (23, usize::MAX))));
+}
+
+#[test]
+fn selection_fully_scrolled_out_is_none() {
+    // Entirely above the window.
+    assert_eq!(selection_visible_rows((10, 0), (20, 0), 100, 24), None);
+    // Entirely below the window (window covers 100..124).
+    assert_eq!(selection_visible_rows((130, 0), (140, 0), 100, 24), None);
+    // Zero-row window.
+    assert_eq!(selection_visible_rows((100, 0), (110, 0), 100, 0), None);
+}
