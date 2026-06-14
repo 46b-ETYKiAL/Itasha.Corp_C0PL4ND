@@ -147,6 +147,27 @@ mod tests {
     }
 
     #[test]
+    fn clickable_extractor_is_http_s_only_never_file_or_other_schemes() {
+        // Security invariant lock (defense-in-depth): the CLICKABLE URL path must
+        // only ever surface http(s) — a `file:`/`smb:`/`vscode:` etc. URL printed
+        // by an untrusted PTY must NOT become a clickable span. The core stores
+        // OSC 8 `file:` URIs for DISPLAY, but they must never reach an opener;
+        // this is the test that keeps the opener-fed extractor http(s)-only so a
+        // future change can't silently re-introduce the `file://host/share/evil`
+        // ctrl-click vector (removed in PR #170).
+        assert!(find_urls("open file:///etc/passwd please").is_empty());
+        assert!(find_urls(r"file://server/share/evil.exe").is_empty());
+        assert!(find_urls("smb://host/share").is_empty());
+        assert!(find_urls("vscode://file/c:/x").is_empty());
+        assert!(find_urls("javascript:alert(1)").is_empty());
+        // http(s) still matches alongside a rejected scheme.
+        assert_eq!(
+            urls("file:///x then https://ok.dev/y"),
+            ["https://ok.dev/y"]
+        );
+    }
+
+    #[test]
     fn trailing_sentence_punctuation_is_trimmed() {
         assert_eq!(urls("visit https://example.com."), ["https://example.com"]);
         assert_eq!(

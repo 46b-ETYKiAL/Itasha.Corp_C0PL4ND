@@ -134,7 +134,13 @@ fn major(v: &str) -> u64 {
 
 /// Verify a contributed relative path stays inside the plugin folder.
 fn is_contained(rel: &str) -> bool {
-    !rel.contains("..") && !Path::new(rel).is_absolute()
+    // Reject `..` traversal and absolute paths. Also reject any `:` so a Windows
+    // DRIVE-RELATIVE path (`C:theme.toml`) — which `Path::is_absolute()` reports
+    // as NON-absolute, yet `dir.join("C:theme.toml")` resolves against the C:
+    // drive's current directory rather than the plugin folder — cannot escape the
+    // plugin dir. (UNC `\\srv\share` and rooted `\x` forms are already caught by
+    // `is_absolute()`.) Defense-in-depth: the plugin layer is declarative-only.
+    !rel.contains("..") && !rel.contains(':') && !Path::new(rel).is_absolute()
 }
 
 /// Load and validate a single plugin folder (containing `extension.toml`).
@@ -233,6 +239,22 @@ mod tests {
     fn capabilities_default_to_deny() {
         let c = Capabilities::default();
         assert!(!c.requests_dangerous());
+    }
+
+    #[test]
+    fn is_contained_rejects_escapes_including_windows_drive_relative() {
+        // Plain relative paths inside the plugin folder are allowed.
+        assert!(is_contained("themes/neon.toml"));
+        assert!(is_contained("keybindings.toml"));
+        // Traversal + absolute forms are rejected.
+        assert!(!is_contained("../evil.toml"));
+        assert!(!is_contained("a/../../evil.toml"));
+        // Windows drive-relative `C:theme.toml` is NON-absolute per
+        // `Path::is_absolute()` yet escapes via the drive's cwd — rejected by the
+        // `:` guard. (Also covers drive-absolute `C:\...` and UNC `\\srv\share`.)
+        assert!(!is_contained("C:theme.toml"));
+        assert!(!is_contained(r"C:\Windows\evil.toml"));
+        assert!(!is_contained(r"\\server\share\evil.toml"));
     }
 
     #[test]

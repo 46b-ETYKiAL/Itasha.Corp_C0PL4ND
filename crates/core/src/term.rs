@@ -2482,6 +2482,15 @@ impl Screen {
     /// — OSC 8 links are expected to be absolute. The scheme is the substring
     /// before the first `:`; anything else (`javascript:`, `data:`, …) is the
     /// phishing / code-exec surface and is denied.
+    ///
+    /// SECURITY INVARIANT: `file:` is permitted here for DISPLAY/CAPTURE ONLY
+    /// (so e.g. `ls --hyperlink`'s `file://` links render as styled links). A
+    /// stored OSC 8 `file:` URI MUST NEVER be passed to an opener — the clickable
+    /// path is fed exclusively by the http(s)-only `hyperlink::find_urls`
+    /// extractor (locked by `clickable_extractor_is_http_s_only_*`), NOT by the
+    /// `hyperlinks()` accessor. Wiring `hyperlinks()` to a clickable/opener
+    /// surface would re-introduce the `file://host/share/evil.exe` ctrl-click
+    /// vector removed in PR #170; do not do so without dropping `file:` here.
     fn is_allowed_hyperlink_scheme(uri: &str) -> bool {
         match uri.split_once(':') {
             Some((scheme, _)) => {
