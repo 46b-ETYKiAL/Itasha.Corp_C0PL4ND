@@ -32,49 +32,52 @@ impl Default for SearchOptions {
 }
 
 /// Find every match of `query` across `lines`. Empty/invalid queries yield none.
+///
+/// Match offsets are byte ranges into the ORIGINAL line (what `all_lines`
+/// produced and what the UI's `byte_to_col` maps against). Both literal and
+/// regex queries run through the regex engine against the unmodified line, and
+/// case-insensitivity is the `(?i)` flag — NOT lowercasing the haystack. The
+/// previous literal case-insensitive path searched `line.to_lowercase()` and
+/// returned offsets into THAT string; `to_lowercase()` is not byte-length
+/// preserving (e.g. `İ` U+0130 → `i̇` 2→3 bytes, Kelvin `K` U+212A → `k` 3→1),
+/// so any such char before a match shifted the highlight/jump to the wrong
+/// column. Routing the literal path through `regex::escape` keeps the query's
+/// characters verbatim while giving source-relative offsets.
 pub fn find(lines: &[String], query: &str, opts: SearchOptions) -> Vec<SearchMatch> {
     if query.is_empty() {
         return Vec::new();
     }
+    let Ok(re) = Regex::new(&build_pattern(query, opts)) else {
+        return Vec::new(); // invalid regex → no matches (UI shows 0)
+    };
     let mut out = Vec::new();
-    if opts.regex {
-        let pat = if opts.case_insensitive {
-            format!("(?i){query}")
-        } else {
-            query.to_string()
-        };
-        let Ok(re) = Regex::new(&pat) else {
-            return Vec::new(); // invalid regex → no matches (UI shows 0)
-        };
-        for (i, line) in lines.iter().enumerate() {
-            for m in re.find_iter(line) {
-                out.push(SearchMatch {
-                    line: i,
-                    start: m.start(),
-                    end: m.end(),
-                });
-            }
-        }
-    } else {
-        for (i, line) in lines.iter().enumerate() {
-            let (hay, needle) = if opts.case_insensitive {
-                (line.to_lowercase(), query.to_lowercase())
-            } else {
-                (line.clone(), query.to_string())
-            };
-            let mut from = 0;
-            while let Some(pos) = hay[from..].find(&needle) {
-                let s = from + pos;
-                out.push(SearchMatch {
-                    line: i,
-                    start: s,
-                    end: s + needle.len(),
-                });
-                from = s + needle.len().max(1);
-            }
+    for (i, line) in lines.iter().enumerate() {
+        for m in re.find_iter(line) {
+            out.push(SearchMatch {
+                line: i,
+                start: m.start(),
+                end: m.end(),
+            });
         }
     }
     out
+}
+
+/// Build the effective regex pattern: a literal query is `regex::escape`d so its
+/// metacharacters match verbatim; a regex query is used as-is. Case-insensitive
+/// search applies the `(?i)` flag rather than lowercasing the haystack, so match
+/// offsets stay relative to the original (un-lowercased) line.
+fn build_pattern(query: &str, opts: SearchOptions) -> String {
+    let body = if opts.regex {
+        query.to_string()
+    } else {
+        regex::escape(query)
+    };
+    if opts.case_insensitive {
+        format!("(?i){body}")
+    } else {
+        body
+    }
 }
 
 #[cfg(test)]
@@ -155,5 +158,39 @@ mod tests {
             },
         );
         assert_eq!(m.len(), 3);
+    }
+
+    #[test]
+    fn case_insensitive_offsets_are_source_relative() {
+        // Regression: `to_lowercase()` is not byte-length-preserving. 'İ'
+        // (U+0130, 2 bytes) lowercases to "i̇" (3 bytes), so the old path —
+        // which searched `line.to_lowercase()` — returned a match offset shifted
+        // by +1 byte; the UI's `byte_to_col` then mapped it to the wrong column.
+        // Offsets must be byte ranges into the ORIGINAL line.
+        let l = vec!["İx".to_string()]; // 'İ' = 2 bytes; 'x' at byte offset 2
+        let m = find(&l, "x", SearchOptions::default()); // case-insensitive default
+        assert_eq!(m.len(), 1);
+        assert_eq!(
+            m[0].start, 2,
+            "offset must index the original line, not its lowercase form"
+        );
+        assert_eq!(&l[0][m[0].start..m[0].end], "x");
+    }
+
+    #[test]
+    fn literal_query_metacharacters_match_verbatim() {
+        // A literal (non-regex) query must match its characters verbatim — the
+        // escape path keeps `.` from matching any char.
+        let l = vec!["a.b".to_string(), "axb".to_string()];
+        let m = find(
+            &l,
+            "a.b",
+            SearchOptions {
+                regex: false,
+                case_insensitive: false,
+            },
+        );
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].line, 0);
     }
 }
