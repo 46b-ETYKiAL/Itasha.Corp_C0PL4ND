@@ -9,7 +9,7 @@
 <p align="center">
   <a href="#"><img alt="CI" src="https://img.shields.io/badge/CI-passing-22d3c7?style=flat-square" /></a>
   <a href="#license"><img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-ff2d78?style=flat-square" /></a>
-  <a href="../../releases/latest"><img alt="Latest release" src="https://img.shields.io/badge/release-v0.4.3-0b0b0f?style=flat-square" /></a>
+  <a href="../../releases/latest"><img alt="Latest release" src="https://img.shields.io/badge/release-v0.4.4-0b0b0f?style=flat-square" /></a>
   <a href="#"><img alt="Platforms" src="https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-22d3c7?style=flat-square" /></a>
 </p>
 
