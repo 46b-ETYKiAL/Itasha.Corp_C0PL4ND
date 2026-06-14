@@ -114,6 +114,13 @@ egui_kittest = { version = "0.34", features = ["wgpu", "snapshot", "eframe"] }
 # dir — so it is available to the round-trip tests without a dev-dep entry.
 minisign = "0.9"
 
+# Round-trip test for the persisted layout snapshot. eframe serializes its
+# `Storage` values as RON (the format that supports egui_tiles' integer tile-id
+# map keys, which JSON cannot), so the snapshot round-trip test must use the same
+# format eframe does. Pinned to the exact version eframe already pulls transitively
+# (no new lockfile entry — just promotion to a direct dev-dep).
+ron = "=0.12.1"
+
 # Embeds the sigil icon + version resource into the exe (build.rs). Windows-only
 # build dependency; uses the MSVC resource compiler. Pinned exact per dep policy.
 [target.'cfg(windows)'.build-dependencies]

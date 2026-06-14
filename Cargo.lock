@@ -633,6 +633,7 @@ dependencies = [
  "minisign-verify",
  "pollster",
  "rfd",
+ "ron",
  "self-replace",
  "semver",
  "serde",

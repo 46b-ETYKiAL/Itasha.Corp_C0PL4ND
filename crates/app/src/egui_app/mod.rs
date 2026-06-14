@@ -20,6 +20,7 @@ pub mod chrome;
 pub mod fonts;
 pub mod grid;
 pub mod hyperlink;
+mod layout_state;
 pub mod pane_term;
 mod search_ui;
 mod settings;
@@ -211,6 +212,13 @@ pub struct C0pl4ndApp {
     /// exactly how a manually-opened terminal (`spawn_term`) already behaves —
     /// after which the debounced resize is a no-op and the cursor stays put.
     pending_spawn: HashSet<PaneId>,
+    /// Working directories captured from a previous run's persisted layout
+    /// snapshot, keyed by the restored pane id. Consumed (removed) by the
+    /// deferred first-spawn in [`render_pane_body`]: a pane with an entry spawns
+    /// its shell in that dir, a pane without one spawns in the default dir. Empty
+    /// on a fresh launch and after every entry is consumed — so a pane the user
+    /// later splits never inherits a stale restored cwd.
+    restored_cwds: HashMap<PaneId, String>,
     /// Monotonic pane-id allocator.
     pane_alloc: PaneIdAllocator,
     /// The currently-focused pane (drives tab highlight + input routing).
@@ -447,6 +455,20 @@ impl C0pl4ndApp {
         if let Some(err) = config_error {
             app.toast = Some(err);
         }
+        // Restore the persisted split-pane layout + per-pane cwd from a previous
+        // run (eframe `persistence` storage). A missing, unreadable, or
+        // structurally-invalid snapshot is silently ignored — the default grid
+        // built by `bootstrap_with` stands. Never a panic: a corrupt blob must not
+        // brick launch. The headless `bootstrap()` path has no `cc`, so tests keep
+        // the deterministic default grid.
+        if let Some(storage) = cc.storage {
+            if let Some(snapshot) = eframe::get_value::<layout_state::LayoutSnapshot>(
+                storage,
+                layout_state::LAYOUT_STORAGE_KEY,
+            ) {
+                app.apply_layout_snapshot(snapshot);
+            }
+        }
         // F5-3: first-run affordance. A fresh install has no config file yet —
         // and "zero-config is a first-class goal", so we deliberately do NOT
         // write one (that would defeat it). Surface a one-time welcome toast
@@ -536,6 +558,7 @@ impl C0pl4ndApp {
             grid_tree,
             terms,
             pending_spawn,
+            restored_cwds: HashMap::new(),
             pane_alloc,
             focused_pane,
             pinned: HashSet::new(),
@@ -583,6 +606,59 @@ impl C0pl4ndApp {
     /// and register it. Used by `split`. The default profile (program `None`,
     /// index 0) uses the platform default shell; a named profile launches its
     /// explicit program + args. A failed spawn degrades to an error pane.
+    /// Replace the default grid with a restored layout snapshot, IF it is
+    /// structurally usable. The panes are registered as DEFERRED (`pending_spawn`)
+    /// exactly like the default initial pane, so each spawns at its MEASURED size
+    /// on the first frame its rect is known (bug #40) — and consults
+    /// `restored_cwds` so it opens in its saved working directory. An out-of-range
+    /// pane count (empty or over the cap) leaves the default grid untouched. The
+    /// allocator resumes past every restored id so a fresh split can never collide
+    /// with a restored pane.
+    fn apply_layout_snapshot(&mut self, snapshot: layout_state::LayoutSnapshot) {
+        let panes = grid::panes_in_visual_order(&snapshot.tree);
+        if !layout_state::snapshot_is_restorable(panes.len()) {
+            return;
+        }
+        self.grid_tree = snapshot.tree;
+        // The default grid's panes were deferred (never spawned), but clear any
+        // live terms defensively so a restore can never leak a stale pane.
+        self.terms.clear();
+        self.pending_spawn = panes.iter().copied().collect();
+        self.restored_cwds = snapshot
+            .cwds
+            .into_iter()
+            .filter(|(pid, _)| panes.contains(pid))
+            .collect();
+        self.focused_pane = layout_state::restored_focus(&panes, snapshot.focused);
+        self.pinned = snapshot
+            .pinned
+            .into_iter()
+            .filter(|pid| panes.contains(pid))
+            .collect();
+        self.pane_alloc =
+            PaneIdAllocator::seeded(layout_state::restored_next_id(&panes, snapshot.next_id));
+    }
+
+    /// Capture the current layout into a snapshot for persistence: the tiling
+    /// tree, each live pane's reported cwd (OSC 7), the focused pane, the pinned
+    /// set, and the allocator's next id. Panes that never reported a cwd simply
+    /// have no entry (they re-spawn in the default dir on restore).
+    fn capture_layout(&self) -> layout_state::LayoutSnapshot {
+        let mut cwds = HashMap::new();
+        for pid in grid::panes_in_visual_order(&self.grid_tree) {
+            if let Some(cwd) = self.terms.get(&pid).and_then(PaneTerm::cwd) {
+                cwds.insert(pid, cwd);
+            }
+        }
+        layout_state::LayoutSnapshot {
+            tree: self.grid_tree.clone(),
+            cwds,
+            focused: self.focused_pane,
+            pinned: self.pinned.iter().copied().collect(),
+            next_id: self.pane_alloc.peek_next(),
+        }
+    }
+
     fn spawn_term(&mut self, pid: PaneId) {
         let theme = self.theme.clone();
         let profile = self.shell_profiles.get(self.active_shell);
@@ -858,6 +934,10 @@ impl C0pl4ndApp {
         focused: bool,
         terms: &mut HashMap<PaneId, PaneTerm>,
         pending_spawn: &mut HashSet<PaneId>,
+        // Per-pane working dirs from a restored layout snapshot; consumed here so
+        // a deferred first-spawn opens in its saved cwd (disjoint borrow, like
+        // `pending_spawn`).
+        restored_cwds: &mut HashMap<PaneId, String>,
         galley_cache: &mut GalleyCache,
         image_textures: &mut ImageTextureCache,
         theme: &c0pl4nd_core::Theme,
@@ -908,10 +988,16 @@ impl C0pl4ndApp {
         // is a no-op, so cmd's banner/prompt cursor never snaps home to (0,0).
         if pending_spawn.remove(&pane_id) {
             let (cols, rows) = cell_metrics.cols_rows(px_w, px_h);
-            terms.insert(
-                pane_id,
-                PaneTerm::spawn_with_term(theme.clone(), cols, rows, Some(term)),
-            );
+            // A restored pane opens in its saved cwd; a fresh pane (no restore
+            // entry) opens in the default dir. `remove` consumes the entry so a
+            // later re-use of the id never inherits a stale cwd.
+            let pane_term = match restored_cwds.remove(&pane_id) {
+                Some(cwd) => {
+                    PaneTerm::spawn_in_with_term(theme.clone(), cols, rows, Some(term), Some(&cwd))
+                }
+                None => PaneTerm::spawn_with_term(theme.clone(), cols, rows, Some(term)),
+            };
+            terms.insert(pane_id, pane_term);
         }
 
         // --- background quad (theme bg) + focus ring ---
@@ -1629,6 +1715,10 @@ impl C0pl4ndApp {
             // through so `render_pane_body` can spawn a pending pane at the
             // MEASURED `(cols, rows)` on the first frame its rect is known.
             let pending_spawn = &mut self.pending_spawn;
+            // Restored per-pane cwds: a separate field, disjoint from `terms` and
+            // `grid_tree`, threaded so a deferred first-spawn opens in its saved
+            // working directory.
+            let restored_cwds = &mut self.restored_cwds;
             // The per-row galley cache is a separate field, so it borrows
             // disjointly from `terms` AND from `grid_tree` (audit #2).
             let galley_cache = &mut self.galley_cache;
@@ -1695,6 +1785,7 @@ impl C0pl4ndApp {
                     pid == focused,
                     terms,
                     pending_spawn,
+                    restored_cwds,
                     galley_cache,
                     image_textures,
                     theme,
@@ -2856,6 +2947,21 @@ impl eframe::App for C0pl4ndApp {
     /// of which are unaffected by `persist_egui_memory`.
     fn persist_egui_memory(&self) -> bool {
         false
+    }
+
+    /// Persist the split-pane layout + per-pane cwd so the next launch restores
+    /// the user's panes/splits and working directories ([`apply_layout_snapshot`]
+    /// reads it back in [`Self::new`]). eframe fires this on a debounced interval
+    /// and on exit (the `persistence` feature). Only structural layout state +
+    /// already-OSC-7-reported cwds are written — never typed text or scrollback,
+    /// so this is consistent with the privacy `persist_egui_memory() == false`
+    /// policy. RON, in the app's `with_app_id` data folder (local-only).
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(
+            storage,
+            layout_state::LAYOUT_STORAGE_KEY,
+            &self.capture_layout(),
+        );
     }
 
     /// eframe 0.34's `App` main entry is `ui(&mut self, &mut Ui, &mut Frame)`;
