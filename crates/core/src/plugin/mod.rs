@@ -251,9 +251,15 @@ mod tests {
         assert!(!is_contained("a/../../evil.toml"));
         // Windows drive-relative `C:theme.toml` is NON-absolute per
         // `Path::is_absolute()` yet escapes via the drive's cwd — rejected by the
-        // `:` guard. (Also covers drive-absolute `C:\...` and UNC `\\srv\share`.)
+        // `:` guard on EVERY platform (the `:` is what makes this cross-platform).
+        // Drive-absolute `C:\...` likewise carries a `:`.
         assert!(!is_contained("C:theme.toml"));
         assert!(!is_contained(r"C:\Windows\evil.toml"));
+        // A UNC path `\\server\share\...` is only `is_absolute()` (and thus
+        // rejected) on WINDOWS; on Unix backslash is an ordinary filename char,
+        // so the string is a harmless relative name that stays inside the plugin
+        // dir — nothing to reject. Assert the rejection only where it applies.
+        #[cfg(windows)]
         assert!(!is_contained(r"\\server\share\evil.toml"));
     }
 
