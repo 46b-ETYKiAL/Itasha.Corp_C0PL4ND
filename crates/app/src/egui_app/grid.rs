@@ -61,6 +61,19 @@ impl PaneIdAllocator {
         self.next = self.next.wrapping_add(1);
         id
     }
+
+    /// Resume allocation from a known counter — used by layout-restore so the
+    /// allocator never re-issues an id already present in the restored tree.
+    pub fn seeded(next: u64) -> Self {
+        Self { next }
+    }
+
+    /// The next id this allocator would hand out, without advancing — captured
+    /// into the layout snapshot so a restored allocator resumes past every
+    /// previously-issued id.
+    pub fn peek_next(&self) -> u64 {
+        self.next
+    }
 }
 
 /// Count the leaf panes in an `egui_tiles::Tree`. Used by the 6-pane cap

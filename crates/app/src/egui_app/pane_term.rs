@@ -233,6 +233,50 @@ impl PaneTerm {
         }
     }
 
+    /// Like [`PaneTerm::spawn_with_term`] but starts the shell in an explicit
+    /// working directory — the path used by layout-restore so a persisted pane
+    /// re-opens where it was. A `cwd` that no longer names an existing directory
+    /// falls back to the home dir inside the core spawn (a stale restored cwd is
+    /// not an error), and a failed spawn degrades to an error label, never a
+    /// panic — identical to [`spawn_with_term`](Self::spawn_with_term).
+    pub fn spawn_in_with_term(
+        theme: Theme,
+        cols: u16,
+        rows: u16,
+        term: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Self {
+        match Session::spawn_shell_in_with_term(None, rows, cols, cwd, term) {
+            Ok(session) => Self {
+                session: Some(session),
+                error: None,
+                theme,
+                size: (cols, rows),
+                wake_wired: false,
+                span_cache: RefCell::new(RowSpanCache::default()),
+            },
+            Err(e) => Self {
+                session: None,
+                error: Some(format!("shell failed to start: {e}")),
+                theme,
+                size: (cols, rows),
+                wake_wired: false,
+                span_cache: RefCell::new(RowSpanCache::default()),
+            },
+        }
+    }
+
+    /// The pane's current working directory (OSC 7), if the shell reported one.
+    /// Read under the terminal lock; `None` for a failed-spawn pane, a poisoned
+    /// lock, or a shell that has not emitted OSC 7. Used by layout-persistence to
+    /// snapshot where each pane was so a restored pane re-opens in the same dir.
+    pub fn cwd(&self) -> Option<String> {
+        let session = self.session.as_ref()?;
+        let term_arc = session.terminal();
+        let term = term_arc.lock().ok()?;
+        term.cwd().map(str::to_string)
+    }
+
     /// Spawn a pane running an explicit program (deterministic tests). Mirrors
     /// [`Session::spawn_program`]; same no-panic degradation on failure.
     ///

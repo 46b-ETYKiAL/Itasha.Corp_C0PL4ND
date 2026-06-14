@@ -1033,3 +1033,90 @@ fn theme_candidate_paths_prioritizes_the_config_dir() {
         vec![PathBuf::from("assets/themes/nord.toml")]
     );
 }
+
+// --- layout persistence (Wave: restore split-pane layout + per-pane cwd) ---
+
+use crate::egui_app::grid as grid_mod;
+use crate::egui_app::layout_state::LayoutSnapshot;
+
+/// Build a snapshot over a default horizontal grid of the given pane ids.
+fn snapshot_for(panes: &[PaneId], focused: PaneId, next_id: u64) -> LayoutSnapshot {
+    LayoutSnapshot {
+        tree: grid_mod::build_default_grid(panes),
+        cwds: std::collections::HashMap::new(),
+        focused,
+        pinned: Vec::new(),
+        next_id,
+    }
+}
+
+/// A structurally-valid snapshot replaces the default grid: the panes become the
+/// (deferred) pending set, focus + allocator + pinned are restored, and only
+/// in-tree cwds survive the filter.
+#[test]
+fn apply_layout_snapshot_restores_a_valid_layout() {
+    let mut app = C0pl4ndApp::bootstrap(); // default: 1 pane (id 0)
+    let panes = [PaneId(10), PaneId(11), PaneId(12)];
+    let mut snap = snapshot_for(&panes, PaneId(11), 13);
+    snap.cwds.insert(PaneId(10), "/home/op/work".to_string());
+    // A cwd for a pane NOT in the tree must be dropped on restore.
+    snap.cwds
+        .insert(PaneId(99), "/should/be/dropped".to_string());
+    snap.pinned = vec![PaneId(12), PaneId(99)]; // 99 not in tree → filtered
+
+    app.apply_layout_snapshot(snap);
+
+    assert_eq!(app.pane_count(), 3, "restored tree has 3 panes");
+    assert_eq!(app.focused_pane, PaneId(11), "focus restored");
+    // All restored panes are deferred (spawned on first frame at measured size).
+    assert_eq!(app.pending_spawn.len(), 3);
+    assert!(app.terms.is_empty(), "no panes spawned yet (deferred)");
+    // Only the in-tree cwd survived the filter.
+    assert_eq!(app.restored_cwds.len(), 1);
+    assert_eq!(
+        app.restored_cwds.get(&PaneId(10)).map(String::as_str),
+        Some("/home/op/work")
+    );
+    assert_eq!(
+        app.pinned.iter().copied().collect::<Vec<_>>(),
+        vec![PaneId(12)]
+    );
+    // Allocator resumes past every restored id (max present 12 + 1 = 13).
+    assert_eq!(app.pane_alloc.peek_next(), 13);
+}
+
+/// A snapshot whose pane count exceeds the live cap is rejected — the default
+/// grid stands untouched (a corrupt/over-cap blob must never brick launch).
+#[test]
+fn apply_layout_snapshot_rejects_over_cap() {
+    let mut app = C0pl4ndApp::bootstrap();
+    let before = app.pane_count();
+    let too_many: Vec<PaneId> = (0..(grid_mod::MAX_PANES as u64 + 1)).map(PaneId).collect();
+    app.apply_layout_snapshot(snapshot_for(&too_many, PaneId(0), 99));
+    assert_eq!(app.pane_count(), before, "over-cap snapshot ignored");
+}
+
+/// An empty snapshot (zero panes) is rejected for the same reason.
+#[test]
+fn apply_layout_snapshot_rejects_empty() {
+    let mut app = C0pl4ndApp::bootstrap();
+    let before = app.pane_count();
+    app.apply_layout_snapshot(snapshot_for(&[], PaneId(0), 0));
+    assert_eq!(app.pane_count(), before, "empty snapshot ignored");
+}
+
+/// `capture_layout` of a freshly-bootstrapped app round-trips through
+/// `apply_layout_snapshot` with the pane structure preserved (the deferred
+/// initial pane has no live term, so its cwd is simply absent — not an error).
+#[test]
+fn capture_then_apply_round_trips_pane_structure() {
+    let app = C0pl4ndApp::bootstrap();
+    let snap = app.capture_layout();
+    let captured_panes = grid_mod::panes_in_visual_order(&snap.tree);
+    let mut app2 = C0pl4ndApp::bootstrap();
+    app2.apply_layout_snapshot(snap);
+    assert_eq!(
+        grid_mod::panes_in_visual_order(&app2.grid_tree),
+        captured_panes
+    );
+}
