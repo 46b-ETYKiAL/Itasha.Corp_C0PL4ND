@@ -312,20 +312,34 @@ fn geometry_on_screen(
 /// and feeding it to `open_path` (`cmd /C start`) would let one ctrl-click
 /// launch an arbitrary local/UNC executable. The modern egui shell's
 /// `hyperlink::find_urls` is http(s)-only for the same reason; this matches it.
+/// The RFC-3986 URL character set used to bound a ctrl-click URL token, mirroring
+/// the egui shell's `hyperlink::is_url_char` so both shells accept the same URL
+/// shape (and reject the same shell-metacharacter smuggling).
+fn is_url_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(ch)
+}
+
 fn find_url_in_line(chars: &[char], col: usize) -> Option<String> {
     if chars.is_empty() {
         return None;
     }
     let col = col.min(chars.len() - 1);
-    if chars[col].is_whitespace() {
+    // Bound the token to the RFC-3986 URL charset (matching the egui shell's
+    // `hyperlink::is_url_char`), NOT merely "non-whitespace". This stops a
+    // PTY-printed `http://x|whoami` / `http://x^...` / `` http://x`cmd` `` from
+    // smuggling a cmd metacharacter into the `cmd /C start` opener: `|`, `^`,
+    // `` ` ``, `<`, `>`, `"`, `{`, `}`, `\` are not URL chars, so they terminate
+    // the token. (`&` IS a legitimate URL query char and stays; the stable-Rust
+    // cmd-arg escaping from CVE-2024-24576 neutralizes it at spawn time anyway.)
+    if !is_url_char(chars[col]) {
         return None;
     }
     let mut start = col;
-    while start > 0 && !chars[start - 1].is_whitespace() {
+    while start > 0 && is_url_char(chars[start - 1]) {
         start -= 1;
     }
     let mut end = col;
-    while end + 1 < chars.len() && !chars[end + 1].is_whitespace() {
+    while end + 1 < chars.len() && is_url_char(chars[end + 1]) {
         end += 1;
     }
     let mut token: String = chars[start..=end].iter().collect();

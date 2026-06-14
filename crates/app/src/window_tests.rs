@@ -295,6 +295,36 @@ fn find_url_accepts_http_but_rejects_file_scheme() {
 }
 
 #[test]
+fn find_url_stops_at_shell_metacharacters() {
+    let chars = |s: &str| s.chars().collect::<Vec<char>>();
+    // SECURITY: the token is bounded to the RFC URL charset, so a cmd
+    // metacharacter that an attacker-controlled program prints adjacent to a URL
+    // terminates the token and is NEVER carried into the `cmd /C start` opener.
+    // `|`, `^`, backtick are not URL chars → the URL stops before them.
+    assert_eq!(
+        find_url_in_line(&chars("http://x.io/a|whoami"), 8),
+        Some("http://x.io/a".to_string()),
+        "pipe terminates the URL token"
+    );
+    assert_eq!(
+        find_url_in_line(&chars("http://x.io/a^b"), 8),
+        Some("http://x.io/a".to_string()),
+        "caret terminates the URL token"
+    );
+    assert_eq!(
+        find_url_in_line(&chars("http://x.io/a`calc`"), 8),
+        Some("http://x.io/a".to_string()),
+        "backtick terminates the URL token"
+    );
+    // '&' IS a legitimate URL query separator and stays part of the token.
+    assert_eq!(
+        find_url_in_line(&chars("http://x.io/a?b=1&c=2"), 8),
+        Some("http://x.io/a?b=1&c=2".to_string()),
+        "ampersand is a valid query char and is kept"
+    );
+}
+
+#[test]
 fn bidi_ascii_row_skips_reorder() {
     let c = GColor::rgb(200, 200, 200);
     let row: Vec<(char, GColor)> = "hello -> world".chars().map(|ch| (ch, c)).collect();
