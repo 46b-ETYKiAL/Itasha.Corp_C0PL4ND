@@ -1010,3 +1010,26 @@ fn tint_rgba_parses_hex_and_appends_alpha() {
     assert_eq!(tint_rgba("nothex", 0), None);
     assert_eq!(tint_rgba("", 255), None);
 }
+
+#[test]
+fn theme_candidate_paths_prioritizes_the_config_dir() {
+    use std::path::{Path, PathBuf};
+    let cfg = Path::new("/cfg");
+    let exe = Path::new("/app");
+    let paths = theme_candidate_paths("nord", Some(cfg), Some(exe));
+    // User override (config dir) first, then cwd assets, then exe-adjacent assets.
+    assert_eq!(
+        paths,
+        vec![
+            PathBuf::from("/cfg/themes/nord.toml"),
+            PathBuf::from("assets/themes/nord.toml"),
+            PathBuf::from("/app/assets/themes/nord.toml"),
+        ],
+        "config-dir user theme must be the highest-priority candidate"
+    );
+    // With no config dir / no exe dir, only the cwd assets path remains.
+    assert_eq!(
+        theme_candidate_paths("nord", None, None),
+        vec![PathBuf::from("assets/themes/nord.toml")]
+    );
+}

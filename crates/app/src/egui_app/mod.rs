@@ -4641,19 +4641,38 @@ fn load_config_from(path: Option<std::path::PathBuf>) -> (c0pl4nd_core::Config, 
 /// themes dir (next to the binary or in the source tree during development),
 /// falling back to the built-in Itasha.Corp void theme when the file is absent.
 /// The terminal grid's glyph colours come from this theme — NOT egui Visuals.
-fn load_terminal_theme(config: &c0pl4nd_core::Config) -> c0pl4nd_core::Theme {
-    let mut candidates: Vec<std::path::PathBuf> =
-        vec![std::path::PathBuf::from("assets/themes").join(format!("{}.toml", config.theme))];
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            candidates.push(
-                parent
-                    .join("assets/themes")
-                    .join(format!("{}.toml", config.theme)),
-            );
-        }
+/// On-disk theme-file lookup order for a theme named `name`, highest priority
+/// first. The user's config-dir `themes/<name>.toml` comes FIRST so it overrides
+/// a built-in (and a shipped `assets/themes`) of the same name — the behavior the
+/// settings hint promises ("a user theme TOML under the config dir's themes
+/// folder overrides the built-in of the same name"). Pure so the ordering is
+/// unit-testable without touching the real filesystem.
+fn theme_candidate_paths(
+    name: &str,
+    config_dir: Option<&std::path::Path>,
+    exe_dir: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let file = format!("{name}.toml");
+    let mut candidates = Vec::new();
+    // 1. User override: <config dir>/themes/<name>.toml
+    if let Some(d) = config_dir {
+        candidates.push(d.join("themes").join(&file));
     }
-    for c in candidates {
+    // 2. Dev tree / current working dir: assets/themes/<name>.toml
+    candidates.push(std::path::PathBuf::from("assets/themes").join(&file));
+    // 3. Shipped next to the executable: <exe dir>/assets/themes/<name>.toml
+    if let Some(d) = exe_dir {
+        candidates.push(d.join("assets/themes").join(&file));
+    }
+    candidates
+}
+
+fn load_terminal_theme(config: &c0pl4nd_core::Config) -> c0pl4nd_core::Theme {
+    let config_path = c0pl4nd_core::Config::default_path();
+    let config_dir = config_path.as_deref().and_then(|p| p.parent());
+    let exe = std::env::current_exe().ok();
+    let exe_dir = exe.as_deref().and_then(|p| p.parent());
+    for c in theme_candidate_paths(&config.theme, config_dir, exe_dir) {
         if let Ok(t) = c0pl4nd_core::Theme::load_from(&c) {
             return t;
         }
