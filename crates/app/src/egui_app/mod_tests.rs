@@ -988,13 +988,18 @@ fn egui_key_to_logical_maps_keys_and_ctrl_chords() {
 }
 
 #[test]
-fn byte_to_col_counts_chars_to_the_byte_boundary() {
-    // 'é' is 2 bytes: byte 3 is the start of 'l', i.e. column 2.
+fn byte_to_col_counts_cell_width_to_the_byte_boundary() {
+    // 'é' is 2 bytes but a single-width cell: byte 3 (start of 'l') is column 2.
     assert_eq!(byte_to_col("héllo", 3), 2);
-    // '日' is 3 bytes: byte 3 is the start of '本', i.e. column 1.
-    assert_eq!(byte_to_col("日本", 3), 1);
-    // Past the end clamps to the char count.
+    // '日' is 3 bytes AND a WIDE (2-cell) glyph: byte 3 (start of '本') is cell
+    // column 2, not 1 — the renderer positions '本' two cells past '日', so a
+    // span/highlight must too. (This is the wide-glyph alignment fix.)
+    assert_eq!(byte_to_col("日本", 3), 2);
+    // A wide glyph mid-string: byte 4 is 'b' after "a日" → cells 1 (a) + 2 (日).
+    assert_eq!(byte_to_col("a日b", 4), 3);
+    // Past the end clamps to the total cell width.
     assert_eq!(byte_to_col("abc", 99), 3);
+    assert_eq!(byte_to_col("日本", 99), 4);
     assert_eq!(byte_to_col("", 0), 0);
     assert_eq!(byte_to_col("abc", 0), 0);
 }
