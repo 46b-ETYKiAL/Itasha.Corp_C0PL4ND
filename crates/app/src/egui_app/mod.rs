@@ -77,39 +77,31 @@ enum RowPass {
 /// job-construction cost — this cache does, and skips the cache lookup entirely
 /// on a hit. Cleared wholesale on a font re-install (the cached galleys reference
 /// the old font atlas).
-/// Cache key for one painted grid RUN: `(pane, row_idx, run_idx, pass)`.
-type GalleyKey = (PaneId, usize, usize, RowPass);
-
 #[derive(Default)]
 struct GalleyCache {
-    /// `(pane, row_idx, run_idx, pass) -> (content/style key, laid-out galley)`.
-    /// Keyed per RUN (not per row): the grid is painted one galley per colour run,
-    /// each positioned on its exact cell-column boundary so a wide (CJK/emoji)
-    /// glyph cannot shift the runs after it.
-    rows: HashMap<GalleyKey, (u64, std::sync::Arc<egui::Galley>)>,
-    /// Run keys touched THIS frame, so runs that scrolled off (a shrunk grid /
-    /// fewer runs on a changed row) are pruned and the map cannot grow unbounded.
-    seen_this_frame: HashSet<GalleyKey>,
+    /// `(pane, row_idx, pass) -> (content/style key, laid-out galley)`.
+    rows: HashMap<(PaneId, usize, RowPass), (u64, std::sync::Arc<egui::Galley>)>,
+    /// Row indices touched THIS frame, per pane, so rows that scrolled off (a
+    /// shrunk grid) are pruned and the map cannot grow without bound.
+    seen_this_frame: HashSet<(PaneId, usize, RowPass)>,
 }
 
 impl GalleyCache {
-    /// Lay out one grid row's colour RUN as a galley, reusing the cached galley
-    /// when the content/style `key` is unchanged. `build` constructs the
-    /// [`egui::text::LayoutJob`] on a miss (kept as a closure so the string
-    /// allocations only happen when the cache misses). Records the entry as seen
-    /// this frame for the end-of-frame prune.
-    #[allow(clippy::too_many_arguments)]
-    fn run_galley(
+    /// Lay out one grid row's colour runs as a single galley, reusing the cached
+    /// galley when the content/style `key` is unchanged. `build` constructs the
+    /// [`egui::text::LayoutJob`] on a miss (kept as a closure so the per-run
+    /// string allocations only happen when the cache misses). Records the entry
+    /// as seen this frame for the end-of-frame prune.
+    fn row_galley(
         &mut self,
         painter: &egui::Painter,
         pane: PaneId,
         row_idx: usize,
-        run_idx: usize,
         pass: RowPass,
         key: u64,
         build: impl FnOnce() -> egui::text::LayoutJob,
     ) -> std::sync::Arc<egui::Galley> {
-        let id = (pane, row_idx, run_idx, pass);
+        let id = (pane, row_idx, pass);
         self.seen_this_frame.insert(id);
         if let Some((cached_key, galley)) = self.rows.get(&id) {
             if *cached_key == key {
@@ -4203,20 +4195,16 @@ struct SearchHighlight<'a> {
     selected: usize,
 }
 
-/// The byte offset `byte` within `line` converted to a terminal CELL column.
-/// Each char contributes its cell width (2 for an East-Asian wide / fullwidth
-/// glyph, 1 otherwise) — NOT a flat char count — so a span before/after a wide
-/// glyph lands on the same cell column the grid renderer positions that glyph at.
-/// The core matcher returns BYTE spans (`str::find` / `Regex::find` offsets);
-/// a multi-byte OR wide glyph before the match would otherwise mis-count the
-/// column. Clamps to the line length so a stale span (the grid scrolled since the
-/// match was computed) can never index past the row.
+/// The byte offset `byte` within `line` converted to a CHARACTER column (the
+/// terminal grid is monospace, so one char == one cell). The core matcher
+/// returns BYTE spans (`str::find` / `Regex::find` offsets); a multi-byte glyph
+/// before the match would otherwise over-count the column if bytes were used
+/// directly. Clamps to the line length so a stale span (the grid scrolled since
+/// the match was computed) can never index past the row.
 fn byte_to_col(line: &str, byte: usize) -> usize {
     let b = byte.min(line.len());
-    line.char_indices()
-        .take_while(|(i, _)| *i < b)
-        .map(|(_, c)| pane_term::cell_render_width(c))
-        .sum()
+    // Count chars up to the byte boundary; `char_indices` walks char starts.
+    line.char_indices().take_while(|(i, _)| *i < b).count()
 }
 
 /// Map a pointer position (POINTS, in screen space) to the `(row, col)` grid
@@ -4672,72 +4660,71 @@ fn paint_grid_native(
     // Folded into each row's cache key so a font-size or theme change relays the
     // rows (a font FAMILY change clears the whole cache via `clear()`).
     let style_key = row_style_key(font_size, default_fg);
-    let default_fg32 = egui::Color32::from_rgb(default_fg.0, default_fg.1, default_fg.2);
     for (row_idx, runs) in rows.iter().enumerate() {
-        let row_y = origin.y + row_idx as f32 * ch;
-        // Paint each colour run as its OWN galley positioned at its exact cell-
-        // column x (`origin.x + col_cells * cw`). `grid_rows` splits runs at every
-        // wide (width-2) glyph and skips its continuation spacer, so a wide glyph
-        // is a standalone run; positioning each run on a cell boundary means a
-        // wide glyph (whose CJK-fallback advance is NOT exactly 2 cell widths)
-        // cannot shift the runs that follow it. For an all-single-width row this
-        // is visually identical to one combined galley (each run already begins at
-        // its natural cell offset). `col_cells` walks in CELL units, not chars.
-        let mut col_cells: usize = 0;
-        for (run_idx, run) in runs.iter().enumerate() {
-            let text = &run.0;
-            if text.is_empty() {
-                continue;
-            }
-            let run_origin = egui::pos2(origin.x + col_cells as f32 * cw, row_y);
-            // Per-run cache key: the run's own text+colour folded with the style
-            // bits (a one-element slice reuses the existing row hashing).
-            let run_key = row_content_key(std::slice::from_ref(run), style_key);
-            // --- chromatic aberration (research §2 + §2(b) edge-weighting):
-            // re-draw the run's glyphs as PURE-CHANNEL ghosts at ±offset BEHIND
-            // the crisp pass — a pure-red copy shifted left and a pure-blue copy
-            // shifted right, so only the un-occluded fringe spills past the glyph
-            // edge as an authentic additive RGB split. The offset is EDGE-WEIGHTED
-            // by the row's vertical position (CRT lens falloff). Cached per pass.
-            if ghost_offset > 0.0 {
-                let off =
-                    chromatic_edge_weighted_offset(ghost_offset, row_y, rect.top(), rect.bottom());
-                let red = egui::Color32::from_rgba_unmultiplied(255, 0, 0, ghost_alpha);
-                let red_galley = galley_cache.run_galley(
-                    painter,
-                    pane_id,
-                    row_idx,
-                    run_idx,
-                    RowPass::GhostRed,
-                    run_key ^ (u64::from(ghost_alpha) << 8 | 0x01),
-                    || build_row_job(std::slice::from_ref(run), &font, Some(red)),
-                );
-                painter.galley(run_origin + egui::vec2(-off, 0.0), red_galley, default_fg32);
-                let blue = egui::Color32::from_rgba_unmultiplied(0, 0, 255, ghost_alpha);
-                let blue_galley = galley_cache.run_galley(
-                    painter,
-                    pane_id,
-                    row_idx,
-                    run_idx,
-                    RowPass::GhostBlue,
-                    run_key ^ (u64::from(ghost_alpha) << 8 | 0x02),
-                    || build_row_job(std::slice::from_ref(run), &font, Some(blue)),
-                );
-                painter.galley(run_origin + egui::vec2(off, 0.0), blue_galley, default_fg32);
-            }
-            // Crisp main pass in the run's real colour, on top of any ghosts.
-            let main_galley = galley_cache.run_galley(
+        let row_origin = egui::pos2(origin.x, origin.y + row_idx as f32 * ch);
+        // Content hash of this row's runs (text + per-cell colours), folded with
+        // the shared style bits — the cache key for the crisp pass. Computed once
+        // and reused for the ghost passes (which add the override colour).
+        let content_key = row_content_key(runs, style_key);
+        // --- chromatic aberration (research §2 + §2(b) edge-weighting): re-draw
+        // the row's glyphs as PURE-CHANNEL ghosts at ±offset BEHIND the crisp
+        // pass — a pure-red copy shifted left and a pure-blue copy shifted right,
+        // so only the un-occluded fringe spills past the glyph edge as an
+        // authentic additive RGB split (tinted galleys washed to grey under the
+        // glyph; pure channels pop). The offset is EDGE-WEIGHTED by the row's
+        // vertical position so the fringing is stronger toward the top/bottom of
+        // the pane and near-zero at the middle — the CRT lens falloff. The ghost
+        // galleys are cached separately per pass (the override colour + alpha
+        // fold into their key) so they too skip re-layout on an unchanged row.
+        if ghost_offset > 0.0 {
+            let row_y = row_origin.y;
+            let off =
+                chromatic_edge_weighted_offset(ghost_offset, row_y, rect.top(), rect.bottom());
+            // Pure red, shifted LEFT — drawn first (behind).
+            let red = egui::Color32::from_rgba_unmultiplied(255, 0, 0, ghost_alpha);
+            let red_galley = galley_cache.row_galley(
                 painter,
                 pane_id,
                 row_idx,
-                run_idx,
-                RowPass::Main,
-                run_key,
-                || build_row_job(std::slice::from_ref(run), &font, None),
+                RowPass::GhostRed,
+                content_key ^ (u64::from(ghost_alpha) << 8 | 0x01),
+                || build_row_job(runs, &font, Some(red)),
             );
-            painter.galley(run_origin, main_galley, default_fg32);
-            col_cells += pane_term::str_cell_width(text);
+            painter.galley(
+                row_origin + egui::vec2(-off, 0.0),
+                red_galley,
+                egui::Color32::from_rgb(default_fg.0, default_fg.1, default_fg.2),
+            );
+            // Pure blue, shifted RIGHT.
+            let blue = egui::Color32::from_rgba_unmultiplied(0, 0, 255, ghost_alpha);
+            let blue_galley = galley_cache.row_galley(
+                painter,
+                pane_id,
+                row_idx,
+                RowPass::GhostBlue,
+                content_key ^ (u64::from(ghost_alpha) << 8 | 0x02),
+                || build_row_job(runs, &font, Some(blue)),
+            );
+            painter.galley(
+                row_origin + egui::vec2(off, 0.0),
+                blue_galley,
+                egui::Color32::from_rgb(default_fg.0, default_fg.1, default_fg.2),
+            );
         }
+        // Crisp main pass in the runs' real colours, on top of any ghosts.
+        let main_galley = galley_cache.row_galley(
+            painter,
+            pane_id,
+            row_idx,
+            RowPass::Main,
+            content_key,
+            || build_row_job(runs, &font, None),
+        );
+        painter.galley(
+            row_origin,
+            main_galley,
+            egui::Color32::from_rgb(default_fg.0, default_fg.1, default_fg.2),
+        );
     }
 
     // --- terminal cursor ---

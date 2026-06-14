@@ -36,72 +36,6 @@ use c0pl4nd_core::{Session, Theme};
 /// free of any glyphon/egui dependency (so it stays headlessly testable).
 pub type ColorRun = (String, (u8, u8, u8));
 
-/// The number of terminal CELLS a glyph occupies: 2 for an East-Asian wide /
-/// fullwidth glyph (and wide emoji), 1 otherwise. Mirrors the core VT layer's
-/// own `UnicodeWidthChar::width(c).max(1)` cell allocation (`term.rs` `print`),
-/// so the renderer's column accounting agrees with how the grid stored the cells.
-pub fn cell_render_width(c: char) -> usize {
-    use unicode_width::UnicodeWidthChar;
-    if c.width().unwrap_or(1) >= 2 {
-        2
-    } else {
-        1
-    }
-}
-
-/// The total terminal CELL width of a string — the sum of each char's
-/// [`cell_render_width`]. Used by the renderer to advance the cell-column cursor
-/// past a painted run (wide glyphs count as 2 cells).
-pub fn str_cell_width(s: &str) -> usize {
-    s.chars().map(cell_render_width).sum()
-}
-
-/// Build one visible row's [`ColorRun`]s from its cells, breaking a run on a
-/// colour change AND at every WIDE (width-2) glyph, and SKIPPING the blank
-/// continuation spacer the core writes after a wide glyph. A wide glyph becomes
-/// its own single-char run so the renderer can position it (and everything after
-/// it) on exact cell boundaries — a single proportional galley would otherwise
-/// drift, because the CJK fallback font's advance is not exactly two cell widths.
-/// Pure (colour resolution injected) so the wide-split + spacer-skip is unit-
-/// testable without a live terminal.
-fn build_color_runs(
-    cells: &[c0pl4nd_core::Cell],
-    cols: usize,
-    default_cell: &c0pl4nd_core::Cell,
-    mut color_of: impl FnMut(&c0pl4nd_core::Cell) -> (u8, u8, u8),
-) -> Vec<ColorRun> {
-    let mut runs: Vec<ColorRun> = Vec::new();
-    let mut run = String::new();
-    let mut run_color: Option<(u8, u8, u8)> = None;
-    let mut col = 0;
-    while col < cols {
-        let cell = cells.get(col).unwrap_or(default_cell);
-        let fg = color_of(cell);
-        if cell_render_width(cell.c) >= 2 {
-            // Flush any pending single-width run, emit the wide glyph standalone,
-            // and skip its trailing continuation spacer cell.
-            if let Some(pc) = run_color.take() {
-                runs.push((std::mem::take(&mut run), pc));
-            }
-            runs.push((cell.c.to_string(), fg));
-            col += 2;
-            continue;
-        }
-        if run_color != Some(fg) {
-            if let Some(pc) = run_color.take() {
-                runs.push((std::mem::take(&mut run), pc));
-            }
-            run_color = Some(fg);
-        }
-        run.push(cell.c);
-        col += 1;
-    }
-    if let Some(pc) = run_color {
-        runs.push((run, pc));
-    }
-    runs
-}
-
 /// Damage-gated cache of the visible grid as per-row colour runs (the output of
 /// [`PaneTerm::grid_rows`]). The renderer calls `grid_rows` every frame; this
 /// cache lets an UNCHANGED pane (the blinking-cursor / idle-effect case) skip the
@@ -956,9 +890,23 @@ impl PaneTerm {
         let default_cell = c0pl4nd_core::Cell::default();
         let mut rows_out: Vec<Vec<ColorRun>> = Vec::with_capacity(grid_rows);
         guard.for_visible_rows(|_, row| {
-            let mut runs = build_color_runs(row, cols, &default_cell, |cell| {
-                self.theme.cell_colors(cell, default_fg, default_bg).0
-            });
+            let mut runs: Vec<ColorRun> = Vec::new();
+            let mut run = String::new();
+            let mut run_color: Option<(u8, u8, u8)> = None;
+            for col in 0..cols {
+                let cell = row.get(col).unwrap_or(&default_cell);
+                let (fg, _bg) = self.theme.cell_colors(cell, default_fg, default_bg);
+                if run_color != Some(fg) {
+                    if let Some(pc) = run_color.take() {
+                        runs.push((std::mem::take(&mut run), pc));
+                    }
+                    run_color = Some(fg);
+                }
+                run.push(cell.c);
+            }
+            if let Some(pc) = run_color {
+                runs.push((run, pc));
+            }
             // BiDi (F3-2): reorder this row's logical-order runs into VISUAL
             // order for right-to-left scripts (Arabic/Hebrew). The fast path
             // returns the LTR-only row UNCHANGED (zero cost); only a row that
@@ -1049,70 +997,6 @@ mod tests {
 
     fn void_theme() -> Theme {
         Theme::builtin_void()
-    }
-
-    #[test]
-    fn cell_render_width_is_two_for_wide_glyphs() {
-        assert_eq!(cell_render_width('a'), 1);
-        assert_eq!(cell_render_width('ｱ'), 1); // halfwidth katakana
-        assert_eq!(cell_render_width('漢'), 2); // CJK ideograph
-        assert_eq!(cell_render_width('Ａ'), 2); // fullwidth Latin
-        assert_eq!(cell_render_width('😀'), 2); // wide emoji
-    }
-
-    #[test]
-    fn str_cell_width_sums_cell_widths() {
-        assert_eq!(str_cell_width("abc"), 3);
-        assert_eq!(str_cell_width("a漢b"), 4); // 1 + 2 + 1
-        assert_eq!(str_cell_width("漢字"), 4);
-        assert_eq!(str_cell_width(""), 0);
-    }
-
-    #[test]
-    fn build_color_runs_splits_wide_glyphs_and_skips_the_continuation_spacer() {
-        use c0pl4nd_core::Cell;
-        let c = |ch: char| Cell {
-            c: ch,
-            ..Cell::default()
-        };
-        // Grid: 'a', '漢' (wide), ' ' (continuation spacer the core wrote), 'b'.
-        let cells = vec![c('a'), c('漢'), c(' '), c('b')];
-        let runs = build_color_runs(&cells, 4, &Cell::default(), |_| (1, 2, 3));
-        // The wide glyph is its OWN run and the spacer is NOT emitted, so the run
-        // text never double-counts the wide glyph's width.
-        assert_eq!(
-            runs,
-            vec![
-                ("a".to_string(), (1, 2, 3)),
-                ("漢".to_string(), (1, 2, 3)),
-                ("b".to_string(), (1, 2, 3)),
-            ]
-        );
-    }
-
-    #[test]
-    fn build_color_runs_breaks_runs_on_colour_change() {
-        use c0pl4nd_core::Cell;
-        let c = |ch: char| Cell {
-            c: ch,
-            ..Cell::default()
-        };
-        let cells = vec![c('a'), c('b'), c('c')];
-        // Colour by char: a,b red; c green.
-        let runs = build_color_runs(&cells, 3, &Cell::default(), |cell| {
-            if cell.c == 'c' {
-                (0, 255, 0)
-            } else {
-                (255, 0, 0)
-            }
-        });
-        assert_eq!(
-            runs,
-            vec![
-                ("ab".to_string(), (255, 0, 0)),
-                ("c".to_string(), (0, 255, 0))
-            ]
-        );
     }
 
     /// A theme change must reach a live pane's rendered colours. The pane holds
