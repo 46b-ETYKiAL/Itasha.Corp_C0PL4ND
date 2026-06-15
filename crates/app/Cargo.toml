@@ -96,7 +96,7 @@ window-vibrancy.workspace = true
 # (`async-std` is its self-contained runtime; `common-controls-v6` selects the
 # modern Win32 dialog). Windows links its native backend unconditionally.
 # Exact-pinned per dependency-management.md (production). MIT/Apache-2.0.
-rfd = { version = "=0.15.4", default-features = false, features = ["xdg-portal", "async-std", "common-controls-v6"] }
+rfd = { version = "=0.16.0", default-features = false, features = ["xdg-portal", "async-std", "common-controls-v6"] }
 # Global allocator. The system allocator is the canonical egui-native-slowness
 # bottleneck (emilk/egui#5587); mimalloc restores headroom under the per-frame
 # grid-snapshot + paste/scroll allocation churn. Set as `#[global_allocator]` in
