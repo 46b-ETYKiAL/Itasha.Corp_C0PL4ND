@@ -3,3 +3,23 @@ corpus/
 artifacts/
 coverage/
 /Cargo.lock
+
+# Seed corpora are committed so each campaign starts from meaningful inputs.
+# The bulk corpus (fuzzer-grown) stays ignored above; these curated seed dirs
+# are tracked. Force-added with `git add -f` and kept here for clarity.
+!corpus/config_toml/
+!corpus/config_toml/**
+!corpus/itermcolors/
+!corpus/itermcolors/**
+!corpus/osc/
+!corpus/osc/**
+!corpus/vt_parser/
+!corpus/vt_parser/**
+!corpus/state_json/
+!corpus/state_json/**
+!corpus/fuzz_sixel/
+!corpus/fuzz_sixel/**
+!corpus/fuzz_kitty/
+!corpus/fuzz_kitty/**
+!corpus/fuzz_archive/
+!corpus/fuzz_archive/**
