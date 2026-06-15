@@ -108,6 +108,18 @@ pub fn row_glyph_cells(runs: &[ColorRun]) -> Vec<(char, (u8, u8, u8), usize)> {
 /// at its exact cell-column, so this keeps the run text free of the spacer's
 /// double-counted width. Pure (colour resolution injected) so the wide-split +
 /// spacer-skip is unit-testable without a live terminal.
+///
+/// KNOWN LIMITATION — combining marks: only each cell's BASE char (`cell.c`) is
+/// emitted; the core stores combining marks (e.g. the U+0301 in a decomposed
+/// `é`) in a parallel side-table (`Grid::grapheme_at`), and they are dropped
+/// here. This is consistent with `Grid::to_text` (copy drops them too), so the
+/// rendered and copied text agree. Compositing them would require this pipeline
+/// to carry the full grapheme cluster through [`ColorRun`] AND egui's text
+/// layout to shape base+mark into one glyph — egui does no HarfBuzz-grade
+/// shaping, so a naive plumb-through can render a floating accent rather than a
+/// combined glyph. That visual outcome cannot be verified in a headless build,
+/// so it is deliberately NOT done blind here (see the `é` conformance case in
+/// `crates/core/tests/vt_conformance.rs`, which pins the core's side-table model).
 fn build_color_runs(
     cells: &[c0pl4nd_core::Cell],
     cols: usize,
