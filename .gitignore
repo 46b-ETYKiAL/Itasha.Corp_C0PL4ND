@@ -15,3 +15,6 @@ egui-app.png
 egui-*.png
 # Stale-by-rename proptest seeds are noise; a real regression is pinned in the test itself.
 *.proptest-regressions
+
+# cargo-mutants run output (transient local mutation-testing artifacts).
+mutants.out/
