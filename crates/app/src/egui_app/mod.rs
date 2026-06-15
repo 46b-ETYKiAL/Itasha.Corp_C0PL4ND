@@ -4708,48 +4708,41 @@ fn paint_grid_native(
     // count to the non-blank glyphs actually on screen.
     for (row_idx, runs) in rows.iter().enumerate() {
         let row_y = origin.y + row_idx as f32 * ch;
-        let mut col_cells: usize = 0;
-        for (text, rgb) in runs.iter() {
-            for c in text.chars() {
-                let w = pane_term::cell_render_width(c);
-                if c != ' ' {
-                    let cell_origin = egui::pos2(origin.x + col_cells as f32 * cw, row_y);
-                    // --- chromatic aberration (CRT effect, off by default): pure-
-                    // channel ghosts at ±offset BEHIND the crisp glyph (red left,
-                    // blue right), edge-weighted by the row's vertical position.
-                    if ghost_offset > 0.0 {
-                        let off = chromatic_edge_weighted_offset(
-                            ghost_offset,
-                            row_y,
-                            rect.top(),
-                            rect.bottom(),
-                        );
-                        let red = egui::Color32::from_rgba_unmultiplied(255, 0, 0, ghost_alpha);
-                        let red_g = galley_cache.glyph(
-                            painter,
-                            glyph_cache_key(c, (ghost_alpha, 0, 1), RowPass::GhostRed, style_key),
-                            || build_glyph_job(c, &font, red),
-                        );
-                        painter.galley(cell_origin + egui::vec2(-off, 0.0), red_g, default_fg32);
-                        let blue = egui::Color32::from_rgba_unmultiplied(0, 0, 255, ghost_alpha);
-                        let blue_g = galley_cache.glyph(
-                            painter,
-                            glyph_cache_key(c, (ghost_alpha, 0, 2), RowPass::GhostBlue, style_key),
-                            || build_glyph_job(c, &font, blue),
-                        );
-                        painter.galley(cell_origin + egui::vec2(off, 0.0), blue_g, default_fg32);
-                    }
-                    // Crisp main pass in the cell's real colour, on top of ghosts.
-                    let color = egui::Color32::from_rgb(rgb.0, rgb.1, rgb.2);
-                    let main_g = galley_cache.glyph(
-                        painter,
-                        glyph_cache_key(c, *rgb, RowPass::Main, style_key),
-                        || build_glyph_job(c, &font, color),
-                    );
-                    painter.galley(cell_origin, main_g, default_fg32);
-                }
-                col_cells += w;
+        // `row_glyph_cells` is the single source of truth for per-cell X: each
+        // painted glyph paired with its grid cell column (wide glyphs advance 2,
+        // blanks skipped). Positions are COMPUTED from the cell column, never
+        // accumulated from glyph advances — see its doc + unit tests.
+        for (c, rgb, col_cells) in pane_term::row_glyph_cells(runs) {
+            let cell_origin = egui::pos2(origin.x + col_cells as f32 * cw, row_y);
+            // --- chromatic aberration (CRT effect, off by default): pure-
+            // channel ghosts at ±offset BEHIND the crisp glyph (red left,
+            // blue right), edge-weighted by the row's vertical position.
+            if ghost_offset > 0.0 {
+                let off =
+                    chromatic_edge_weighted_offset(ghost_offset, row_y, rect.top(), rect.bottom());
+                let red = egui::Color32::from_rgba_unmultiplied(255, 0, 0, ghost_alpha);
+                let red_g = galley_cache.glyph(
+                    painter,
+                    glyph_cache_key(c, (ghost_alpha, 0, 1), RowPass::GhostRed, style_key),
+                    || build_glyph_job(c, &font, red),
+                );
+                painter.galley(cell_origin + egui::vec2(-off, 0.0), red_g, default_fg32);
+                let blue = egui::Color32::from_rgba_unmultiplied(0, 0, 255, ghost_alpha);
+                let blue_g = galley_cache.glyph(
+                    painter,
+                    glyph_cache_key(c, (ghost_alpha, 0, 2), RowPass::GhostBlue, style_key),
+                    || build_glyph_job(c, &font, blue),
+                );
+                painter.galley(cell_origin + egui::vec2(off, 0.0), blue_g, default_fg32);
             }
+            // Crisp main pass in the cell's real colour, on top of ghosts.
+            let color = egui::Color32::from_rgb(rgb.0, rgb.1, rgb.2);
+            let main_g = galley_cache.glyph(
+                painter,
+                glyph_cache_key(c, rgb, RowPass::Main, style_key),
+                || build_glyph_job(c, &font, color),
+            );
+            painter.galley(cell_origin, main_g, default_fg32);
         }
     }
 

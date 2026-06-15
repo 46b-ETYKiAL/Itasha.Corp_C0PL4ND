@@ -75,6 +75,32 @@ fn copy_row_text(row: &[c0pl4nd_core::Cell], lo: usize, hi: usize) -> String {
     line.trim_end().to_string()
 }
 
+/// For one row's [`ColorRun`]s, the painted glyphs as `(char, colour, cell_col)`
+/// — each NON-blank glyph paired with the grid CELL column it is painted at.
+/// `cell_col` advances by [`cell_render_width`] per char, so a WIDE (width-2)
+/// glyph shifts every following glyph by two cells; blank cells are skipped
+/// (their background is painted separately) but still advance the column.
+///
+/// This is the SINGLE SOURCE OF TRUTH for per-cell glyph X positions: the
+/// renderer paints each returned glyph at `origin.x + cell_col * cw`, so the
+/// layout is font-advance-independent (a wide or fallback glyph can never shift
+/// another cell — the failure mode that reverted the per-run approach). Pulling
+/// it out as a pure function makes wide-glyph alignment unit-testable WITHOUT a
+/// live display.
+pub fn row_glyph_cells(runs: &[ColorRun]) -> Vec<(char, (u8, u8, u8), usize)> {
+    let mut out = Vec::new();
+    let mut col = 0usize;
+    for (text, rgb) in runs {
+        for c in text.chars() {
+            if c != ' ' {
+                out.push((c, *rgb, col));
+            }
+            col += cell_render_width(c);
+        }
+    }
+    out
+}
+
 /// Build one visible row's [`ColorRun`]s from its cells, breaking a run on a
 /// colour change AND at every WIDE (width-2) glyph, and SKIPPING the blank
 /// continuation spacer the core writes after a wide glyph (`term.rs` `print`).
@@ -1157,6 +1183,56 @@ mod tests {
         // whitespace is trimmed.
         let row = vec![c('a'), c(' '), c('b'), c(' '), c(' ')];
         assert_eq!(copy_row_text(&row, 0, 4), "a b");
+    }
+
+    #[test]
+    fn row_glyph_cells_places_wide_glyphs_at_correct_cells() {
+        // Runs as build_color_runs produces them (the wide glyph is its own run).
+        // 'a' at cell 0; '漢' (width 2) at cell 1; 'b' at cell 3 — the wide glyph
+        // shifts 'b' by two cells. THIS is the property that makes CJK/emoji
+        // render cell-accurately; it is verified here without a live display.
+        let runs = vec![
+            ("a".to_string(), (1, 1, 1)),
+            ("漢".to_string(), (2, 2, 2)),
+            ("b".to_string(), (3, 3, 3)),
+        ];
+        assert_eq!(
+            row_glyph_cells(&runs),
+            vec![
+                ('a', (1, 1, 1), 0),
+                ('漢', (2, 2, 2), 1),
+                ('b', (3, 3, 3), 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn row_glyph_cells_skips_blanks_but_still_advances_the_column() {
+        // A blank is not painted (background is drawn separately) but still
+        // advances the cell column, so 'b' lands at cell 2.
+        let runs = vec![("a b".to_string(), (9, 9, 9))];
+        assert_eq!(
+            row_glyph_cells(&runs),
+            vec![('a', (9, 9, 9), 0), ('b', (9, 9, 9), 2)]
+        );
+    }
+
+    #[test]
+    fn row_glyph_cells_handles_two_adjacent_wide_glyphs() {
+        let runs = vec![
+            ("漢".to_string(), (1, 1, 1)),
+            ("字".to_string(), (2, 2, 2)),
+            ("x".to_string(), (3, 3, 3)),
+        ];
+        // 漢@0, 字@2 (after the first wide glyph), x@4 (after the second).
+        assert_eq!(
+            row_glyph_cells(&runs),
+            vec![
+                ('漢', (1, 1, 1), 0),
+                ('字', (2, 2, 2), 2),
+                ('x', (3, 3, 3), 4)
+            ]
+        );
     }
 
     /// A theme change must reach a live pane's rendered colours. The pane holds
