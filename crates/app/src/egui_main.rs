@@ -163,6 +163,9 @@ fn main() -> eframe::Result<()> {
                         let _ = tx.send(notice);
                         ctx.request_repaint(); // wake the UI to show the toast
                     }
+                    // Record the attempt (success OR failure) so the interval
+                    // throttle suppresses the next launch's check until due.
+                    update::record_check_now();
                 });
                 app.attach_update_check(rx);
             }
@@ -181,18 +184,21 @@ fn main() -> eframe::Result<()> {
 /// (`notify`) behaviour as one whose config has already been written — no
 /// special-cased divergence.
 fn launch_check_config() -> (bool, String) {
-    c0pl4nd_core::Config::default_path()
+    // The configured update settings (from the persisted config, or the canonical
+    // default when no config exists yet). A check runs only when the mode opts in
+    // (`notify`/`auto` or the legacy flag) AND the interval throttle says it is due
+    // — so the default `notify` mode does not hit the GitHub API on every launch.
+    let update = c0pl4nd_core::Config::default_path()
         .filter(|p| p.exists())
         .and_then(|p| {
             std::fs::read_to_string(&p)
                 .ok()
                 .and_then(|s| c0pl4nd_core::Config::from_toml(&s, &p).ok())
         })
-        .map(|c| (c.update.checks_on_launch(), c.update.channel))
-        .unwrap_or_else(|| {
-            let u = c0pl4nd_core::Config::default().update;
-            (u.checks_on_launch(), u.channel)
-        })
+        .map(|c| c.update)
+        .unwrap_or_else(|| c0pl4nd_core::Config::default().update);
+    let should_check = update.checks_on_launch() && update::check_due(update.check_interval_hours);
+    (should_check, update.channel)
 }
 
 /// Whether the persisted config has window transparency enabled — read at launch
