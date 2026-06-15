@@ -48,6 +48,12 @@ zeroize = "=1.8.2"
 [dev-dependencies]
 toml.workspace = true
 criterion = { version = "0.8", default-features = false }
+# Property-based testing with automatic shrinking + a committed regression
+# corpus (`proptest-regressions/`). Replaces/augments the hand-rolled SplitMix64
+# harness in `tests/property_tests.rs`: failures shrink to a minimal input and
+# the failing seed is persisted so a fixed bug stays fixed. Dev-only — never in
+# the production graph. Pinned to the current stable 1.x line.
+proptest = "1"
 
 [[bench]]
 name = "throughput"
