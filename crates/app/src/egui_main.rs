@@ -146,13 +146,14 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             let mut app = egui_app::C0pl4ndApp::new(cc);
-            // Opt-in, local-first launch update check. The ONE network call runs
-            // on a background thread so startup never blocks; the app polls the
-            // channel each frame and surfaces a found update as a toast. Off by
-            // default — fires only for the network-on-launch update modes
-            // (`notify`/`auto`) OR the legacy `check_on_launch` flag. The Updates
-            // settings page owns the richer in-app download/install flow; this
-            // launch path is the lightweight "a newer version exists" notice.
+            // Launch update check. The ONE network call runs on a background
+            // thread so startup never blocks; the app polls the channel each
+            // frame and surfaces a found update as a toast. Runs by default —
+            // the default `notify` mode performs this on-launch check (as does
+            // `auto`), plus the legacy `check_on_launch` flag; `manual`/`off`
+            // suppress it. The check is throttled by `check_interval_hours`. The
+            // Updates settings page owns the richer in-app download/install
+            // flow; this launch path is the lightweight "newer version" notice.
             let (should_check, channel) = launch_check_config();
             if should_check {
                 let (tx, rx) = std::sync::mpsc::channel();
@@ -175,7 +176,10 @@ fn main() -> eframe::Result<()> {
 /// load path the `c0pl4nd update` CLI subcommand uses) so the decision honours
 /// the canonical `[update] mode` (`notify`/`auto` check on launch) as well as
 /// the legacy `check_on_launch` flag, without depending on the host app's
-/// accessor. Defaults to (false, "stable") when no config exists — local-first.
+/// accessor. When no config file exists yet (first-ever launch) the canonical
+/// [`UpdateConfig`] default is used, so a brand-new user gets the same default
+/// (`notify`) behaviour as one whose config has already been written — no
+/// special-cased divergence.
 fn launch_check_config() -> (bool, String) {
     c0pl4nd_core::Config::default_path()
         .filter(|p| p.exists())
@@ -185,7 +189,10 @@ fn launch_check_config() -> (bool, String) {
                 .and_then(|s| c0pl4nd_core::Config::from_toml(&s, &p).ok())
         })
         .map(|c| (c.update.checks_on_launch(), c.update.channel))
-        .unwrap_or_else(|| (false, "stable".to_string()))
+        .unwrap_or_else(|| {
+            let u = c0pl4nd_core::Config::default().update;
+            (u.checks_on_launch(), u.channel)
+        })
 }
 
 /// Whether the persisted config has window transparency enabled — read at launch

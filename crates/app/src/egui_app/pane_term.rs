@@ -49,6 +49,32 @@ pub fn cell_render_width(c: char) -> usize {
     }
 }
 
+/// Copy the visible characters of one display row between cell columns `lo..=hi`
+/// (inclusive), SKIPPING the blank continuation spacer the core writes after a
+/// wide (width-2) glyph. A cell is that spacer iff its PREVIOUS cell in the row
+/// is a width-2 glyph (`term.rs` `print` writes the glyph then one blank cell),
+/// so the check is a pure char-width lookback — it works for scrollback rows too
+/// (unlike the live-grid-only continuation bitset) and is correct even when the
+/// selection starts exactly on a spacer. This mirrors the per-cell renderer's
+/// wide-glyph handling so copied text matches what is drawn: no stray space is
+/// emitted around a CJK / emoji glyph. Trailing whitespace is trimmed.
+fn copy_row_text(row: &[c0pl4nd_core::Cell], lo: usize, hi: usize) -> String {
+    let mut line = String::new();
+    for c in lo..=hi {
+        if c > 0 {
+            if let Some(prev) = row.get(c - 1) {
+                if cell_render_width(prev.c) >= 2 {
+                    continue; // this cell is the wide glyph's spacer
+                }
+            }
+        }
+        if let Some(cell) = row.get(c) {
+            line.push(cell.c);
+        }
+    }
+    line.trim_end().to_string()
+}
+
 /// Build one visible row's [`ColorRun`]s from its cells, breaking a run on a
 /// colour change AND at every WIDE (width-2) glyph, and SKIPPING the blank
 /// continuation spacer the core writes after a wide glyph (`term.rs` `print`).
@@ -644,13 +670,7 @@ impl PaneTerm {
             } else {
                 width.saturating_sub(1)
             };
-            let mut line = String::new();
-            for c in lo..=hi {
-                if let Some(cell) = row.get(c) {
-                    line.push(cell.c);
-                }
-            }
-            out.push_str(line.trim_end());
+            out.push_str(&copy_row_text(row, lo, hi));
             if r != end.0 {
                 out.push('\n');
             }
@@ -1094,6 +1114,49 @@ mod tests {
                 ("c".to_string(), (0, 255, 0))
             ]
         );
+    }
+
+    #[test]
+    fn copy_row_text_skips_wide_glyph_spacers() {
+        use c0pl4nd_core::Cell;
+        let c = |ch: char| Cell {
+            c: ch,
+            ..Cell::default()
+        };
+        // Grid layout of "a漢b": 'a', '漢' (wide), ' ' (continuation spacer the
+        // core writes after the wide glyph), 'b'. Copying the whole row must
+        // yield "a漢b" with NO stray space from the spacer.
+        let row = vec![c('a'), c('漢'), c(' '), c('b')];
+        assert_eq!(copy_row_text(&row, 0, 3), "a漢b");
+        // Selecting only the wide glyph + its spacer copies just the glyph.
+        assert_eq!(copy_row_text(&row, 1, 2), "漢");
+    }
+
+    #[test]
+    fn copy_row_text_skips_spacer_even_when_selection_starts_on_it() {
+        use c0pl4nd_core::Cell;
+        let c = |ch: char| Cell {
+            c: ch,
+            ..Cell::default()
+        };
+        // Selection STARTS on the continuation spacer (index 2) of the wide
+        // glyph at index 1. The lookback inspects index 1 (a width-2 glyph) and
+        // recognises index 2 as the spacer, so no stray space is copied.
+        let row = vec![c('a'), c('漢'), c(' '), c('b')];
+        assert_eq!(copy_row_text(&row, 2, 3), "b");
+    }
+
+    #[test]
+    fn copy_row_text_keeps_real_spaces_and_trims_trailing() {
+        use c0pl4nd_core::Cell;
+        let c = |ch: char| Cell {
+            c: ch,
+            ..Cell::default()
+        };
+        // A genuine space (not preceded by a wide glyph) is kept; trailing
+        // whitespace is trimmed.
+        let row = vec![c('a'), c(' '), c('b'), c(' '), c(' ')];
+        assert_eq!(copy_row_text(&row, 0, 4), "a b");
     }
 
     /// A theme change must reach a live pane's rendered colours. The pane holds
