@@ -73,7 +73,7 @@ fontdb = "=0.23.0"
 # maintained; pass cargo-deny / cargo-audit.
 serde_json = "=1.0.150"                                   # parse the GitHub Releases API response (serde is already a dep above)
 semver = "=1.0.28"                                        # release version compare (tolerant leading `v`)
-sha2 = "=0.10.8"                                          # artifact checksum (catches corruption)
+sha2 = "=0.11.0"                                          # artifact checksum (catches corruption)
 minisign-verify = "=0.2.5"                                # ed25519 signature verify (catches tampering); zero-dep
 self-replace = "=1.5.0"                                   # atomic running-exe swap (Windows rename-aside)
 flate2 = "=1.1.9"                                         # gunzip the Unix `.tar.gz` release archive
