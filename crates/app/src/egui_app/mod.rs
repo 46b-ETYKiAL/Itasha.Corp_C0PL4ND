@@ -130,6 +130,14 @@ impl GalleyCache {
 /// Content cache key for one painted glyph: the char, its RGB colour, the pass
 /// (crisp / chromatic-ghost), and the shared per-frame style bits (font size +
 /// fallback fg). Two cells with the same glyph+colour+style share one galley.
+///
+/// INVARIANT: the key must capture EVERY input that changes the laid-out galley
+/// produced by [`build_glyph_job`]. Today that function renders only `char` +
+/// `font` (size via `style_key`) + `color` — SGR attributes (bold / italic /
+/// underline) are intentionally NOT rendered, so they are correctly absent here.
+/// If [`build_glyph_job`] is ever extended to honour `CellFlags`, those flag bits
+/// MUST be added to this key, or two visually-different cells (e.g. bold vs
+/// regular `a`) would collide on one cached galley.
 fn glyph_cache_key(c: char, rgb: (u8, u8, u8), pass: RowPass, style_key: u64) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
