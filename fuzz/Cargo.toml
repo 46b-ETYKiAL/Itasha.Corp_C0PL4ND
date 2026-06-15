@@ -105,6 +105,27 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "config_toml"
+path = "fuzz_targets/config_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "itermcolors"
+path = "fuzz_targets/itermcolors.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "osc"
+path = "fuzz_targets/osc.rs"
+test = false
+doc = false
+bench = false
+
 # Fuzz builds are release-with-debug; opt for crash-finding speed.
 [profile.release]
 debug = 1
