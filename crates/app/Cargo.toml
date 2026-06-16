@@ -73,12 +73,12 @@ fontdb = "=0.23.0"
 # maintained; pass cargo-deny / cargo-audit.
 serde_json = "=1.0.150"                                   # parse the GitHub Releases API response (serde is already a dep above)
 semver = "=1.0.28"                                        # release version compare (tolerant leading `v`)
-sha2 = "=0.10.8"                                          # artifact checksum (catches corruption)
+sha2 = "=0.11.0"                                          # artifact checksum (catches corruption)
 minisign-verify = "=0.2.5"                                # ed25519 signature verify (catches tampering); zero-dep
 self-replace = "=1.5.0"                                   # atomic running-exe swap (Windows rename-aside)
 flate2 = "=1.1.9"                                         # gunzip the Unix `.tar.gz` release archive
 tar = { version = "=0.4.46", default-features = false }   # untar the binary from the Unix archive
-zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }  # unzip the Windows `.zip` archive
+zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }  # unzip the Windows `.zip` archive
 tempfile = "=3.27.0"                                      # per-run unique 0700 staging dir for the verified download (defense-in-depth TOCTOU fix; already in the lock graph)
 unicode-width = "=0.2.2"                                  # East-Asian cell-width for cell-accurate grid layout (same version core pins; already in the lock graph)
 
@@ -97,12 +97,12 @@ window-vibrancy.workspace = true
 # (`async-std` is its self-contained runtime; `common-controls-v6` selects the
 # modern Win32 dialog). Windows links its native backend unconditionally.
 # Exact-pinned per dependency-management.md (production). MIT/Apache-2.0.
-rfd = { version = "=0.15.4", default-features = false, features = ["xdg-portal", "async-std", "common-controls-v6"] }
+rfd = { version = "=0.16.0", default-features = false, features = ["xdg-portal", "async-std", "common-controls-v6"] }
 # Global allocator. The system allocator is the canonical egui-native-slowness
 # bottleneck (emilk/egui#5587); mimalloc restores headroom under the per-frame
 # grid-snapshot + paste/scroll allocation churn. Set as `#[global_allocator]` in
 # both binary roots. Pure-Rust-friendly vendored C, no runtime deps.
-mimalloc = "=0.1.43"
+mimalloc = "=0.1.52"
 
 [dev-dependencies]
 # Headless egui UI tests (kittest = AccessKit-driven). State-assertion tests run
