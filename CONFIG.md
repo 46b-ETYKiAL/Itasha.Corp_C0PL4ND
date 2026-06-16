@@ -121,6 +121,28 @@ On launch, C0PL4ND shows a neofetch-style splash: a brand ASCII logo beside your
 startup_panel = true   # set false to launch straight to a clean prompt
 ```
 
+## Updates
+
+C0PL4ND can check whether a newer release exists. This is the **only** outbound
+network feature; the check is **read-only and sends zero identifiers** (see
+[PRIVACY.md](PRIVACY.md)). The default is `notify`.
+
+```toml
+[update]
+mode = "notify"          # off | notify | manual | auto
+check_interval_hours = 24 # min hours between on-launch checks (notify/auto)
+channel = "stable"        # release channel to track
+```
+
+- **`notify`** *(default)* — once per launch (at most once per
+  `check_interval_hours`) check GitHub Releases and show a passive toast if a
+  newer version exists. Never downloads or installs on its own.
+- **`manual`** — **no on-launch network**; check only when you press
+  "Check for updates" in Settings (or run `c0pl4nd update`).
+- **`off`** — never check, never touch the network for updates.
+- **`auto`** — like `notify`, but also downloads and applies a
+  cryptographically verified (SHA-256 + minisign) update when one is found.
+
 ## Keybindings
 
 C0PL4ND ships with sensible default keybindings (open the **command palette** to discover available actions and their current shortcuts). For a scannable table of every default binding, see **[docs/KEYBINDINGS.md](docs/KEYBINDINGS.md)**. You can override any binding here. Bindings are simple `key = action` entries; defaults you don't override stay active.
@@ -191,6 +213,11 @@ confirm_close_with_processes = true
 [effects]
 crt = false                   # CRT/scanline overlay — OFF by default
 scanline = 0.0                # 0.0 .. 1.0, used when crt = true
+
+[update]
+mode = "notify"               # off | notify | manual | auto (read-only check)
+check_interval_hours = 24     # min hours between on-launch checks
+channel = "stable"
 
 [keybindings]
 "ctrl+shift+t"   = "tab.new"
