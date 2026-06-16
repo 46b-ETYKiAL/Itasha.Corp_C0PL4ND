@@ -78,7 +78,7 @@ minisign-verify = "=0.2.5"                                # ed25519 signature ve
 self-replace = "=1.5.0"                                   # atomic running-exe swap (Windows rename-aside)
 flate2 = "=1.1.9"                                         # gunzip the Unix `.tar.gz` release archive
 tar = { version = "=0.4.46", default-features = false }   # untar the binary from the Unix archive
-zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }  # unzip the Windows `.zip` archive
+zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }  # unzip the Windows `.zip` archive
 tempfile = "=3.27.0"                                      # per-run unique 0700 staging dir for the verified download (defense-in-depth TOCTOU fix; already in the lock graph)
 unicode-width = "=0.2.2"                                  # East-Asian cell-width for cell-accurate grid layout (same version core pins; already in the lock graph)
 
