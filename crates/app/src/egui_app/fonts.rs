@@ -171,6 +171,17 @@ pub fn build_font_definitions(
             base.font_data
                 .insert(key.clone(), egui::FontData::from_owned(bytes).into());
             prepend_keys.push(key);
+            tracing::debug!(font = %name, "loaded configured monospace font face");
+        } else {
+            // Observability breadcrumb: a configured family/fallback that does
+            // not resolve degrades silently to the built-in font, which reads as
+            // "my font setting did nothing". Log it at warn so `C0PL4ND_LOG=warn`
+            // (the default) surfaces it without a debug build.
+            tracing::warn!(
+                font = %name,
+                "configured monospace font not found on this system; using the \
+                 built-in font (check the [font] family/fallback in config.toml)"
+            );
         }
     }
 
