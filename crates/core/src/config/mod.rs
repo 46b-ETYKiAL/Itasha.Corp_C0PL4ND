@@ -839,6 +839,24 @@ mod tests {
         assert!(c.validate().is_ok());
     }
 
+    /// Doc/behaviour parity guard: the default update mode is `notify`, which
+    /// means a fresh install DOES make a once-per-launch network version check.
+    /// This is a privacy-relevant default documented in PRIVACY.md / CHANGELOG.md
+    /// — if this ever changes, those docs MUST change too. Failing this test is a
+    /// signal that the documented default has silently drifted from the code.
+    #[test]
+    fn default_update_mode_is_notify_and_checks_on_launch() {
+        assert_eq!(UpdateMode::default(), UpdateMode::Notify);
+        let u = UpdateConfig::default();
+        assert_eq!(u.mode, UpdateMode::Notify);
+        assert!(
+            u.checks_on_launch(),
+            "the default `notify` mode performs an on-launch check — PRIVACY.md \
+             must say so"
+        );
+        assert_eq!(u.check_interval_hours, 24);
+    }
+
     #[test]
     fn partial_toml_fills_defaults() {
         let p = PathBuf::from("test.toml");

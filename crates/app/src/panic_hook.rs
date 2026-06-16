@@ -149,6 +149,18 @@ fn parse_crash_slot(name: &str) -> Option<u32> {
     (idx < MAX_CRASH_LOGS).then_some(idx)
 }
 
+/// Surface a FATAL STARTUP error that occurs before the egui window exists
+/// (e.g. GPU adapter/device init failure, which `eframe::run_native` returns as
+/// a clean `Err` — NOT a panic, so the panic hook never fires). A release GUI
+/// build has no console, so without this a user just sees the window never
+/// appear with zero explanation. Prints to stderr on every platform AND, on
+/// Windows, shows a modal `MessageBox`. Best-effort; never panics.
+pub fn show_startup_error(title: &str, body: &str) {
+    eprintln!("{title}: {body}");
+    #[cfg(windows)]
+    windows_msgbox::show_dialog(title, body);
+}
+
 /// Windows-only `MessageBoxW` crash notification.
 ///
 /// This is the second audited platform-FFI surface in this otherwise
@@ -169,11 +181,21 @@ mod windows_msgbox {
     /// inside the panic hook (before abort), so it must not itself panic; any
     /// failure is swallowed.
     pub fn show_crash_dialog(log_path: &Path) {
-        let title = to_wide("C0PL4ND crashed");
-        let body = to_wide(&format!(
-            "C0PL4ND crashed unexpectedly.\n\nA crash log was written to:\n{}",
-            log_path.display()
-        ));
+        show_dialog(
+            "C0PL4ND crashed",
+            &format!(
+                "C0PL4ND crashed unexpectedly.\n\nA crash log was written to:\n{}",
+                log_path.display()
+            ),
+        );
+    }
+
+    /// Show a modal error dialog with an arbitrary `title` + `body`. Must not
+    /// panic (callers run in pre-abort / pre-window contexts); any failure is
+    /// swallowed.
+    pub fn show_dialog(title: &str, body: &str) {
+        let title = to_wide(title);
+        let body = to_wide(body);
 
         // SAFETY: `MessageBoxW` is a user32 call taking an optional owner `HWND`
         // (we pass `None` for a top-level dialog), two NUL-terminated wide-string
@@ -182,7 +204,7 @@ mod windows_msgbox {
         // the `PCWSTR`s point at their first element. The call has no
         // memory-safety preconditions beyond valid NUL-terminated pointers,
         // which are satisfied here. The return value is ignored — a failed
-        // dialog must not block the in-flight abort.
+        // dialog must not block the caller.
         unsafe {
             MessageBoxW(
                 None,

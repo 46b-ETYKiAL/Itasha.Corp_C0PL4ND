@@ -1999,6 +1999,9 @@ impl C0pl4ndApp {
         );
         self.terms.remove(&pid);
         self.pinned.remove(&pid);
+        // A selection holds grid coordinates of a now-removed pane; drop it so it
+        // cannot paint against a different pane after the focus re-anchors below.
+        self.selection = None;
         // Re-anchor focus if the focused pane was closed.
         if grid::tile_of_pane(&self.grid_tree, self.focused_pane).is_none() {
             if let Some((p, _)) = self.pane_titles().first() {

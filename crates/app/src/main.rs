@@ -115,8 +115,23 @@ fn main() -> Result<()> {
         });
     }
 
-    // Windowed GPU mode is provided by the app-shell window module.
-    crate::run_gui(&config)
+    // Windowed GPU mode is provided by the app-shell window module. A GPU/window
+    // init failure returns a clean `Err` (not a panic), so surface it with a
+    // diagnostic + recovery hint before propagating — a release GUI build has no
+    // console and would otherwise show nothing. Mirrors the egui binary.
+    let result = crate::run_gui(&config);
+    if let Err(e) = &result {
+        panic_hook::show_startup_error(
+            "C0PL4ND failed to start",
+            &format!(
+                "C0PL4ND could not initialize its window or GPU:\n\n{e:#}\n\nIf this \
+                 looks like a GPU or graphics-driver problem, try relaunching with \
+                 the environment variable WGPU_BACKEND=dx12 (Windows) or \
+                 WGPU_BACKEND=gl (Linux).",
+            ),
+        );
+    }
+    result
 }
 
 mod diagnostics;

@@ -141,7 +141,7 @@ fn main() -> eframe::Result<()> {
     // is correct for an on-demand repainter.
     options.wgpu_options.desired_maximum_frame_latency = Some(1);
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "C0PL4ND",
         options,
         Box::new(|cc| {
@@ -171,7 +171,24 @@ fn main() -> eframe::Result<()> {
             }
             Ok(Box::new(app))
         }),
-    )
+    );
+
+    // A GPU adapter/device or window-init failure comes back as a clean `Err`
+    // (NOT a panic), so the panic hook never fires and a release GUI build — which
+    // has no console — would otherwise show nothing at all. Surface it with a
+    // diagnostic + a recovery hint before propagating the error.
+    if let Err(e) = &result {
+        panic_hook::show_startup_error(
+            "C0PL4ND failed to start",
+            &format!(
+                "C0PL4ND could not initialize its window or GPU:\n\n{e}\n\nIf this \
+                 looks like a GPU or graphics-driver problem, try relaunching with \
+                 the environment variable WGPU_BACKEND=dx12 (Windows) or \
+                 WGPU_BACKEND=gl (Linux).",
+            ),
+        );
+    }
+    result
 }
 
 /// Decide whether to run the lightweight on-launch update check and which
