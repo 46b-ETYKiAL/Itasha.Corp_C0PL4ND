@@ -62,49 +62,18 @@ fn host_allowed(host: &str) -> bool {
     host.eq_ignore_ascii_case("api.github.com")
 }
 
-/// Lowercased host of an `https://host[:port]/...` URL (strips userinfo + port).
-fn url_host(url: &str) -> Option<String> {
-    let after = url.split_once("://")?.1;
-    let authority = after.split(['/', '?', '#']).next()?;
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    let host = host_port.split(':').next()?;
-    if host.is_empty() {
-        return None;
-    }
-    Some(host.to_ascii_lowercase())
-}
-
-/// Refuse any URL that is not `https://` to an allow-listed host. Re-checked at
-/// every redirect hop by [`confined_api_get`].
+/// Refuse any URL that is not `https://` to an allow-listed host. The pure URL
+/// plumbing (scheme check, host extraction) is shared with the in-app updater
+/// via [`crate::net_confine`]; only the host allow-list ([`host_allowed`]) is
+/// caller-specific. Re-checked at every redirect hop by [`confined_api_get`].
 fn assert_confined(url: &str) -> Result<()> {
-    let https = url
-        .split_once("://")
-        .map(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
-        .unwrap_or(false);
-    if !https {
+    if !c0pl4nd_core::net_confine::is_https(url) {
         anyhow::bail!("refusing non-https update URL: {url}");
     }
-    match url_host(url) {
+    match c0pl4nd_core::net_confine::url_host(url) {
         Some(h) if host_allowed(&h) => Ok(()),
         Some(h) => anyhow::bail!("refusing update request to non-allowlisted host: {h}"),
         None => anyhow::bail!("malformed update URL (no host): {url}"),
-    }
-}
-
-/// Resolve a redirect `Location` against the current URL. Absolute targets pass
-/// through (their host is re-validated by the caller); origin-relative (`/path`)
-/// targets keep the current scheme+host; anything else is refused.
-fn resolve_redirect(base: &str, loc: &str) -> Result<String> {
-    if loc.contains("://") {
-        Ok(loc.to_string())
-    } else if let Some(rest) = loc.strip_prefix('/') {
-        let (scheme, after) = base
-            .split_once("://")
-            .with_context(|| format!("malformed base URL: {base}"))?;
-        let host = after.split(['/', '?', '#']).next().unwrap_or(after);
-        Ok(format!("{scheme}://{host}/{rest}"))
-    } else {
-        anyhow::bail!("unsupported relative redirect target: {loc}")
     }
 }
 
@@ -138,7 +107,8 @@ fn confined_api_get(url: &str) -> Result<String> {
             let loc = resp
                 .header("Location")
                 .with_context(|| format!("redirect {} without Location", resp.status()))?;
-            let next = resolve_redirect(&current, loc)?;
+            let next = c0pl4nd_core::net_confine::resolve_redirect(&current, loc)
+                .map_err(|e| anyhow::anyhow!("{e}: {loc}"))?;
             assert_confined(&next)?;
             current = next;
             continue;
@@ -430,38 +400,8 @@ mod tests {
         assert!(assert_confined("https:///releases").is_err());
     }
 
-    #[test]
-    fn url_host_strips_userinfo_and_port() {
-        assert_eq!(
-            url_host("https://api.github.com/x").as_deref(),
-            Some("api.github.com")
-        );
-        assert_eq!(
-            url_host("https://api.github.com:443/x").as_deref(),
-            Some("api.github.com")
-        );
-        assert_eq!(
-            url_host("https://user:pw@evil.example.com/x").as_deref(),
-            Some("evil.example.com")
-        );
-        assert_eq!(url_host("https:///x"), None);
-    }
-
-    #[test]
-    fn resolve_redirect_keeps_origin_for_relative_and_passes_absolute() {
-        // Origin-relative redirect keeps the current scheme + host.
-        assert_eq!(
-            resolve_redirect("https://api.github.com/a", "/b/c").unwrap(),
-            "https://api.github.com/b/c"
-        );
-        // Absolute target passes through (the caller re-validates its host).
-        assert_eq!(
-            resolve_redirect("https://api.github.com/a", "https://api.github.com/d").unwrap(),
-            "https://api.github.com/d"
-        );
-        // A scheme-relative / weird relative target is refused outright.
-        assert!(resolve_redirect("https://api.github.com/a", "b/c").is_err());
-    }
+    // `url_host` and `resolve_redirect` now live in `crate::net_confine` and are
+    // tested there; this module keeps only the allow-list-specific assertion.
 
     #[test]
     fn is_due_when_never_checked() {
