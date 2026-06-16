@@ -10,13 +10,13 @@
 //! (`toggle_search` / `recompute_search` / `search_cycle`) is exercised THROUGH
 //! `frame_tick`, exactly as the shipping binary runs it each frame:
 //!
-//! - **toggle**: Ctrl+F opens AND closes the overlay; Esc closes it.
+//! - **toggle**: Ctrl+Shift+F opens AND closes the overlay; Esc closes it.
 //! - **filter**: typing a query recomputes the match count over the focused
 //!   pane's grid text (the shared core matcher).
 //! - **toggles**: the Regex + Case option flags flip via keyboard-seeded state.
 //! - **cycle**: Enter / F3 step the selection forward (wrapping); Shift+F3 back.
 //!
-//! These tests are driven entirely by KEYBOARD (Ctrl+F, typed chars, nav keys)
+//! These tests are driven entirely by KEYBOARD (Ctrl+Shift+F, typed chars, nav keys)
 //! and assert the observable accessors — they never click a title-bar flow
 //! button, so the async-OSC-title flow-region race that destabilises click-based
 //! chrome tests does not apply here (see the team's effect-verified-retry note
@@ -49,7 +49,8 @@ fn harness(app: &RefCell<C0pl4ndApp>) -> Harness<'_> {
     h
 }
 
-/// Send the Ctrl+F find chord (real `Event::Key` with modifiers), then step.
+/// Send the Ctrl+Shift+F find chord (real `Event::Key` with modifiers), then
+/// step. (Plain Ctrl+F is deliberately left for the shell as `^F`.)
 fn press_find_chord(h: &mut Harness<'_>) {
     h.event(egui::Event::Key {
         key: egui::Key::F,
@@ -58,6 +59,7 @@ fn press_find_chord(h: &mut Harness<'_>) {
         repeat: false,
         modifiers: egui::Modifiers {
             ctrl: true,
+            shift: true,
             ..Default::default()
         },
     });

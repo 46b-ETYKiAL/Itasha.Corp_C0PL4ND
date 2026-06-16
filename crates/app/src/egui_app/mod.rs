@@ -2773,7 +2773,7 @@ impl C0pl4ndApp {
                         });
                 }
                 ui.separator();
-                ui.weak("↑/↓ select · Enter run · Esc close");
+                ui.weak("Up/Down select · Enter run · Esc close");
             });
 
         if let Some(i) = clicked {
@@ -2782,11 +2782,11 @@ impl C0pl4ndApp {
         }
     }
 
-    // ---- in-terminal find overlay (Ctrl+F) -------------------------------
+    // ---- in-terminal find overlay (Ctrl+Shift+F) -------------------------
     //
     // The overlay searches the FOCUSED pane's visible/scrollback grid text via
     // the shared core matcher (`c0pl4nd_core::search::find`). It is opened with
-    // Ctrl+F (handled in `frame_tick`), filters as you type, shows a live match
+    // Ctrl+Shift+F (handled in `frame_tick`), filters as you type, shows a live match
     // count, cycles matches with Enter / F3 / Shift+F3, and closes with Esc. The
     // Regex + Case toggles map onto `search::SearchOptions`. These methods are the
     // production logic `frame_tick` calls — the interaction tests drive them
@@ -2860,7 +2860,7 @@ impl C0pl4ndApp {
     }
 
     /// Whether the find overlay is currently open. Observation accessor for the
-    /// interaction tests (asserts Ctrl+F toggled it through the real frame loop).
+    /// interaction tests (asserts Ctrl+Shift+F toggled it through the real frame loop).
     #[allow(dead_code)]
     pub fn search_is_open(&self) -> bool {
         self.search_open
@@ -3244,21 +3244,22 @@ impl C0pl4ndApp {
             self.toggle_palette();
         }
 
-        // 0a') find overlay: Ctrl+F (Cmd+F on macOS) toggles it. The matching
-        //      key-press is removed from the event stream so it never reaches the
-        //      PTY — without this, on the close frame (overlay already open) the
-        //      `F` would fall through to `forward_input_to_focused` and be encoded
-        //      as the Ctrl+F control byte (0x06, the shell's forward-char). The
-        //      ctrl-OR-command match is done explicitly (not via `consume_key`) so
-        //      it is unambiguous on every platform — the same discipline the
-        //      palette chord uses above.
+        // 0a') find overlay: Ctrl+Shift+F (Cmd+Shift+F on macOS) toggles it —
+        //      matching the documented binding (KEYBINDINGS.md / config `search`)
+        //      and the palette's own Ctrl+Shift+P convention. Using the SHIFTED
+        //      chord deliberately leaves plain Ctrl+F free to reach the shell as
+        //      the Ctrl+F control byte (0x06, readline/emacs forward-char). The
+        //      matching key-press is removed from the event stream so it never
+        //      reaches the PTY. The ctrl-OR-command match is done explicitly (not
+        //      via `consume_key`) so it is unambiguous on every platform — the
+        //      same discipline the palette chord uses above.
         let toggle_search = ctx.input_mut(|i| {
             let mut found = false;
             i.events.retain(|ev| {
                 let hit = matches!(
                     ev,
                     egui::Event::Key { key: egui::Key::F, pressed: true, modifiers, .. }
-                    if (modifiers.ctrl || modifiers.command) && !modifiers.shift && !modifiers.alt
+                    if modifiers.shift && (modifiers.ctrl || modifiers.command) && !modifiers.alt
                 );
                 found |= hit;
                 !hit

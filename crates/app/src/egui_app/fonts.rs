@@ -128,6 +128,31 @@ fn font_data_key(family: &str) -> String {
     format!("c0pl4nd-user-font::{}", family.trim().to_lowercase())
 }
 
+/// The platform's OS-bundled CJK fonts, tried in order as an implicit ultimate
+/// fallback by [`build_font_definitions`] so CJK (Chinese/Japanese/Korean) text
+/// renders out of the box — instead of tofu boxes — without shipping a multi-MB
+/// CJK font in the binary. Only the FIRST that resolves on the machine is loaded.
+fn os_cjk_fallback_fonts() -> &'static [&'static str] {
+    #[cfg(target_os = "windows")]
+    {
+        // Present on every Windows install: MS Gothic (JP monospace) first, then
+        // the SC / KR system faces so non-Japanese CJK also resolves.
+        &["MS Gothic", "Yu Gothic", "Microsoft YaHei", "Malgun Gothic"]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        &["Hiragino Sans", "Apple SD Gothic Neo", "PingFang SC"]
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        &[
+            "Noto Sans Mono CJK JP",
+            "Noto Sans CJK JP",
+            "Noto Sans CJK SC",
+        ]
+    }
+}
+
 /// Build the egui [`egui::FontDefinitions`] for the configured `family` +
 /// `fallbacks`, on top of `base` (which must already carry egui's defaults +
 /// the Phosphor icon families — i.e. the output of the chrome's base font
@@ -182,6 +207,27 @@ pub fn build_font_definitions(
                 "configured monospace font not found on this system; using the \
                  built-in font (check the [font] family/fallback in config.toml)"
             );
+        }
+    }
+
+    // Implicit OS CJK fallback: append the FIRST platform CJK font that resolves
+    // so Chinese/Japanese/Korean text renders out of the box using a face the OS
+    // already ships — instead of tofu boxes — WITHOUT bundling a multi-MB CJK
+    // font into the binary. It is loaded last, so it is the lowest-priority
+    // fallback (used only for glyphs the primary + user fallbacks lack), and at
+    // most ONE is loaded. The per-cell renderer places every wide glyph on its
+    // own two cells, so even a proportional CJK face aligns in the grid.
+    for cand in os_cjk_fallback_fonts() {
+        if wanted.iter().any(|w| w.eq_ignore_ascii_case(cand)) {
+            continue; // already attempted as a user-configured fallback
+        }
+        if let Some(bytes) = face_bytes_for_family(db, cand) {
+            let key = font_data_key(cand);
+            base.font_data
+                .insert(key.clone(), egui::FontData::from_owned(bytes).into());
+            prepend_keys.push(key);
+            tracing::debug!(font = %cand, "loaded OS CJK fallback font for grid coverage");
+            break;
         }
     }
 
