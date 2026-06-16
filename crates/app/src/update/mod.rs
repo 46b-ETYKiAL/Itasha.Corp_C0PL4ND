@@ -1,11 +1,13 @@
-//! Telemetry-free, opt-in update CHECK.
+//! Telemetry-free update CHECK.
 //!
-//! C0PL4ND never phones home on its own. The version check runs only when the
-//! user invokes `c0pl4nd update` or explicitly sets `[update] check_on_launch =
-//! true`. The single network surface is the **public GitHub Releases API** for
-//! this repository — unauthenticated, zero PII, no custom server, no shipped
-//! token. The check is offline-graceful: an unreachable API is reported as
-//! "could not check", never an error that blocks the app.
+//! The version check runs on launch under the default `notify` mode (and
+//! `auto`), when the user invokes `c0pl4nd update`, or when the legacy
+//! `[update] check_on_launch = true` flag is set; `manual`/`off` suppress it.
+//! The single network surface is the **public GitHub Releases API** for this
+//! repository — unauthenticated, zero PII, no custom server, no shipped token,
+//! reached over a host-confined https GET ([`confined_api_get`]). The check is
+//! offline-graceful: an unreachable API is reported as "could not check", never
+//! an error that blocks the app.
 //!
 //! Scope: this module CHECKS for a newer release and points the user at the
 //! download page. It does NOT download-and-apply a binary in place — that
@@ -27,6 +29,9 @@
 //! binaries — without forcing it onto the legacy winit `c0pl4nd-legacy` binary
 //! that also uses this CLI module.
 
+use std::io::Read;
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 
 /// Canonical public release repository. (The prior value `itasha-corp/c0pl4nd`
@@ -36,6 +41,87 @@ const REPO: &str = "46b-ETYKiAL/Itasha.Corp_C0PL4ND";
 /// `User-Agent` for the one API call. App name + version ONLY — no PII. The
 /// GitHub API rejects requests without a User-Agent, so this is mandatory.
 const USER_AGENT: &str = concat!("c0pl4nd-updater/", env!("CARGO_PKG_VERSION"));
+
+/// Largest Releases-API JSON body the check will read. A real `releases/latest`
+/// or `releases?per_page=20` response is far smaller; the cap stops a hostile or
+/// MITM'd endpoint from streaming an unbounded body that could OOM the process.
+const MAX_RELEASE_JSON_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Redirect hops followed MANUALLY, each re-confined to https + an allow-listed
+/// host. A normal GitHub REST response is a direct 200, so this is headroom.
+const MAX_REDIRECTS: usize = 4;
+
+/// The only host this version check may contact. It calls the GitHub REST API
+/// and nothing else, so the allow-list is exactly that host — a MITM'd or
+/// hostile redirect cannot point the request (and our `User-Agent`) at an
+/// arbitrary server. This mirrors the hardened `update_engine::net` allow-list;
+/// it is duplicated here rather than shared because this dependency-light module
+/// is ALSO compiled into the legacy `c0pl4nd-legacy` binary, which excludes the
+/// `update_engine`/eframe stack.
+fn host_allowed(host: &str) -> bool {
+    host.eq_ignore_ascii_case("api.github.com")
+}
+
+/// Refuse any URL that is not `https://` to an allow-listed host. The pure URL
+/// plumbing (scheme check, host extraction) is shared with the in-app updater
+/// via [`crate::net_confine`]; only the host allow-list ([`host_allowed`]) is
+/// caller-specific. Re-checked at every redirect hop by [`confined_api_get`].
+fn assert_confined(url: &str) -> Result<()> {
+    if !c0pl4nd_core::net_confine::is_https(url) {
+        anyhow::bail!("refusing non-https update URL: {url}");
+    }
+    match c0pl4nd_core::net_confine::url_host(url) {
+        Some(h) if host_allowed(&h) => Ok(()),
+        Some(h) => anyhow::bail!("refusing update request to non-allowlisted host: {h}"),
+        None => anyhow::bail!("malformed update URL (no host): {url}"),
+    }
+}
+
+/// Host-confined, redirect-controlled, size-capped GET of a GitHub REST URL.
+/// ureq's default agent follows up to 5 redirects to ARBITRARY hosts; this
+/// builds a `redirects(0)` agent and walks the chain itself, re-asserting https
+/// AND an allow-listed host at EVERY hop, then reads at most
+/// [`MAX_RELEASE_JSON_BYTES`]. Connect/read timeouts bound a hung launch thread.
+fn confined_api_get(url: &str) -> Result<String> {
+    assert_confined(url)?;
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(20))
+        .build();
+    let mut current = url.to_string();
+    for _ in 0..=MAX_REDIRECTS {
+        // With redirects(0) a 3xx returns Ok (status in 300..400); ureq still
+        // maps >=400 to Err(Status). Accept a 3xx from either shape.
+        let resp = match agent
+            .get(&current)
+            .set("User-Agent", USER_AGENT)
+            .set("Accept", "application/vnd.github+json")
+            .call()
+        {
+            Ok(r) => r,
+            Err(ureq::Error::Status(code, r)) if (300..400).contains(&code) => r,
+            Err(e) => return Err(anyhow::anyhow!("failed to reach GitHub Releases: {e}")),
+        };
+        if (300..400).contains(&resp.status()) {
+            let loc = resp
+                .header("Location")
+                .with_context(|| format!("redirect {} without Location", resp.status()))?;
+            let next = c0pl4nd_core::net_confine::resolve_redirect(&current, loc)
+                .map_err(|e| anyhow::anyhow!("{e}: {loc}"))?;
+            assert_confined(&next)?;
+            current = next;
+            continue;
+        }
+        let mut body = String::new();
+        resp.into_reader()
+            .take(MAX_RELEASE_JSON_BYTES)
+            .read_to_string(&mut body)
+            .context("failed to read release response")?;
+        return Ok(body);
+    }
+    anyhow::bail!("too many redirects (> {MAX_REDIRECTS}) fetching {url}")
+}
 
 /// The running binary's version.
 pub fn current_version() -> &'static str {
@@ -109,22 +195,13 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 /// reads the dedicated `releases/latest` endpoint (newest non-prerelease);
 /// other channels scan the full `releases` list for a matching tag.
 pub fn latest_version(channel: &str) -> Result<String> {
-    let fetch = |url: &str| -> Result<String> {
-        ureq::get(url)
-            .set("User-Agent", USER_AGENT)
-            .set("Accept", "application/vnd.github+json")
-            .call()
-            .context("failed to reach GitHub Releases")?
-            .into_string()
-            .context("failed to read release response")
-    };
     if channel.eq_ignore_ascii_case("stable") {
-        let body = fetch(&format!(
+        let body = confined_api_get(&format!(
             "https://api.github.com/repos/{REPO}/releases/latest"
         ))?;
         parse_tag(&body).context("no tag_name in latest release")
     } else {
-        let body = fetch(&format!(
+        let body = confined_api_get(&format!(
             "https://api.github.com/repos/{REPO}/releases?per_page=20"
         ))?;
         pick_channel_tag(&body, channel).context("no releases found")
@@ -171,6 +248,78 @@ pub fn run_update(channel: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ----------------------------------------------------------------------------
+// On-launch check throttle (`[update] check_interval_hours`)
+// ----------------------------------------------------------------------------
+//
+// The default `notify` mode runs a version check on launch. Without a throttle
+// that would hit the GitHub REST API on EVERY launch and risk the 60-req/hr
+// unauthenticated rate limit. We persist the Unix-seconds timestamp of the last
+// launch check in a tiny sibling file next to the config and only re-check once
+// `check_interval_hours` have elapsed. The decision ([`is_due`]) is pure and
+// unit-tested; the I/O wrappers are best-effort (a read/write failure just means
+// the next launch re-checks, which is safe).
+
+/// Path of the file recording the last on-launch check time (Unix seconds).
+/// Sibling of the config file so it lives in the same per-user config dir.
+fn check_state_path() -> Option<std::path::PathBuf> {
+    let cfg = c0pl4nd_core::Config::default_path()?;
+    let dir = cfg.parent()?;
+    Some(dir.join("last-update-check"))
+}
+
+/// Seconds since the Unix epoch, or `None` if the system clock predates it.
+fn now_unix() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// Read the recorded last-check time (Unix seconds), if present and parseable.
+fn read_last_check() -> Option<u64> {
+    let path = check_state_path()?;
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Record "a launch check happened now" so the next launch within
+/// `check_interval_hours` skips the network. Best-effort: a write failure just
+/// means the next launch re-checks (no throttle), which is safe. Called AFTER
+/// every launch-check attempt regardless of its outcome, so a transient offline
+/// launch does not spam the API on every subsequent start.
+pub fn record_check_now() {
+    if let (Some(path), Some(now)) = (check_state_path(), now_unix()) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, now.to_string());
+    }
+}
+
+/// PURE due-ness decision. A check is due when:
+/// * there is no recorded last-check (`last == None`), or
+/// * the interval is `0` (throttle disabled), or
+/// * `last` is in the FUTURE relative to `now` (clock moved backwards — re-check
+///   rather than suppress indefinitely), or
+/// * at least `interval_hours` have elapsed since `last`.
+fn is_due(now: u64, last: Option<u64>, interval_hours: u32) -> bool {
+    let Some(last) = last else {
+        return true;
+    };
+    if interval_hours == 0 || last > now {
+        return true;
+    }
+    now - last >= u64::from(interval_hours) * 3600
+}
+
+/// Whether an on-launch update check is due now, given the configured interval.
+/// A clock error (epoch unreadable) is treated as "due" so a check is never
+/// permanently suppressed.
+pub fn check_due(interval_hours: u32) -> bool {
+    let now = now_unix().unwrap_or(u64::MAX);
+    is_due(now, read_last_check(), interval_hours)
 }
 
 #[cfg(test)]
@@ -233,5 +382,61 @@ mod tests {
         );
         // Empty list → None.
         assert_eq!(pick_channel_tag("{}", "beta"), None);
+    }
+
+    #[test]
+    fn assert_confined_allows_only_https_github_api() {
+        // The real endpoints this module uses are accepted.
+        assert!(assert_confined("https://api.github.com/repos/x/y/releases/latest").is_ok());
+        // Plain http is refused (TLS-downgrade defense).
+        assert!(assert_confined("http://api.github.com/repos/x/y/releases/latest").is_err());
+        // A different host (e.g. a MITM redirect target) is refused even over https.
+        assert!(assert_confined("https://evil.example.com/releases").is_err());
+        // github.com (not the API host) is NOT on this module's allow-list.
+        assert!(assert_confined("https://github.com/x/y").is_err());
+        // Userinfo cannot smuggle a foreign host past the check.
+        assert!(assert_confined("https://api.github.com@evil.example.com/").is_err());
+        // Malformed (no host) is refused.
+        assert!(assert_confined("https:///releases").is_err());
+    }
+
+    // `url_host` and `resolve_redirect` now live in `crate::net_confine` and are
+    // tested there; this module keeps only the allow-list-specific assertion.
+
+    #[test]
+    fn is_due_when_never_checked() {
+        assert!(
+            is_due(1_000_000, None, 24),
+            "no recorded check → always due"
+        );
+    }
+
+    #[test]
+    fn is_due_respects_the_interval() {
+        let last = 1_000_000u64;
+        let day = 24 * 3600;
+        // Exactly at the interval boundary → due.
+        assert!(is_due(last + day, Some(last), 24));
+        // One second past → due.
+        assert!(is_due(last + day + 1, Some(last), 24));
+        // One second short → NOT due (throttled).
+        assert!(!is_due(last + day - 1, Some(last), 24));
+        // Same instant → not due.
+        assert!(!is_due(last, Some(last), 24));
+    }
+
+    #[test]
+    fn is_due_when_interval_is_zero_disables_throttle() {
+        assert!(
+            is_due(1_000_000, Some(1_000_000), 0),
+            "interval 0 means check every launch"
+        );
+    }
+
+    #[test]
+    fn is_due_when_clock_moved_backwards() {
+        // Recorded time is in the FUTURE relative to now (clock rolled back):
+        // re-check rather than suppress forever.
+        assert!(is_due(1_000, Some(5_000), 24));
     }
 }

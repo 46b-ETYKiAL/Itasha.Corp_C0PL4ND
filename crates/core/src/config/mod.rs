@@ -62,29 +62,34 @@ impl Default for FontConfig {
     }
 }
 
-/// When (and whether) C0PL4ND checks for updates. Local-first: the default is
-/// [`UpdateMode::Manual`] — the app makes NO automatic network connection; the
-/// user checks on demand from Settings. `notify`/`auto` are explicit opt-ins to
-/// an on-launch GitHub-Releases version check (a check reads only the public
-/// GitHub Releases API and sends zero identifiers).
+/// When (and whether) C0PL4ND checks for updates. The default is
+/// [`UpdateMode::Notify`] — once per launch (when due) the app reads the public
+/// GitHub Releases API and shows a passive toast if a newer version exists. The
+/// check is read-only and sends zero identifiers, and it never downloads or
+/// installs on its own. Users who want a fully local-first, no-network-on-launch
+/// experience set `manual` (check only on demand from Settings) or `off` (never
+/// touch the network for updates).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateMode {
     /// Never check, never touch the network for updates.
     Off,
-    /// Check once per launch (when due); show a passive toast if newer exists.
-    Notify,
-    /// Default: check only when the user presses "Check for updates".
+    /// Default: check once per launch (when due); show a passive toast if a newer
+    /// version exists. Read-only; never downloads or installs on its own.
     #[default]
+    Notify,
+    /// Check only when the user presses "Check for updates".
     Manual,
     /// Check once per launch (when due); download + apply a verified update when
     /// one is found.
     Auto,
 }
 
-/// Opt-in update behaviour. Local-first: the default mode is `manual`, so
-/// C0PL4ND never contacts the network unless the user presses "Check for
-/// updates", runs `c0pl4nd update`, or opts into `notify`/`auto`.
+/// Update behaviour. The default mode is `notify`, so on launch (when due)
+/// C0PL4ND performs a single read-only GitHub-Releases version check and shows
+/// a passive toast if a newer version exists. Set `manual` (check only on
+/// demand from Settings or `c0pl4nd update`) or `off` (never touch the network)
+/// for a fully local-first experience.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UpdateConfig {
@@ -106,7 +111,7 @@ pub struct UpdateConfig {
 impl Default for UpdateConfig {
     fn default() -> Self {
         UpdateConfig {
-            mode: UpdateMode::Manual,
+            mode: UpdateMode::Notify,
             check_interval_hours: 24,
             check_on_launch: false,
             channel: "stable".to_string(),
@@ -832,6 +837,24 @@ mod tests {
         assert_eq!(c.theme, "itasha-corp");
         assert_eq!(c.scrollback_lines, 10_000);
         assert!(c.validate().is_ok());
+    }
+
+    /// Doc/behaviour parity guard: the default update mode is `notify`, which
+    /// means a fresh install DOES make a once-per-launch network version check.
+    /// This is a privacy-relevant default documented in PRIVACY.md / CHANGELOG.md
+    /// — if this ever changes, those docs MUST change too. Failing this test is a
+    /// signal that the documented default has silently drifted from the code.
+    #[test]
+    fn default_update_mode_is_notify_and_checks_on_launch() {
+        assert_eq!(UpdateMode::default(), UpdateMode::Notify);
+        let u = UpdateConfig::default();
+        assert_eq!(u.mode, UpdateMode::Notify);
+        assert!(
+            u.checks_on_launch(),
+            "the default `notify` mode performs an on-launch check — PRIVACY.md \
+             must say so"
+        );
+        assert_eq!(u.check_interval_hours, 24);
     }
 
     #[test]

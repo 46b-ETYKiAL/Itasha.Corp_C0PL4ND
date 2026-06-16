@@ -32,7 +32,7 @@
 //!
 //! These boundaries are the DEFINED behaviour of F3-2, not deferred work.
 
-use super::pane_term::ColorRun;
+use super::pane_term::{cell_render_width, ColorRun};
 
 /// Reorder one row's logical-order colour runs into VISUAL order using the
 /// Unicode Bidirectional Algorithm, preserving each character's colour.
@@ -110,11 +110,28 @@ pub fn reorder_runs_visual(runs: &[ColorRun]) -> Option<Vec<ColorRun>> {
 
 /// Coalesce a per-character `(char, colour)` sequence into colour runs, merging
 /// consecutive characters that share a colour. Inverse of the flatten step.
+///
+/// A WIDE (width-2) glyph is emitted as its OWN single-char run, breaking the
+/// surrounding run on both sides — exactly as [`build_color_runs`] does in the
+/// non-reordered path. The per-cell renderer advances by `cell_render_width`
+/// per char and so does not strictly require this isolation, but keeping the
+/// "one wide glyph = one run" invariant on BOTH paths means a row mixing RTL
+/// script with a CJK / emoji glyph reconstructs to the same run shape it would
+/// have without reordering — no run-based consumer can desync on it.
+///
+/// [`build_color_runs`]: super::pane_term
 fn coalesce(chars: &[(char, (u8, u8, u8))]) -> Vec<ColorRun> {
     let mut runs: Vec<ColorRun> = Vec::new();
     let mut cur = String::new();
     let mut cur_color: Option<(u8, u8, u8)> = None;
     for (ch, color) in chars {
+        if cell_render_width(*ch) >= 2 {
+            if let Some(pc) = cur_color.take() {
+                runs.push((std::mem::take(&mut cur), pc));
+            }
+            runs.push((ch.to_string(), *color));
+            continue;
+        }
         if cur_color != Some(*color) {
             if let Some(pc) = cur_color.take() {
                 runs.push((std::mem::take(&mut cur), pc));
@@ -248,6 +265,64 @@ mod tests {
             text_of(&visual).chars().count(),
             "מרחבא world".chars().count(),
             "reordering preserves the character count"
+        );
+    }
+
+    #[test]
+    fn reorder_preserves_total_cell_width_with_wide_glyphs() {
+        // A row mixing RTL (Arabic) with a WIDE CJK glyph. The per-cell renderer
+        // advances `col_cells` by `cell_render_width(c)` for every char, so the
+        // load-bearing invariant is that the reorder preserves the TOTAL cell
+        // width — the row must occupy the same number of grid columns after
+        // reordering as before, or wide glyphs would mis-align. (This is the
+        // invariant that keeps RTL+CJK rows cell-accurate.)
+        let logical = vec![
+            ("اب".to_string(), RED),   // two Arabic, width 1 each
+            ("漢".to_string(), GREEN), // one wide CJK, width 2
+            ("x".to_string(), BLUE),   // one ASCII, width 1
+        ];
+        let total = |runs: &[ColorRun]| -> usize {
+            runs.iter()
+                .flat_map(|(s, _)| s.chars())
+                .map(cell_render_width)
+                .sum()
+        };
+        let logical_w = total(&logical); // 1+1+2+1 = 5
+        let visual = reorder_runs_visual(&logical).expect("an RTL row reorders");
+        assert_eq!(
+            total(&visual),
+            logical_w,
+            "total cell width is invariant through BiDi reorder (5 cells)"
+        );
+        // The wide glyph survives exactly once and is isolated in its own run
+        // (coalesce re-splits wide glyphs, mirroring build_color_runs).
+        let han_runs: Vec<&ColorRun> = visual.iter().filter(|(s, _)| s.contains('漢')).collect();
+        assert_eq!(
+            han_runs.len(),
+            1,
+            "the wide glyph appears in exactly one run"
+        );
+        assert_eq!(
+            han_runs[0].0, "漢",
+            "the wide glyph is isolated as its own single-char run"
+        );
+        assert_eq!(han_runs[0].1, GREEN, "the wide glyph keeps its colour");
+    }
+
+    #[test]
+    fn coalesce_isolates_wide_glyph_between_same_colour_neighbours() {
+        // The exact merge case the audit flagged: a wide glyph flanked by
+        // same-colour single-width chars must NOT be merged into one run.
+        let chars = vec![('a', RED), ('漢', RED), ('b', RED)];
+        let runs = coalesce(&chars);
+        assert_eq!(
+            runs,
+            vec![
+                ("a".to_string(), RED),
+                ("漢".to_string(), RED),
+                ("b".to_string(), RED),
+            ],
+            "a wide glyph breaks the run on both sides even with a shared colour"
         );
     }
 }

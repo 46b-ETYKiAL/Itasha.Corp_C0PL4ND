@@ -267,3 +267,74 @@ fn load_theme(name: &str) -> Option<Theme> {
     let p = std::path::PathBuf::from("assets/themes").join(format!("{name}.toml"));
     Theme::load_from(&p).ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reference IEC 61966-2-1 sRGB→linear transfer for cross-checking.
+    fn reference_srgb_to_linear(c: u8) -> f64 {
+        let s = c as f64 / 255.0;
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    #[test]
+    fn srgb_endpoints_are_exact() {
+        // 0 → 0.0 and 255 → 1.0 are the anchor points; the readback PNG's
+        // clear-colour correctness depends on these being exact.
+        assert_eq!(srgb_to_linear(0), 0.0);
+        assert!((srgb_to_linear(255) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn srgb_uses_linear_segment_below_threshold() {
+        // For the small-value linear segment (s <= 0.04045), the transfer is a
+        // plain divide by 12.92. c=10 → s=0.0392.. which is below threshold.
+        let c = 10u8;
+        let s = c as f64 / 255.0;
+        assert!(s <= 0.04045, "precondition: c=10 is in the linear segment");
+        let expected = s / 12.92;
+        assert!((srgb_to_linear(c) - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn srgb_uses_gamma_segment_above_threshold() {
+        // c=11 → s=0.0431.. is just ABOVE the 0.04045 knee, so it must take the
+        // power-curve branch, NOT the linear divide. This kills a mutant that
+        // flips the comparison or drops the gamma branch.
+        let c = 11u8;
+        let s = c as f64 / 255.0;
+        assert!(s > 0.04045, "precondition: c=11 is in the gamma segment");
+        let gamma = ((s + 0.055) / 1.055).powf(2.4);
+        let linear_wrong = s / 12.92;
+        assert!((srgb_to_linear(c) - gamma).abs() < 1e-12);
+        // And prove the two branches actually diverge here.
+        assert!((gamma - linear_wrong).abs() > 1e-9);
+    }
+
+    #[test]
+    fn srgb_is_monotonic_nondecreasing() {
+        // The transfer must be monotonic across the whole 0..=255 domain.
+        let mut prev = -1.0_f64;
+        for c in 0u8..=255 {
+            let v = srgb_to_linear(c);
+            assert!(v >= prev, "non-monotonic at c={c}: {v} < {prev}");
+            assert!((0.0..=1.0).contains(&v), "out of [0,1] at c={c}: {v}");
+            prev = v;
+        }
+    }
+
+    #[test]
+    fn srgb_midpoint_matches_reference() {
+        // Mid-grey 128 against an independent reference implementation.
+        let v = srgb_to_linear(128);
+        assert!((v - reference_srgb_to_linear(128)).abs() < 1e-12);
+        // Sanity: sRGB mid-grey is ~0.2158 linear (well below 0.5 — the whole
+        // point of the gamma curve).
+        assert!((v - 0.2158).abs() < 1e-3, "128 → {v}, expected ~0.2158");
+    }
+}

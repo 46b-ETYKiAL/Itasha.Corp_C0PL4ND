@@ -517,7 +517,7 @@ fn mode_off_disables_the_channel_combo() {
     // The Updates page renders TWO combos: [0] = update Mode (off/notify/manual/
     // auto), [1] = release channel. The channel combo is rendered inside
     // `add_enabled_ui(mode != Off, …)`, so its enabled-ness reflects the LIVE
-    // Mode — no set-then-assert tautology. The default Mode is Manual (networked),
+    // Mode — no set-then-assert tautology. The default Mode is Notify (networked),
     // so the channel combo starts ENABLED; switching Mode to "off" (fully offline)
     // DISABLES it.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
@@ -526,14 +526,14 @@ fn mode_off_disables_the_channel_combo() {
     open_settings(&mut h);
     select_category(&mut h, "Updates");
 
-    // Precondition: default Mode = Manual (networked) → channel combo enabled.
+    // Precondition: default Mode = Notify (networked) → channel combo enabled.
     assert!(
         !h.get_all_by_role(egui::accesskit::Role::ComboBox)
             .nth(1)
             .expect("Updates must render the channel combo")
             .accesskit_node()
             .is_disabled(),
-        "precondition: the channel combo is enabled while Mode is manual"
+        "precondition: the channel combo is enabled while Mode is notify"
     );
 
     // Open the Mode combo (the first one) and pick "off".
@@ -558,7 +558,7 @@ fn mode_off_disables_the_channel_combo() {
 #[test]
 fn picking_an_update_channel_changes_the_combo_value() {
     // `update.channel` defaults to "stable"; its combo ([1]) is enabled whenever
-    // Mode != Off (default Mode = Manual, so it is enabled at open). Open the
+    // Mode != Off (default Mode = Notify, so it is enabled at open). Open the
     // channel combo, pick "nightly", and assert the combo's accessible VALUE
     // became "nightly" — its selected_text is `config.update.channel`, so this
     // observes the live config change, not a test mirror.

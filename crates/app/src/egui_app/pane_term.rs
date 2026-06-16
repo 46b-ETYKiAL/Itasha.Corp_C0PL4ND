@@ -36,6 +36,126 @@ use c0pl4nd_core::{Session, Theme};
 /// free of any glyphon/egui dependency (so it stays headlessly testable).
 pub type ColorRun = (String, (u8, u8, u8));
 
+/// The number of terminal CELLS a glyph occupies: 2 for an East-Asian wide /
+/// fullwidth glyph (and wide emoji), 1 otherwise. Mirrors the core VT layer's
+/// own `UnicodeWidthChar::width(c).max(1)` cell allocation (`term.rs` `print`),
+/// so the renderer's column accounting agrees with how the grid stored the cells.
+pub fn cell_render_width(c: char) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    if c.width().unwrap_or(1) >= 2 {
+        2
+    } else {
+        1
+    }
+}
+
+/// Copy the visible characters of one display row between cell columns `lo..=hi`
+/// (inclusive), SKIPPING the blank continuation spacer the core writes after a
+/// wide (width-2) glyph. A cell is that spacer iff its PREVIOUS cell in the row
+/// is a width-2 glyph (`term.rs` `print` writes the glyph then one blank cell),
+/// so the check is a pure char-width lookback — it works for scrollback rows too
+/// (unlike the live-grid-only continuation bitset) and is correct even when the
+/// selection starts exactly on a spacer. This mirrors the per-cell renderer's
+/// wide-glyph handling so copied text matches what is drawn: no stray space is
+/// emitted around a CJK / emoji glyph. Trailing whitespace is trimmed.
+fn copy_row_text(row: &[c0pl4nd_core::Cell], lo: usize, hi: usize) -> String {
+    let mut line = String::new();
+    for c in lo..=hi {
+        if c > 0 {
+            if let Some(prev) = row.get(c - 1) {
+                if cell_render_width(prev.c) >= 2 {
+                    continue; // this cell is the wide glyph's spacer
+                }
+            }
+        }
+        if let Some(cell) = row.get(c) {
+            line.push(cell.c);
+        }
+    }
+    line.trim_end().to_string()
+}
+
+/// For one row's [`ColorRun`]s, the painted glyphs as `(char, colour, cell_col)`
+/// — each NON-blank glyph paired with the grid CELL column it is painted at.
+/// `cell_col` advances by [`cell_render_width`] per char, so a WIDE (width-2)
+/// glyph shifts every following glyph by two cells; blank cells are skipped
+/// (their background is painted separately) but still advance the column.
+///
+/// This is the SINGLE SOURCE OF TRUTH for per-cell glyph X positions: the
+/// renderer paints each returned glyph at `origin.x + cell_col * cw`, so the
+/// layout is font-advance-independent (a wide or fallback glyph can never shift
+/// another cell — the failure mode that reverted the per-run approach). Pulling
+/// it out as a pure function makes wide-glyph alignment unit-testable WITHOUT a
+/// live display.
+pub fn row_glyph_cells(runs: &[ColorRun]) -> Vec<(char, (u8, u8, u8), usize)> {
+    let mut out = Vec::new();
+    let mut col = 0usize;
+    for (text, rgb) in runs {
+        for c in text.chars() {
+            if c != ' ' {
+                out.push((c, *rgb, col));
+            }
+            col += cell_render_width(c);
+        }
+    }
+    out
+}
+
+/// Build one visible row's [`ColorRun`]s from its cells, breaking a run on a
+/// colour change AND at every WIDE (width-2) glyph, and SKIPPING the blank
+/// continuation spacer the core writes after a wide glyph (`term.rs` `print`).
+/// A wide glyph becomes its own single-char run. The renderer paints each cell
+/// at its exact cell-column, so this keeps the run text free of the spacer's
+/// double-counted width. Pure (colour resolution injected) so the wide-split +
+/// spacer-skip is unit-testable without a live terminal.
+///
+/// KNOWN LIMITATION — combining marks: only each cell's BASE char (`cell.c`) is
+/// emitted; the core stores combining marks (e.g. the U+0301 in a decomposed
+/// `é`) in a parallel side-table (`Grid::grapheme_at`), and they are dropped
+/// here. This is consistent with `Grid::to_text` (copy drops them too), so the
+/// rendered and copied text agree. Compositing them would require this pipeline
+/// to carry the full grapheme cluster through [`ColorRun`] AND egui's text
+/// layout to shape base+mark into one glyph — egui does no HarfBuzz-grade
+/// shaping, so a naive plumb-through can render a floating accent rather than a
+/// combined glyph. That visual outcome cannot be verified in a headless build,
+/// so it is deliberately NOT done blind here (see the `é` conformance case in
+/// `crates/core/tests/vt_conformance.rs`, which pins the core's side-table model).
+fn build_color_runs(
+    cells: &[c0pl4nd_core::Cell],
+    cols: usize,
+    default_cell: &c0pl4nd_core::Cell,
+    mut color_of: impl FnMut(&c0pl4nd_core::Cell) -> (u8, u8, u8),
+) -> Vec<ColorRun> {
+    let mut runs: Vec<ColorRun> = Vec::new();
+    let mut run = String::new();
+    let mut run_color: Option<(u8, u8, u8)> = None;
+    let mut col = 0;
+    while col < cols {
+        let cell = cells.get(col).unwrap_or(default_cell);
+        let fg = color_of(cell);
+        if cell_render_width(cell.c) >= 2 {
+            if let Some(pc) = run_color.take() {
+                runs.push((std::mem::take(&mut run), pc));
+            }
+            runs.push((cell.c.to_string(), fg));
+            col += 2; // skip the trailing continuation spacer cell
+            continue;
+        }
+        if run_color != Some(fg) {
+            if let Some(pc) = run_color.take() {
+                runs.push((std::mem::take(&mut run), pc));
+            }
+            run_color = Some(fg);
+        }
+        run.push(cell.c);
+        col += 1;
+    }
+    if let Some(pc) = run_color {
+        runs.push((run, pc));
+    }
+    runs
+}
+
 /// Damage-gated cache of the visible grid as per-row colour runs (the output of
 /// [`PaneTerm::grid_rows`]). The renderer calls `grid_rows` every frame; this
 /// cache lets an UNCHANGED pane (the blinking-cursor / idle-effect case) skip the
@@ -588,13 +708,7 @@ impl PaneTerm {
             } else {
                 width.saturating_sub(1)
             };
-            let mut line = String::new();
-            for c in lo..=hi {
-                if let Some(cell) = row.get(c) {
-                    line.push(cell.c);
-                }
-            }
-            out.push_str(line.trim_end());
+            out.push_str(&copy_row_text(row, lo, hi));
             if r != end.0 {
                 out.push('\n');
             }
@@ -890,23 +1004,9 @@ impl PaneTerm {
         let default_cell = c0pl4nd_core::Cell::default();
         let mut rows_out: Vec<Vec<ColorRun>> = Vec::with_capacity(grid_rows);
         guard.for_visible_rows(|_, row| {
-            let mut runs: Vec<ColorRun> = Vec::new();
-            let mut run = String::new();
-            let mut run_color: Option<(u8, u8, u8)> = None;
-            for col in 0..cols {
-                let cell = row.get(col).unwrap_or(&default_cell);
-                let (fg, _bg) = self.theme.cell_colors(cell, default_fg, default_bg);
-                if run_color != Some(fg) {
-                    if let Some(pc) = run_color.take() {
-                        runs.push((std::mem::take(&mut run), pc));
-                    }
-                    run_color = Some(fg);
-                }
-                run.push(cell.c);
-            }
-            if let Some(pc) = run_color {
-                runs.push((run, pc));
-            }
+            let mut runs = build_color_runs(row, cols, &default_cell, |cell| {
+                self.theme.cell_colors(cell, default_fg, default_bg).0
+            });
             // BiDi (F3-2): reorder this row's logical-order runs into VISUAL
             // order for right-to-left scripts (Arabic/Hebrew). The fast path
             // returns the LTR-only row UNCHANGED (zero cost); only a row that
@@ -997,6 +1097,154 @@ mod tests {
 
     fn void_theme() -> Theme {
         Theme::builtin_void()
+    }
+
+    #[test]
+    fn cell_render_width_is_two_for_wide_glyphs() {
+        assert_eq!(cell_render_width('a'), 1);
+        assert_eq!(cell_render_width('ｱ'), 1); // halfwidth katakana
+        assert_eq!(cell_render_width('漢'), 2); // CJK ideograph
+        assert_eq!(cell_render_width('Ａ'), 2); // fullwidth Latin
+        assert_eq!(cell_render_width('😀'), 2); // wide emoji
+    }
+
+    #[test]
+    fn build_color_runs_splits_wide_glyphs_and_skips_the_continuation_spacer() {
+        use c0pl4nd_core::Cell;
+        let c = |ch: char| Cell {
+            c: ch,
+            ..Cell::default()
+        };
+        // Grid: 'a', '漢' (wide), ' ' (continuation spacer the core wrote), 'b'.
+        let cells = vec![c('a'), c('漢'), c(' '), c('b')];
+        let runs = build_color_runs(&cells, 4, &Cell::default(), |_| (1, 2, 3));
+        // The wide glyph is its OWN run and the spacer is NOT emitted, so the run
+        // column accounting never double-counts the wide glyph's width.
+        assert_eq!(
+            runs,
+            vec![
+                ("a".to_string(), (1, 2, 3)),
+                ("漢".to_string(), (1, 2, 3)),
+                ("b".to_string(), (1, 2, 3)),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_color_runs_breaks_runs_on_colour_change() {
+        use c0pl4nd_core::Cell;
+        let c = |ch: char| Cell {
+            c: ch,
+            ..Cell::default()
+        };
+        let cells = vec![c('a'), c('b'), c('c')];
+        let runs = build_color_runs(&cells, 3, &Cell::default(), |cell| {
+            if cell.c == 'c' {
+                (0, 255, 0)
+            } else {
+                (255, 0, 0)
+            }
+        });
+        assert_eq!(
+            runs,
+            vec![
+                ("ab".to_string(), (255, 0, 0)),
+                ("c".to_string(), (0, 255, 0))
+            ]
+        );
+    }
+
+    #[test]
+    fn copy_row_text_skips_wide_glyph_spacers() {
+        use c0pl4nd_core::Cell;
+        let c = |ch: char| Cell {
+            c: ch,
+            ..Cell::default()
+        };
+        // Grid layout of "a漢b": 'a', '漢' (wide), ' ' (continuation spacer the
+        // core writes after the wide glyph), 'b'. Copying the whole row must
+        // yield "a漢b" with NO stray space from the spacer.
+        let row = vec![c('a'), c('漢'), c(' '), c('b')];
+        assert_eq!(copy_row_text(&row, 0, 3), "a漢b");
+        // Selecting only the wide glyph + its spacer copies just the glyph.
+        assert_eq!(copy_row_text(&row, 1, 2), "漢");
+    }
+
+    #[test]
+    fn copy_row_text_skips_spacer_even_when_selection_starts_on_it() {
+        use c0pl4nd_core::Cell;
+        let c = |ch: char| Cell {
+            c: ch,
+            ..Cell::default()
+        };
+        // Selection STARTS on the continuation spacer (index 2) of the wide
+        // glyph at index 1. The lookback inspects index 1 (a width-2 glyph) and
+        // recognises index 2 as the spacer, so no stray space is copied.
+        let row = vec![c('a'), c('漢'), c(' '), c('b')];
+        assert_eq!(copy_row_text(&row, 2, 3), "b");
+    }
+
+    #[test]
+    fn copy_row_text_keeps_real_spaces_and_trims_trailing() {
+        use c0pl4nd_core::Cell;
+        let c = |ch: char| Cell {
+            c: ch,
+            ..Cell::default()
+        };
+        // A genuine space (not preceded by a wide glyph) is kept; trailing
+        // whitespace is trimmed.
+        let row = vec![c('a'), c(' '), c('b'), c(' '), c(' ')];
+        assert_eq!(copy_row_text(&row, 0, 4), "a b");
+    }
+
+    #[test]
+    fn row_glyph_cells_places_wide_glyphs_at_correct_cells() {
+        // Runs as build_color_runs produces them (the wide glyph is its own run).
+        // 'a' at cell 0; '漢' (width 2) at cell 1; 'b' at cell 3 — the wide glyph
+        // shifts 'b' by two cells. THIS is the property that makes CJK/emoji
+        // render cell-accurately; it is verified here without a live display.
+        let runs = vec![
+            ("a".to_string(), (1, 1, 1)),
+            ("漢".to_string(), (2, 2, 2)),
+            ("b".to_string(), (3, 3, 3)),
+        ];
+        assert_eq!(
+            row_glyph_cells(&runs),
+            vec![
+                ('a', (1, 1, 1), 0),
+                ('漢', (2, 2, 2), 1),
+                ('b', (3, 3, 3), 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn row_glyph_cells_skips_blanks_but_still_advances_the_column() {
+        // A blank is not painted (background is drawn separately) but still
+        // advances the cell column, so 'b' lands at cell 2.
+        let runs = vec![("a b".to_string(), (9, 9, 9))];
+        assert_eq!(
+            row_glyph_cells(&runs),
+            vec![('a', (9, 9, 9), 0), ('b', (9, 9, 9), 2)]
+        );
+    }
+
+    #[test]
+    fn row_glyph_cells_handles_two_adjacent_wide_glyphs() {
+        let runs = vec![
+            ("漢".to_string(), (1, 1, 1)),
+            ("字".to_string(), (2, 2, 2)),
+            ("x".to_string(), (3, 3, 3)),
+        ];
+        // 漢@0, 字@2 (after the first wide glyph), x@4 (after the second).
+        assert_eq!(
+            row_glyph_cells(&runs),
+            vec![
+                ('漢', (1, 1, 1), 0),
+                ('字', (2, 2, 2), 2),
+                ('x', (3, 3, 3), 4)
+            ]
+        );
     }
 
     /// A theme change must reach a live pane's rendered colours. The pane holds

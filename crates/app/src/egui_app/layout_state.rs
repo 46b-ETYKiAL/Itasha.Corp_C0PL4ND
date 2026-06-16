@@ -60,7 +60,10 @@ pub fn restored_focus(panes: &[PaneId], saved: PaneId) -> PaneId {
     if panes.contains(&saved) {
         saved
     } else {
-        panes[0]
+        // `panes[0]` would panic on an empty slice; this is `pub` with an
+        // implicit non-empty contract, so guard it defensively (mirrors the
+        // `unwrap_or` fallback its sibling `restored_next_id` already uses).
+        panes.first().copied().unwrap_or(saved)
     }
 }
 

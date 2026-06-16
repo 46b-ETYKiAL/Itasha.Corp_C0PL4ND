@@ -485,8 +485,22 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
-            echo "::warning::MINISIGN_SECRET_KEY not set — shipping checksummed but UNSIGNED artifacts (auto-update will reject them)."
-            exit 0
+            # A stable (non-prerelease) tag has no '-' in its name (e.g. v0.4.6);
+            # an rc/pre tag does (v0.4.6-rc.2). Shipping a STABLE release UNSIGNED
+            # is a release-readiness landmine: the fail-closed in-app updater
+            # rejects unsigned artifacts, so existing users could not auto-update
+            # to it — a release that looks successful yet is un-updatable. Fail
+            # loudly for stable tags; allow the unsigned path only for prereleases.
+            case "${GITHUB_REF_NAME:-}" in
+              *-*)
+                echo "::warning::MINISIGN_SECRET_KEY not set — shipping checksummed but UNSIGNED prerelease artifacts (auto-update will reject them; acceptable for an rc/pre tag)."
+                exit 0
+                ;;
+              *)
+                echo "::error::MINISIGN_SECRET_KEY not set on a STABLE tag (${GITHUB_REF_NAME:-?}). A stable release MUST be signed — the fail-closed in-app updater rejects unsigned artifacts, so existing users could not auto-update to it. Provision the signing key (see this step's comment) or cut a prerelease (-rc/-pre) tag instead. Failing the release."
+                exit 1
+                ;;
+            esac
           fi
           cargo install rsign2 --locked --version "^0.6"
           umask 077

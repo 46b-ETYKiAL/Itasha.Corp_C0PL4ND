@@ -68,37 +68,37 @@ fn quote_path_for_shell_posix_escapes_single_quote() {
     );
 }
 
-/// The galley-cache content key (audit #2) is content+style sensitive and
-/// stable: identical runs+style hash equal; any change to text, colour, or
-/// the style seed changes the key.
+/// The per-glyph cache key is content+pass+style sensitive and stable: the same
+/// glyph+colour+pass+style hashes equal (a cache HIT, shared across cells); any
+/// change to the glyph, its colour, the pass, or the style seed changes the key.
 #[test]
-fn row_content_key_is_content_and_style_sensitive() {
+fn glyph_cache_key_is_content_pass_and_style_sensitive() {
     let style = row_style_key(14.0, (200, 200, 200));
-    let runs_a: Vec<ColorRun> = vec![("hello".to_string(), (255, 0, 0))];
-    let runs_a2: Vec<ColorRun> = vec![("hello".to_string(), (255, 0, 0))];
-    let runs_text: Vec<ColorRun> = vec![("hallo".to_string(), (255, 0, 0))];
-    let runs_color: Vec<ColorRun> = vec![("hello".to_string(), (0, 255, 0))];
-
+    let base = glyph_cache_key('a', (255, 0, 0), RowPass::Main, style);
     assert_eq!(
-        row_content_key(&runs_a, style),
-        row_content_key(&runs_a2, style),
-        "identical runs + style produce the same key (a cache HIT)"
+        base,
+        glyph_cache_key('a', (255, 0, 0), RowPass::Main, style),
+        "identical glyph+colour+pass+style → same key (a cache HIT, reused per cell)"
     );
     assert_ne!(
-        row_content_key(&runs_a, style),
-        row_content_key(&runs_text, style),
-        "a text change must change the key (a cache MISS → relayout)"
+        base,
+        glyph_cache_key('b', (255, 0, 0), RowPass::Main, style),
+        "a different glyph must change the key"
     );
     assert_ne!(
-        row_content_key(&runs_a, style),
-        row_content_key(&runs_color, style),
+        base,
+        glyph_cache_key('a', (0, 255, 0), RowPass::Main, style),
         "a colour change must change the key"
     );
-    // A style (font-size / fg) change changes the seed and thus the key.
+    assert_ne!(
+        base,
+        glyph_cache_key('a', (255, 0, 0), RowPass::GhostRed, style),
+        "a different pass (chromatic ghost) must change the key"
+    );
     let style2 = row_style_key(18.0, (200, 200, 200));
     assert_ne!(
-        row_content_key(&runs_a, style),
-        row_content_key(&runs_a, style2),
+        base,
+        glyph_cache_key('a', (255, 0, 0), RowPass::Main, style2),
         "a font-size change must change the key"
     );
 }
@@ -988,13 +988,18 @@ fn egui_key_to_logical_maps_keys_and_ctrl_chords() {
 }
 
 #[test]
-fn byte_to_col_counts_chars_to_the_byte_boundary() {
-    // 'é' is 2 bytes: byte 3 is the start of 'l', i.e. column 2.
+fn byte_to_col_counts_cell_width_to_the_byte_boundary() {
+    // 'é' is 2 bytes but a single-width cell: byte 3 (start of 'l') is column 2.
     assert_eq!(byte_to_col("héllo", 3), 2);
-    // '日' is 3 bytes: byte 3 is the start of '本', i.e. column 1.
-    assert_eq!(byte_to_col("日本", 3), 1);
-    // Past the end clamps to the char count.
+    // '日' is 3 bytes AND a WIDE (2-cell) glyph: byte 3 (start of '本') is cell
+    // column 2 — the per-cell renderer positions '本' two cells past '日', so a
+    // span/highlight must too.
+    assert_eq!(byte_to_col("日本", 3), 2);
+    // A wide glyph mid-string: byte 4 is 'b' after "a日" → cells 1 (a) + 2 (日).
+    assert_eq!(byte_to_col("a日b", 4), 3);
+    // Past the end clamps to the total cell width.
     assert_eq!(byte_to_col("abc", 99), 3);
+    assert_eq!(byte_to_col("日本", 99), 4);
     assert_eq!(byte_to_col("", 0), 0);
     assert_eq!(byte_to_col("abc", 0), 0);
 }

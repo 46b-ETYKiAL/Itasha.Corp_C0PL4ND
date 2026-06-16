@@ -13,8 +13,11 @@ in the source — the relevant files are named so you can check.
   no crash reporting to a server, and no account or login.
 - **Your shell input and output never leave your device.** Keystrokes, command
   output, and session contents are not transmitted anywhere.
-- **The only network connection the app can make is an opt-in update check** to
-  GitHub Releases — and even that is **not** the default behavior (see below).
+- **The only network connection the app can make is a version check** against
+  the public GitHub Releases API. By default it runs once per launch (the
+  `notify` mode) to tell you when a newer version exists; it is **read-only,
+  sends zero identifiers**, and you can switch it to on-demand (`manual`) or off
+  (`off`). See below.
 
 The codebase enforces this structurally: a CI gate (`no-network-gate.yml`) fails
 the build if any network call site appears anywhere outside the two opt-in
@@ -24,17 +27,23 @@ updater modules. The terminal core and UI contain no network code at all.
 
 ## The only network connection: the update check
 
-C0PL4ND can check whether a newer release exists. This is the **sole** outbound
-network feature, and it is **opt-in by default in the most conservative sense**:
+C0PL4ND checks whether a newer release exists. This is the **sole** outbound
+network feature, and it is designed to be minimal and privacy-respecting:
 
-- The default update mode is **`manual`** (`crates/core/src/config/mod.rs`,
-  `UpdateMode::Manual`). In manual mode the app makes **no automatic network
-  connection** — it contacts the network only when *you* press **"Check for
-  updates"** in Settings (or run the update command).
+- The default update mode is **`notify`** (`crates/core/src/config/mod.rs`,
+  `UpdateMode::Notify`). At most once per launch — throttled to one check per
+  `check_interval_hours` (default 24h), recorded in a small `last-update-check`
+  timestamp file next to your config — the app reads the public GitHub Releases
+  API and shows a passive toast if a newer version exists. The check is
+  **read-only and sends zero identifiers** (see "What the update check sends"
+  below); it never downloads or installs anything on its own.
+- For a fully local-first, **no-network-on-launch** experience, set **`manual`**
+  (`UpdateMode::Manual`) — the app then contacts the network only when *you*
+  press **"Check for updates"** in Settings (or run the update command).
 - You can turn it off entirely with the **`off`** mode (`UpdateMode::Off`):
   C0PL4ND then never checks and never touches the network for updates.
-- The `notify` and `auto` modes are explicit opt-ins to an on-launch check;
-  neither is the default.
+- The **`auto`** mode additionally downloads and applies a cryptographically
+  verified update when one is found.
 
 ### What the update check sends
 
@@ -120,8 +129,9 @@ shell session contents** — no scrollback, no command output, no keystrokes.
 
 - **Disable the update check.** Set the update mode to **`off`** (Settings →
   Updates, or `mode = "off"` in `config.toml`). C0PL4ND will then make no network
-  connection at all. The default mode (`manual`) already makes no automatic
-  connection — it only checks when you press the button.
+  connection at all. To keep update checks but make **no on-launch network
+  connection** (check only when you press the button), set **`manual`** instead
+  of the default `notify`.
 - **Clearing / disabling command history.** Command history is already
   memory-only and is discarded when the app closes; nothing is written to disk to
   clear. *(In-app controls to clear or disable history during a session are

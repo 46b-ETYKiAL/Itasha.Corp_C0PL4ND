@@ -75,3 +75,40 @@ pub fn harden_dll_search_order() {
 /// Non-Windows: there is no Win32 DLL search order to harden. No-op.
 #[cfg(not(windows))]
 pub fn harden_dll_search_order() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn harden_is_a_noop_off_windows() {
+        // On non-Windows the function is a pure no-op stub: it must be callable
+        // and return without panicking. (There is no observable side effect to
+        // assert beyond "does not panic / does not abort".)
+        harden_dll_search_order();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn harden_is_idempotent_off_windows() {
+        // The no-op stub carries no state, so repeated calls are safe and
+        // remain a no-op. Calling several times must still not panic.
+        for _ in 0..5 {
+            harden_dll_search_order();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn harden_runs_without_panic_on_windows() {
+        // On Windows the two Win32 loader calls are process-wide and by design
+        // irreversible, but they are idempotent and non-fatal (the `Result`s
+        // are intentionally ignored). Calling the entry point must not panic.
+        // We deliberately call it only once-per-test-process-effect via a
+        // single invocation; a second call would simply re-apply the same
+        // restriction and is also safe, but one call is sufficient to prove
+        // the FFI path is sound.
+        harden_dll_search_order();
+    }
+}

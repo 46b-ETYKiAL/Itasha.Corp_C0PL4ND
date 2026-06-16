@@ -45,6 +45,12 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
+# `arbitrary` is a deliberate forward-provision for structured fuzz targets (see
+# its comment under [dependencies]); it has no consumer yet, so tell cargo-machete
+# not to flag it as an unused dependency.
+[package.metadata.cargo-machete]
+ignored = ["arbitrary"]
+
 # Fuzz tooling is exact-pinned per dependency-management.md (security-sensitive
 # tooling): a fuzz harness gates the two untrusted-input surfaces, so a silent
 # minor bump that changed harness semantics is itself a supply-chain risk.
@@ -101,6 +107,27 @@ bench = false
 [[bin]]
 name = "fuzz_archive"
 path = "fuzz_targets/fuzz_archive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_toml"
+path = "fuzz_targets/config_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "itermcolors"
+path = "fuzz_targets/itermcolors.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "osc"
+path = "fuzz_targets/osc.rs"
 test = false
 doc = false
 bench = false

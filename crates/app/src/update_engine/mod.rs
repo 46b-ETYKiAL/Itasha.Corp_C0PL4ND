@@ -33,3 +33,41 @@ pub mod verify;
 /// in-app [`net`] / [`updater`] modules and the "View all releases" link.
 pub const UPDATE_OWNER: &str = "46b-ETYKiAL";
 pub const UPDATE_REPO: &str = "Itasha.Corp_C0PL4ND";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_coordinates_are_the_canonical_release_repo() {
+        // These two constants are interpolated directly into the GitHub
+        // Releases API URL (`/repos/{owner}/{repo}/releases/latest`) and the
+        // "View all releases" link. A wrong value silently points the updater
+        // at the wrong repo, so pin the exact expected strings.
+        assert_eq!(UPDATE_OWNER, "46b-ETYKiAL");
+        assert_eq!(UPDATE_REPO, "Itasha.Corp_C0PL4ND");
+    }
+
+    #[test]
+    fn repo_coordinates_are_url_path_safe() {
+        // Owner/repo are placed in a URL path; neither may contain a slash,
+        // whitespace, or be empty, or the constructed API URL is malformed.
+        for v in [UPDATE_OWNER, UPDATE_REPO] {
+            assert!(!v.is_empty());
+            assert!(!v.contains('/'));
+            assert!(!v.contains(char::is_whitespace));
+        }
+    }
+
+    #[test]
+    fn releases_api_url_composes_correctly() {
+        // Exercise the actual interpolation shape the net module uses, so a
+        // mutant that drops/duplicates a path segment is caught.
+        let url =
+            format!("https://api.github.com/repos/{UPDATE_OWNER}/{UPDATE_REPO}/releases/latest");
+        assert_eq!(
+            url,
+            "https://api.github.com/repos/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases/latest"
+        );
+    }
+}
