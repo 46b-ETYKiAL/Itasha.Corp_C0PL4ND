@@ -102,7 +102,7 @@ rfd = { version = "=0.15.4", default-features = false, features = ["xdg-portal",
 # bottleneck (emilk/egui#5587); mimalloc restores headroom under the per-frame
 # grid-snapshot + paste/scroll allocation churn. Set as `#[global_allocator]` in
 # both binary roots. Pure-Rust-friendly vendored C, no runtime deps.
-mimalloc = "=0.1.43"
+mimalloc = "=0.1.52"
 
 [dev-dependencies]
 # Headless egui UI tests (kittest = AccessKit-driven). State-assertion tests run
