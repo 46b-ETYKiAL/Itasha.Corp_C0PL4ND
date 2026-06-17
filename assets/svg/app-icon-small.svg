@@ -1,19 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="C0PL4ND app icon (small)">
-  <title>C0PL4ND app icon — small-size variant (&lt;=48px)</title>
-  <desc>Stripped for 16/24/32/48px: void plate + operator-violet keyline + 3 bold radial seal-ticks (the "hint of seal") + the bold phosphor-cyan prompt chevron + teal cursor block with the daemon fork() trident notch. No ring/tracery (would alias at small sizes). Same core geometry as the master so the glyph never shifts across tiers.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 1024 1024" role="img" aria-label="C0PL4ND app icon (small)">
+  <title>C0PL4ND app icon - small tier</title>
+  <desc>Small-size monochrome variant: void plate, teal keyline, one containment ring, and the bold phosphor-teal prompt chevron + cursor block. Fine seal chrome dropped for legibility at 16-48px.</desc>
   <rect x="80" y="80" width="864" height="864" rx="176" fill="#08060d"/>
-  <rect x="80" y="80" width="864" height="864" rx="176" fill="none" stroke="#a020ff" stroke-width="20"/>
-  <g stroke="#a020ff" stroke-width="18" stroke-linecap="round" opacity="0.8">
-    <line x1="512" y1="104" x2="512" y2="146"/>
-    <line x1="104" y1="512" x2="146" y2="512"/>
-    <line x1="920" y1="512" x2="878" y2="512"/>
-  </g>
-  <path d="M312 336 L520 512 L312 688" fill="none" stroke="#00e5ff" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="576" y="566" width="168" height="64" rx="8" fill="#00ffb3"/>
-  <g stroke="#00ffb3" stroke-width="12" stroke-linecap="round">
-    <line x1="744" y1="598" x2="792" y2="564"/>
-    <line x1="744" y1="598" x2="800" y2="598"/>
-    <line x1="744" y1="598" x2="792" y2="632"/>
-  </g>
-  <circle cx="800" cy="598" r="7" fill="#ff0040"/>
+  <rect x="80" y="80" width="864" height="864" rx="176" fill="none" stroke="#1ad6c0" stroke-width="12"/>
+  <circle cx="512" cy="512" r="360" fill="none" stroke="#1ad6c0" stroke-width="6" opacity="0.7"/>
+  <path d="M362 360 L556 512 L362 664" fill="none" stroke="#7af0e4" stroke-width="96" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="600" y="560" width="168" height="74" rx="12" fill="#7af0e4"/>
 </svg>
