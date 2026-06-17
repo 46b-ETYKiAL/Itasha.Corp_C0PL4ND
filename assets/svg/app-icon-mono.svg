@@ -1,11 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="C0PL4ND symbolic icon">
-  <title>C0PL4ND app icon — monochrome / symbolic</title>
-  <desc>Single-colour symbolic variant for Windows tray, Linux hicolor-symbolic, and notification glyphs. currentColor (defaults to phosphor white), transparent background, no plate, no occult chrome — the bare prompt chevron + cursor block with the daemon fork() trident notch.</desc>
-  <path d="M312 336 L520 512 L312 688" fill="none" stroke="currentColor" color="#e9f7ff" stroke-width="96" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="576" y="560" width="172" height="72" rx="8" fill="currentColor" color="#e9f7ff"/>
-  <g stroke="currentColor" color="#e9f7ff" stroke-width="14" stroke-linecap="round" fill="none">
-    <line x1="748" y1="596" x2="800" y2="558"/>
-    <line x1="748" y1="596" x2="810" y2="596"/>
-    <line x1="748" y1="596" x2="800" y2="634"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="C0PL4ND symbolic mark">
+  <title>C0PL4ND symbolic mark - flat monochrome</title>
+  <desc>Flat single-ink symbolic mark (currentColor): seal ring + radial ticks + prompt chevron + cursor + daemon trident, one value, for template/monochrome contexts.</desc>
+  <g fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="80" y="80" width="864" height="864" rx="176" stroke-width="22"/>
+    <circle cx="512" cy="512" r="372"/>
+    <g stroke-width="16">
+      <line x1="512" y1="140" x2="512" y2="172"/><line x1="140" y1="512" x2="172" y2="512"/><line x1="852" y1="512" x2="884" y2="512"/>
+      <line x1="754" y1="270" x2="776" y2="248"/><line x1="270" y1="270" x2="248" y2="248"/><line x1="754" y1="754" x2="776" y2="776"/><line x1="270" y1="754" x2="248" y2="776"/>
+    </g>
+  </g>
+  <path d="M372 372 L556 512 L372 652" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="600" y="566" width="156" height="66" rx="12" fill="currentColor"/>
+  <g stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M512 742 L512 826 M468 772 L468 812 M556 772 L556 812 M468 772 L512 748 L556 772"/>
   </g>
 </svg>
