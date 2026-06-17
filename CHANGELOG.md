@@ -8,6 +8,22 @@ Full per-release artifacts (signed binaries, SBOMs, provenance) are on the
 [GitHub Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases)
 page.
 
+## [0.4.7] - 2026-06-17
+
+### Changed
+
+- **New app icon: a monochrome phosphor-teal daemon-sigil.** The app icon is
+  redrawn as a single-hue (`#1ad6c0`) occult summoning seal — a double
+  containment ring with radial seal-ticks, a faint kamea grid, inward goetic
+  bind-rune spikes, and cardinal pommel dots — wrapped around the bold `>_`
+  shell prompt mark, with a `fork()` trident as the daemon signature at the
+  base. This replaces the previous multi-colour cyan/violet/red icon and
+  realigns the mark to C0PL4ND's phosphor-teal brand voice. The new art ships
+  in the embedded Windows `.ico`, the runtime window icon, and the full icon
+  source family (`assets/svg/app-icon*.svg`, `logomark.svg`). Legibility is
+  preserved down to 16px via a size-tiered render (the clean prompt mark at
+  small sizes, the full seal at large sizes).
+
 ## [0.4.6] - 2026-06-15
 
 ### Changed
