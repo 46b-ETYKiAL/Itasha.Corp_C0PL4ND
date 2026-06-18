@@ -905,6 +905,37 @@ mod tests {
         assert!(c.validate().is_ok());
     }
 
+    /// `config_dir()` (the per-user data dir the W1TN3SS report spool lives under)
+    /// MUST be exactly the parent of `default_path()` (the dir holding
+    /// `config.toml`) — so the spool, config, and crash logs share one root. This
+    /// pins the value: it is neither `None` when a config path resolves, nor an
+    /// empty/default `PathBuf` — it is the real `…/c0pl4nd` directory.
+    #[test]
+    fn config_dir_is_parent_of_default_path() {
+        match Config::default_path() {
+            Some(p) => {
+                let expected = p.parent().map(Path::to_path_buf);
+                assert_eq!(
+                    Config::config_dir(),
+                    expected,
+                    "config_dir must equal the parent of default_path"
+                );
+                let dir =
+                    Config::config_dir().expect("config_dir resolves whenever default_path does");
+                assert!(
+                    !dir.as_os_str().is_empty(),
+                    "config_dir must not be an empty path"
+                );
+                assert!(
+                    dir.ends_with("c0pl4nd"),
+                    "config_dir must be the per-user c0pl4nd data dir, got {dir:?}"
+                );
+            }
+            // No config path resolves in this environment → config_dir is None too.
+            None => assert_eq!(Config::config_dir(), None),
+        }
+    }
+
     /// Doc/behaviour parity guard: the default update mode is `notify`, which
     /// means a fresh install DOES make a once-per-launch network version check.
     /// This is a privacy-relevant default documented in PRIVACY.md / CHANGELOG.md
