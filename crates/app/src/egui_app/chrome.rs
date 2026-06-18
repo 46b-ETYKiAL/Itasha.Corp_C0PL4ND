@@ -61,6 +61,11 @@ pub struct ChromeActions {
     /// (like [`open_shell`](Self::open_shell)) so the host applies it after the
     /// panel closes.
     pub rerun_command: Option<String>,
+    /// User clicked the script-menu "Report an issue…" item (W1TN3SS). The host
+    /// opens the manual-issue dialog ([`crate::issue_intake::IssueIntakeState::open_fresh`])
+    /// after the panel closure returns. Routed through the action struct so the
+    /// `&mut self` dialog state is touched outside the panel borrow.
+    pub report_issue: bool,
 }
 
 impl C0pl4ndApp {
@@ -341,6 +346,28 @@ impl C0pl4ndApp {
                                     }
                                 }
                             });
+                    }
+                    // W1TN3SS manual "Report an issue…" entry (opt-in,
+                    // user-initiated). Opens the prefilled-GitHub-issue dialog;
+                    // nothing is sent until the user reviews + submits in their
+                    // browser. Deferred to the host (the dialog state is
+                    // `&mut self`, unsafe to touch mid-panel-borrow).
+                    ui.separator();
+                    let report = ui
+                        .button(format!("{} Report an issue…", icon::BUG))
+                        .on_hover_text(
+                            "Open a prefilled GitHub issue (review before submitting)",
+                        );
+                    report.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            true,
+                            "report an issue",
+                        )
+                    });
+                    if report.clicked() {
+                        actions.report_issue = true;
+                        ui.close_kind(egui::UiKind::Menu);
                     }
                 },
             );

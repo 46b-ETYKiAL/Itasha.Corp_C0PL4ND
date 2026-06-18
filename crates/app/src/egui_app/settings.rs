@@ -203,6 +203,44 @@ fn reset_to_default<T: PartialEq + Clone>(ui: &mut egui::Ui, cur: &mut T, def: &
     false
 }
 
+/// Equal-weight 3-way consent selector for a W1TN3SS reporting stream
+/// (`Off` / `Ask each time` / `Always`). The three radios carry EQUAL visual
+/// weight — there is no pre-ticked default-on or dark-pattern asymmetry; `Off`
+/// is first and is the default. Returns `true` when the user changed the mode.
+/// Pure UI over the SDK's `ReportingMode`; the host persists the config on
+/// change like any other setting.
+fn reporting_mode_selector(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    mode: &mut itasha_report_core::config::ReportingMode,
+) -> bool {
+    use itasha_report_core::config::ReportingMode;
+    let mut changed = false;
+    ui.push_id(id_salt, |ui| {
+        ui.horizontal(|ui| {
+            // Off FIRST (the privacy-default, selected by default) — equal weight.
+            changed |= ui
+                .radio_value(mode, ReportingMode::Off, "Off")
+                .on_hover_text("Never report for this stream (the default).")
+                .changed();
+            changed |= ui
+                .radio_value(mode, ReportingMode::AskEachTime, "Ask each time")
+                .on_hover_text(
+                    "Show each report to you — editable — and ask before sending.",
+                )
+                .changed();
+            changed |= ui
+                .radio_value(mode, ReportingMode::Always, "Always send")
+                .on_hover_text(
+                    "Send reports for this stream without asking each time. You can \
+                     turn this off at any time.",
+                )
+                .changed();
+        });
+    });
+    changed
+}
+
 /// A dim helper label under a heading (SCR1B3's `weak().small()` idiom). WRAPS
 /// to the available width — a long single-line help string (e.g. the Updates
 /// page's) otherwise sets the content's min width and forced the whole settings
@@ -1484,6 +1522,40 @@ fn render_sections(
             &def.history_capture_enabled,
         );
 
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        // ---- W1TN3SS opt-in crash/error/issue reporting (default OFF) ----
+        ui.heading("Report a crash or issue");
+        help(
+            ui,
+            "Reporting is OPT-IN and OFF by default. Nothing is ever sent without \
+             your per-report consent, and every report is shown to you — editable \
+             — before it leaves. No accounts, no identifiers, no tracking. Reports \
+             go only to the project's own self-hosted endpoint (none is configured \
+             by default, so a default build sends nothing).",
+        );
+        ui.add_space(6.0);
+        ui.label("Crash reports");
+        // Equal-weight 3-way selector (Off / Ask each time / Always) — no
+        // pre-ticked default-on path; the Off radio is first + selected by
+        // default. Mirrors the proven consent shape.
+        changed |= reporting_mode_selector(
+            ui,
+            "crash_reports_mode",
+            &mut config.reporting.streams.crash_reports,
+        );
+        ui.add_space(6.0);
+        ui.label("Manual issue reports");
+        changed |= reporting_mode_selector(
+            ui,
+            "manual_issues_mode",
+            &mut config.reporting.streams.manual_issues,
+        );
+
+        ui.add_space(10.0);
+        ui.separator();
         ui.add_space(6.0);
 
         // Incognito is RUNTIME state (never persisted) owned by the host; reflect

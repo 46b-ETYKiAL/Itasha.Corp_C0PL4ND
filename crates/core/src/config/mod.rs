@@ -485,6 +485,56 @@ impl EffectsConfig {
     }
 }
 
+/// W1TN3SS manual "Report an issue" coordinates: the GitHub `owner/repo` the
+/// prefilled Issue-Form deep link targets, and the support email alias the
+/// `mailto:` fallback addresses. Both have sane C0PL4ND defaults and are
+/// overridable in config. NO persistent identifier and NO transport state is
+/// ever stored here — only the public repo coordinates the deep link needs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IssueIntakeConfig {
+    /// The GitHub `owner/repo` the prefilled Issue-Form deep link targets.
+    pub repo: String,
+    /// The support email alias the `mailto:` fallback addresses.
+    pub mailto_alias: String,
+}
+
+impl Default for IssueIntakeConfig {
+    fn default() -> Self {
+        IssueIntakeConfig {
+            repo: "46b-ETYKiAL/Itasha.Corp_C0PL4ND".to_string(),
+            mailto_alias: "46b.AbandonSomething@proton.me".to_string(),
+        }
+    }
+}
+
+/// Opt-in reporting configuration. Wraps the W1TN3SS SDK's two-stream
+/// [`itasha_report_core::config::ReportingConfig`] (crash + manual-issue
+/// consent posture, **both default OFF**) and adds the manual-issue repo
+/// coordinates. This block is **additive** to the on-disk config (serde
+/// `default`) — an older config file with no `[reporting]` table loads with
+/// both streams OFF, so upgrading never silently enables any reporting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReportingConfig {
+    /// Per-stream consent posture (crash_reports + manual_issues). **Default
+    /// OFF** for every stream — the privacy-default; nothing transmits until
+    /// the user explicitly opts in.
+    pub streams: itasha_report_core::config::ReportingConfig,
+    /// Manual "Report an issue" deep-link coordinates.
+    pub issue_intake: IssueIntakeConfig,
+}
+
+impl Default for ReportingConfig {
+    /// Both streams OFF (the SDK's privacy-default), default issue-intake coords.
+    fn default() -> Self {
+        ReportingConfig {
+            streams: itasha_report_core::config::ReportingConfig::all_off(),
+            issue_intake: IssueIntakeConfig::default(),
+        }
+    }
+}
+
 /// The default window tint color (`#RRGGBB`) — a near-black void wash matching
 /// the brand background. A free function so `#[serde(default = ...)]` can name
 /// it for the `tint` field.
@@ -599,6 +649,12 @@ pub struct Config {
     /// per-session Incognito toggle forces this off regardless.
     #[serde(default = "default_true")]
     pub history_capture_enabled: bool,
+    /// Opt-in crash/error/issue reporting (W1TN3SS). **Both streams default
+    /// OFF** — nothing is captured-for-send or transmitted until the user
+    /// explicitly opts in from Settings → Privacy. Additive: an older config
+    /// with no `[reporting]` table loads with reporting fully off.
+    #[serde(default)]
+    pub reporting: ReportingConfig,
 }
 
 /// serde default for boolean fields that should default to `true` when absent
@@ -646,6 +702,7 @@ impl Default for Config {
             copy_on_select: false,
             paste_warn_multiline: true,
             history_capture_enabled: true,
+            reporting: ReportingConfig::default(),
         }
     }
 }
@@ -757,6 +814,15 @@ impl Config {
                 .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
                 .map(|p| p.join("c0pl4nd").join("config.toml"))
         }
+    }
+
+    /// The per-user C0PL4ND data directory (the PARENT of `config.toml`) — the
+    /// root the W1TN3SS report spool (`reports/`) is created under. Returns
+    /// `None` when no config path resolves (no `%APPDATA%` / `$HOME`). Shares
+    /// the resolution with [`Config::default_path`] so the spool, the config
+    /// file, and the crash logs all live under one per-user dir.
+    pub fn config_dir() -> Option<PathBuf> {
+        Self::default_path().and_then(|p| p.parent().map(Path::to_path_buf))
     }
 
     /// Load from a specific path. Missing file → built-in defaults (zero-config).
@@ -1238,6 +1304,59 @@ mod tests {
         let loaded = Config::load_from(&path).expect("load");
         assert_eq!(loaded.theme, "ghost-paper");
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    // ---- W1TN3SS opt-in reporting (additive, default-OFF) ----
+
+    #[test]
+    fn reporting_defaults_both_streams_off() {
+        use itasha_report_core::config::ReportingMode;
+        let c = Config::default();
+        assert_eq!(
+            c.reporting.streams.crash_reports,
+            ReportingMode::Off,
+            "crash reporting MUST default OFF (opt-in only)"
+        );
+        assert_eq!(
+            c.reporting.streams.manual_issues,
+            ReportingMode::Off,
+            "manual-issue reporting MUST default OFF (opt-in only)"
+        );
+    }
+
+    #[test]
+    fn old_config_without_reporting_table_loads_both_streams_off() {
+        use itasha_report_core::config::ReportingMode;
+        // A config file written BEFORE the reporting feature existed (no
+        // `[reporting]` table) must still parse, and reporting must come up OFF
+        // — upgrading never silently enables any reporting stream.
+        let p = PathBuf::from("test.toml");
+        let c = Config::from_toml("theme = \"ghost-paper\"\n", &p).unwrap();
+        assert_eq!(c.reporting.streams.crash_reports, ReportingMode::Off);
+        assert_eq!(c.reporting.streams.manual_issues, ReportingMode::Off);
+        // Issue-intake coords backfill to the C0PL4ND defaults.
+        assert_eq!(
+            c.reporting.issue_intake.repo,
+            "46b-ETYKiAL/Itasha.Corp_C0PL4ND"
+        );
+    }
+
+    #[test]
+    fn reporting_round_trips_and_is_reversible() {
+        use itasha_report_core::config::ReportingMode;
+        // A user opts crash reporting into AskEachTime; the migrate is reversible
+        // (serialize → parse reproduces the stored value; an unset stream stays
+        // OFF). serde stored-value wins, so an explicit value is never clobbered.
+        let p = PathBuf::from("test.toml");
+        let toml = "[reporting.streams]\ncrash_reports = \"ask_each_time\"\n";
+        let c = Config::from_toml(toml, &p).unwrap();
+        assert_eq!(c.reporting.streams.crash_reports, ReportingMode::AskEachTime);
+        // Manual-issue stream stays OFF (only the set field changed).
+        assert_eq!(c.reporting.streams.manual_issues, ReportingMode::Off);
+        // Round-trip: serialize then re-parse reproduces the posture exactly.
+        let serialized = c.to_toml().unwrap();
+        let c2 = Config::from_toml(&serialized, &p).unwrap();
+        assert_eq!(c2.reporting, c.reporting);
     }
 
     #[cfg(unix)]

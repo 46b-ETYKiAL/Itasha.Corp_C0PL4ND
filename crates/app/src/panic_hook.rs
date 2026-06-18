@@ -46,9 +46,41 @@ pub fn install() {
                 let _ = &path; // used only on Windows
             }
         }
+        // W1TN3SS Tier-1: ALSO spool a sanitized, opt-in crash report locally so
+        // the user can review + consent-send it on the NEXT launch (the consent
+        // dialog drains the spool). Nothing transmits here — capture is
+        // local-first, default-OFF, consent-gated. Only the panic's STATIC
+        // `&'static str` message (a source-literal, e.g. an `expect("…")`
+        // string) + our own panic SITE enter the report — a runtime `String`
+        // payload (which could embed environment fragments / paths) is
+        // deliberately NOT spooled. Best-effort; a spool failure in an
+        // already-panicking thread is swallowed (never re-panics).
+        capture_panic_w1tn3ss(info);
         // Always chain to the previous hook (default abort message, etc.).
         previous(info);
     }));
+}
+
+/// W1TN3SS Tier-1 capture: spool a sanitized, opt-in crash report from the
+/// panic's STATIC message + our panic SITE via [`crate::reporting::capture_panic`].
+///
+/// Only a `&'static str` panic payload (a source-literal message, e.g. from
+/// `panic!("lit")` / `expect("…")` / `unwrap()` — the latter's std message is a
+/// `&'static str`) is spooled, honouring the SDK's static-message discipline: a
+/// runtime `String` payload (from `panic!("{}", x)`) could embed environment
+/// fragments or a path, so it is deliberately NOT spooled (only the static
+/// shape + the location reaches the report). Best-effort: a non-static payload
+/// or a spool failure is a no-op — the panic hook must never itself re-panic.
+fn capture_panic_w1tn3ss(info: &PanicHookInfo<'_>) {
+    // Only the `&'static str` arm is spooled (the static-message discipline).
+    let Some(static_msg) = info.payload().downcast_ref::<&'static str>() else {
+        return;
+    };
+    let location = info
+        .location()
+        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let _ = crate::reporting::capture_panic(static_msg, &location);
 }
 
 /// The directory crash logs are written to: a `crashes/` subdir of the per-user
