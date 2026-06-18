@@ -55,6 +55,7 @@ pub fn install() {
         // payload (which could embed environment fragments / paths) is
         // deliberately NOT spooled. Best-effort; a spool failure in an
         // already-panicking thread is swallowed (never re-panics).
+        #[cfg(not(feature = "legacy-winit"))]
         capture_panic_w1tn3ss(info);
         // Always chain to the previous hook (default abort message, etc.).
         previous(info);
@@ -71,6 +72,7 @@ pub fn install() {
 /// fragments or a path, so it is deliberately NOT spooled (only the static
 /// shape + the location reaches the report). Best-effort: a non-static payload
 /// or a spool failure is a no-op — the panic hook must never itself re-panic.
+#[cfg(not(feature = "legacy-winit"))]
 fn capture_panic_w1tn3ss(info: &PanicHookInfo<'_>) {
     // Only the `&'static str` arm is spooled (the static-message discipline).
     let Some(static_msg) = info.payload().downcast_ref::<&'static str>() else {

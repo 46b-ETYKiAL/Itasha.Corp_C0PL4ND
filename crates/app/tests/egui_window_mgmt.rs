@@ -26,6 +26,10 @@
 
 #[path = "../src/egui_app/mod.rs"]
 mod egui_app;
+#[path = "../src/issue_intake.rs"]
+mod issue_intake;
+#[path = "../src/reporting.rs"]
+mod reporting;
 
 use std::cell::RefCell;
 use std::time::{Duration, Instant};

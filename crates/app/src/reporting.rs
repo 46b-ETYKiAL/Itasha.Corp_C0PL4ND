@@ -87,7 +87,7 @@ fn log_outcome(outcome: &ReportOutcome) {
 
 /// Build a sanitized Tier-1 crash report from the panic's STATIC message + our
 /// own panic SITE. Only a source-literal message (e.g. an `expect("…")` string)
-/// + the `file:line` of our own code enter the report. A runtime `String`
+/// and the `file:line` of our own code enter the report. A runtime `String`
 /// payload — which could embed environment fragments or a user's path — is the
 /// caller's responsibility to keep out (the hook passes `&'static str` only);
 /// the SDK's [`Sanitizer`] is the second line of defense (home/username/host
