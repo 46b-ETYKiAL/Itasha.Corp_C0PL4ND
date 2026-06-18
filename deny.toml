@@ -13,7 +13,16 @@ yanked = "deny"
 # where pty.read returns garbage/empty output — https://github.com/wezterm/wezterm/issues/6783
 # (0.9.0 is the latest crates.io release). Re-evaluate and drop this ignore when
 # portable-pty > 0.9.0 ships the wezterm#6783 fix. See .github/scorecard-notes.md.
-ignore = ["RUSTSEC-2017-0008"]
+#
+# RUSTSEC-2026-0173: `proc-macro-error2` is UNMAINTAINED (informational advisory,
+# NOT an exploitable vulnerability). It is a BUILD-TIME proc-macro helper pulled
+# transitively by `i18n-embed-fl` <- `age` <- the in-house `itasha-report-core`
+# W1TN3SS reporting SDK (age provides the report E2E-encryption stack). It never
+# enters the shipped binary's runtime attack surface (proc-macros run only at
+# compile time). `cargo audit` already classifies it as an allowed warning; this
+# mirrors that accepted-risk posture for `cargo deny`. Re-evaluate and drop this
+# ignore when `age` / `i18n-embed-fl` migrate off `proc-macro-error2`.
+ignore = ["RUSTSEC-2017-0008", "RUSTSEC-2026-0173"]
 
 [licenses]
 version = 2
@@ -54,3 +63,5 @@ wildcards = "warn"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# In-house W1TN3SS opt-in crash/issue reporting SDK (first-party, pinned by tag).
+allow-git = ["https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-W1TN3SS.git"]
