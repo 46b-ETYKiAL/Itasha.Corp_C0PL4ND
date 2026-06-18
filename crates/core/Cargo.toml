@@ -16,6 +16,10 @@ tracing.workspace = true
 serde.workspace = true
 serde_json = "=1.0.150"
 toml.workspace = true
+# W1TN3SS reporting SDK (pinned git tag) — the config layer embeds the SDK's
+# default-OFF two-stream `ReportingConfig` so the consent posture serializes
+# with the rest of `config.toml`. Pure consumer; no SDK code authored here.
+itasha-report-core.workspace = true
 vte = "=0.15.0"
 # SIMD-accelerated byte search (BurntSushi) for the VT parser fast path: skip
 # runs of plain printable bytes to the next ESC/control byte instead of scanning

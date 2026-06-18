@@ -27,7 +27,11 @@ mod diagnostics;
 mod dll_hardening;
 #[path = "egui_app/mod.rs"]
 mod egui_app;
+// W1TN3SS opt-in reporting glue (Tier-1 crash spool + manual issue intake).
+// Pure consumers of the pinned-tag `itasha-report-core` SDK; both default OFF.
+mod issue_intake;
 mod panic_hook;
+mod reporting;
 #[path = "update/mod.rs"]
 mod update;
 

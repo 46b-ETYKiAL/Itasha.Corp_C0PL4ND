@@ -41,6 +41,10 @@ workspace = true
 
 [dependencies]
 c0pl4nd-core = { path = "../core" }
+# W1TN3SS opt-in reporting SDK (pinned git tag; default-OFF, consent-gated). The
+# app is a pure consumer — capture/sanitize/spool/preview/transport/intake all
+# live in the SDK and are CALLED from `reporting.rs` + `issue_intake.rs`.
+itasha-report-core.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -30,6 +30,13 @@ tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 toml = "=1.1.2"
 
+# --- W1TN3SS opt-in crash/error/issue reporting SDK (first-party, pinned git
+#     tag; default-OFF, consent-gated, no vendor SaaS/telemetry). Consumed as a
+#     pure dependency — this app authors no SDK code (the fleet-rollout
+#     integration). Pinned to the exact release tag per dependency-management.md
+#     so an SDK change cannot float into the app until it explicitly bumps. ---
+itasha-report-core = { git = "https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-W1TN3SS.git", tag = "itasha-report-core-v0.2.0" }
+
 # --- GPU/windowing anchor (promoted to workspace so the egui bundle and the
 #     existing terminal-grid renderer share ONE pinned wgpu/winit/glyphon). ---
 # These resolve to wgpu 29.0.3 / winit 0.30.13 / glyphon 0.11.0 — the same set
