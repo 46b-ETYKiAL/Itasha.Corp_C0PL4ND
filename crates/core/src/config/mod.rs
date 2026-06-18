@@ -1350,7 +1350,10 @@ mod tests {
         let p = PathBuf::from("test.toml");
         let toml = "[reporting.streams]\ncrash_reports = \"ask_each_time\"\n";
         let c = Config::from_toml(toml, &p).unwrap();
-        assert_eq!(c.reporting.streams.crash_reports, ReportingMode::AskEachTime);
+        assert_eq!(
+            c.reporting.streams.crash_reports,
+            ReportingMode::AskEachTime
+        );
         // Manual-issue stream stays OFF (only the set field changed).
         assert_eq!(c.reporting.streams.manual_issues, ReportingMode::Off);
         // Round-trip: serialize then re-parse reproduces the posture exactly.

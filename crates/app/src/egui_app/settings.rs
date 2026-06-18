@@ -225,9 +225,7 @@ fn reporting_mode_selector(
                 .changed();
             changed |= ui
                 .radio_value(mode, ReportingMode::AskEachTime, "Ask each time")
-                .on_hover_text(
-                    "Show each report to you — editable — and ask before sending.",
-                )
+                .on_hover_text("Show each report to you — editable — and ask before sending.")
                 .changed();
             changed |= ui
                 .radio_value(mode, ReportingMode::Always, "Always send")

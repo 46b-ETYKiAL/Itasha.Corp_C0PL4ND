@@ -161,7 +161,12 @@ pub fn build_body(description: &str, include_diagnostics: bool, renderer: &str) 
 /// Build the [`IssueFormRequest`] for the consumed SDK helper from the dialog's
 /// current state.
 #[must_use]
-pub fn build_request(repo: &str, kind: IssueKind, title_tail: &str, body: &str) -> IssueFormRequest {
+pub fn build_request(
+    repo: &str,
+    kind: IssueKind,
+    title_tail: &str,
+    body: &str,
+) -> IssueFormRequest {
     let title = format!("{}{}", kind.title_prefix(), title_tail.trim());
     IssueFormRequest {
         repo: repo.to_string(),
@@ -384,7 +389,10 @@ mod tests {
 
     #[test]
     fn title_tail_takes_first_nonempty_line_capped() {
-        assert_eq!(title_tail_from("\n\n  hello world  \nsecond"), "hello world");
+        assert_eq!(
+            title_tail_from("\n\n  hello world  \nsecond"),
+            "hello world"
+        );
         assert_eq!(title_tail_from(""), "");
         let long = "x".repeat(200);
         assert_eq!(title_tail_from(&long).chars().count(), 80);

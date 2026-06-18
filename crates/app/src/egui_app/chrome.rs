@@ -355,15 +355,9 @@ impl C0pl4ndApp {
                     ui.separator();
                     let report = ui
                         .button(format!("{} Report an issue…", icon::BUG))
-                        .on_hover_text(
-                            "Open a prefilled GitHub issue (review before submitting)",
-                        );
+                        .on_hover_text("Open a prefilled GitHub issue (review before submitting)");
                     report.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            true,
-                            "report an issue",
-                        )
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "report an issue")
                     });
                     if report.clicked() {
                         actions.report_issue = true;

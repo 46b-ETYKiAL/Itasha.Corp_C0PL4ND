@@ -2381,14 +2381,16 @@ impl C0pl4ndApp {
                      below before deciding — nothing is sent unless you choose Send.",
                 );
                 ui.add_space(6.0);
-                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(self.crash_consent.edited_text_mut())
-                            .desired_rows(8)
-                            .desired_width(f32::INFINITY)
-                            .font(egui::TextStyle::Monospace),
-                    );
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(self.crash_consent.edited_text_mut())
+                                .desired_rows(8)
+                                .desired_width(f32::INFINITY)
+                                .font(egui::TextStyle::Monospace),
+                        );
+                    });
                 ui.add_space(8.0);
                 ui.label("Remember my choice for future crashes:");
                 let remember = self.crash_consent.remember_mut();
@@ -2487,13 +2489,15 @@ impl C0pl4ndApp {
                 });
                 ui.add_space(6.0);
                 ui.label("Describe the issue:");
-                egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.issue_intake.description)
-                            .desired_rows(5)
-                            .desired_width(f32::INFINITY),
-                    );
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.issue_intake.description)
+                                .desired_rows(5)
+                                .desired_width(f32::INFINITY),
+                        );
+                    });
                 ui.add_space(6.0);
                 ui.checkbox(
                     &mut self.issue_intake.include_diagnostics,
@@ -2507,9 +2511,7 @@ impl C0pl4ndApp {
                     .id_salt("issue_preview")
                     .max_height(120.0)
                     .show(ui, |ui| {
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(&preview).monospace()).wrap(),
-                        );
+                        ui.add(egui::Label::new(egui::RichText::new(&preview).monospace()).wrap());
                     });
                 ui.add_space(8.0);
                 if !self.issue_intake.fits_url_length(&repo, renderer) {
