@@ -964,4 +964,329 @@ mod tests {
     fn kitty_default_event_kind_is_press() {
         assert_eq!(KeyEventKind::default(), KeyEventKind::Press);
     }
+
+    // ---- legacy encode_key: every named-key arm + Alt-as-Meta ----
+
+    #[test]
+    fn legacy_backspace_is_del() {
+        assert_eq!(
+            encode_key(&LogicalKey::Backspace, false, KeyModifiers::NONE),
+            Some(vec![0x7f])
+        );
+    }
+
+    #[test]
+    fn legacy_tab_is_horizontal_tab() {
+        assert_eq!(
+            encode_key(&LogicalKey::Tab, false, KeyModifiers::NONE),
+            Some(vec![b'\t'])
+        );
+    }
+
+    #[test]
+    fn legacy_escape_is_esc_byte() {
+        assert_eq!(
+            encode_key(&LogicalKey::Escape, false, KeyModifiers::NONE),
+            Some(vec![0x1b])
+        );
+    }
+
+    #[test]
+    fn legacy_space_is_space_byte() {
+        assert_eq!(
+            encode_key(&LogicalKey::Space, false, KeyModifiers::NONE),
+            Some(vec![b' '])
+        );
+    }
+
+    #[test]
+    fn legacy_all_arrows_csi_and_ss3() {
+        // Exact bytes for every arrow in BOTH cursor modes (kills any
+        // letter-swap mutant on A/B/C/D).
+        for (key, letter) in [
+            (LogicalKey::ArrowUp, b'A'),
+            (LogicalKey::ArrowDown, b'B'),
+            (LogicalKey::ArrowRight, b'C'),
+            (LogicalKey::ArrowLeft, b'D'),
+        ] {
+            assert_eq!(
+                encode_key(&key, false, KeyModifiers::NONE),
+                Some(vec![0x1b, b'[', letter])
+            );
+            assert_eq!(
+                encode_key(&key, true, KeyModifiers::NONE),
+                Some(vec![0x1b, b'O', letter])
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_insert_and_pagedown_tilde_forms() {
+        assert_eq!(
+            encode_key(&LogicalKey::Insert, false, KeyModifiers::NONE),
+            Some(b"\x1b[2~".to_vec())
+        );
+        assert_eq!(
+            encode_key(&LogicalKey::PageDown, false, KeyModifiers::NONE),
+            Some(b"\x1b[6~".to_vec())
+        );
+    }
+
+    #[test]
+    fn legacy_function_keys_exact_bytes_f1_through_f12() {
+        // Every F-key's exact sequence — kills any tilde-number / SS3-letter
+        // swap mutant across the whole F1..=F12 table.
+        let expected: &[(u8, &[u8])] = &[
+            (1, b"\x1bOP"),
+            (2, b"\x1bOQ"),
+            (3, b"\x1bOR"),
+            (4, b"\x1bOS"),
+            (5, b"\x1b[15~"),
+            (6, b"\x1b[17~"),
+            (7, b"\x1b[18~"),
+            (8, b"\x1b[19~"),
+            (9, b"\x1b[20~"),
+            (10, b"\x1b[21~"),
+            (11, b"\x1b[23~"),
+            (12, b"\x1b[24~"),
+        ];
+        for (n, seq) in expected {
+            assert_eq!(
+                encode_key(&LogicalKey::Function(*n), false, KeyModifiers::NONE),
+                Some(seq.to_vec()),
+                "F{n} legacy sequence"
+            );
+        }
+        // n == 0 is out of range and encodes nothing (lower-bound guard).
+        assert_eq!(
+            encode_key(&LogicalKey::Function(0), false, KeyModifiers::NONE),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_alt_does_not_double_prefix_an_arrow() {
+        // Alt+Enter prefixes ESC (Enter is a non-ESC byte).
+        let alt = KeyModifiers {
+            alt: true,
+            ..KeyModifiers::NONE
+        };
+        assert_eq!(
+            encode_key(&LogicalKey::Enter, false, alt),
+            Some(vec![0x1b, b'\r'])
+        );
+        // Alt+Function(5) (tilde form already starts with ESC) is NOT prefixed.
+        assert_eq!(
+            encode_key(&LogicalKey::Function(5), false, alt),
+            Some(b"\x1b[15~".to_vec())
+        );
+    }
+
+    // ---- kitty encoder: remaining branches ----
+
+    #[test]
+    fn kitty_modified_space_encodes_csi_u_codepoint_32() {
+        // Ctrl+Space → CSI 32 ; 5 u (space is codepoint 32).
+        assert_eq!(
+            encode_key_kitty(&LogicalKey::Space, ctrl(), DISAMB, KeyEventKind::Press),
+            Some(b"\x1b[32;5u".to_vec())
+        );
+        // Unmodified Space with no event → fall through to legacy (None).
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Space,
+                KeyModifiers::NONE,
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn kitty_modified_pageup_and_pagedown_tilde() {
+        // Ctrl+PageUp → CSI 5 ; 5 ~ ; Ctrl+PageDown → CSI 6 ; 5 ~.
+        assert_eq!(
+            encode_key_kitty(&LogicalKey::PageUp, ctrl(), DISAMB, KeyEventKind::Press),
+            Some(b"\x1b[5;5~".to_vec())
+        );
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::PageDown,
+                ctrl(),
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            Some(b"\x1b[6;5~".to_vec())
+        );
+        // Ctrl+Insert → CSI 2 ; 5 ~.
+        assert_eq!(
+            encode_key_kitty(&LogicalKey::Insert, ctrl(), DISAMB, KeyEventKind::Press),
+            Some(b"\x1b[2;5~".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_function_keys_f2_f3_f4_csi_letter() {
+        // Ctrl+F2/F3/F4 use the CSI-1-letter Q/R/S form (kills letter-swap).
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Function(2),
+                ctrl(),
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            Some(b"\x1b[1;5Q".to_vec())
+        );
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Function(3),
+                ctrl(),
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            Some(b"\x1b[1;5R".to_vec())
+        );
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Function(4),
+                ctrl(),
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            Some(b"\x1b[1;5S".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_function_keys_f6_through_f12_tilde() {
+        // Each higher F-key under Ctrl emits its tilde number (kills number swap).
+        let expected: &[(u8, &[u8])] = &[
+            (6, b"\x1b[17;5~"),
+            (7, b"\x1b[18;5~"),
+            (8, b"\x1b[19;5~"),
+            (9, b"\x1b[20;5~"),
+            (10, b"\x1b[21;5~"),
+            (11, b"\x1b[23;5~"),
+            (12, b"\x1b[24;5~"),
+        ];
+        for (n, seq) in expected {
+            assert_eq!(
+                encode_key_kitty(
+                    &LogicalKey::Function(*n),
+                    ctrl(),
+                    DISAMB,
+                    KeyEventKind::Press
+                ),
+                Some(seq.to_vec()),
+                "kitty F{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_empty_text_falls_through() {
+        // Empty Text under a modifier → None (the `Some(c), None` guard's empty arm).
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Text(String::new()),
+                ctrl(),
+                DISAMB,
+                KeyEventKind::Press
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn kitty_release_on_letter_with_event_bit() {
+        // Release of Ctrl+'a' with bit2: CSI 97 ; 5 : 3 u (encode_char_key event arm).
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Text("a".into()),
+                ctrl(),
+                DISAMB_EVENTS,
+                KeyEventKind::Release
+            ),
+            Some(b"\x1b[97;5:3u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_all_arrows_and_home_with_modifier() {
+        // Modified cursor keys use the CSI-1-letter form; one assert per letter
+        // kills the letter-swap mutant on every arm of csi_letter_or_fallback.
+        let cases: &[(LogicalKey, &[u8])] = &[
+            (LogicalKey::ArrowDown, b"\x1b[1;2B"),
+            (LogicalKey::ArrowRight, b"\x1b[1;2C"),
+            (LogicalKey::ArrowLeft, b"\x1b[1;2D"),
+            (LogicalKey::Home, b"\x1b[1;2H"),
+        ];
+        for (key, seq) in cases {
+            assert_eq!(
+                encode_key_kitty(key, shift(), DISAMB, KeyEventKind::Press),
+                Some(seq.to_vec()),
+                "modified {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_repeat_event_on_letter_and_tilde_forms() {
+        // Repeat (event sub-param 2) on the CSI-letter form (arrow) and the
+        // tilde form (F5) — exercises kitty_csi_letter / kitty_tilde event arms
+        // and the kitty_event_subparam Repeat=2 branch.
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::ArrowUp,
+                KeyModifiers::NONE,
+                DISAMB_EVENTS,
+                KeyEventKind::Repeat
+            ),
+            Some(b"\x1b[1;1:2A".to_vec())
+        );
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Function(5),
+                KeyModifiers::NONE,
+                DISAMB_EVENTS,
+                KeyEventKind::Repeat
+            ),
+            Some(b"\x1b[15;1:2~".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_enter_falls_through_without_disambiguate_or_modifier() {
+        // Events-only flag (bit2, no disambiguate): an unmodified Enter PRESS has
+        // nothing to disambiguate and no event to report -> csi_u_or_fallback
+        // returns None (legacy CR is sent).
+        const EVENTS_ONLY: u8 = 2;
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Enter,
+                KeyModifiers::NONE,
+                EVENTS_ONLY,
+                KeyEventKind::Press
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn kitty_associated_text_with_event_sub_param() {
+        // bit1|bit2|bit16 + a Repeat: encode_char_key emits both the event
+        // sub-param AND the trailing text codepoint (covers the report_text arm
+        // alongside emit_event).
+        let flags = 1 | 2 | 16;
+        assert_eq!(
+            encode_key_kitty(
+                &LogicalKey::Text("a".into()),
+                ctrl(),
+                flags,
+                KeyEventKind::Repeat
+            ),
+            Some(b"\x1b[97;5:2;97u".to_vec())
+        );
+    }
 }
