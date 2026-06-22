@@ -382,7 +382,10 @@ mod tests {
             report.contains("dynamic runtime-built message"),
             "the String-payload arm must render the formatted message: {report}"
         );
-        assert!(report.contains("message:"), "message field present: {report}");
+        assert!(
+            report.contains("message:"),
+            "message field present: {report}"
+        );
     }
 
     #[test]

@@ -623,7 +623,10 @@ mod tests {
 
         // Decline the first → still pending (the second advances in).
         st.decline_and_discard();
-        assert!(st.has_pending(), "the second crash advances after declining the first");
+        assert!(
+            st.has_pending(),
+            "the second crash advances after declining the first"
+        );
         // Decline the second → now empty.
         st.decline_and_discard();
         assert!(!st.has_pending(), "declining the last clears the dialog");
@@ -652,7 +655,10 @@ mod tests {
             ReportOutcome::RefusedNoEndpoint,
             "no endpoint → structured refusal (never a fake Sent, never a drop)"
         );
-        assert!(!st.has_pending(), "the dialog advances past the sent-attempt report");
+        assert!(
+            !st.has_pending(),
+            "the dialog advances past the sent-attempt report"
+        );
         // The file is RETAINED (not removed) because the send did not succeed.
         let remaining = open_spool_in(&dir).expect("reopen").list().expect("list");
         assert_eq!(
@@ -761,7 +767,11 @@ mod tests {
         assert!(st.load_from_spool() >= 1);
         // Rebind to None → reloading finds nothing.
         st.set_config_dir(None);
-        assert_eq!(st.load_from_spool(), 0, "an unbound dialog presents nothing");
+        assert_eq!(
+            st.load_from_spool(),
+            0,
+            "an unbound dialog presents nothing"
+        );
         assert!(!st.has_pending());
         let _ = std::fs::remove_dir_all(&dir);
     }

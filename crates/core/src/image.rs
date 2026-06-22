@@ -758,8 +758,15 @@ mod tests {
         // Draw at x=0 (green), $, draw again at x=0 (red overwrites) → width 1.
         let data = b"#0;2;0;100;0~$#1;2;100;0;0#1~";
         let img = decode_sixel(data).expect("decoded");
-        assert_eq!(img.width, 1, "graphics-CR returns to column 0 → width stays 1");
-        assert_eq!(img.pixel(0, 0), [255, 0, 0, 255], "second draw overwrites with red");
+        assert_eq!(
+            img.width, 1,
+            "graphics-CR returns to column 0 → width stays 1"
+        );
+        assert_eq!(
+            img.pixel(0, 0),
+            [255, 0, 0, 255],
+            "second draw overwrites with red"
+        );
     }
 
     /// Unknown / ignorable bytes between tokens are skipped (the `_ => i += 1`

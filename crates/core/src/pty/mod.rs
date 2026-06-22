@@ -714,8 +714,8 @@ mod tests {
     fn wait_reports_exit_success_and_failure() {
         // Success: `exit 0` / `echo`.
         #[cfg(windows)]
-        let mut ok = PtyProcess::spawn_program("cmd.exe", &["/C", "exit", "0"], 24, 80)
-            .expect("spawn ok");
+        let mut ok =
+            PtyProcess::spawn_program("cmd.exe", &["/C", "exit", "0"], 24, 80).expect("spawn ok");
         #[cfg(not(windows))]
         let mut ok =
             PtyProcess::spawn_program("/bin/sh", &["-c", "exit 0"], 24, 80).expect("spawn ok");
@@ -723,8 +723,8 @@ mod tests {
 
         // Failure: non-zero exit.
         #[cfg(windows)]
-        let mut bad = PtyProcess::spawn_program("cmd.exe", &["/C", "exit", "3"], 24, 80)
-            .expect("spawn bad");
+        let mut bad =
+            PtyProcess::spawn_program("cmd.exe", &["/C", "exit", "3"], 24, 80).expect("spawn bad");
         #[cfg(not(windows))]
         let mut bad =
             PtyProcess::spawn_program("/bin/sh", &["-c", "exit 3"], 24, 80).expect("spawn bad");
@@ -745,8 +745,12 @@ mod tests {
         #[cfg(not(windows))]
         let mut proc = PtyProcess::spawn_program("/bin/sh", &["-i"], 24, 80).expect("spawn");
 
-        assert!(proc.child_pid().is_some(), "a freshly spawned child has a pid");
-        proc.resize(40, 120).expect("resize a live PTY must succeed");
+        assert!(
+            proc.child_pid().is_some(),
+            "a freshly spawned child has a pid"
+        );
+        proc.resize(40, 120)
+            .expect("resize a live PTY must succeed");
         proc.kill();
     }
 
@@ -759,8 +763,14 @@ mod tests {
         #[cfg(not(windows))]
         let mut proc = PtyProcess::spawn_program("/bin/sh", &["-i"], 24, 80).expect("spawn");
 
-        assert!(proc.reader().is_ok(), "reader clone must succeed on a live PTY");
-        assert!(proc.writer().is_ok(), "writer take must succeed on a live PTY");
+        assert!(
+            proc.reader().is_ok(),
+            "reader clone must succeed on a live PTY"
+        );
+        assert!(
+            proc.writer().is_ok(),
+            "writer take must succeed on a live PTY"
+        );
         proc.kill();
     }
 
@@ -787,8 +797,8 @@ mod tests {
         } else {
             "/c0pl4nd/definitely/not/here/xyz"
         };
-        let mut proc =
-            PtyProcess::spawn_shell_in(None, 24, 80, Some(bogus)).expect("spawn falls back to home");
+        let mut proc = PtyProcess::spawn_shell_in(None, 24, 80, Some(bogus))
+            .expect("spawn falls back to home");
         assert!(proc.child_pid().is_some());
         proc.kill();
     }
@@ -800,9 +810,14 @@ mod tests {
     fn spawn_shell_in_with_existing_cwd_succeeds() {
         let dir = std::env::temp_dir();
         let dir_s = dir.to_string_lossy().into_owned();
-        let mut proc =
-            PtyProcess::spawn_shell_in_with_term(None, 24, 80, Some(&dir_s), Some("xterm-256color"))
-                .expect("spawn in existing cwd");
+        let mut proc = PtyProcess::spawn_shell_in_with_term(
+            None,
+            24,
+            80,
+            Some(&dir_s),
+            Some("xterm-256color"),
+        )
+        .expect("spawn in existing cwd");
         assert!(proc.child_pid().is_some());
         proc.kill();
     }

@@ -1590,7 +1590,10 @@ mod tests {
     #[test]
     fn config_error_invalid_display_format() {
         let e = ConfigError::Invalid("widget out of range".to_string());
-        assert_eq!(e.to_string(), "config validation error: widget out of range");
+        assert_eq!(
+            e.to_string(),
+            "config validation error: widget out of range"
+        );
     }
 
     #[test]
@@ -1601,7 +1604,9 @@ mod tests {
         };
         let s = e.to_string();
         assert!(
-            s.contains("could not read config file") && s.contains("cfg.toml") && s.contains("denied"),
+            s.contains("could not read config file")
+                && s.contains("cfg.toml")
+                && s.contains("denied"),
             "Io Display must name the path and embed the source, got: {s}"
         );
     }
@@ -1609,8 +1614,8 @@ mod tests {
     #[test]
     fn load_from_existing_valid_file_round_trips_through_from_toml() {
         // The Ok arm of load_from: an existing, readable, valid file parses.
-        let path = std::env::temp_dir()
-            .join(format!("c0pl4nd-load-{}-ok.toml", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("c0pl4nd-load-{}-ok.toml", std::process::id()));
         let _ = std::fs::remove_file(&path);
         std::fs::write(&path, "theme = \"ghost-paper\"\nligatures = true\n").expect("seed");
         let c = Config::load_from(&path).expect("valid file loads");
@@ -1624,8 +1629,8 @@ mod tests {
     fn load_from_invalid_file_surfaces_validation_error_not_defaults() {
         // The Ok arm reads, but validation rejects an out-of-range value — the
         // error must propagate (not silently fall back to defaults).
-        let path = std::env::temp_dir()
-            .join(format!("c0pl4nd-load-{}-bad.toml", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("c0pl4nd-load-{}-bad.toml", std::process::id()));
         let _ = std::fs::remove_file(&path);
         std::fs::write(&path, "opacity = 9.0\n").expect("seed");
         let err = Config::load_from(&path).unwrap_err();
@@ -1642,8 +1647,8 @@ mod tests {
         // FILE, so create_dir_all (inside atomic_write_owner_only) cannot create
         // a directory there. The error must surface as ConfigError::Io carrying
         // the target path — never a panic, never a silent success.
-        let file_as_parent = std::env::temp_dir()
-            .join(format!("c0pl4nd-save-{}-blocker", std::process::id()));
+        let file_as_parent =
+            std::env::temp_dir().join(format!("c0pl4nd-save-{}-blocker", std::process::id()));
         let _ = std::fs::remove_file(&file_as_parent);
         let _ = std::fs::remove_dir_all(&file_as_parent);
         std::fs::write(&file_as_parent, b"i am a file, not a dir").expect("seed blocker");
@@ -1749,7 +1754,10 @@ mod tests {
         assert!(!c.cursor.blink);
         let c2 = Config::from_toml("[cursor]\nstyle = \"bar\"\n", &p).unwrap();
         assert_eq!(c2.cursor.style, CursorStyle::Bar);
-        assert!(c2.cursor.blink, "unset blink backfills to the default (true)");
+        assert!(
+            c2.cursor.blink,
+            "unset blink backfills to the default (true)"
+        );
     }
 
     // ---- UpdateMode parsing + checks_on_launch for every mode ----
@@ -1780,11 +1788,8 @@ mod tests {
         // check_on_launch = true flag still forces an on-launch check, so old
         // config files keep their behaviour.
         let p = PathBuf::from("test.toml");
-        let c = Config::from_toml(
-            "[update]\nmode = \"off\"\ncheck_on_launch = true\n",
-            &p,
-        )
-        .unwrap();
+        let c =
+            Config::from_toml("[update]\nmode = \"off\"\ncheck_on_launch = true\n", &p).unwrap();
         assert_eq!(c.update.mode, UpdateMode::Off);
         assert!(
             c.update.checks_on_launch(),

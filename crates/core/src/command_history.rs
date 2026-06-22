@@ -297,7 +297,11 @@ mod tests {
         h.record("c"); // full: [c, b, a]
         h.record("a"); // re-run 'a' → [a, c, b], still len 3, 'b' NOT evicted
         let got: Vec<&str> = h.entries().collect();
-        assert_eq!(got, vec!["a", "c", "b"], "re-run dedups and reorders, no eviction");
+        assert_eq!(
+            got,
+            vec!["a", "c", "b"],
+            "re-run dedups and reorders, no eviction"
+        );
         assert_eq!(h.len(), 3);
     }
 

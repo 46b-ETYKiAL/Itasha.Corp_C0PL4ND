@@ -1111,12 +1111,7 @@ mod tests {
             Some(b"\x1b[5;5~".to_vec())
         );
         assert_eq!(
-            encode_key_kitty(
-                &LogicalKey::PageDown,
-                ctrl(),
-                DISAMB,
-                KeyEventKind::Press
-            ),
+            encode_key_kitty(&LogicalKey::PageDown, ctrl(), DISAMB, KeyEventKind::Press),
             Some(b"\x1b[6;5~".to_vec())
         );
         // Ctrl+Insert → CSI 2 ; 5 ~.

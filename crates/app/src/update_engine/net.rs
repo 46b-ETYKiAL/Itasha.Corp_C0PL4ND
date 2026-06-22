@@ -1054,6 +1054,9 @@ mod tests {
         let digest = sha256_hex(archive);
         let bare = format!("{digest}\n");
         let first = bare.split_whitespace().next().unwrap();
-        assert_eq!(first, digest, "a bare-digest sidecar yields the digest itself");
+        assert_eq!(
+            first, digest,
+            "a bare-digest sidecar yields the digest itself"
+        );
     }
 }

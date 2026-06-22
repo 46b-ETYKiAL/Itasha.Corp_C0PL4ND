@@ -303,9 +303,15 @@ mod tests {
         let (x0, y0) = (v[0][0], v[0][1]);
         let (x1, y1) = (v[2][0], v[2][1]);
         assert!((x0 - -0.5).abs() < 1e-6, "left edge at NDC -0.5, got {x0}");
-        assert!((y0 - 0.5).abs() < 1e-6, "top edge at NDC +0.5 (flipped), got {y0}");
+        assert!(
+            (y0 - 0.5).abs() < 1e-6,
+            "top edge at NDC +0.5 (flipped), got {y0}"
+        );
         assert!((x1 - 0.5).abs() < 1e-6, "right edge at NDC +0.5, got {x1}");
-        assert!((y1 - -0.5).abs() < 1e-6, "bottom edge at NDC -0.5 (flipped), got {y1}");
+        assert!(
+            (y1 - -0.5).abs() < 1e-6,
+            "bottom edge at NDC -0.5 (flipped), got {y1}"
+        );
     }
 
     /// `bytemuck_cast` reinterprets the 6×4 f32 vertex array as exactly its byte

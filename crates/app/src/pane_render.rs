@@ -477,7 +477,10 @@ mod tests {
         let v = quad_verts(&q, 200.0, 120.0);
         // tri-1 = [TL, TR, BL]; tri-2 = [TR, BR, BL]. The shared edge TR & BL.
         assert_eq!(v[1], v[3], "top-right vertex shared across both triangles");
-        assert_eq!(v[2], v[5], "bottom-left vertex shared across both triangles");
+        assert_eq!(
+            v[2], v[5],
+            "bottom-left vertex shared across both triangles"
+        );
     }
 
     #[test]

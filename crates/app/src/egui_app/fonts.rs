@@ -372,7 +372,10 @@ mod tests {
         // The egui font_data key is per-family so the Family choice and a
         // differently-named Fallback never collide; it is lowercased + trimmed
         // so the same font under two casings maps to ONE key.
-        assert_eq!(font_data_key("Cascadia Code"), "c0pl4nd-user-font::cascadia code");
+        assert_eq!(
+            font_data_key("Cascadia Code"),
+            "c0pl4nd-user-font::cascadia code"
+        );
         assert_eq!(
             font_data_key("  CASCADIA code  "),
             font_data_key("cascadia code"),
@@ -411,6 +414,9 @@ mod tests {
         let base = egui::FontDefinitions::default();
         let (_defs, loaded) =
             build_font_definitions(base, &db, "Hack", &["hack".to_string(), "HACK".to_string()]);
-        assert!(!loaded, "an uninstalled family loads nothing even when repeated");
+        assert!(
+            !loaded,
+            "an uninstalled family loads nothing even when repeated"
+        );
     }
 }

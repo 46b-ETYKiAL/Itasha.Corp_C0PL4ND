@@ -553,7 +553,10 @@ mod tests {
         l.split(LeafId(0), Axis::Horizontal, b);
         let c = l.alloc_id();
         l.split(b, Axis::Vertical, c); // nested split { b, c }
-        assert!(l.resize(c, 0.1, 600), "resize must recurse into the nested split");
+        assert!(
+            l.resize(c, 0.1, 600),
+            "resize must recurse into the nested split"
+        );
         assert!(flex_sum_ok(&l.root));
     }
 
@@ -566,8 +569,16 @@ mod tests {
         // Huge delta with zero extent clamps to 1.0 - 0.05 = 0.95 on leaf 0.
         assert!(l.resize(LeafId(0), 5.0, 0));
         if let LayoutNode::Split { children, .. } = &l.root {
-            assert!((children[0].flex - 0.95).abs() < 1e-4, "got {}", children[0].flex);
-            assert!((children[1].flex - 0.05).abs() < 1e-4, "got {}", children[1].flex);
+            assert!(
+                (children[0].flex - 0.95).abs() < 1e-4,
+                "got {}",
+                children[0].flex
+            );
+            assert!(
+                (children[1].flex - 0.05).abs() < 1e-4,
+                "got {}",
+                children[1].flex
+            );
         } else {
             panic!("root should be a split");
         }
@@ -620,7 +631,11 @@ mod tests {
         assert_eq!(l.remove(b), RemoveOutcome::Collapsed);
         assert_eq!(l.leaf_count(), 2);
         let ids = root_child_leaf_ids(&l);
-        assert_eq!(ids, vec![Some(LeafId(0)), Some(c)], "c hoisted in place of the nested split");
+        assert_eq!(
+            ids,
+            vec![Some(LeafId(0)), Some(c)],
+            "c hoisted in place of the nested split"
+        );
         assert!(flex_sum_ok(&l.root));
     }
 
@@ -728,7 +743,7 @@ mod tests {
         l.split(b, Axis::Vertical, c); // 0 | (b / c)
         let d = l.alloc_id();
         l.split(c, Axis::Vertical, d); // 0 | (b / c / d)
-        // Move the deeply-nested d next to 0 — forces rename into the nested split.
+                                       // Move the deeply-nested d next to 0 — forces rename into the nested split.
         assert!(l.move_leaf(d, LeafId(0), Axis::Horizontal, false));
         assert!(l.contains(d), "d kept its id through the nested rename");
         assert_eq!(l.leaf_count(), 4);
@@ -769,9 +784,16 @@ mod tests {
             }
             // The nested split's children are all 1/3.
             for ch in children {
-                if let LayoutNode::Split { children: nested, .. } = &ch.node {
+                if let LayoutNode::Split {
+                    children: nested, ..
+                } = &ch.node
+                {
                     for nc in nested {
-                        assert!((nc.flex - 1.0 / 3.0).abs() < 1e-4, "nested flex {}", nc.flex);
+                        assert!(
+                            (nc.flex - 1.0 / 3.0).abs() < 1e-4,
+                            "nested flex {}",
+                            nc.flex
+                        );
                     }
                 }
             }

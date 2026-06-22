@@ -493,7 +493,10 @@ mod tests {
         // A 2-digit channel `80` scales (0x80 * 255 + 127) / 255 = 128, exact.
         assert_eq!(parse_color_spec("rgb:80/80/80"), Some((128, 128, 128)));
         // 4-digit max `ffff` -> 255 (kills any divisor mutant in scale_hex_channel).
-        assert_eq!(parse_color_spec("rgb:ffff/ffff/ffff"), Some((255, 255, 255)));
+        assert_eq!(
+            parse_color_spec("rgb:ffff/ffff/ffff"),
+            Some((255, 255, 255))
+        );
         // 4-digit `0001` rounds to 0.
         assert_eq!(parse_color_spec("rgb:0001/0000/0000"), Some((0, 0, 0)));
     }

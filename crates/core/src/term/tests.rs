@@ -3038,7 +3038,7 @@ fn decsc_decrc_restores_g0_charset_selection() {
     t.advance(b"\x1b(0"); // G0 = line drawing
     t.advance(b"\x1b7"); // DECSC saves position + charset
     t.advance(b"\x1b(B"); // G0 = ASCII
-    // `q` in line-drawing maps to the horizontal-line glyph; in ASCII it is 'q'.
+                          // `q` in line-drawing maps to the horizontal-line glyph; in ASCII it is 'q'.
     t.advance(b"q");
     assert_eq!(
         t.grid().cell(0, 0).unwrap().c,
@@ -3060,7 +3060,11 @@ fn decrc_without_save_homes_cursor() {
     let mut t = Terminal::new(4, 10);
     t.advance(b"\x1b[3;5H"); // move to row 3 col 5
     t.advance(b"\x1b8"); // DECRC with nothing saved -> home
-    assert_eq!(t.cursor_position(), Some((0, 0)), "bare restore homes cursor");
+    assert_eq!(
+        t.cursor_position(),
+        Some((0, 0)),
+        "bare restore homes cursor"
+    );
 }
 
 // ---- Tab stops: HTS / TBC / CHT / CBT ----
@@ -3073,7 +3077,11 @@ fn hts_sets_stop_and_tab_lands_on_it() {
     t.advance(b"\x1bH"); // HTS: set a tab stop at col 3
     t.advance(b"\r"); // back to col 0
     t.advance(b"\t"); // tab forward -> should land on col 3 (the new stop)
-    assert_eq!(t.cursor_position(), Some((0, 3)), "tab lands on the HTS stop");
+    assert_eq!(
+        t.cursor_position(),
+        Some((0, 3)),
+        "tab lands on the HTS stop"
+    );
 }
 
 #[test]
@@ -3096,7 +3104,11 @@ fn tbc_clear_all_then_tab_goes_to_last_column() {
     let mut t = Terminal::new(2, 10);
     t.advance(b"\x1b[3g"); // clear ALL tab stops
     t.advance(b"\r\t"); // no stop ahead -> last column (9)
-    assert_eq!(t.cursor_position(), Some((0, 9)), "tab to last col when no stop");
+    assert_eq!(
+        t.cursor_position(),
+        Some((0, 9)),
+        "tab to last col when no stop"
+    );
 }
 
 #[test]
@@ -3165,7 +3177,10 @@ fn focus_report_emits_only_when_enabled() {
     let mut t = Terminal::new(2, 10);
     // Disabled by default: focus_report is a no-op.
     t.focus_report(true);
-    assert!(t.take_pty_response().is_empty(), "no report while ?1004 off");
+    assert!(
+        t.take_pty_response().is_empty(),
+        "no report while ?1004 off"
+    );
     t.advance(b"\x1b[?1004h"); // enable focus reporting
     t.focus_report(true);
     assert_eq!(t.take_pty_response(), b"\x1b[I", "focus-in report");
@@ -3179,8 +3194,8 @@ fn focus_report_emits_only_when_enabled() {
 fn cud_stops_at_bottom_margin() {
     let mut t = Terminal::new(5, 10);
     t.advance(b"\x1b[2;4r"); // scroll region rows 1..=3 (1-based 2..=4)
-    // Inside the region: CUD stops at the bottom margin (row 3), not the
-    // physical bottom (row 4).
+                             // Inside the region: CUD stops at the bottom margin (row 3), not the
+                             // physical bottom (row 4).
     t.advance(b"\x1b[2;1H"); // row 1, inside region
     t.advance(b"\x1b[99B");
     assert_eq!(
@@ -3194,8 +3209,8 @@ fn cud_stops_at_bottom_margin() {
 fn cud_below_region_bounded_by_physical_bottom() {
     let mut t = Terminal::new(6, 10);
     t.advance(b"\x1b[2;3r"); // region rows 1..=2; this homes cursor to row 1
-    // Place the cursor BELOW the bottom margin (row 4, where row > scroll_bottom).
-    // DECTCEM-independent absolute move ignores the region in non-origin mode.
+                             // Place the cursor BELOW the bottom margin (row 4, where row > scroll_bottom).
+                             // DECTCEM-independent absolute move ignores the region in non-origin mode.
     t.advance(b"\x1b[5;1H"); // row 4 (below region bottom = row 2)
     assert_eq!(t.cursor_position(), Some((4, 0)));
     // CUD from below the region: ceiling is the physical bottom (row 5).
@@ -3242,7 +3257,11 @@ fn il_inserts_blank_lines_within_region() {
     t.advance(b"\x1b[2;1H"); // row 1
     t.advance(b"\x1b[1L"); // IL: insert one blank line at row 1
     assert_eq!(t.grid().cell(1, 0).unwrap().c, ' ', "row 1 now blank");
-    assert_eq!(t.grid().cell(2, 0).unwrap().c, 'B', "B shifted down to row 2");
+    assert_eq!(
+        t.grid().cell(2, 0).unwrap().c,
+        'B',
+        "B shifted down to row 2"
+    );
     assert_eq!(t.cursor_position(), Some((1, 0)), "IL homes column");
 }
 
@@ -3252,7 +3271,11 @@ fn dl_deletes_lines_within_region() {
     t.advance(b"AAAA\r\nBBBB\r\nCCCC");
     t.advance(b"\x1b[1;1H"); // row 0
     t.advance(b"\x1b[1M"); // DL: delete one line at row 0
-    assert_eq!(t.grid().cell(0, 0).unwrap().c, 'B', "B shifted up into row 0");
+    assert_eq!(
+        t.grid().cell(0, 0).unwrap().c,
+        'B',
+        "B shifted up into row 0"
+    );
     assert_eq!(t.cursor_position(), Some((0, 0)));
 }
 
@@ -3266,7 +3289,11 @@ fn ech_erases_chars_in_place() {
     assert_eq!(t.grid().cell(0, 1).unwrap().c, ' ');
     assert_eq!(t.grid().cell(0, 2).unwrap().c, ' ');
     assert_eq!(t.grid().cell(0, 3).unwrap().c, ' ');
-    assert_eq!(t.grid().cell(0, 4).unwrap().c, 'e', "e past the erased run intact");
+    assert_eq!(
+        t.grid().cell(0, 4).unwrap().c,
+        'e',
+        "e past the erased run intact"
+    );
 }
 
 // ---- SD (scroll down, CSI T) ----
@@ -3277,7 +3304,11 @@ fn sd_scrolls_region_down() {
     t.advance(b"AAAAA\r\nBBBBB\r\nCCCCC");
     t.advance(b"\x1b[2T"); // SD: scroll whole region down 2
     assert_eq!(t.grid().cell(0, 0).unwrap().c, ' ', "top now blank");
-    assert_eq!(t.grid().cell(2, 0).unwrap().c, 'A', "A pushed down two rows");
+    assert_eq!(
+        t.grid().cell(2, 0).unwrap().c,
+        'A',
+        "A pushed down two rows"
+    );
 }
 
 // ---- REP (CSI b) repeats last grapheme ----
@@ -3441,7 +3472,7 @@ fn encode_mouse_anyevent_reports_bare_motion() {
 fn encode_mouse_buttonevent_drops_motion_without_held_button() {
     let mut t = Terminal::new(4, 80);
     t.advance(b"\x1b[?1002h\x1b[?1006h"); // button-event + SGR
-    // ?1002 reports motion only while a button is held -> None for None button.
+                                          // ?1002 reports motion only while a button is held -> None for None button.
     let none = t.encode_mouse(
         MouseButton::None,
         MouseModifiers::default(),
@@ -3529,7 +3560,11 @@ fn erase_display_cursor_to_end_and_start_to_cursor() {
     t.advance(b"\x1b[2;3H");
     t.advance(b"\x1b[1J");
     assert_eq!(t.grid().cell(0, 0).unwrap().c, ' ', "row above erased");
-    assert_eq!(t.grid().cell(1, 2).unwrap().c, ' ', "up to+incl cursor erased");
+    assert_eq!(
+        t.grid().cell(1, 2).unwrap().c,
+        ' ',
+        "up to+incl cursor erased"
+    );
     assert_eq!(t.grid().cell(1, 3).unwrap().c, 'B', "after cursor intact");
 }
 
@@ -3585,10 +3620,14 @@ fn decstbm_no_params_is_full_screen() {
 fn cuu_above_region_bounded_by_physical_top() {
     let mut t = Terminal::new(6, 10);
     t.advance(b"\x1b[3;5r"); // region rows 2..=4; homes cursor to row 2
-    // Move ABOVE the top margin (row 0, where row < scroll_top).
+                             // Move ABOVE the top margin (row 0, where row < scroll_top).
     t.advance(b"\x1b[1;1H"); // row 0
     t.advance(b"\x1b[99A"); // CUU: floor is physical top (row 0) when above region
-    assert_eq!(t.cursor_position(), Some((0, 0)), "above-region CUU floored at row 0");
+    assert_eq!(
+        t.cursor_position(),
+        Some((0, 0)),
+        "above-region CUU floored at row 0"
+    );
 }
 
 // ---- IRM insert getter + DECOM origin getter ----
@@ -3731,7 +3770,7 @@ fn autowrap_off_overwrites_last_column() {
     let mut t = Terminal::new(2, 3);
     t.advance(b"\x1b[?7l"); // autowrap off
     t.advance(b"abcd"); // 4 chars into 3 cols
-    // No wrap: stays on row 0; last column holds the final glyph.
+                        // No wrap: stays on row 0; last column holds the final glyph.
     assert_eq!(t.cursor_position().unwrap().0, 0, "no wrap to row 1");
     assert_eq!(t.grid().cell(0, 2).unwrap().c, 'd', "last col overwritten");
     assert!(t.grid().cell(1, 0).unwrap().c == ' ', "row 1 untouched");
@@ -3818,7 +3857,11 @@ fn erase_display_and_line_unknown_modes_are_noops() {
     t.advance(b"abcdef");
     t.advance(b"\x1b[9J"); // unknown ED mode -> default arm, no change
     t.advance(b"\x1b[9K"); // unknown EL mode -> default arm, no change
-    assert_eq!(t.grid().cell(0, 0).unwrap().c, 'a', "unknown erase modes are no-ops");
+    assert_eq!(
+        t.grid().cell(0, 0).unwrap().c,
+        'a',
+        "unknown erase modes are no-ops"
+    );
 }
 
 #[test]
@@ -3827,14 +3870,18 @@ fn xtwinops_unknown_op_is_ignored() {
     t.advance(b"\x1b]0;keep\x07");
     t.advance(b"\x1b[18t"); // report-size op we intentionally ignore
     assert_eq!(t.title(), "keep");
-    assert_eq!(t.title_stack_depth(), 0, "non-stack XTWINOPS op left stack alone");
+    assert_eq!(
+        t.title_stack_depth(),
+        0,
+        "non-stack XTWINOPS op left stack alone"
+    );
 }
 
 #[test]
 fn encode_mouse_middle_button_and_modifiers_combine() {
     let mut t = Terminal::new(4, 80);
     t.advance(b"\x1b[?1000h\x1b[?1006h"); // normal + SGR
-    // Middle button (1) + shift (4) + alt (8) = 13.
+                                          // Middle button (1) + shift (4) + alt (8) = 13.
     let out = t
         .encode_mouse(
             MouseButton::Middle,
@@ -3873,7 +3920,10 @@ fn malformed_kitty_apc_is_ignored() {
     // APC body whose first byte is not 'G' (handled by the prefilter as non-Kitty
     // and swallowed) plus a Kitty APC with an unparseable control string.
     t.advance(b"\x1b_Gnot-a-valid-control\x1b\\");
-    assert!(t.images().is_empty(), "malformed Kitty control produces no image");
+    assert!(
+        t.images().is_empty(),
+        "malformed Kitty control produces no image"
+    );
 }
 
 #[test]
@@ -3922,7 +3972,10 @@ fn for_visible_rows_walks_scrollback_when_offset_set() {
     t.set_view_offset(t.scrollback_len());
     let rows = t.display_rows();
     assert_eq!(rows.len(), 2);
-    assert!(rows.iter().all(|r| r.len() == 4), "rows padded to grid width");
+    assert!(
+        rows.iter().all(|r| r.len() == 4),
+        "rows padded to grid width"
+    );
 }
 
 #[test]
@@ -3933,9 +3986,13 @@ fn alt_screen_47_form_does_not_save_cursor() {
     assert!(t.alt_screen_active());
     t.advance(b"\x1b[4;5H"); // move on the alt screen
     t.advance(b"\x1b[?47l"); // leave alt; 47 does NOT restore the cursor
-    // The cursor is left where it was on the alt screen (clamped), not restored
-    // to the primary's saved (1,2).
-    assert_eq!(t.cursor_position(), Some((3, 4)), "47 leaves cursor where it sat");
+                             // The cursor is left where it was on the alt screen (clamped), not restored
+                             // to the primary's saved (1,2).
+    assert_eq!(
+        t.cursor_position(),
+        Some((3, 4)),
+        "47 leaves cursor where it sat"
+    );
 }
 
 #[test]
@@ -3945,8 +4002,12 @@ fn alt_screen_1047_clears_alt_on_exit() {
     t.advance(b"\x1b[?1047h"); // enter alt via 1047 (homes cursor, no save)
     t.advance(b"ALT");
     t.advance(b"\x1b[?1047l"); // leave; 1047 clears the alt screen on the way out
-    // Primary content is restored.
-    assert_eq!(t.grid().cell(0, 0).unwrap().c, 'p', "primary restored after 1047");
+                               // Primary content is restored.
+    assert_eq!(
+        t.grid().cell(0, 0).unwrap().c,
+        'p',
+        "primary restored after 1047"
+    );
 }
 
 #[test]

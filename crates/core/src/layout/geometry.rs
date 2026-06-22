@@ -328,7 +328,10 @@ mod tests {
         let rects = l.cascade(Rect::new(0, 0, 1, 600));
         assert_eq!(rects.len(), 2);
         for (_, r) in &rects {
-            assert!(r.w >= 0, "no negative width under tight gutter clamp: {r:?}");
+            assert!(
+                r.w >= 0,
+                "no negative width under tight gutter clamp: {r:?}"
+            );
         }
     }
 

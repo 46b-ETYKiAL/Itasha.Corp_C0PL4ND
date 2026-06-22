@@ -533,7 +533,10 @@ mod tests {
         l.focused = LeafId(9999); // not in the tree
         assert!(!l.contains(l.focused));
         l.rebalance_squarest();
-        assert!(l.contains(l.focused), "rebalance must reattach a dangling focus");
+        assert!(
+            l.contains(l.focused),
+            "rebalance must reattach a dangling focus"
+        );
     }
 
     #[test]

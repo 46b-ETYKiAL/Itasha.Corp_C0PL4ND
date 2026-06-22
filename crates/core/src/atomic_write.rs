@@ -283,7 +283,10 @@ mod tests {
         );
         // No stray temp left behind for the failed write.
         let tmp = tmp_path_for(&target);
-        assert!(!tmp.exists(), "failed write must not leave a temp file {tmp:?}");
+        assert!(
+            !tmp.exists(),
+            "failed write must not leave a temp file {tmp:?}"
+        );
         let _ = fs::remove_file(&file);
     }
 
@@ -329,7 +332,11 @@ mod tests {
         let _ = fs::remove_file(&p);
         let payload: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
         atomic_write(&p, &payload).expect("write large");
-        assert_eq!(fs::read(&p).expect("read"), payload, "every byte must round-trip");
+        assert_eq!(
+            fs::read(&p).expect("read"),
+            payload,
+            "every byte must round-trip"
+        );
         let _ = fs::remove_file(&p);
     }
 }

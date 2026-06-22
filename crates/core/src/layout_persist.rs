@@ -1659,8 +1659,8 @@ mod tests {
         snap.save(&path).expect("save creates parent dirs");
         assert!(path.exists());
 
-        let back = LayoutSnapshot::from_json(&std::fs::read_to_string(&path).unwrap())
-            .expect("reparse");
+        let back =
+            LayoutSnapshot::from_json(&std::fs::read_to_string(&path).unwrap()).expect("reparse");
         assert_eq!(back, snap);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1686,7 +1686,11 @@ mod tests {
         // The captured root mirrors the live root's split-ness.
         match (&l.root, &snap.root) {
             (LayoutNode::Split { children: lc, .. }, NodeView::Split { children: sc, .. }) => {
-                assert_eq!(lc.len(), sc.len(), "child arity preserved through node_view");
+                assert_eq!(
+                    lc.len(),
+                    sc.len(),
+                    "child arity preserved through node_view"
+                );
             }
             other => panic!("expected both splits, got {other:?}"),
         }

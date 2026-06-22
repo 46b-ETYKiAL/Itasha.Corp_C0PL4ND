@@ -463,8 +463,7 @@ white = "#ffffff"
 
     #[test]
     fn load_from_reads_disk_and_round_trips() {
-        let tmp = std::env::temp_dir()
-            .join(format!("c0pl4nd-theme-{}.toml", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("c0pl4nd-theme-{}.toml", std::process::id()));
         std::fs::write(&tmp, MINIMAL_TOML).unwrap();
         let t = Theme::load_from(&tmp).expect("load_from disk");
         assert_eq!(t.name, "mini");

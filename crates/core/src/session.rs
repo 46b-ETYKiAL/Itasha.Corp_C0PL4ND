@@ -388,8 +388,8 @@ mod tests {
     #[test]
     fn terminal_handle_reflects_configured_size() {
         #[cfg(windows)]
-        let session = Session::spawn_program("cmd.exe", &["/C", "echo hi"], 30, 100)
-            .expect("spawn");
+        let session =
+            Session::spawn_program("cmd.exe", &["/C", "echo hi"], 30, 100).expect("spawn");
         #[cfg(not(windows))]
         let session =
             Session::spawn_program("/bin/sh", &["-c", "echo hi"], 30, 100).expect("spawn");
@@ -412,8 +412,8 @@ mod tests {
     #[test]
     fn resize_updates_grid_dimensions() {
         #[cfg(windows)]
-        let mut session = Session::spawn_program("cmd.exe", &["/C", "echo hi"], 24, 80)
-            .expect("spawn");
+        let mut session =
+            Session::spawn_program("cmd.exe", &["/C", "echo hi"], 24, 80).expect("spawn");
         #[cfg(not(windows))]
         let mut session =
             Session::spawn_program("/bin/sh", &["-c", "echo hi"], 24, 80).expect("spawn");
@@ -437,7 +437,9 @@ mod tests {
         let mut session = Session::spawn_program("/bin/sh", &["-i"], 24, 80).expect("spawn");
 
         // A bare newline is innocuous; the writer must accept it.
-        session.write_input(b"\r\n").expect("write_input should succeed on a live PTY");
+        session
+            .write_input(b"\r\n")
+            .expect("write_input should succeed on a live PTY");
         // Drop kills the child (see Session::Drop).
         let _ = &mut session;
     }

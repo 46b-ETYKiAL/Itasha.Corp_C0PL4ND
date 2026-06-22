@@ -156,10 +156,7 @@ mod tests {
     /// return (spawn failure) on every host: a bogus binary name never exists.
     #[test]
     fn query_cmd_missing_binary_is_none() {
-        let out = query_cmd(
-            "c0pl4nd-definitely-not-a-real-binary-xyz",
-            &["--version"],
-        );
+        let out = query_cmd("c0pl4nd-definitely-not-a-real-binary-xyz", &["--version"]);
         assert_eq!(out, None, "a nonexistent binary must yield None, not panic");
     }
 
@@ -218,6 +215,9 @@ mod tests {
         // The OS result is cached in a OnceLock, so two calls must agree.
         let a = reduced_motion();
         let b = reduced_motion();
-        assert_eq!(a, b, "reduced_motion must be stable (OnceLock-cached OS read)");
+        assert_eq!(
+            a, b,
+            "reduced_motion must be stable (OnceLock-cached OS read)"
+        );
     }
 }

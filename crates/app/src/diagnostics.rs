@@ -279,10 +279,7 @@ mod tests {
     #[test]
     fn config_status_invalid_when_toml_is_malformed() {
         // A present-but-unparseable file → Invalid (carries the error text).
-        let dir = std::env::temp_dir().join(format!(
-            "c0pl4nd-diag-invalid-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("c0pl4nd-diag-invalid-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join("config.toml");
@@ -298,8 +295,7 @@ mod tests {
     #[test]
     fn config_status_loaded_when_toml_is_valid_default() {
         // An EMPTY config file is valid (every field has a default) → Loaded.
-        let dir =
-            std::env::temp_dir().join(format!("c0pl4nd-diag-loaded-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("c0pl4nd-diag-loaded-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join("config.toml");

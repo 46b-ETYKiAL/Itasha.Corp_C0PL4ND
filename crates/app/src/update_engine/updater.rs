@@ -601,7 +601,10 @@ mod tests {
         tx.send(UpdateMsg::Downloaded(Err("checksum mismatch".to_string())))
             .unwrap();
         u.poll(&ctx);
-        assert_eq!(u.state, UpdateState::Failed("checksum mismatch".to_string()));
+        assert_eq!(
+            u.state,
+            UpdateState::Failed("checksum mismatch".to_string())
+        );
         assert!(
             u.staging_dir.is_none(),
             "a failed download clears the tracked staging dir"

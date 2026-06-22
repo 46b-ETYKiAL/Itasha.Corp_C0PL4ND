@@ -136,7 +136,11 @@ mod tests {
     #[test]
     fn url_host_empty_host_is_none() {
         assert_eq!(url_host("https://:443/x"), None, "empty host → None");
-        assert_eq!(url_host("https://@/x"), None, "userinfo then empty host → None");
+        assert_eq!(
+            url_host("https://@/x"),
+            None,
+            "userinfo then empty host → None"
+        );
     }
 
     /// `is_https` on a bare scheme with no authority still classifies by scheme

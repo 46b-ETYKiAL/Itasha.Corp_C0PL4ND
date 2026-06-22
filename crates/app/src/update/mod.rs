@@ -458,7 +458,10 @@ mod tests {
         // The FIRST differing component decides — a huge patch never overrides a
         // larger major/minor (a mutant that compares the wrong index is caught).
         assert!(is_newer("2.0.0", "1.99.99"), "major dominates");
-        assert!(!is_newer("1.99.99", "2.0.0"), "a big patch loses to a bigger major");
+        assert!(
+            !is_newer("1.99.99", "2.0.0"),
+            "a big patch loses to a bigger major"
+        );
         assert!(is_newer("1.3.0", "1.2.99"), "minor dominates patch");
         assert!(!is_newer("1.2.99", "1.3.0"));
     }
@@ -467,11 +470,20 @@ mod tests {
     fn is_newer_treats_non_numeric_component_prefix_as_its_number() {
         // A component like `0-beta` compares on its numeric PREFIX (0), and a
         // component with NO leading digits parses as 0 (the `unwrap_or(0)` arm).
-        assert!(!is_newer("1.0.0-beta", "1.0.0"), "1.0.0-beta == 1.0.0 numerically");
-        assert!(is_newer("1.0.1-beta", "1.0.0"), "the numeric prefix still ranks");
+        assert!(
+            !is_newer("1.0.0-beta", "1.0.0"),
+            "1.0.0-beta == 1.0.0 numerically"
+        );
+        assert!(
+            is_newer("1.0.1-beta", "1.0.0"),
+            "the numeric prefix still ranks"
+        );
         // A wholly non-numeric component is treated as 0.
         assert!(!is_newer("1.x.0", "1.0.0"), "'x' parses to 0 → equal");
-        assert!(!is_newer("v1.2.0", "v1.2.0"), "leading v on both is ignored");
+        assert!(
+            !is_newer("v1.2.0", "v1.2.0"),
+            "leading v on both is ignored"
+        );
     }
 
     #[test]
@@ -529,7 +541,10 @@ mod tests {
         // itself is network-gated; this locks the message shape it emits).
         let latest = "9.9.9";
         let current = current_version();
-        assert!(is_newer(latest, current), "9.9.9 must be newer than the build");
+        assert!(
+            is_newer(latest, current),
+            "9.9.9 must be newer than the build"
+        );
         let msg = format!(
             "C0PL4ND {latest} is available (you have {current}). Download: {}",
             release_page_url()

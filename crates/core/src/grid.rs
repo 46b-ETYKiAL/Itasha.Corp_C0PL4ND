@@ -1173,7 +1173,10 @@ mod tests {
         g2.set_wrapped(0, true);
         // Width change (4→6) → flag invalidated.
         g2.resize(3, 6);
-        assert!(!g2.is_wrapped(0), "width-changing resize clears the wrap flag");
+        assert!(
+            !g2.is_wrapped(0),
+            "width-changing resize clears the wrap flag"
+        );
     }
 
     /// `scroll_region_up` with `top > bottom` returns an empty vec and changes
