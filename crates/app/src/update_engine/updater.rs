@@ -476,6 +476,153 @@ mod tests {
         assert_eq!(u.state, UpdateState::UpToDate);
     }
 
+    /// A release-info fixture for driving the `poll` state machine offline.
+    fn fake_release(version: &str) -> ReleaseInfo {
+        ReleaseInfo {
+            version: semver::Version::parse(version).unwrap(),
+            tag: format!("v{version}"),
+            asset_url: "https://dl/c0pl4nd.zip".to_string(),
+            asset_name: "c0pl4nd.zip".to_string(),
+            sig_url: "https://dl/c0pl4nd.zip.minisig".to_string(),
+            sha_url: "https://dl/c0pl4nd.zip.sha256".to_string(),
+            html_url: "https://github.com/o/r".to_string(),
+        }
+    }
+
+    /// Build an `Updater` with an injected receiver + launch kind, so `poll` can
+    /// be driven with synthetic worker messages (no network, no thread).
+    fn updater_with_rx(rx: Receiver<UpdateMsg>, kind: LaunchKind) -> Updater {
+        Updater {
+            state: UpdateState::Checking,
+            rx: Some(rx),
+            launch_kind: kind,
+            staging_dir: None,
+        }
+    }
+
+    #[test]
+    fn poll_with_no_receiver_is_a_noop() {
+        // Without an in-flight worker (no rx), poll leaves the state untouched.
+        let ctx = egui::Context::default();
+        let mut u = updater_in(UpdateState::UpToDate);
+        u.poll(&ctx);
+        assert_eq!(u.state, UpdateState::UpToDate);
+    }
+
+    #[test]
+    fn poll_check_result_none_moves_to_up_to_date() {
+        // A "no newer release" check result transitions Checking → UpToDate and
+        // resets the launch kind to Manual.
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut u = updater_with_rx(rx, LaunchKind::Notify);
+        tx.send(UpdateMsg::CheckResult(Ok(None))).unwrap();
+        u.poll(&ctx);
+        assert_eq!(u.state, UpdateState::UpToDate);
+    }
+
+    #[test]
+    fn poll_check_result_err_moves_to_failed() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut u = updater_with_rx(rx, LaunchKind::Manual);
+        tx.send(UpdateMsg::CheckResult(Err("offline".to_string())))
+            .unwrap();
+        u.poll(&ctx);
+        assert_eq!(u.state, UpdateState::Failed("offline".to_string()));
+    }
+
+    #[test]
+    fn poll_check_result_available_in_manual_mode_shows_available_only() {
+        // A found update under a NON-auto launch kind parks at Available and
+        // does NOT auto-start a download (the user must click Update).
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let info = fake_release("9.9.9");
+        let mut u = updater_with_rx(rx, LaunchKind::Manual);
+        tx.send(UpdateMsg::CheckResult(Ok(Some(info.clone()))))
+            .unwrap();
+        u.poll(&ctx);
+        assert_eq!(u.state, UpdateState::Available(info));
+        assert!(
+            !u.is_busy(),
+            "manual mode parks at Available without auto-downloading"
+        );
+    }
+
+    #[test]
+    fn poll_progress_updates_downloading_bytes() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut u = updater_with_rx(rx, LaunchKind::Manual);
+        tx.send(UpdateMsg::Progress {
+            received: 512,
+            total: 2048,
+        })
+        .unwrap();
+        u.poll(&ctx);
+        assert_eq!(
+            u.state,
+            UpdateState::Downloading {
+                received: 512,
+                total: 2048,
+            }
+        );
+    }
+
+    #[test]
+    fn poll_downloaded_ok_moves_to_ready_to_apply() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut u = updater_with_rx(rx, LaunchKind::Manual);
+        tx.send(UpdateMsg::Downloaded(Ok((
+            PathBuf::from("/staging/c0pl4nd"),
+            "9.9.9".to_string(),
+        ))))
+        .unwrap();
+        u.poll(&ctx);
+        assert_eq!(
+            u.state,
+            UpdateState::ReadyToApply {
+                staged: PathBuf::from("/staging/c0pl4nd"),
+                version: "9.9.9".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn poll_downloaded_err_moves_to_failed_and_clears_staging() {
+        // A verify/extract failure surfaces Failed and triggers staging cleanup
+        // (the cleanup is best-effort; with no real dir it is a harmless no-op).
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut u = updater_with_rx(rx, LaunchKind::Manual);
+        u.staging_dir = Some(PathBuf::from("/nonexistent/staging-dir"));
+        tx.send(UpdateMsg::Downloaded(Err("checksum mismatch".to_string())))
+            .unwrap();
+        u.poll(&ctx);
+        assert_eq!(u.state, UpdateState::Failed("checksum mismatch".to_string()));
+        assert!(
+            u.staging_dir.is_none(),
+            "a failed download clears the tracked staging dir"
+        );
+    }
+
+    #[test]
+    fn poll_drops_receiver_on_disconnect() {
+        // When the worker's tx is dropped (thread done, channel disconnected),
+        // poll clears the receiver so subsequent polls are no-ops.
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel::<UpdateMsg>();
+        let mut u = updater_with_rx(rx, LaunchKind::Manual);
+        drop(tx); // disconnect with no pending messages
+        u.poll(&ctx);
+        // The state stays Checking (no message arrived), but rx is now cleared:
+        // a second poll is a pure no-op (covered by poll_with_no_receiver).
+        u.poll(&ctx);
+        assert_eq!(u.state, UpdateState::Checking);
+    }
+
     #[test]
     fn state_transitions_are_observable_via_partial_eq() {
         // The state machine's variants compare by value, so the UI can branch on

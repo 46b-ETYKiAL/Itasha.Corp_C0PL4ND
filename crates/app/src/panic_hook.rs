@@ -356,4 +356,94 @@ mod tests {
         assert!(report.contains("location:"), "location field: {report}");
         assert!(report.contains("backtrace:"), "backtrace section: {report}");
     }
+
+    /// Drive a real panic of a given payload through a temporary hook and return
+    /// the formatted report. The hook is restored before returning.
+    fn report_for_panic<F: FnOnce() + std::panic::UnwindSafe>(f: F) -> String {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = captured.clone();
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            *sink.lock().unwrap() = format_crash_report(info, &Backtrace::disabled());
+        }));
+        let _ = std::panic::catch_unwind(f);
+        std::panic::set_hook(previous);
+        let report = captured.lock().unwrap().clone();
+        report
+    }
+
+    #[test]
+    fn format_crash_report_renders_a_string_payload() {
+        // A `panic!("{}", x)` produces a `String` payload (not `&str`); the
+        // payload extractor's String arm must surface it verbatim.
+        let dynamic = String::from("runtime-built");
+        let report = report_for_panic(move || panic!("dynamic {dynamic} message"));
+        assert!(
+            report.contains("dynamic runtime-built message"),
+            "the String-payload arm must render the formatted message: {report}"
+        );
+        assert!(report.contains("message:"), "message field present: {report}");
+    }
+
+    #[test]
+    fn format_crash_report_handles_a_non_string_payload() {
+        // A panic with a non-string payload (here an integer via
+        // `std::panic::panic_any`) hits the fallback arm and renders the
+        // placeholder rather than crashing the formatter.
+        let report = report_for_panic(|| std::panic::panic_any(42u32));
+        assert!(
+            report.contains("<non-string panic payload>"),
+            "a non-string payload renders the explicit placeholder: {report}"
+        );
+    }
+
+    #[cfg(not(feature = "legacy-winit"))]
+    #[test]
+    fn w1tn3ss_capture_spools_a_static_message_panic() {
+        // The W1TN3SS Tier-1 capture seam: a `&'static str` panic payload is
+        // extracted and spooled via reporting::capture_panic. We drive a real
+        // panic through a temporary hook that calls the capture function, and
+        // assert it ran (it returns a structured outcome, never re-panics).
+        // capture_panic uses the GLOBAL config dir; here we only assert the
+        // static-message EXTRACTION path executes without re-panicking inside
+        // the already-panicking thread.
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = ran.clone();
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // Exercise the static-message extraction exactly as the hook does.
+            capture_panic_w1tn3ss(info);
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        let _ = std::panic::catch_unwind(|| panic!("a static literal message"));
+        std::panic::set_hook(previous);
+        assert!(
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the W1TN3SS capture path ran inside the panic hook without re-panicking"
+        );
+    }
+
+    #[test]
+    fn crash_log_dir_is_a_crashes_subdir_when_resolvable() {
+        // When a config path resolves, the crash dir is its parent's `crashes/`
+        // subdir. When it does not resolve, None — never a panic. We assert the
+        // shape conditionally so the test is hermetic on any host.
+        if let Some(dir) = crash_log_dir() {
+            assert_eq!(
+                dir.file_name().and_then(|n| n.to_str()),
+                Some("crashes"),
+                "the crash dir is the `crashes/` subdir of the config parent"
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn show_startup_error_does_not_panic_off_windows() {
+        // Smoke: the pre-window fatal-error surface prints to stderr and must
+        // never panic. NOT exercised on Windows because there it pops a MODAL
+        // MessageBox that would BLOCK a headless test run — only the no-window
+        // stderr path is safe to call headlessly.
+        show_startup_error("test title", "test body");
+    }
 }

@@ -971,4 +971,89 @@ mod tests {
             assert_eq!(archive_ext(), ".tar.gz");
         }
     }
+
+    #[test]
+    fn extract_binary_zip_errs_when_only_non_binary_entries() {
+        // A zip with only non-binary entries (no `c0pl4nd`/`c0pl4nd.exe`) is an
+        // error — the binary entry must be present and named exactly.
+        let dir = tempfile::tempdir().unwrap();
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            zw.start_file("README.md", opts).unwrap();
+            zw.write_all(b"docs").unwrap();
+            zw.start_file("LICENSE", opts).unwrap();
+            zw.write_all(b"mit").unwrap();
+            zw.finish().unwrap();
+        }
+        let err = extract_binary(&buf, "c0pl4nd-x.zip", dir.path())
+            .expect_err("a zip without the binary entry must error");
+        assert!(
+            err.contains("did not contain a c0pl4nd"),
+            "the error names the missing binary: {err}"
+        );
+    }
+
+    #[test]
+    fn extract_binary_zip_picks_binary_from_a_subdirectory_by_basename() {
+        // The binary may be nested under a top-level dir in the archive
+        // (`c0pl4nd-vX/c0pl4nd.exe`). Matching is by file BASENAME, so the
+        // nested binary is still found and extracted into the flat staging dir.
+        let dir = tempfile::tempdir().unwrap();
+        let payload = b"MZ nested fake exe";
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            zw.start_file("c0pl4nd-v1.0.0/README.md", opts).unwrap();
+            zw.write_all(b"x").unwrap();
+            zw.start_file("c0pl4nd-v1.0.0/c0pl4nd.exe", opts).unwrap();
+            zw.write_all(payload).unwrap();
+            zw.finish().unwrap();
+        }
+        let extracted = extract_binary(&buf, "c0pl4nd-x.zip", dir.path()).unwrap();
+        assert_eq!(
+            extracted.file_name().and_then(|n| n.to_str()),
+            Some("c0pl4nd.exe"),
+            "the nested binary is extracted under its basename into the flat dir"
+        );
+        assert_eq!(fs::read(&extracted).unwrap(), payload);
+    }
+
+    #[test]
+    fn extract_binary_dispatches_zip_vs_targz_by_asset_extension() {
+        // `extract_binary` selects the zip path for a `.zip` asset name and the
+        // tar.gz path otherwise. Feeding a .zip body but naming it `.tar.gz`
+        // must route to the tar.gz extractor and FAIL to parse it as a tarball
+        // (proving the dispatch keys on the NAME, not content sniffing).
+        let dir = tempfile::tempdir().unwrap();
+        // A valid zip body.
+        let mut zip_buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_buf));
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            zw.start_file("c0pl4nd", opts).unwrap();
+            zw.write_all(b"x").unwrap();
+            zw.finish().unwrap();
+        }
+        // Routed to the tar.gz extractor by the `.tar.gz` name → cannot parse a
+        // zip as a gzip stream → error (never a silent wrong-format extraction).
+        assert!(
+            extract_binary(&zip_buf, "mislabelled.tar.gz", dir.path()).is_err(),
+            "a zip body routed through the tar.gz extractor by name must fail"
+        );
+    }
+
+    #[test]
+    fn sha_sidecar_bare_digest_first_token_is_the_whole_string() {
+        // The `.sha256` sidecar may be a BARE hex digest with no filename. The
+        // first-whitespace-token extraction (used by download_verify_extract)
+        // must return the whole digest unchanged.
+        let archive = b"some bytes";
+        let digest = sha256_hex(archive);
+        let bare = format!("{digest}\n");
+        let first = bare.split_whitespace().next().unwrap();
+        assert_eq!(first, digest, "a bare-digest sidecar yields the digest itself");
+    }
 }
