@@ -22,6 +22,9 @@ concurrency:
 
 jobs:
   coverage:
+    # NOTE: job name kept byte-stable (NOT renamed to track the threshold) so it
+    # cannot orphan a required status check bound to this name; the enforced
+    # threshold is --fail-under-lines below (now 93). See merge-queue-check-gating.
     name: Core line coverage (>= 88%)
     runs-on: ubuntu-latest
     steps:
