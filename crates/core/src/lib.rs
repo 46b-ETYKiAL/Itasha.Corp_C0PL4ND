@@ -51,4 +51,24 @@ mod tests {
         assert_eq!(PRODUCT_NAME, "C0PL4ND");
         assert!(!version().is_empty());
     }
+
+    #[test]
+    fn tagline_is_the_brand_tagline() {
+        // The tagline is surfaced in startup / about UI; pin the exact brand copy
+        // so a silent edit is caught (it is a user-visible brand string).
+        assert_eq!(TAGLINE, "the operator's shell into the wired");
+    }
+
+    #[test]
+    fn version_matches_the_crate_package_version() {
+        // version() must return the compiled-in CARGO_PKG_VERSION verbatim — not a
+        // hard-coded literal that could drift from Cargo.toml.
+        assert_eq!(version(), env!("CARGO_PKG_VERSION"));
+        // Sanity: a semantic version has at least major.minor (one dot).
+        assert!(
+            version().contains('.'),
+            "version {:?} should look like a semver",
+            version()
+        );
+    }
 }
