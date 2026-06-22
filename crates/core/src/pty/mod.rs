@@ -719,7 +719,7 @@ mod tests {
         #[cfg(not(windows))]
         let mut ok =
             PtyProcess::spawn_program("/bin/sh", &["-c", "exit 0"], 24, 80).expect("spawn ok");
-        assert_eq!(ok.wait().expect("wait ok"), true, "exit 0 → success");
+        assert!(ok.wait().expect("wait ok"), "exit 0 → success");
 
         // Failure: non-zero exit.
         #[cfg(windows)]
@@ -728,9 +728,8 @@ mod tests {
         #[cfg(not(windows))]
         let mut bad =
             PtyProcess::spawn_program("/bin/sh", &["-c", "exit 3"], 24, 80).expect("spawn bad");
-        assert_eq!(
-            bad.wait().expect("wait bad"),
-            false,
+        assert!(
+            !bad.wait().expect("wait bad"),
             "a non-zero exit must report failure (success == false)"
         );
     }

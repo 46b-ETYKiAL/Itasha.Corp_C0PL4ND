@@ -201,8 +201,10 @@ mod tests {
     /// controllable in CI), proving the per-platform arm executes without error.
     #[test]
     fn os_reduced_motion_returns_a_bool_without_panicking() {
-        let v = os_reduced_motion();
-        assert!(v == true || v == false);
+        // The host's real setting is not controllable here, so we only assert the
+        // call completes without panicking and yields a `bool` (the `: bool`
+        // binding enforces the return type at compile time).
+        let _v: bool = os_reduced_motion();
     }
 
     /// `reduced_motion()` short-circuits to `true` when the env override is set,

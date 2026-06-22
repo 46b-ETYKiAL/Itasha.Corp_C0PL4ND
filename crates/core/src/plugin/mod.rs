@@ -592,11 +592,15 @@ api_version = "0.1.0"
         assert!(!c.requests_dangerous());
         c.pty_write = true;
         assert!(c.requests_dangerous(), "pty_write is dangerous");
-        let mut c = Capabilities::default();
-        c.filesystem = true;
+        let c = Capabilities {
+            filesystem: true,
+            ..Default::default()
+        };
         assert!(c.requests_dangerous(), "filesystem is dangerous");
-        let mut c = Capabilities::default();
-        c.process_spawn = true;
+        let c = Capabilities {
+            process_spawn: true,
+            ..Default::default()
+        };
         assert!(c.requests_dangerous(), "process_spawn is dangerous");
     }
 
