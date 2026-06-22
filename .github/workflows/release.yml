@@ -524,7 +524,7 @@ jobs:
         # detection that a hand-rolled `gh release create` script would have to
         # re-implement. The functionality overlaps the runner's `gh` CLI but the
         # ergonomic + auditable surface is worth keeping; no security delta.
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b
         with:
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
