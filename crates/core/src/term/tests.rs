@@ -2750,6 +2750,1278 @@ fn frame_paste_strips_controls_but_keeps_tab_and_newline() {
     );
 }
 
+// ============================================================================
+// Coverage-completion batch: OSC color set/query/reset, scroll-region edges,
+// charset save/restore, tab-clear, reverse-index, focus reporting, the full
+// CSI cursor/edit/scroll arm set, DECSCUSR, mouse encodings, and reflow edges.
+// All assertions are mutation-grade (exact cell/cursor/mode state, never just
+// "did not panic").
+// ============================================================================
+
+// ---- OSC 4 indexed palette: set, query reply, and OSC 104 reset ----
+
+#[test]
+fn osc4_set_indexed_color_updates_palette_and_queues_set() {
+    let mut t = Terminal::new(2, 10);
+    // Set palette index 1 to pure red via the `#` spec form.
+    t.advance(b"\x1b]4;1;#ff0000\x07");
+    assert_eq!(t.palette_color(1), (255, 0, 0), "palette index 1 updated");
+    // A ColorSet is queued for the host to mirror.
+    let sets = t.take_color_sets();
+    assert!(
+        sets.iter().any(|s| matches!(
+            s,
+            ColorSet::Indexed {
+                index: 1,
+                rgb: (255, 0, 0)
+            }
+        )),
+        "an Indexed color-set is queued, got {sets:?}"
+    );
+}
+
+#[test]
+fn osc4_query_replies_with_current_palette_value() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b]4;2;#00ff00\x07"); // set index 2 green
+    let _ = t.take_pty_response(); // drain the set (no reply expected)
+    t.advance(b"\x1b]4;2;?\x07"); // query index 2
+    let reply = String::from_utf8(t.take_pty_response()).unwrap();
+    assert_eq!(
+        reply, "\x1b]4;2;rgb:0000/ffff/0000\x07",
+        "OSC 4 query reflects the live palette entry"
+    );
+}
+
+#[test]
+fn osc104_resets_single_index_to_default() {
+    let mut t = Terminal::new(2, 10);
+    let original = t.palette_color(3);
+    t.advance(b"\x1b]4;3;#abcdef\x07");
+    assert_ne!(t.palette_color(3), original, "palette changed");
+    let _ = t.take_color_sets();
+    t.advance(b"\x1b]104;3\x07"); // reset only index 3
+    assert_eq!(t.palette_color(3), original, "index 3 back to default");
+    // The reset queues a ColorSet carrying the default value.
+    let sets = t.take_color_sets();
+    assert!(
+        sets.iter()
+            .any(|s| matches!(s, ColorSet::Indexed { index: 3, .. })),
+        "reset queues a color-set for index 3"
+    );
+}
+
+#[test]
+fn osc104_no_args_resets_entire_palette() {
+    let mut t = Terminal::new(2, 10);
+    let original_5 = t.palette_color(5);
+    let original_200 = t.palette_color(200);
+    t.advance(b"\x1b]4;5;#111111\x07");
+    t.advance(b"\x1b]4;200;#222222\x07");
+    let _ = t.take_color_sets();
+    t.advance(b"\x1b]104\x07"); // reset all
+    assert_eq!(t.palette_color(5), original_5);
+    assert_eq!(t.palette_color(200), original_200);
+    // The full reset queues one color-set per palette entry (256).
+    assert_eq!(t.take_color_sets().len(), 256);
+}
+
+// ---- OSC 10/11/12 dynamic colors: set, query, and OSC 110/111/112 reset ----
+
+#[test]
+fn osc10_11_12_set_dynamic_colors() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b]10;#010203\x07"); // foreground
+    t.advance(b"\x1b]11;#040506\x07"); // background
+    t.advance(b"\x1b]12;#070809\x07"); // cursor
+    assert_eq!(t.dynamic_color(DynamicColor::Foreground), (1, 2, 3));
+    assert_eq!(t.dynamic_color(DynamicColor::Background), (4, 5, 6));
+    assert_eq!(t.dynamic_color(DynamicColor::Cursor), (7, 8, 9));
+    let sets = t.take_color_sets();
+    assert!(sets.iter().any(|s| matches!(
+        s,
+        ColorSet::Dynamic {
+            which: DynamicColor::Cursor,
+            rgb: (7, 8, 9)
+        }
+    )));
+}
+
+#[test]
+fn osc11_query_replies_with_background() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b]11;#101112\x07");
+    let _ = t.take_pty_response();
+    t.advance(b"\x1b]11;?\x07");
+    let reply = String::from_utf8(t.take_pty_response()).unwrap();
+    assert_eq!(reply, "\x1b]11;rgb:1010/1111/1212\x07");
+}
+
+#[test]
+fn osc110_111_112_reset_dynamic_colors_to_default() {
+    let mut t = Terminal::new(2, 10);
+    let def_fg = t.dynamic_color(DynamicColor::Foreground);
+    let def_bg = t.dynamic_color(DynamicColor::Background);
+    let def_cur = t.dynamic_color(DynamicColor::Cursor);
+    t.advance(b"\x1b]10;#aabbcc\x07\x1b]11;#ddeeff\x07\x1b]12;#123456\x07");
+    let _ = t.take_color_sets();
+    t.advance(b"\x1b]110\x07\x1b]111\x07\x1b]112\x07");
+    assert_eq!(t.dynamic_color(DynamicColor::Foreground), def_fg);
+    assert_eq!(t.dynamic_color(DynamicColor::Background), def_bg);
+    assert_eq!(t.dynamic_color(DynamicColor::Cursor), def_cur);
+    // Each reset queues a Dynamic color-set carrying the default.
+    let sets = t.take_color_sets();
+    assert_eq!(sets.len(), 3, "three dynamic resets queued");
+}
+
+// ---- OSC 9 / OSC 777 notifications ----
+
+#[test]
+fn osc9_notification_body_only() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b]9;build done\x07");
+    let n = t.take_notification().expect("a notification");
+    assert_eq!(n.title, "");
+    assert_eq!(n.body, "build done");
+    assert!(t.take_notification().is_none(), "queue drained");
+}
+
+#[test]
+fn osc777_notify_title_and_body() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b]777;notify;Heads up;the thing happened\x07");
+    let all = t.take_notifications();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].title, "Heads up");
+    assert_eq!(all[0].body, "the thing happened");
+}
+
+#[test]
+fn osc9_empty_body_produces_no_notification() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b]9;\x07");
+    assert!(t.take_notification().is_none());
+}
+
+// ---- OSC 9 ; 4 progress (taskbar) ----
+
+#[test]
+fn osc9_4_progress_states_and_percent() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b]9;4;1;42\x07"); // normal, 42%
+    t.advance(b"\x1b]9;4;3;99\x07"); // indeterminate -> percent forced to 0
+    t.advance(b"\x1b]9;4;0;50\x07"); // remove -> percent forced to 0
+    let p = t.take_progress();
+    assert_eq!(p.len(), 3);
+    assert_eq!(p[0].state, ProgressState::Normal);
+    assert_eq!(p[0].percent, 42);
+    assert_eq!(p[1].state, ProgressState::Indeterminate);
+    assert_eq!(p[1].percent, 0, "indeterminate zeroes percent");
+    assert_eq!(p[2].state, ProgressState::Remove);
+    assert_eq!(p[2].percent, 0, "remove zeroes percent");
+}
+
+#[test]
+fn osc9_4_error_and_warning_states() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b]9;4;2;10\x07"); // error
+    t.advance(b"\x1b]9;4;4;200\x07"); // warning, percent clamps to 100
+    let p = t.take_progress();
+    assert_eq!(p[0].state, ProgressState::Error);
+    assert_eq!(p[0].percent, 10);
+    assert_eq!(p[1].state, ProgressState::Warning);
+    assert_eq!(p[1].percent, 100, "percent clamps to 100");
+}
+
+// ---- OSC 52 clipboard write + read (default-off) ----
+
+#[test]
+fn osc52_write_decodes_and_queues() {
+    let mut t = Terminal::new(2, 10);
+    // base64 of "hi" is "aGk=".
+    t.advance(b"\x1b]52;c;aGk=\x07");
+    let w = t.take_clipboard_write().expect("a clipboard write");
+    assert_eq!(w.selection, ClipboardSelection::Clipboard);
+    assert_eq!(w.text, "hi");
+    assert!(t.take_clipboard_write().is_none(), "queue now empty");
+}
+
+#[test]
+fn osc52_primary_selection_recognised() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b]52;p;aGk=\x07");
+    let w = t.take_clipboard_write().unwrap();
+    assert_eq!(w.selection, ClipboardSelection::Primary);
+}
+
+#[test]
+fn osc52_read_request_dropped_when_disabled() {
+    let mut t = Terminal::new(2, 10);
+    assert!(!t.clipboard_read_enabled(), "reads off by default");
+    t.advance(b"\x1b]52;c;?\x07");
+    // No write produced, no reply queued.
+    assert!(t.take_clipboard_write().is_none());
+    assert!(t.take_pty_response().is_empty());
+}
+
+#[test]
+fn respond_clipboard_read_noop_until_enabled_then_emits() {
+    let mut t = Terminal::new(2, 10);
+    // Disabled: respond is a no-op.
+    t.respond_clipboard_read(ClipboardSelection::Clipboard, "secret");
+    assert!(t.take_pty_response().is_empty(), "no reply while disabled");
+    // Enabled: the host-supplied text is base64-encoded into an OSC 52 reply.
+    t.set_clipboard_read_enabled(true);
+    assert!(t.clipboard_read_enabled());
+    t.respond_clipboard_read(ClipboardSelection::Primary, "hi");
+    let reply = String::from_utf8(t.take_pty_response()).unwrap();
+    assert_eq!(reply, "\x1b]52;p;aGk=\x07");
+}
+
+// ---- DECSCUSR cursor shapes (CSI Ps SP q) ----
+
+#[test]
+fn decscusr_selects_every_shape_and_blink() {
+    let cases: &[(&[u8], CursorShape, bool)] = &[
+        (b"\x1b[0 q", CursorShape::Block, true),
+        (b"\x1b[1 q", CursorShape::Block, true),
+        (b"\x1b[2 q", CursorShape::Block, false),
+        (b"\x1b[3 q", CursorShape::Underline, true),
+        (b"\x1b[4 q", CursorShape::Underline, false),
+        (b"\x1b[5 q", CursorShape::Bar, true),
+        (b"\x1b[6 q", CursorShape::Bar, false),
+    ];
+    for (seq, shape, blink) in cases {
+        let mut t = Terminal::new(2, 10);
+        t.advance(seq);
+        assert_eq!(t.cursor_shape(), *shape, "shape for {seq:x?}");
+        assert_eq!(
+            t.cursor_blink(),
+            *blink,
+            "blink for {seq:x?} (DECSCUSR half)"
+        );
+    }
+    // Out-of-range Ps is ignored (shape stays default Block).
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b[9 q");
+    assert_eq!(t.cursor_shape(), CursorShape::Block);
+}
+
+#[test]
+fn cursor_blink_also_tracks_dec_mode_12() {
+    let mut t = Terminal::new(2, 10);
+    assert!(!t.cursor_blink(), "no blink by default");
+    t.advance(b"\x1b[?12h"); // att610 blink on
+    assert!(t.cursor_blink(), "?12h enables blink");
+    t.advance(b"\x1b[?12l");
+    assert!(!t.cursor_blink());
+}
+
+// ---- DECSCNM reverse screen + origin-mode getter ----
+
+#[test]
+fn reverse_screen_getter_reflects_mode_5() {
+    let mut t = Terminal::new(2, 10);
+    assert!(!t.reverse_screen());
+    t.advance(b"\x1b[?5h");
+    assert!(t.reverse_screen(), "?5h sets DECSCNM");
+    t.advance(b"\x1b[?5l");
+    assert!(!t.reverse_screen());
+}
+
+// ---- Charset save/restore round-trip via DECSC/DECRC ----
+
+#[test]
+fn decsc_decrc_restores_g0_charset_selection() {
+    let mut t = Terminal::new(2, 10);
+    // Select DEC line-drawing on G0, save, switch G0 back to ASCII, restore.
+    t.advance(b"\x1b(0"); // G0 = line drawing
+    t.advance(b"\x1b7"); // DECSC saves position + charset
+    t.advance(b"\x1b(B"); // G0 = ASCII
+                          // `q` in line-drawing maps to the horizontal-line glyph; in ASCII it is 'q'.
+    t.advance(b"q");
+    assert_eq!(
+        t.grid().cell(0, 0).unwrap().c,
+        'q',
+        "ASCII active: 'q' prints literally"
+    );
+    t.advance(b"\x1b8"); // DECRC restores -> G0 line-drawing again
+    t.advance(b"\r");
+    t.advance(b"q");
+    assert_eq!(
+        t.grid().cell(0, 0).unwrap().c,
+        '─',
+        "restored line-drawing charset maps 'q' to the horizontal bar"
+    );
+}
+
+#[test]
+fn decrc_without_save_homes_cursor() {
+    let mut t = Terminal::new(4, 10);
+    t.advance(b"\x1b[3;5H"); // move to row 3 col 5
+    t.advance(b"\x1b8"); // DECRC with nothing saved -> home
+    assert_eq!(
+        t.cursor_position(),
+        Some((0, 0)),
+        "bare restore homes cursor"
+    );
+}
+
+// ---- Tab stops: HTS / TBC / CHT / CBT ----
+
+#[test]
+fn hts_sets_stop_and_tab_lands_on_it() {
+    let mut t = Terminal::new(2, 20);
+    t.advance(b"\x1b[1G"); // col 0
+    t.advance(b"   "); // advance to col 3
+    t.advance(b"\x1bH"); // HTS: set a tab stop at col 3
+    t.advance(b"\r"); // back to col 0
+    t.advance(b"\t"); // tab forward -> should land on col 3 (the new stop)
+    assert_eq!(
+        t.cursor_position(),
+        Some((0, 3)),
+        "tab lands on the HTS stop"
+    );
+}
+
+#[test]
+fn tbc_clears_stop_at_cursor() {
+    let mut t = Terminal::new(2, 40);
+    // Default stop at col 8. Move there, clear it (CSI 0 g), then a tab from
+    // col 0 must skip past 8 to the next default stop (16).
+    t.advance(b"\x1b[9G"); // col 8 (1-based 9)
+    t.advance(b"\x1b[0g"); // TBC clear at cursor
+    t.advance(b"\r\t");
+    assert_eq!(
+        t.cursor_position(),
+        Some((0, 16)),
+        "with col-8 stop cleared, tab skips to col 16"
+    );
+}
+
+#[test]
+fn tbc_clear_all_then_tab_goes_to_last_column() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b[3g"); // clear ALL tab stops
+    t.advance(b"\r\t"); // no stop ahead -> last column (9)
+    assert_eq!(
+        t.cursor_position(),
+        Some((0, 9)),
+        "tab to last col when no stop"
+    );
+}
+
+#[test]
+fn cht_advances_multiple_tab_stops() {
+    let mut t = Terminal::new(2, 40);
+    t.advance(b"\r");
+    t.advance(b"\x1b[2I"); // CHT: forward 2 tab stops -> col 16
+    assert_eq!(t.cursor_position(), Some((0, 16)));
+}
+
+#[test]
+fn cbt_moves_back_tab_stops() {
+    let mut t = Terminal::new(2, 40);
+    t.advance(b"\x1b[30G"); // col 29
+    t.advance(b"\x1b[2Z"); // CBT: back 2 stops from 29 -> 24 -> 16
+    assert_eq!(t.cursor_position(), Some((0, 16)));
+}
+
+// ---- Reverse index (ESC M) and IND (ESC D) / NEL (ESC E) ----
+
+#[test]
+fn reverse_index_moves_up_when_not_at_top() {
+    let mut t = Terminal::new(3, 5);
+    t.advance(b"\x1b[2;1H"); // row 1 (0-based)
+    t.advance(b"\x1bM"); // RI -> up one row, no scroll
+    assert_eq!(t.cursor_position(), Some((0, 0)));
+}
+
+#[test]
+fn nel_does_cr_then_lf() {
+    let mut t = Terminal::new(3, 10);
+    t.advance(b"abc"); // cursor at col 3, row 0
+    t.advance(b"\x1bE"); // NEL: CR + LF -> col 0, row 1
+    assert_eq!(t.cursor_position(), Some((1, 0)));
+}
+
+#[test]
+fn ind_indexes_down() {
+    let mut t = Terminal::new(3, 10);
+    t.advance(b"abc"); // col 3 row 0
+    t.advance(b"\x1bD"); // IND: down one row, column unchanged
+    assert_eq!(t.cursor_position(), Some((1, 3)));
+}
+
+// ---- RIS hard reset (ESC c) ----
+
+#[test]
+fn ris_clears_screen_scrollback_and_homes() {
+    let mut t = Terminal::with_scrollback(2, 8, 100);
+    t.advance(b"x\r\ny\r\nz\r\nw"); // build scrollback + content
+    t.advance(b"\x1b[31m"); // set a non-default pen
+    assert!(t.scrollback_len() > 0);
+    t.advance(b"\x1bc"); // RIS
+    assert_eq!(t.scrollback_len(), 0, "scrollback dropped");
+    assert_eq!(t.cursor_position(), Some((0, 0)), "cursor homed");
+    assert_eq!(t.grid().cell(0, 0).unwrap().c, ' ', "screen cleared");
+    // Pen reset: a freshly printed glyph is default fg.
+    t.advance(b"Q");
+    assert_eq!(t.grid().cell(0, 0).unwrap().fg, Color::Default);
+}
+
+// ---- Focus reporting (CSI I / CSI O) ----
+
+#[test]
+fn focus_report_emits_only_when_enabled() {
+    let mut t = Terminal::new(2, 10);
+    // Disabled by default: focus_report is a no-op.
+    t.focus_report(true);
+    assert!(
+        t.take_pty_response().is_empty(),
+        "no report while ?1004 off"
+    );
+    t.advance(b"\x1b[?1004h"); // enable focus reporting
+    t.focus_report(true);
+    assert_eq!(t.take_pty_response(), b"\x1b[I", "focus-in report");
+    t.focus_report(false);
+    assert_eq!(t.take_pty_response(), b"\x1b[O", "focus-out report");
+}
+
+// ---- CSI cursor motion: CUD ceiling, CNL, CPL, CHA, VPA ----
+
+#[test]
+fn cud_stops_at_bottom_margin() {
+    let mut t = Terminal::new(5, 10);
+    t.advance(b"\x1b[2;4r"); // scroll region rows 1..=3 (1-based 2..=4)
+                             // Inside the region: CUD stops at the bottom margin (row 3), not the
+                             // physical bottom (row 4).
+    t.advance(b"\x1b[2;1H"); // row 1, inside region
+    t.advance(b"\x1b[99B");
+    assert_eq!(
+        t.cursor_position(),
+        Some((3, 0)),
+        "in-region CUD stops at bottom margin"
+    );
+}
+
+#[test]
+fn cud_below_region_bounded_by_physical_bottom() {
+    let mut t = Terminal::new(6, 10);
+    t.advance(b"\x1b[2;3r"); // region rows 1..=2; this homes cursor to row 1
+                             // Place the cursor BELOW the bottom margin (row 4, where row > scroll_bottom).
+                             // DECTCEM-independent absolute move ignores the region in non-origin mode.
+    t.advance(b"\x1b[5;1H"); // row 4 (below region bottom = row 2)
+    assert_eq!(t.cursor_position(), Some((4, 0)));
+    // CUD from below the region: ceiling is the physical bottom (row 5).
+    t.advance(b"\x1b[99B");
+    assert_eq!(
+        t.cursor_position(),
+        Some((5, 0)),
+        "below-region CUD hits physical bottom"
+    );
+}
+
+#[test]
+fn cnl_and_cpl_move_to_column_zero() {
+    let mut t = Terminal::new(5, 10);
+    t.advance(b"\x1b[1;5H"); // row 0 col 4
+    t.advance(b"\x1b[2E"); // CNL: down 2, col 0
+    assert_eq!(t.cursor_position(), Some((2, 0)));
+    t.advance(b"\x1b[3;5H"); // row 2 col 4
+    t.advance(b"\x1b[1F"); // CPL: up 1, col 0
+    assert_eq!(t.cursor_position(), Some((1, 0)));
+}
+
+#[test]
+fn cha_sets_absolute_column() {
+    let mut t = Terminal::new(3, 20);
+    t.advance(b"\x1b[10G"); // CHA: col 9 (1-based 10)
+    assert_eq!(t.cursor_position(), Some((0, 9)));
+}
+
+#[test]
+fn vpa_sets_absolute_row() {
+    let mut t = Terminal::new(5, 10);
+    t.advance(b"abc"); // col 3
+    t.advance(b"\x1b[3d"); // VPA: row 2 (1-based 3), col preserved
+    assert_eq!(t.cursor_position(), Some((2, 3)));
+}
+
+// ---- CSI editing: IL, DL, ICH, DCH, ECH ----
+
+#[test]
+fn il_inserts_blank_lines_within_region() {
+    let mut t = Terminal::new(4, 5);
+    t.advance(b"AAAA\r\nBBBB\r\nCCCC"); // rows 0,1,2
+    t.advance(b"\x1b[2;1H"); // row 1
+    t.advance(b"\x1b[1L"); // IL: insert one blank line at row 1
+    assert_eq!(t.grid().cell(1, 0).unwrap().c, ' ', "row 1 now blank");
+    assert_eq!(
+        t.grid().cell(2, 0).unwrap().c,
+        'B',
+        "B shifted down to row 2"
+    );
+    assert_eq!(t.cursor_position(), Some((1, 0)), "IL homes column");
+}
+
+#[test]
+fn dl_deletes_lines_within_region() {
+    let mut t = Terminal::new(4, 5);
+    t.advance(b"AAAA\r\nBBBB\r\nCCCC");
+    t.advance(b"\x1b[1;1H"); // row 0
+    t.advance(b"\x1b[1M"); // DL: delete one line at row 0
+    assert_eq!(
+        t.grid().cell(0, 0).unwrap().c,
+        'B',
+        "B shifted up into row 0"
+    );
+    assert_eq!(t.cursor_position(), Some((0, 0)));
+}
+
+#[test]
+fn ech_erases_chars_in_place() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"abcdef");
+    t.advance(b"\x1b[1;2H"); // col 1
+    t.advance(b"\x1b[3X"); // ECH: erase 3 chars (no shift)
+    assert_eq!(t.grid().cell(0, 0).unwrap().c, 'a');
+    assert_eq!(t.grid().cell(0, 1).unwrap().c, ' ');
+    assert_eq!(t.grid().cell(0, 2).unwrap().c, ' ');
+    assert_eq!(t.grid().cell(0, 3).unwrap().c, ' ');
+    assert_eq!(
+        t.grid().cell(0, 4).unwrap().c,
+        'e',
+        "e past the erased run intact"
+    );
+}
+
+// ---- SD (scroll down, CSI T) ----
+
+#[test]
+fn sd_scrolls_region_down() {
+    let mut t = Terminal::new(3, 5);
+    t.advance(b"AAAAA\r\nBBBBB\r\nCCCCC");
+    t.advance(b"\x1b[2T"); // SD: scroll whole region down 2
+    assert_eq!(t.grid().cell(0, 0).unwrap().c, ' ', "top now blank");
+    assert_eq!(
+        t.grid().cell(2, 0).unwrap().c,
+        'A',
+        "A pushed down two rows"
+    );
+}
+
+// ---- REP (CSI b) repeats last grapheme ----
+
+#[test]
+fn rep_repeats_last_printed_glyph() {
+    let mut t = Terminal::new(2, 20);
+    t.advance(b"x");
+    t.advance(b"\x1b[4b"); // REP: repeat 'x' 4 more times
+    let line: String = (0..5).map(|c| t.grid().cell(0, c).unwrap().c).collect();
+    assert_eq!(line, "xxxxx", "1 original + 4 repeats");
+}
+
+#[test]
+fn rep_with_no_prior_print_is_noop() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b[3b"); // REP with nothing printed yet
+    assert_eq!(t.grid().cell(0, 0).unwrap().c, ' ', "no glyph to repeat");
+}
+
+// ---- SGR attribute combinations + reset arms ----
+
+#[test]
+fn sgr_all_attributes_and_individual_resets() {
+    let mut t = Terminal::new(2, 30);
+    // bold, italic, underline, inverse, strikeout all on at once.
+    t.advance(b"\x1b[1;3;4;7;9mX");
+    let c = t.grid().cell(0, 0).unwrap();
+    assert!(c.flags.bold && c.flags.italic && c.flags.inverse && c.flags.strikeout);
+    assert!(c.flags.underline());
+    // Individual resets: 22 bold-off, 23 italic-off, 24 underline-off,
+    // 27 inverse-off, 29 strikeout-off.
+    t.advance(b"\x1b[22;23;24;27;29mY");
+    let c = t.grid().cell(0, 1).unwrap();
+    assert!(!c.flags.bold && !c.flags.italic && !c.flags.inverse && !c.flags.strikeout);
+    assert!(!c.flags.underline(), "underline reset by SGR 24");
+}
+
+#[test]
+fn sgr_double_underline_21_and_bright_colors() {
+    let mut t = Terminal::new(2, 30);
+    t.advance(b"\x1b[21mA"); // SGR 21 -> double underline
+    assert_eq!(
+        t.grid().cell(0, 0).unwrap().flags.underline_style,
+        UnderlineStyle::Double
+    );
+    // Bright foreground 90..=97 -> indexed 8..=15.
+    t.advance(b"\x1b[92mB"); // bright green -> index 10
+    assert_eq!(t.grid().cell(0, 1).unwrap().fg, Color::Indexed(10));
+    // Bright background 100..=107 -> indexed 8..=15.
+    t.advance(b"\x1b[105mC"); // bright magenta bg -> index 13
+    assert_eq!(t.grid().cell(0, 2).unwrap().bg, Color::Indexed(13));
+}
+
+#[test]
+fn sgr_default_fg_bg_and_bg_indexed() {
+    let mut t = Terminal::new(2, 30);
+    t.advance(b"\x1b[44mB"); // bg indexed 4 (blue)
+    assert_eq!(t.grid().cell(0, 0).unwrap().bg, Color::Indexed(4));
+    t.advance(b"\x1b[39;49mD"); // reset fg + bg to default
+    let c = t.grid().cell(0, 1).unwrap();
+    assert_eq!(c.fg, Color::Default);
+    assert_eq!(c.bg, Color::Default);
+}
+
+#[test]
+fn sgr_underline_color_set_and_reset() {
+    let mut t = Terminal::new(2, 30);
+    // SGR 58;2;r;g;b sets underline color; 4 turns underline on.
+    t.advance(b"\x1b[4;58;2;10;20;30mU");
+    let c = t.grid().cell(0, 0).unwrap();
+    assert_eq!(c.underline_color, Some(Color::Rgb(10, 20, 30)));
+    // SGR 59 clears it.
+    t.advance(b"\x1b[59mV");
+    assert_eq!(t.grid().cell(0, 1).unwrap().underline_color, None);
+}
+
+#[test]
+fn sgr_underline_color_indexed_colon_form() {
+    let mut t = Terminal::new(2, 30);
+    // Colon form `58:5:n` selects indexed underline color.
+    t.advance(b"\x1b[4;58:5:200mU");
+    assert_eq!(
+        t.grid().cell(0, 0).unwrap().underline_color,
+        Some(Color::Indexed(200))
+    );
+}
+
+#[test]
+fn sgr_extended_bg_indexed_semicolon_form() {
+    let mut t = Terminal::new(2, 30);
+    t.advance(b"\x1b[48;5;123mZ"); // bg indexed 123
+    assert_eq!(t.grid().cell(0, 0).unwrap().bg, Color::Indexed(123));
+}
+
+// ---- Mouse encodings: urxvt, wheel, motion gating, X10 release ----
+
+#[test]
+fn encode_mouse_urxvt_offsets_button_by_32() {
+    let mut t = Terminal::new(4, 80);
+    t.advance(b"\x1b[?1000h\x1b[?1015h"); // normal tracking, urxvt encoding
+    let out = t
+        .encode_mouse(
+            MouseButton::Left,
+            MouseModifiers::default(),
+            5,
+            7,
+            MouseEventKind::Press,
+        )
+        .unwrap();
+    // Left=0, +32 = 32; decimal `CSI 32 ; 5 ; 7 M`.
+    assert_eq!(out, b"\x1b[32;5;7M");
+}
+
+#[test]
+fn encode_mouse_sgr_wheel_up_is_button_64_press() {
+    let mut t = Terminal::new(4, 80);
+    t.advance(b"\x1b[?1000h\x1b[?1006h"); // SGR encoding
+    let out = t
+        .encode_mouse(
+            MouseButton::WheelUp,
+            MouseModifiers::default(),
+            3,
+            4,
+            MouseEventKind::Press,
+        )
+        .unwrap();
+    // Wheel up = 64; SGR always reports wheel as press (`M`).
+    assert_eq!(out, b"\x1b[<64;3;4M");
+    // Wheel "release" still encodes with `M` (not `m`).
+    let out = t
+        .encode_mouse(
+            MouseButton::WheelDown,
+            MouseModifiers::default(),
+            3,
+            4,
+            MouseEventKind::Release,
+        )
+        .unwrap();
+    assert_eq!(out, b"\x1b[<65;3;4M", "wheel down=65, release still `M`");
+}
+
+#[test]
+fn encode_mouse_anyevent_reports_bare_motion() {
+    let mut t = Terminal::new(4, 80);
+    t.advance(b"\x1b[?1003h\x1b[?1006h"); // any-event + SGR
+    let out = t
+        .encode_mouse(
+            MouseButton::None,
+            MouseModifiers::default(),
+            2,
+            2,
+            MouseEventKind::Motion,
+        )
+        .unwrap();
+    // None=3 base + 32 motion bit = 35.
+    assert_eq!(out, b"\x1b[<35;2;2M");
+}
+
+#[test]
+fn encode_mouse_buttonevent_drops_motion_without_held_button() {
+    let mut t = Terminal::new(4, 80);
+    t.advance(b"\x1b[?1002h\x1b[?1006h"); // button-event + SGR
+                                          // ?1002 reports motion only while a button is held -> None for None button.
+    let none = t.encode_mouse(
+        MouseButton::None,
+        MouseModifiers::default(),
+        1,
+        1,
+        MouseEventKind::Motion,
+    );
+    assert!(none.is_none(), "no bare motion under ?1002");
+    // Held-button drag IS reported.
+    let drag = t
+        .encode_mouse(
+            MouseButton::Left,
+            MouseModifiers::default(),
+            1,
+            1,
+            MouseEventKind::Motion,
+        )
+        .unwrap();
+    // Left=0 + 32 motion = 32.
+    assert_eq!(drag, b"\x1b[<32;1;1M");
+}
+
+#[test]
+fn encode_mouse_x10_release_collapses_to_button_three() {
+    let mut t = Terminal::new(4, 80);
+    t.advance(b"\x1b[?1000h"); // X10 encoding (default)
+    let out = t
+        .encode_mouse(
+            MouseButton::Right,
+            MouseModifiers::default(),
+            1,
+            1,
+            MouseEventKind::Release,
+        )
+        .unwrap();
+    // X10 release forces low button bits to 3: byte = (3) + 32 = 35 = '#'.
+    assert_eq!(out[0], 0x1b);
+    assert_eq!(&out[1..3], b"[M");
+    assert_eq!(out[3], 35, "release collapses to button 3 (+32)");
+}
+
+// ---- DSR cursor position report (CSI 6n) and terminal-OK (CSI 5n) ----
+
+#[test]
+fn dsr_cursor_position_report() {
+    let mut t = Terminal::new(10, 40);
+    t.advance(b"\x1b[3;7H"); // row 2 col 6 (0-based)
+    t.advance(b"\x1b[6n"); // DSR cursor position request
+    let reply = String::from_utf8(t.take_pty_response()).unwrap();
+    assert_eq!(reply, "\x1b[3;7R", "CPR is 1-based row;col");
+}
+
+#[test]
+fn dsr_terminal_ok() {
+    let mut t = Terminal::new(4, 10);
+    t.advance(b"\x1b[5n");
+    assert_eq!(t.take_pty_response(), b"\x1b[0n");
+}
+
+// ---- Device attributes: primary + secondary ----
+
+#[test]
+fn da_primary_and_secondary_replies() {
+    let mut t = Terminal::new(4, 10);
+    t.advance(b"\x1b[c"); // primary DA
+    assert_eq!(t.take_pty_response(), b"\x1b[?62;1;6;22c");
+    t.advance(b"\x1b[>c"); // secondary DA
+    assert_eq!(t.take_pty_response(), b"\x1b[>0;0;0c");
+}
+
+// ---- Erase-in-display modes 0/1, erase-in-line 0/1 ----
+
+#[test]
+fn erase_display_cursor_to_end_and_start_to_cursor() {
+    let mut t = Terminal::new(3, 4);
+    t.advance(b"AAAA\r\nBBBB\r\nCCCC");
+    t.advance(b"\x1b[2;3H"); // row 1, col 2
+    t.advance(b"\x1b[0J"); // erase cursor -> end
+    assert_eq!(t.grid().cell(1, 1).unwrap().c, 'B', "before cursor intact");
+    assert_eq!(t.grid().cell(1, 2).unwrap().c, ' ', "at cursor erased");
+    assert_eq!(t.grid().cell(2, 0).unwrap().c, ' ', "rows below erased");
+    // Now mode 1: start -> cursor.
+    let mut t = Terminal::new(3, 4);
+    t.advance(b"AAAA\r\nBBBB\r\nCCCC");
+    t.advance(b"\x1b[2;3H");
+    t.advance(b"\x1b[1J");
+    assert_eq!(t.grid().cell(0, 0).unwrap().c, ' ', "row above erased");
+    assert_eq!(
+        t.grid().cell(1, 2).unwrap().c,
+        ' ',
+        "up to+incl cursor erased"
+    );
+    assert_eq!(t.grid().cell(1, 3).unwrap().c, 'B', "after cursor intact");
+}
+
+#[test]
+fn erase_in_line_modes() {
+    // Mode 0: cursor -> EOL.
+    let mut t = Terminal::new(2, 6);
+    t.advance(b"abcdef");
+    t.advance(b"\x1b[1;3H"); // col 2
+    t.advance(b"\x1b[0K");
+    assert_eq!(t.grid().cell(0, 1).unwrap().c, 'b');
+    assert_eq!(t.grid().cell(0, 2).unwrap().c, ' ');
+    assert_eq!(t.grid().cell(0, 5).unwrap().c, ' ');
+    // Mode 1: BOL -> cursor.
+    let mut t = Terminal::new(2, 6);
+    t.advance(b"abcdef");
+    t.advance(b"\x1b[1;3H");
+    t.advance(b"\x1b[1K");
+    assert_eq!(t.grid().cell(0, 0).unwrap().c, ' ');
+    assert_eq!(t.grid().cell(0, 2).unwrap().c, ' ');
+    assert_eq!(t.grid().cell(0, 3).unwrap().c, 'd', "after cursor intact");
+    // Mode 2: whole line.
+    let mut t = Terminal::new(2, 6);
+    t.advance(b"abcdef");
+    t.advance(b"\x1b[2K");
+    for c in 0..6 {
+        assert_eq!(t.grid().cell(0, c).unwrap().c, ' ');
+    }
+}
+
+// ---- DECSTBM reset to full when invalid + scroll-region getter ----
+
+#[test]
+fn decstbm_invalid_region_resets_to_full() {
+    let mut t = Terminal::new(5, 10);
+    t.advance(b"\x1b[2;4r"); // valid region 1..=3
+    assert_eq!(t.scroll_region(), (1, 3));
+    // top >= bottom is invalid -> reset to full screen.
+    t.advance(b"\x1b[4;2r");
+    assert_eq!(t.scroll_region(), (0, 4), "invalid region resets to full");
+}
+
+#[test]
+fn decstbm_no_params_is_full_screen() {
+    let mut t = Terminal::new(5, 10);
+    t.advance(b"\x1b[2;4r"); // set a region
+    t.advance(b"\x1b[r"); // bare DECSTBM -> full screen
+    assert_eq!(t.scroll_region(), (0, 4));
+    assert_eq!(t.cursor_position(), Some((0, 0)), "DECSTBM homes cursor");
+}
+
+#[test]
+fn cuu_above_region_bounded_by_physical_top() {
+    let mut t = Terminal::new(6, 10);
+    t.advance(b"\x1b[3;5r"); // region rows 2..=4; homes cursor to row 2
+                             // Move ABOVE the top margin (row 0, where row < scroll_top).
+    t.advance(b"\x1b[1;1H"); // row 0
+    t.advance(b"\x1b[99A"); // CUU: floor is physical top (row 0) when above region
+    assert_eq!(
+        t.cursor_position(),
+        Some((0, 0)),
+        "above-region CUU floored at row 0"
+    );
+}
+
+// ---- IRM insert getter + DECOM origin getter ----
+
+#[test]
+fn insert_mode_getter_tracks_csi_4h_l() {
+    let mut t = Terminal::new(2, 10);
+    assert!(!t.insert_mode());
+    t.advance(b"\x1b[4h");
+    assert!(t.insert_mode(), "CSI 4 h enables IRM");
+    t.advance(b"\x1b[4l");
+    assert!(!t.insert_mode());
+}
+
+#[test]
+fn origin_mode_getter_tracks_mode_6() {
+    let mut t = Terminal::new(5, 10);
+    assert!(!t.origin_mode());
+    t.advance(b"\x1b[?6h");
+    assert!(t.origin_mode());
+    t.advance(b"\x1b[?6l");
+    assert!(!t.origin_mode());
+}
+
+// ---- DECRQM ANSI IRM + extra private modes ----
+
+#[test]
+fn decrqm_reports_origin_and_reverse_modes() {
+    let mut t = Terminal::new(5, 10);
+    t.advance(b"\x1b[?6h"); // origin on
+    t.advance(b"\x1b[?6$p"); // DECRQM private mode 6
+    let r = String::from_utf8(t.take_pty_response()).unwrap();
+    assert_eq!(r, "\x1b[?6;1$y", "origin mode reported as set");
+    t.advance(b"\x1b[?5$p"); // reverse-screen mode 5, currently reset
+    let r = String::from_utf8(t.take_pty_response()).unwrap();
+    assert_eq!(r, "\x1b[?5;2$y", "reverse-screen reported as reset");
+}
+
+// ---- DECSTR soft reset (CSI ! p) ----
+
+#[test]
+fn decstr_soft_reset_preserves_scrollback() {
+    let mut t = Terminal::with_scrollback(2, 8, 100);
+    t.advance(b"a\r\nb\r\nc\r\nd"); // build scrollback
+    let sb = t.scrollback_len();
+    assert!(sb > 0);
+    t.advance(b"\x1b[31m\x1b[4h"); // non-default pen + insert mode
+    t.advance(b"\x1b[!p"); // DECSTR soft reset
+    assert_eq!(t.scrollback_len(), sb, "soft reset keeps scrollback");
+    assert!(!t.insert_mode(), "soft reset clears IRM");
+    t.advance(b"Z");
+    assert_eq!(t.grid().cell(0, 0).unwrap().fg, Color::Default, "pen reset");
+}
+
+// ---- XTWINOPS title stack push/pop ----
+
+#[test]
+fn xtwinops_title_stack_push_and_pop() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b]0;first\x07");
+    assert_eq!(t.title(), "first");
+    t.advance(b"\x1b[22t"); // push title
+    assert_eq!(t.title_stack_depth(), 1);
+    t.advance(b"\x1b]0;second\x07");
+    assert_eq!(t.title(), "second");
+    t.advance(b"\x1b[23t"); // pop title -> back to "first"
+    assert_eq!(t.title(), "first");
+    assert_eq!(t.title_stack_depth(), 0);
+}
+
+#[test]
+fn xtwinops_pop_on_empty_stack_is_noop() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b]0;solo\x07");
+    t.advance(b"\x1b[23t"); // pop with empty stack
+    assert_eq!(t.title(), "solo", "title unchanged on empty-stack pop");
+}
+
+// ---- OSC 7 cwd + OSC 133 command marks (C/D) ----
+
+#[test]
+fn osc7_captures_cwd() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b]7;file:///home/user\x07");
+    assert_eq!(t.cwd(), Some("file:///home/user"));
+}
+
+#[test]
+fn osc133_output_start_and_command_end_marks() {
+    let mut t = Terminal::new(4, 20);
+    t.advance(b"\x1b]133;C\x07"); // output start
+    t.advance(b"\x1b]133;D;0\x07"); // command end, exit 0
+    let marks = t.command_marks();
+    assert_eq!(marks.len(), 2);
+    assert!(matches!(marks[0].kind, CommandMarkKind::OutputStart));
+    assert!(matches!(
+        marks[1].kind,
+        CommandMarkKind::CommandEnd { exit_code: Some(0) }
+    ));
+    assert_eq!(t.last_command_exit_code(), Some(Some(0)));
+}
+
+#[test]
+fn osc133_command_end_without_code() {
+    let mut t = Terminal::new(4, 20);
+    t.advance(b"\x1b]133;D\x07"); // command end, no exit code
+    assert_eq!(t.last_command_exit_code(), Some(None));
+}
+
+// ---- Charset SO/SI shift via execute (0x0e / 0x0f) ----
+
+#[test]
+fn so_si_shift_between_g0_and_g1_charsets() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b)0"); // G1 = line drawing
+    t.advance(b"\x0e"); // SO: invoke G1 into GL
+    t.advance(b"q"); // 'q' -> horizontal line under G1
+    assert_eq!(t.grid().cell(0, 0).unwrap().c, '─');
+    t.advance(b"\x0f"); // SI: back to G0 (ASCII)
+    t.advance(b"q");
+    assert_eq!(t.grid().cell(0, 1).unwrap().c, 'q', "G0 ASCII active again");
+}
+
+// ---- Backspace control (0x08) ----
+
+#[test]
+fn backspace_moves_cursor_left_and_saturates() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"ab");
+    t.advance(&[0x08]); // BS
+    assert_eq!(t.cursor_position(), Some((0, 1)));
+    t.advance(&[0x08, 0x08, 0x08]); // saturate at col 0
+    assert_eq!(t.cursor_position(), Some((0, 0)));
+}
+
+// ---- Autowrap off (DECAWM ?7l) clamps instead of wrapping ----
+
+#[test]
+fn autowrap_off_overwrites_last_column() {
+    let mut t = Terminal::new(2, 3);
+    t.advance(b"\x1b[?7l"); // autowrap off
+    t.advance(b"abcd"); // 4 chars into 3 cols
+                        // No wrap: stays on row 0; last column holds the final glyph.
+    assert_eq!(t.cursor_position().unwrap().0, 0, "no wrap to row 1");
+    assert_eq!(t.grid().cell(0, 2).unwrap().c, 'd', "last col overwritten");
+    assert!(t.grid().cell(1, 0).unwrap().c == ' ', "row 1 untouched");
+}
+
+// ---- IRM insert mode actually shifts on print at a populated column ----
+
+#[test]
+fn irm_insert_shifts_existing_glyphs_right() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"world");
+    t.advance(b"\x1b[1;1H"); // home
+    t.advance(b"\x1b[4h"); // IRM on
+    t.advance(b"X"); // insert 'X' -> shifts "world" right
+    assert_eq!(t.grid().cell(0, 0).unwrap().c, 'X');
+    assert_eq!(t.grid().cell(0, 1).unwrap().c, 'w', "world shifted right");
+}
+
+// ---- Final edge-branch batch: dynamic-color cursor query, OSC edge arms,
+//      mouse middle/modifier arms, malformed Kitty APC, view-scroll helpers,
+//      and scrollback-backed visible-row iteration. ----
+
+#[test]
+fn osc12_cursor_color_query_replies() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b]12;#0a141e\x07"); // set cursor color
+    let _ = t.take_pty_response();
+    t.advance(b"\x1b]12;?\x07"); // query cursor color
+    let reply = String::from_utf8(t.take_pty_response()).unwrap();
+    assert_eq!(reply, "\x1b]12;rgb:0a0a/1414/1e1e\x07");
+}
+
+#[test]
+fn osc10_with_no_spec_is_noop() {
+    let mut t = Terminal::new(2, 10);
+    let before = t.dynamic_color(DynamicColor::Foreground);
+    t.advance(b"\x1b]10\x07"); // OSC 10 with no spec param -> early return
+    assert_eq!(t.dynamic_color(DynamicColor::Foreground), before);
+    assert!(t.take_pty_response().is_empty());
+}
+
+#[test]
+fn osc8_empty_uri_is_not_captured() {
+    let mut t = Terminal::new(2, 20);
+    t.advance(b"\x1b]8;;\x07"); // OSC 8 with an empty URI -> not stored
+    assert!(t.hyperlinks().is_empty(), "empty OSC 8 URI is dropped");
+}
+
+#[test]
+fn osc133_duplicate_prompt_mark_is_deduped() {
+    let mut t = Terminal::new(4, 20);
+    // Two A marks at the same absolute line -> only one stored (dedup arm).
+    t.advance(b"\x1b]133;A\x07");
+    t.advance(b"\x1b]133;A\x07");
+    assert_eq!(t.prompt_marks().len(), 1, "same-line prompt mark deduped");
+}
+
+#[test]
+fn osc133_unknown_kind_is_ignored() {
+    let mut t = Terminal::new(4, 20);
+    t.advance(b"\x1b]133;Z\x07"); // unknown semantic-zone kind -> ignored
+    assert!(t.prompt_marks().is_empty());
+    assert!(t.command_marks().is_empty());
+}
+
+#[test]
+fn osc133_command_end_parses_embedded_exit_code() {
+    let mut t = Terminal::new(4, 20);
+    // `D;aid=7` form: the exit code is the first integer-looking token.
+    t.advance(b"\x1b]133;D;aid=7\x07");
+    assert_eq!(t.last_command_exit_code(), Some(Some(7)));
+}
+
+#[test]
+fn dsr_unknown_ps_produces_no_reply() {
+    let mut t = Terminal::new(4, 10);
+    t.advance(b"\x1b[99n"); // DSR with an unsupported parameter
+    assert!(t.take_pty_response().is_empty());
+}
+
+#[test]
+fn erase_display_and_line_unknown_modes_are_noops() {
+    let mut t = Terminal::new(2, 6);
+    t.advance(b"abcdef");
+    t.advance(b"\x1b[9J"); // unknown ED mode -> default arm, no change
+    t.advance(b"\x1b[9K"); // unknown EL mode -> default arm, no change
+    assert_eq!(
+        t.grid().cell(0, 0).unwrap().c,
+        'a',
+        "unknown erase modes are no-ops"
+    );
+}
+
+#[test]
+fn xtwinops_unknown_op_is_ignored() {
+    let mut t = Terminal::new(2, 10);
+    t.advance(b"\x1b]0;keep\x07");
+    t.advance(b"\x1b[18t"); // report-size op we intentionally ignore
+    assert_eq!(t.title(), "keep");
+    assert_eq!(
+        t.title_stack_depth(),
+        0,
+        "non-stack XTWINOPS op left stack alone"
+    );
+}
+
+#[test]
+fn encode_mouse_middle_button_and_modifiers_combine() {
+    let mut t = Terminal::new(4, 80);
+    t.advance(b"\x1b[?1000h\x1b[?1006h"); // normal + SGR
+                                          // Middle button (1) + shift (4) + alt (8) = 13.
+    let out = t
+        .encode_mouse(
+            MouseButton::Middle,
+            MouseModifiers {
+                shift: true,
+                alt: true,
+                control: false,
+            },
+            10,
+            20,
+            MouseEventKind::Press,
+        )
+        .unwrap();
+    assert_eq!(out, b"\x1b[<13;10;20M", "middle+shift+alt = 1+4+8 = 13");
+}
+
+#[test]
+fn encode_mouse_left_release_uses_lowercase_m_in_sgr() {
+    let mut t = Terminal::new(4, 80);
+    t.advance(b"\x1b[?1000h\x1b[?1006h");
+    let out = t
+        .encode_mouse(
+            MouseButton::Left,
+            MouseModifiers::default(),
+            1,
+            1,
+            MouseEventKind::Release,
+        )
+        .unwrap();
+    assert_eq!(out, b"\x1b[<0;1;1m", "non-wheel SGR release ends with `m`");
+}
+
+#[test]
+fn malformed_kitty_apc_is_ignored() {
+    let mut t = Terminal::new(4, 20);
+    // APC body whose first byte is not 'G' (handled by the prefilter as non-Kitty
+    // and swallowed) plus a Kitty APC with an unparseable control string.
+    t.advance(b"\x1b_Gnot-a-valid-control\x1b\\");
+    assert!(
+        t.images().is_empty(),
+        "malformed Kitty control produces no image"
+    );
+}
+
+#[test]
+fn kitty_apc_unknown_action_is_ignored() {
+    let mut t = Terminal::new(4, 20);
+    // a=q is not an action we handle -> the `_ => {}` arm, no image, no panic.
+    t.advance(b"\x1b_Ga=q,i=1\x1b\\");
+    assert!(t.images().is_empty());
+}
+
+#[test]
+fn view_scroll_helpers_clamp_correctly() {
+    let mut t = Terminal::with_scrollback(2, 4, 100);
+    t.advance(b"a\r\nb\r\nc\r\nd\r\ne"); // build scrollback
+    let sb = t.scrollback_len();
+    assert!(sb >= 1);
+    // set_view_offset clamps to history length.
+    t.set_view_offset(1000);
+    assert_eq!(t.view_offset(), sb, "set_view_offset clamps to history");
+    // scroll_down_view saturates at 0.
+    t.scroll_down_view(1000);
+    assert_eq!(t.view_offset(), 0, "scroll_down_view saturates at live");
+    // A second scroll_to_bottom while already at bottom is a no-op (early return).
+    t.scroll_to_bottom();
+    assert_eq!(t.view_offset(), 0);
+}
+
+#[test]
+fn for_visible_rows_walks_scrollback_when_offset_set() {
+    let mut t = Terminal::with_scrollback(2, 4, 100);
+    t.advance(b"L0\r\nL1\r\nL2\r\nL3"); // L0/L1 scroll into history
+    assert!(t.scrollback_len() >= 2);
+    // Scroll the view back so the visible window includes a history row.
+    t.scroll_up_view(2);
+    let mut first_visible = String::new();
+    t.for_visible_rows(|vr, cells| {
+        if vr == 0 {
+            first_visible = cells.iter().map(|c| c.c).collect();
+        }
+    });
+    assert!(
+        first_visible.starts_with("L0") || first_visible.starts_with("L1"),
+        "scrolled-back view surfaces a history row, got {first_visible:?}"
+    );
+    // display_rows (the allocating wrapper) pads every history row to grid width.
+    t.set_view_offset(t.scrollback_len());
+    let rows = t.display_rows();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter().all(|r| r.len() == 4),
+        "rows padded to grid width"
+    );
+}
+
+#[test]
+fn alt_screen_47_form_does_not_save_cursor() {
+    let mut t = Terminal::new(4, 10);
+    t.advance(b"\x1b[2;3H"); // row 1 col 2 on primary
+    t.advance(b"\x1b[?47h"); // enter alt via the 47 form (no cursor save)
+    assert!(t.alt_screen_active());
+    t.advance(b"\x1b[4;5H"); // move on the alt screen
+    t.advance(b"\x1b[?47l"); // leave alt; 47 does NOT restore the cursor
+                             // The cursor is left where it was on the alt screen (clamped), not restored
+                             // to the primary's saved (1,2).
+    assert_eq!(
+        t.cursor_position(),
+        Some((3, 4)),
+        "47 leaves cursor where it sat"
+    );
+}
+
+#[test]
+fn alt_screen_1047_clears_alt_on_exit() {
+    let mut t = Terminal::new(4, 10);
+    t.advance(b"primary");
+    t.advance(b"\x1b[?1047h"); // enter alt via 1047 (homes cursor, no save)
+    t.advance(b"ALT");
+    t.advance(b"\x1b[?1047l"); // leave; 1047 clears the alt screen on the way out
+                               // Primary content is restored.
+    assert_eq!(
+        t.grid().cell(0, 0).unwrap().c,
+        'p',
+        "primary restored after 1047"
+    );
+}
+
+#[test]
+fn clamp_scroll_region_after_shrink_resets_when_invalid() {
+    let mut t = Terminal::new(10, 10);
+    t.advance(b"\x1b[5;8r"); // region rows 4..=7 (custom, not full-screen)
+    assert_eq!(t.scroll_region(), (4, 7));
+    // Shrink the grid so the region's bottom (7) no longer fits (rows now 3).
+    t.resize(3, 10);
+    let (top, bottom) = t.scroll_region();
+    assert!(bottom < 3, "scroll_bottom clamped within new height");
+    assert!(top <= bottom, "region stays well-formed after shrink");
+}
+
 mod utf8_tail_boundary_tests {
     use crate::term::utf8_tail_boundary;
 

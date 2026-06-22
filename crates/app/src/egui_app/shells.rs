@@ -205,4 +205,82 @@ mod tests {
             "detected profiles must not duplicate a program"
         );
     }
+
+    #[test]
+    fn which_resolves_a_bare_name_against_a_synthetic_path() {
+        // The happy path: a bare program name present in a directory on a
+        // synthetic PATH resolves to the full path. We create our own file so
+        // the test does not depend on any real installed binary.
+        let dir = tempfile::tempdir().unwrap();
+        // On Windows the loader searches PATHEXT extensions for a bare name, so
+        // give the file a `.EXE` and probe the extension-less name.
+        let (file_name, probe_name) = if cfg!(windows) {
+            ("mytool.exe", "mytool")
+        } else {
+            ("mytool", "mytool")
+        };
+        let exe = dir.path().join(file_name);
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&exe).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&exe, perms).unwrap();
+        }
+        // Run `which` with a PATH that contains ONLY our temp dir. Guarded by an
+        // env lock so concurrent tests do not clobber PATH/PATHEXT.
+        let _lock = PATH_ENV_LOCK.lock().unwrap();
+        let prev_path = std::env::var_os("PATH");
+        let prev_pathext = std::env::var_os("PATHEXT");
+        std::env::set_var("PATH", dir.path());
+        if cfg!(windows) {
+            std::env::set_var("PATHEXT", ".EXE");
+        }
+        let resolved = which(probe_name);
+        // Restore env before asserting (so a failed assert does not leak state).
+        match prev_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        match prev_pathext {
+            Some(v) => std::env::set_var("PATHEXT", v),
+            None => std::env::remove_var("PATHEXT"),
+        }
+        let resolved = resolved.expect("the bare name resolves on the synthetic PATH");
+        // On Windows the resolver appends the PATHEXT entry verbatim (`.EXE`),
+        // and the filesystem is case-insensitive, so compare case-folded.
+        assert_eq!(
+            resolved
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_ascii_lowercase),
+            Some(file_name.to_ascii_lowercase()),
+            "which returns the full path to the matched file (case-insensitive on Windows)"
+        );
+        assert!(resolved.is_file(), "the resolved path is the real file");
+    }
+
+    #[test]
+    fn which_accepts_an_existing_absolute_path_and_rejects_a_missing_one() {
+        // An absolute path is accepted IFF it exists; a non-existent absolute
+        // path is rejected. This covers the `p.is_absolute()` early branch.
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("abs-tool");
+        std::fs::write(&exe, b"x").unwrap();
+        let abs = exe.to_string_lossy().to_string();
+        assert_eq!(
+            which(&abs).as_deref(),
+            Some(exe.as_path()),
+            "an existing absolute path resolves to itself"
+        );
+        let missing = dir.path().join("does-not-exist-abs");
+        assert!(
+            which(&missing.to_string_lossy()).is_none(),
+            "a non-existent absolute path does not resolve"
+        );
+    }
+
+    use std::sync::Mutex;
+    static PATH_ENV_LOCK: Mutex<()> = Mutex::new(());
 }

@@ -1393,6 +1393,438 @@ mod tests {
         assert_eq!(c2.reporting, c.reporting);
     }
 
+    // ---- validate() Invalid arms: each out-of-range / empty value is rejected
+    //      with the EXACT ConfigError::Invalid variant and a message that names
+    //      the offending field, so the settings UI can surface a useful error. ----
+
+    /// Pull the inner message out of a `ConfigError::Invalid`, panicking with the
+    /// real variant if the error is anything else — so a wrong *variant* (not just
+    /// a wrong message) fails the test.
+    fn expect_invalid(err: ConfigError) -> String {
+        match err {
+            ConfigError::Invalid(msg) => msg,
+            other => panic!("expected ConfigError::Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_empty_theme_with_named_message() {
+        let c = Config {
+            theme: "   ".to_string(), // whitespace-only trims to empty
+            ..Config::default()
+        };
+        let msg = expect_invalid(c.validate().unwrap_err());
+        assert_eq!(msg, "theme name must not be empty");
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_opacity_with_value_in_message() {
+        // Above the 0.0..=1.0 band.
+        let hi = Config {
+            opacity: 5.0,
+            ..Config::default()
+        };
+        let msg = expect_invalid(hi.validate().unwrap_err());
+        assert_eq!(msg, "opacity must be between 0.0 and 1.0, got 5");
+        // Below the band (negative) is equally rejected; the literal value is echoed.
+        let lo = Config {
+            opacity: -0.5,
+            ..Config::default()
+        };
+        let msg = expect_invalid(lo.validate().unwrap_err());
+        assert_eq!(msg, "opacity must be between 0.0 and 1.0, got -0.5");
+        // The exact band edges are VALID (boundary inclusivity).
+        assert!(Config {
+            opacity: 0.0,
+            ..Config::default()
+        }
+        .validate()
+        .is_ok());
+        assert!(Config {
+            opacity: 1.0,
+            ..Config::default()
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_font_size() {
+        // Zero is non-positive → rejected.
+        let zero = Config {
+            font: FontConfig {
+                size: 0.0,
+                ..FontConfig::default()
+            },
+            ..Config::default()
+        };
+        assert_eq!(
+            expect_invalid(zero.validate().unwrap_err()),
+            "font.size must be positive"
+        );
+        // Negative is also rejected.
+        let neg = Config {
+            font: FontConfig {
+                size: -3.0,
+                ..FontConfig::default()
+            },
+            ..Config::default()
+        };
+        assert_eq!(
+            expect_invalid(neg.validate().unwrap_err()),
+            "font.size must be positive"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_cols_or_rows() {
+        // cols == 0 (rows fine) → rejected.
+        let c0 = Config {
+            window: WindowConfig {
+                cols: 0,
+                ..WindowConfig::default()
+            },
+            ..Config::default()
+        };
+        assert_eq!(
+            expect_invalid(c0.validate().unwrap_err()),
+            "window cols and rows must be non-zero"
+        );
+        // rows == 0 (cols fine) → also rejected (the OR arm).
+        let r0 = Config {
+            window: WindowConfig {
+                rows: 0,
+                ..WindowConfig::default()
+            },
+            ..Config::default()
+        };
+        assert_eq!(
+            expect_invalid(r0.validate().unwrap_err()),
+            "window cols and rows must be non-zero"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_tint_strength_with_value() {
+        let c = Config {
+            tint_strength: 1.5,
+            ..Config::default()
+        };
+        assert_eq!(
+            expect_invalid(c.validate().unwrap_err()),
+            "tint_strength must be between 0.0 and 1.0, got 1.5"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_bad_tint_hex_with_debug_quoted_value() {
+        // A non-#RRGGBB tint is rejected, and the offending value is echoed
+        // Debug-quoted (so `{:?}` of the String shows the surrounding quotes).
+        let c = Config {
+            tint: "nope".to_string(),
+            ..Config::default()
+        };
+        assert_eq!(
+            expect_invalid(c.validate().unwrap_err()),
+            "tint must be a #RRGGBB hex color, got \"nope\""
+        );
+    }
+
+    #[test]
+    fn validate_passes_for_a_fully_valid_non_default_config() {
+        // Every guarded field set to a valid non-default value still validates,
+        // proving the happy path threads all the way through validate().
+        let c = Config {
+            theme: "ghost-paper".to_string(),
+            opacity: 0.5,
+            tint_strength: 0.5,
+            tint: "#abcdef".to_string(),
+            font: FontConfig {
+                size: 10.0,
+                ..FontConfig::default()
+            },
+            window: WindowConfig {
+                cols: 120,
+                rows: 40,
+                ..WindowConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(c.validate().is_ok());
+    }
+
+    // ---- ConfigError variants: construction, Display, and the load/save Io arms ----
+
+    #[test]
+    fn config_error_not_found_display_names_path_and_defaults() {
+        let e = ConfigError::NotFound(PathBuf::from("/etc/c0pl4nd/config.toml"));
+        let s = e.to_string();
+        assert!(
+            s.contains("config file not found") && s.contains("using built-in defaults"),
+            "NotFound Display must explain the fallback, got: {s}"
+        );
+        assert!(
+            s.contains("config.toml"),
+            "NotFound Display must name the path, got: {s}"
+        );
+    }
+
+    #[test]
+    fn config_error_parse_is_the_parse_variant_with_path_and_message() {
+        // Malformed TOML surfaces a Parse error (not Invalid/Io), carrying the
+        // path we passed and a non-empty human-readable message.
+        let p = PathBuf::from("broken.toml");
+        let err = Config::from_toml("this is = = not toml", &p).unwrap_err();
+        match err {
+            ConfigError::Parse { path, message } => {
+                assert_eq!(path, p, "Parse error must echo the source path");
+                assert!(!message.is_empty(), "Parse error must carry a message");
+                // The Display format embeds both the path and the message.
+                let disp = ConfigError::Parse { path, message }.to_string();
+                assert!(disp.contains("config parse error in") && disp.contains("broken.toml"));
+            }
+            other => panic!("expected ConfigError::Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_invalid_display_format() {
+        let e = ConfigError::Invalid("widget out of range".to_string());
+        assert_eq!(
+            e.to_string(),
+            "config validation error: widget out of range"
+        );
+    }
+
+    #[test]
+    fn config_error_io_display_names_path_and_source() {
+        let e = ConfigError::Io {
+            path: PathBuf::from("/no/such/cfg.toml"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        };
+        let s = e.to_string();
+        assert!(
+            s.contains("could not read config file")
+                && s.contains("cfg.toml")
+                && s.contains("denied"),
+            "Io Display must name the path and embed the source, got: {s}"
+        );
+    }
+
+    #[test]
+    fn load_from_existing_valid_file_round_trips_through_from_toml() {
+        // The Ok arm of load_from: an existing, readable, valid file parses.
+        let path =
+            std::env::temp_dir().join(format!("c0pl4nd-load-{}-ok.toml", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, "theme = \"ghost-paper\"\nligatures = true\n").expect("seed");
+        let c = Config::load_from(&path).expect("valid file loads");
+        assert_eq!(c.theme, "ghost-paper");
+        assert!(c.ligatures);
+        assert_eq!(c.font.size, 14.0, "unset fields keep their defaults");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_invalid_file_surfaces_validation_error_not_defaults() {
+        // The Ok arm reads, but validation rejects an out-of-range value — the
+        // error must propagate (not silently fall back to defaults).
+        let path =
+            std::env::temp_dir().join(format!("c0pl4nd-load-{}-bad.toml", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, "opacity = 9.0\n").expect("seed");
+        let err = Config::load_from(&path).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Invalid(_)),
+            "an out-of-range value in a real file must surface as Invalid, got {err:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_to_under_a_regular_file_parent_yields_io_error() {
+        // Provoke the save_to Io arm cross-platform: make the parent a regular
+        // FILE, so create_dir_all (inside atomic_write_owner_only) cannot create
+        // a directory there. The error must surface as ConfigError::Io carrying
+        // the target path — never a panic, never a silent success.
+        let file_as_parent =
+            std::env::temp_dir().join(format!("c0pl4nd-save-{}-blocker", std::process::id()));
+        let _ = std::fs::remove_file(&file_as_parent);
+        let _ = std::fs::remove_dir_all(&file_as_parent);
+        std::fs::write(&file_as_parent, b"i am a file, not a dir").expect("seed blocker");
+        // Target a path *under* the regular file → its parent dir cannot exist.
+        let target = file_as_parent.join("sub").join("config.toml");
+        let err = Config::default().save_to(&target).unwrap_err();
+        match err {
+            ConfigError::Io { path, source: _ } => {
+                assert_eq!(path, target, "Io error must echo the target path");
+            }
+            other => panic!("expected ConfigError::Io, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&file_as_parent);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn load_from_unreadable_path_surfaces_io_not_notfound() {
+        // On Windows an invalid filename (reserved characters) yields an IO error
+        // whose kind is NOT NotFound, so it routes to the load_from Io arm rather
+        // than the "missing file → defaults" arm. This covers the third match arm
+        // of load_from that NotFound can never reach on this platform.
+        let bad = std::env::temp_dir().join("c0pl4nd-inv<>:|?.toml");
+        match Config::load_from(&bad) {
+            Err(ConfigError::Io { path, source }) => {
+                assert_eq!(path, bad);
+                assert_ne!(
+                    source.kind(),
+                    std::io::ErrorKind::NotFound,
+                    "a NotFound kind should have fallen back to defaults, not Io"
+                );
+            }
+            // If the platform unexpectedly treats it as NotFound, the contract is
+            // still honoured: missing file → defaults. Accept that outcome too so
+            // the test is not brittle across Windows builds.
+            Ok(c) => assert_eq!(c, Config::default()),
+            Err(other) => panic!("expected Io or default-fallback, got {other:?}"),
+        }
+    }
+
+    // ---- to_toml: round-trip fidelity through the public serialize path ----
+
+    #[test]
+    fn to_toml_serializes_then_from_toml_reproduces_the_config() {
+        // to_toml is the inverse of from_toml; a non-default config survives the
+        // round trip field-for-field. Exercises the Ok arm of to_toml and proves
+        // the serialized form re-parses to an equal value.
+        let original = Config {
+            theme: "ghost-paper".to_string(),
+            opacity: 0.75,
+            transparency_enabled: true,
+            window_mode: WindowMode::Mica,
+            tint: "#aabbcc".to_string(),
+            tint_strength: 0.3,
+            ligatures: true,
+            ..Config::default()
+        };
+        let serialized = original.to_toml().expect("serialize");
+        assert!(
+            serialized.contains("theme = \"ghost-paper\""),
+            "serialized TOML should contain the theme key"
+        );
+        let p = PathBuf::from("roundtrip.toml");
+        let reparsed = Config::from_toml(&serialized, &p).expect("re-parse");
+        assert_eq!(reparsed, original, "to_toml ∘ from_toml must be identity");
+    }
+
+    // ---- IssueIntake / Reporting default coordinates (exact values pinned) ----
+
+    #[test]
+    fn issue_intake_defaults_are_the_c0pl4nd_coordinates() {
+        let i = IssueIntakeConfig::default();
+        assert_eq!(i.repo, "46b-ETYKiAL/Itasha.Corp_C0PL4ND");
+        assert_eq!(i.mailto_alias, "46b.AbandonSomething@proton.me");
+        // The top-level ReportingConfig embeds those same defaults.
+        let r = ReportingConfig::default();
+        assert_eq!(r.issue_intake, i);
+    }
+
+    // ---- PanelSide default + serde round-trip ----
+
+    #[test]
+    fn panel_side_defaults_right_and_round_trips() {
+        assert_eq!(PanelSide::default(), PanelSide::Right);
+        assert_eq!(Config::default().history_sidebar_side, PanelSide::Right);
+        let p = PathBuf::from("test.toml");
+        let c = Config::from_toml("history_sidebar_side = \"left\"\n", &p).unwrap();
+        assert_eq!(c.history_sidebar_side, PanelSide::Left);
+    }
+
+    // ---- CursorStyle / CursorConfig parsing + defaults ----
+
+    #[test]
+    fn cursor_defaults_block_blinking_and_parses_snake_case_styles() {
+        let cc = CursorConfig::default();
+        assert_eq!(cc.style, CursorStyle::Block);
+        assert!(cc.blink);
+        // snake_case rename: "underline" / "bar" parse to their variants, and a
+        // partial [cursor] table backfills the unspecified field.
+        let p = PathBuf::from("test.toml");
+        let c = Config::from_toml("[cursor]\nstyle = \"underline\"\nblink = false\n", &p).unwrap();
+        assert_eq!(c.cursor.style, CursorStyle::Underline);
+        assert!(!c.cursor.blink);
+        let c2 = Config::from_toml("[cursor]\nstyle = \"bar\"\n", &p).unwrap();
+        assert_eq!(c2.cursor.style, CursorStyle::Bar);
+        assert!(
+            c2.cursor.blink,
+            "unset blink backfills to the default (true)"
+        );
+    }
+
+    // ---- UpdateMode parsing + checks_on_launch for every mode ----
+
+    #[test]
+    fn update_mode_parses_all_variants_and_checks_on_launch_is_per_mode() {
+        let p = PathBuf::from("test.toml");
+        for (raw, mode, on_launch) in [
+            ("off", UpdateMode::Off, false),
+            ("notify", UpdateMode::Notify, true),
+            ("manual", UpdateMode::Manual, false),
+            ("auto", UpdateMode::Auto, true),
+        ] {
+            let toml = format!("[update]\nmode = \"{raw}\"\n");
+            let c = Config::from_toml(&toml, &p).unwrap();
+            assert_eq!(c.update.mode, mode, "mode {raw:?} must parse to {mode:?}");
+            assert_eq!(
+                c.update.checks_on_launch(),
+                on_launch,
+                "checks_on_launch for {raw:?} must be {on_launch}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_check_on_launch_flag_forces_on_launch_even_when_mode_is_off() {
+        // The legacy boolean OR-arm: mode = off (no network) but the old
+        // check_on_launch = true flag still forces an on-launch check, so old
+        // config files keep their behaviour.
+        let p = PathBuf::from("test.toml");
+        let c =
+            Config::from_toml("[update]\nmode = \"off\"\ncheck_on_launch = true\n", &p).unwrap();
+        assert_eq!(c.update.mode, UpdateMode::Off);
+        assert!(
+            c.update.checks_on_launch(),
+            "the legacy check_on_launch flag forces a launch check despite mode=off"
+        );
+        // And with the flag false AND mode off, no launch check (the false arm).
+        let c2 = Config::from_toml("[update]\nmode = \"manual\"\n", &p).unwrap();
+        assert!(!c2.update.checks_on_launch());
+    }
+
+    #[test]
+    fn migrate_legacy_transparency_is_noop_when_no_legacy_signal() {
+        // Fully-default opacity (1.0) + acrylic off + new fields at defaults:
+        // migration must change nothing (the early-return / no-signal path).
+        let mut c = Config::default();
+        c.migrate_legacy_transparency();
+        assert!(!c.transparency_enabled);
+        assert_eq!(c.window_mode, WindowMode::Opaque);
+        // And the explicit-new-model early return: transparency_enabled already
+        // true → migration leaves the chosen mode untouched.
+        let mut c2 = Config {
+            transparency_enabled: true,
+            window_mode: WindowMode::Vibrancy,
+            acrylic: true, // would imply Glass if migration ran
+            opacity: 0.2,
+            ..Config::default()
+        };
+        c2.migrate_legacy_transparency();
+        assert_eq!(
+            c2.window_mode,
+            WindowMode::Vibrancy,
+            "an explicit master-on config is never re-migrated"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn save_to_writes_owner_only_0600_no_race() {

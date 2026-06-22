@@ -515,6 +515,294 @@ mod tests {
         assert!(flex_sum_ok(&l.root));
     }
 
+    /// Collect the direct-child leaf ids of the root split, in order. Panics if
+    /// the root is not a split (the test asserts shape first).
+    fn root_child_leaf_ids(l: &Layout) -> Vec<Option<LeafId>> {
+        match &l.root {
+            LayoutNode::Split { children, .. } => children
+                .iter()
+                .map(|c| match c.node {
+                    LayoutNode::Leaf(id) => Some(id),
+                    _ => None,
+                })
+                .collect(),
+            LayoutNode::Leaf(_) => panic!("root is a leaf, not a split"),
+        }
+    }
+
+    #[test]
+    fn resize_single_root_leaf_is_noop() {
+        // A bare root leaf has no split to resize against — returns false.
+        let mut l = Layout::new();
+        assert!(!l.resize(LeafId(0), 0.2, 800));
+    }
+
+    #[test]
+    fn resize_unknown_leaf_is_noop() {
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        assert!(!l.resize(LeafId(404), 0.2, 800));
+    }
+
+    #[test]
+    fn resize_recurses_into_nested_split() {
+        // 0 | (b / c)  — resize c, which lives in the nested vertical split.
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        let c = l.alloc_id();
+        l.split(b, Axis::Vertical, c); // nested split { b, c }
+        assert!(
+            l.resize(c, 0.1, 600),
+            "resize must recurse into the nested split"
+        );
+        assert!(flex_sum_ok(&l.root));
+    }
+
+    #[test]
+    fn resize_zero_axis_extent_uses_floor_min_frac() {
+        // axis_extent <= 0 takes the 0.05 floor branch rather than MIN_CELL/extent.
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        // Huge delta with zero extent clamps to 1.0 - 0.05 = 0.95 on leaf 0.
+        assert!(l.resize(LeafId(0), 5.0, 0));
+        if let LayoutNode::Split { children, .. } = &l.root {
+            assert!(
+                (children[0].flex - 0.95).abs() < 1e-4,
+                "got {}",
+                children[0].flex
+            );
+            assert!(
+                (children[1].flex - 0.05).abs() < 1e-4,
+                "got {}",
+                children[1].flex
+            );
+        } else {
+            panic!("root should be a split");
+        }
+    }
+
+    #[test]
+    fn split_recurses_into_nested_branch() {
+        // Build 0 | (b / c); splitting c (a nested leaf) exercises the recursive
+        // `split_in` branch, not the root special-case.
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        let c = l.alloc_id();
+        l.split(b, Axis::Vertical, c); // nested { b, c }
+        let d = l.alloc_id();
+        assert!(l.split(c, Axis::Vertical, d), "must recurse to find c");
+        assert_eq!(l.leaf_count(), 4);
+        assert!(l.contains(d));
+        assert!(flex_sum_ok(&l.root));
+    }
+
+    #[test]
+    fn remove_recurses_and_renormalizes_parent() {
+        // 0 | (b / c / e): removing one of b/c/e keeps the nested split (3→2)
+        // and exercises the recursive remove_in + parent renormalize path.
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        let c = l.alloc_id();
+        l.split(b, Axis::Vertical, c);
+        let e = l.alloc_id();
+        l.split(c, Axis::Vertical, e); // nested vertical { b, c, e }
+        assert_eq!(l.leaf_count(), 4);
+        assert_eq!(l.remove(c), RemoveOutcome::Removed);
+        assert_eq!(l.leaf_count(), 3);
+        // Root still 2 children: leaf 0 + the (now 2-child) nested split.
+        assert_eq!(root_child_leaf_ids(&l).len(), 2);
+        assert!(flex_sum_ok(&l.root));
+    }
+
+    #[test]
+    fn remove_nested_collapse_hoists_sibling_then_renormalizes_root() {
+        // 0 | (b / c): removing b collapses the nested split to a bare leaf c,
+        // which is hoisted into the root split. Root stays a 2-child split {0, c}.
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        let c = l.alloc_id();
+        l.split(b, Axis::Vertical, c); // nested { b, c }
+        assert_eq!(l.remove(b), RemoveOutcome::Collapsed);
+        assert_eq!(l.leaf_count(), 2);
+        let ids = root_child_leaf_ids(&l);
+        assert_eq!(
+            ids,
+            vec![Some(LeafId(0)), Some(c)],
+            "c hoisted in place of the nested split"
+        );
+        assert!(flex_sum_ok(&l.root));
+    }
+
+    #[test]
+    fn remove_root_split_collapse_hoists_to_root_leaf() {
+        // A 2-child root split → removing one child hoists the survivor to be
+        // the bare root leaf (the root_take_single_child path).
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        assert_eq!(l.remove(LeafId(0)), RemoveOutcome::Collapsed);
+        assert!(matches!(l.root, LayoutNode::Leaf(id) if id == b));
+        assert_eq!(l.focused, b, "focus moved to the surviving leaf");
+    }
+
+    #[test]
+    fn move_leaf_noop_when_source_equals_target() {
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        assert!(!l.move_leaf(b, b, Axis::Horizontal, false));
+        assert_eq!(l.leaf_count(), 2);
+    }
+
+    #[test]
+    fn move_leaf_noop_when_either_id_missing() {
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        assert!(!l.move_leaf(LeafId(404), b, Axis::Horizontal, false));
+        assert!(!l.move_leaf(b, LeafId(404), Axis::Horizontal, false));
+        assert_eq!(l.leaf_count(), 2);
+    }
+
+    #[test]
+    fn move_leaf_noop_when_single_leaf() {
+        let mut l = Layout::new();
+        // Only one leaf: nothing to move (the source==target guard catches the
+        // self case; this asserts the leaf_count<=1 guard too via a distinct id).
+        assert!(!l.move_leaf(LeafId(0), LeafId(0), Axis::Horizontal, false));
+        assert_eq!(l.leaf_count(), 1);
+    }
+
+    #[test]
+    fn move_leaf_after_target_reattaches_with_stable_id() {
+        // 0 | b | c (3-child horizontal). Move b to sit AFTER c.
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        let c = l.alloc_id();
+        l.split(b, Axis::Horizontal, c); // 0 | b | c
+        assert_eq!(l.leaves(), vec![LeafId(0), b, c]);
+
+        assert!(l.move_leaf(b, c, Axis::Horizontal, false));
+        // b keeps its id and now sits AFTER c in DFS order.
+        let leaves = l.leaves();
+        assert_eq!(leaves.len(), 3);
+        assert!(leaves.contains(&b) && leaves.contains(&c) && leaves.contains(&LeafId(0)));
+        let bi = leaves.iter().position(|&x| x == b).unwrap();
+        let ci = leaves.iter().position(|&x| x == c).unwrap();
+        assert!(bi > ci, "b must sit after c: {leaves:?}");
+        assert_eq!(l.focused, b, "focus follows the moved pane");
+        assert!(flex_sum_ok(&l.root));
+    }
+
+    #[test]
+    fn move_leaf_before_target_swaps_ahead() {
+        // 0 | b | c. Move c to sit BEFORE 0 — exercises reorder_before's swap.
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        let c = l.alloc_id();
+        l.split(b, Axis::Horizontal, c); // 0 | b | c
+
+        assert!(l.move_leaf(c, LeafId(0), Axis::Horizontal, true));
+        let leaves = l.leaves();
+        let ci = leaves.iter().position(|&x| x == c).unwrap();
+        let zi = leaves.iter().position(|&x| x == LeafId(0)).unwrap();
+        assert!(ci < zi, "c must sit before 0: {leaves:?}");
+        assert_eq!(l.focused, c);
+        assert!(flex_sum_ok(&l.root));
+    }
+
+    #[test]
+    fn move_leaf_to_other_axis_nests() {
+        // 0 | b. Move 0 below b (different axis) → nested vertical split.
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        assert!(l.move_leaf(LeafId(0), b, Axis::Vertical, false));
+        assert_eq!(l.leaf_count(), 2);
+        assert!(l.contains(LeafId(0)) && l.contains(b));
+        assert_eq!(l.focused, LeafId(0));
+        assert!(flex_sum_ok(&l.root));
+    }
+
+    #[test]
+    fn rename_leaf_recurses_into_nested_split() {
+        // rename_leaf is also exercised by move_leaf, but assert the recursive
+        // arm directly via a deeply-nested move.
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        let c = l.alloc_id();
+        l.split(b, Axis::Vertical, c); // 0 | (b / c)
+        let d = l.alloc_id();
+        l.split(c, Axis::Vertical, d); // 0 | (b / c / d)
+                                       // Move the deeply-nested d next to 0 — forces rename into the nested split.
+        assert!(l.move_leaf(d, LeafId(0), Axis::Horizontal, false));
+        assert!(l.contains(d), "d kept its id through the nested rename");
+        assert_eq!(l.leaf_count(), 4);
+        assert!(flex_sum_ok(&l.root));
+    }
+
+    #[test]
+    fn move_leaf_clears_stale_zoom_on_detach() {
+        // Moving the source removes-then-reattaches it; if it was zoomed, the
+        // intervening remove clears the zoom (zoom is keyed on the detached id).
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        let c = l.alloc_id();
+        l.split(b, Axis::Horizontal, c);
+        l.zoomed = Some(b);
+        assert!(l.move_leaf(b, c, Axis::Horizontal, false));
+        assert_eq!(l.zoomed, None, "the detach-remove cleared the stale zoom");
+    }
+
+    #[test]
+    fn equalize_recurses_into_nested_splits() {
+        // 0 | (b / c / d), all lopsided → equalize sets EVERY split uniform.
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        let c = l.alloc_id();
+        l.split(b, Axis::Vertical, c);
+        let d = l.alloc_id();
+        l.split(c, Axis::Vertical, d);
+        l.resize(LeafId(0), 0.3, 800); // skew root
+        l.resize(c, 0.2, 600); // skew nested
+        l.equalize();
+        // Root: 2 children → 0.5 each.
+        if let LayoutNode::Split { children, .. } = &l.root {
+            for ch in children {
+                assert!((ch.flex - 0.5).abs() < 1e-4, "root child flex {}", ch.flex);
+            }
+            // The nested split's children are all 1/3.
+            for ch in children {
+                if let LayoutNode::Split {
+                    children: nested, ..
+                } = &ch.node
+                {
+                    for nc in nested {
+                        assert!(
+                            (nc.flex - 1.0 / 3.0).abs() < 1e-4,
+                            "nested flex {}",
+                            nc.flex
+                        );
+                    }
+                }
+            }
+        } else {
+            panic!("root should be a split");
+        }
+        assert!(flex_sum_ok(&l.root));
+    }
+
     #[test]
     fn property_random_split_remove_keeps_tree_valid() {
         // Deterministic pseudo-random sequence (LCG) — no external rng dep.

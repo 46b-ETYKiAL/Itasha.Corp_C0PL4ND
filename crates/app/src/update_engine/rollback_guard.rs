@@ -341,4 +341,70 @@ mod tests {
             RollbackDecision::Blocked { .. }
         ));
     }
+
+    #[test]
+    fn installed_baseline_is_at_least_the_compiled_version() {
+        // The production entry point reads the high-water record next to the
+        // running test exe (likely absent) and falls back to the compiled
+        // version. It must NEVER be below the compiled-in version — that is the
+        // floor a tampered/low record can never weaken. Never panics.
+        let compiled = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let baseline = installed_baseline();
+        assert!(
+            baseline >= compiled,
+            "the installed baseline {baseline} must be >= the compiled version {compiled}"
+        );
+    }
+
+    #[test]
+    fn evaluate_installed_blocks_a_zero_version_downgrade_and_malformed() {
+        // The apply-path entry point: 0.0.1 is older than any real build, so it
+        // is always blocked as a downgrade (never silently treated as newer).
+        let d = evaluate_installed("0.0.1");
+        assert!(
+            matches!(d, RollbackDecision::Blocked { .. }),
+            "0.0.1 against the live baseline must be a downgrade block, got {d:?}"
+        );
+        assert!(!d.may_apply());
+        // A malformed candidate is fail-closed Malformed, never applied.
+        let m = evaluate_installed("not-a-version");
+        assert!(matches!(m, RollbackDecision::Malformed { .. }));
+        assert!(!m.may_apply());
+    }
+
+    #[test]
+    fn record_path_is_a_sibling_of_the_exe() {
+        // The high-water record lives NEXT TO the exe (same parent dir), under
+        // the fixed `.c0pl4nd-installed-version` name.
+        let exe = Path::new("/opt/app/c0pl4nd.exe");
+        let rec = record_path_for(exe);
+        assert_eq!(rec.parent(), exe.parent(), "record is a sibling of the exe");
+        assert_eq!(
+            rec.file_name().and_then(|n| n.to_str()),
+            Some(INSTALLED_VERSION_FILE)
+        );
+    }
+
+    #[test]
+    fn read_record_tolerates_an_empty_or_whitespace_file() {
+        // An empty record file (zero bytes) reads as None — the compiled version
+        // then governs the floor (never a crash, never a spuriously-low 0.0.0).
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("c0pl4nd");
+        std::fs::write(record_path_for(&exe), "").unwrap();
+        assert_eq!(read_record(&exe), None);
+        // A whitespace-only record is likewise None.
+        std::fs::write(record_path_for(&exe), "   \n  ").unwrap();
+        assert_eq!(read_record(&exe), None);
+    }
+
+    #[test]
+    fn read_record_strips_a_leading_v() {
+        // The record reader tolerates a leading `v` (mirrors the candidate
+        // parser) so a `v0.5.0` line round-trips to the parsed version.
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("c0pl4nd");
+        std::fs::write(record_path_for(&exe), "v0.5.0\n").unwrap();
+        assert_eq!(read_record(&exe), Some(v("0.5.0")));
+    }
 }

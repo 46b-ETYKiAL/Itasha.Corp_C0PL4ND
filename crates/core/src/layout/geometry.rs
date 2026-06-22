@@ -278,6 +278,64 @@ mod tests {
     }
 
     #[test]
+    fn distribute_empty_weights_is_empty() {
+        let parts = distribute(100, std::iter::empty::<f32>());
+        assert!(parts.is_empty(), "no weights → no parts");
+    }
+
+    #[test]
+    fn distribute_zero_weight_sum_splits_evenly() {
+        // All-zero weights hit the `sum <= EPSILON` branch: even split, exact sum.
+        let parts = distribute(10, [0.0, 0.0, 0.0].into_iter());
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts.iter().sum::<i32>(), 10, "still tiles exactly");
+        // Even-ish: 4 + 3 + 3 via the largest-remainder leftover hand-out.
+        let mut sorted = parts.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![3, 3, 4]);
+    }
+
+    #[test]
+    fn distribute_negative_weights_are_floored_to_zero() {
+        // Negative weights clamp to 0; the lone positive weight takes all of it.
+        let parts = distribute(50, [-1.0, 2.0].into_iter());
+        assert_eq!(parts.iter().sum::<i32>(), 50);
+        assert_eq!(parts, vec![0, 50]);
+    }
+
+    #[test]
+    fn cascade_empty_split_pushes_nothing() {
+        // A split with zero children (degenerate, never produced by the engine
+        // but defended against) cascades to no cells, never panics.
+        let mut l = Layout::new();
+        l.root = split(Axis::Horizontal, vec![]);
+        let rects = l.cascade(Rect::new(0, 0, 800, 600));
+        assert!(rects.is_empty(), "empty split yields no cells");
+    }
+
+    #[test]
+    fn cascade_clamps_when_gutters_exceed_extent() {
+        // Two children in a 1px-wide window: total_gutter (1) == extent, so
+        // avail clamps to 0 and both cells get zero width without underflow.
+        let mut l = Layout::new();
+        l.root = split(
+            Axis::Horizontal,
+            vec![
+                Child::new(LayoutNode::leaf(LeafId(1)), 0.5),
+                Child::new(LayoutNode::leaf(LeafId(2)), 0.5),
+            ],
+        );
+        let rects = l.cascade(Rect::new(0, 0, 1, 600));
+        assert_eq!(rects.len(), 2);
+        for (_, r) in &rects {
+            assert!(
+                r.w >= 0,
+                "no negative width under tight gutter clamp: {r:?}"
+            );
+        }
+    }
+
+    #[test]
     fn rect_helpers() {
         let r = Rect::new(10, 20, 100, 50);
         assert_eq!(r.area(), 5000);

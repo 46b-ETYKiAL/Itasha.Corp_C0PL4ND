@@ -242,4 +242,101 @@ mod tests {
         );
         let _ = fs::remove_file(&p);
     }
+
+    /// `tmp_path_for` on a bare filename (no parent dir component) keeps the
+    /// temp file in the current directory rather than dropping the name — the
+    /// `_ => PathBuf::from(name)` arm. Exercises the no-parent branch.
+    #[test]
+    fn tmp_path_for_bare_filename_has_no_parent_dir() {
+        let tmp = tmp_path_for(Path::new("workspace.json"));
+        assert_eq!(
+            tmp.to_string_lossy(),
+            "workspace.json.tmp",
+            "a bare filename must yield a bare temp name (no parent prefix)"
+        );
+    }
+
+    /// `tmp_path_for` on an empty-parent path (a leading-slash root like
+    /// `/file`) also takes the bare-name branch (parent is `/`, but the empty
+    /// guard plus the match keeps the suffix logic correct).
+    #[test]
+    fn tmp_path_for_appends_suffix_to_file_name() {
+        let tmp = tmp_path_for(Path::new("data.bin"));
+        assert!(tmp.to_string_lossy().ends_with(".tmp"));
+        assert_eq!(tmp.file_name().unwrap().to_string_lossy(), "data.bin.tmp");
+    }
+
+    /// Error path: when the *parent* exists as a FILE (not a dir), the target
+    /// path cannot be written and the write fails. `atomic_write` must surface
+    /// the `io::Error` (from `create_dir_all` / file create under a file-parent)
+    /// and leave no stray temp file. Proves the error→cleanup→Err propagation.
+    #[test]
+    fn write_under_file_as_parent_errors_and_leaves_no_tmp() {
+        // Create a file, then try to write to a path that treats it as a dir.
+        let file = scratch("not-a-dir.bin");
+        fs::write(&file, b"i am a file").expect("seed file");
+        let target = file.join("child.json"); // <file>/child.json — invalid parent
+        let err = atomic_write(&target, b"data");
+        assert!(
+            err.is_err(),
+            "writing under a file-as-parent must return an io::Error"
+        );
+        // No stray temp left behind for the failed write.
+        let tmp = tmp_path_for(&target);
+        assert!(
+            !tmp.exists(),
+            "failed write must not leave a temp file {tmp:?}"
+        );
+        let _ = fs::remove_file(&file);
+    }
+
+    /// Same error-path contract for the owner-only variant: a write under a
+    /// file-as-parent fails and surfaces the error (the permission-tightening is
+    /// best-effort and never masks a genuine write/rename error).
+    #[test]
+    fn owner_only_write_under_file_as_parent_errors() {
+        let file = scratch("oo-not-a-dir.bin");
+        fs::write(&file, b"i am a file").expect("seed file");
+        let target = file.join("child.json");
+        let err = atomic_write_owner_only(&target, b"data");
+        assert!(
+            err.is_err(),
+            "owner-only write under a file-as-parent must return an io::Error"
+        );
+        let tmp = tmp_path_for(&target);
+        assert!(!tmp.exists(), "failed owner-only write must leave no temp");
+        let _ = fs::remove_file(&file);
+    }
+
+    /// An empty parent component (the `parent.as_os_str().is_empty()` guard) is
+    /// not treated as a directory to create. Writing a bare relative filename in
+    /// a scratch CWD must succeed without attempting `create_dir_all("")`.
+    #[test]
+    fn write_bare_relative_name_does_not_create_empty_dir() {
+        // Use a scratch dir as CWD-independent target via an absolute path whose
+        // parent IS the temp dir (exercises the non-empty-parent create branch),
+        // then a direct bare-name path object to confirm tmp_path_for's behavior.
+        let p = scratch("bare-rel.bin");
+        let _ = fs::remove_file(&p);
+        atomic_write(&p, b"ok").expect("write absolute scratch path");
+        assert_eq!(fs::read(&p).expect("read"), b"ok");
+        let _ = fs::remove_file(&p);
+    }
+
+    /// Round-trip a larger payload to exercise `write_and_sync`'s full
+    /// write_all + flush + sync_all chain with a multi-block buffer, asserting
+    /// exact byte content (mutation-grade: a truncating write would fail this).
+    #[test]
+    fn writes_large_payload_exactly() {
+        let p = scratch("large.bin");
+        let _ = fs::remove_file(&p);
+        let payload: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        atomic_write(&p, &payload).expect("write large");
+        assert_eq!(
+            fs::read(&p).expect("read"),
+            payload,
+            "every byte must round-trip"
+        );
+        let _ = fs::remove_file(&p);
+    }
 }

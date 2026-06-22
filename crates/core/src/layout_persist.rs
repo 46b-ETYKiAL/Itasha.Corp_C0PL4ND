@@ -1530,4 +1530,197 @@ mod tests {
             Err(LoadError::Io(_))
         ));
     }
+
+    // --- additional edge-coverage -----------------------------------------
+
+    #[test]
+    fn load_error_display_messages() {
+        // Each Display arm is distinct and embeds its payload.
+        assert_eq!(
+            LoadError::Io("boom".into()).to_string(),
+            "layout file io error: boom"
+        );
+        assert_eq!(
+            LoadError::Parse("nope".into()).to_string(),
+            "layout file parse error: nope"
+        );
+        assert_eq!(
+            LoadError::UnsupportedVersion(7).to_string(),
+            "unsupported layout version 7"
+        );
+        assert_eq!(
+            LoadError::Invalid("empty".into()).to_string(),
+            "invalid layout: empty"
+        );
+    }
+
+    #[test]
+    fn restored_layout_single_pane_is_one_leaf() {
+        let r = RestoredLayout::single_pane();
+        assert_eq!(r.layout.leaf_count(), 1);
+        assert_eq!(r.leaves.len(), 1);
+        assert_eq!(r.leaves[0].1, LeafView::single());
+    }
+
+    #[test]
+    fn restored_workspace_single_tab_fallback() {
+        let w = RestoredWorkspace::single_tab();
+        assert_eq!(w.tabs.len(), 1);
+        assert_eq!(w.active, 0);
+        assert_eq!(w.tabs[0].layout.leaf_count(), 1);
+    }
+
+    #[test]
+    fn workspace_default_is_single_tab() {
+        let w = WorkspaceSnapshot::default();
+        assert_eq!(w, WorkspaceSnapshot::single_tab());
+    }
+
+    #[test]
+    fn restore_outcome_corrupt_reason_is_none_for_non_corrupt() {
+        assert_eq!(RestoreOutcome::Absent.corrupt_reason(), None);
+        assert!(!RestoreOutcome::Absent.is_corrupt());
+        let restored = RestoreOutcome::Restored(RestoredWorkspace::single_tab());
+        assert_eq!(restored.corrupt_reason(), None);
+        assert!(!restored.is_corrupt());
+    }
+
+    #[test]
+    fn leaf_view_for_empty_group_clamps_tab_count_to_one() {
+        // A pathological group with zero tabs (only transiently true mid-collapse)
+        // must clamp tab_count to >= 1 and active to 0.
+        let mut g = TabGroup::new(LeafId(0), 0);
+        let (_, empty) = g.close_active();
+        assert!(empty && g.is_empty());
+        let v = leaf_view_for(&g, None, Some("zsh".into()));
+        assert_eq!(v.tab_count, 1, "empty group clamps to one tab");
+        assert_eq!(v.active, 0);
+        assert_eq!(v.profile.as_deref(), Some("zsh"));
+        assert!(v.cwd.is_none());
+    }
+
+    #[test]
+    fn count_leaves_rejects_zero_tab_leaf() {
+        // A leaf claiming zero tabs is structurally invalid → Invalid error.
+        let snap = LayoutSnapshot {
+            version: LayoutSnapshot::VERSION,
+            root: NodeView::Leaf {
+                view: LeafView {
+                    tab_count: 0,
+                    active: 0,
+                    cwd: None,
+                    profile: None,
+                    scrollback: None,
+                },
+            },
+            focused_ordinal: 0,
+        };
+        assert!(matches!(snap.validate(), Err(LoadError::Invalid(_))));
+        assert!(snap.restore().is_err());
+    }
+
+    #[test]
+    fn count_leaves_rejects_negative_flex() {
+        // A negative (finite) flex is rejected by count_leaves' flex check.
+        let snap = LayoutSnapshot {
+            version: LayoutSnapshot::VERSION,
+            root: NodeView::Split {
+                axis: Axis::Horizontal,
+                children: vec![
+                    ChildView {
+                        flex: -0.5,
+                        node: NodeView::Leaf {
+                            view: LeafView::single(),
+                        },
+                    },
+                    ChildView {
+                        flex: 0.5,
+                        node: NodeView::Leaf {
+                            view: LeafView::single(),
+                        },
+                    },
+                ],
+            },
+            focused_ordinal: 0,
+        };
+        assert!(matches!(snap.validate(), Err(LoadError::Invalid(_))));
+    }
+
+    #[test]
+    fn layout_snapshot_save_creates_parent_and_round_trips() {
+        // Exercise LayoutSnapshot::save directly (distinct from the free `save`),
+        // including the parent-dir creation branch.
+        let base = unique_tmp("ls-save");
+        let dir = base.with_extension("d");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("nested").join("layout.json");
+
+        let snap = LayoutSnapshot::capture(&grid_of(2), |_| LeafView::single());
+        snap.save(&path).expect("save creates parent dirs");
+        assert!(path.exists());
+
+        let back =
+            LayoutSnapshot::from_json(&std::fs::read_to_string(&path).unwrap()).expect("reparse");
+        assert_eq!(back, snap);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn from_json_path1_empty_tabs_wrapper_falls_through_to_v1_then_fails() {
+        // A wrapper-shaped value with an UNKNOWN version AND empty tabs does NOT
+        // hit the early UnsupportedVersion return (that needs non-empty tabs);
+        // it falls through to the v1 bare-LayoutSnapshot parse, which fails here
+        // because the shape is not a valid bare LayoutSnapshot → Parse error.
+        let json = r#"{ "version": 999, "tabs": [], "active": 0 }"#;
+        let err = WorkspaceSnapshot::from_json(json).unwrap_err();
+        assert!(matches!(err, LoadError::Parse(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn node_view_round_trips_a_nested_split_via_capture() {
+        // node_view's Split arm recurses; capture a real nested tree and confirm
+        // the persisted shape mirrors the live one (split axis + child count).
+        let l = grid_of(4);
+        let snap = LayoutSnapshot::capture(&l, |_| LeafView::single());
+        // The captured root mirrors the live root's split-ness.
+        match (&l.root, &snap.root) {
+            (LayoutNode::Split { children: lc, .. }, NodeView::Split { children: sc, .. }) => {
+                assert_eq!(
+                    lc.len(),
+                    sc.len(),
+                    "child arity preserved through node_view"
+                );
+            }
+            other => panic!("expected both splits, got {other:?}"),
+        }
+        // And it restores to the same leaf count.
+        assert_eq!(snap.restore().unwrap().layout.leaf_count(), 4);
+    }
+
+    #[test]
+    fn restore_clamps_out_of_range_focused_ordinal() {
+        // focused_ordinal past the end clamps to the last leaf, not a panic.
+        let mut snap = LayoutSnapshot::capture(&grid_of(3), |_| LeafView::single());
+        snap.focused_ordinal = 999;
+        let restored = snap.restore().expect("restore clamps the ordinal");
+        let last = *restored.layout.leaves().last().unwrap();
+        assert_eq!(restored.layout.focused, last, "clamps to the last leaf");
+    }
+
+    #[test]
+    fn workspace_save_atomic_creates_then_load_outcome_quarantine_cycle() {
+        // End-to-end: a corrupt file → load_outcome Corrupt → quarantine moves it
+        // aside so the next load_outcome on the original path is Absent.
+        let tmp = unique_tmp("cycle");
+        std::fs::write(&tmp, "garbage { not json").unwrap();
+        assert!(WorkspaceSnapshot::load_outcome(&tmp).is_corrupt());
+        let dest = quarantine_corrupt(&tmp).expect("quarantine");
+        assert_eq!(
+            WorkspaceSnapshot::load_outcome(&tmp),
+            RestoreOutcome::Absent,
+            "after quarantine the original path is Absent"
+        );
+        let _ = std::fs::remove_file(&dest);
+    }
 }

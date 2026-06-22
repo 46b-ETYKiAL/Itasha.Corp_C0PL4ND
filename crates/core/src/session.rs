@@ -380,4 +380,112 @@ mod tests {
             "wake callback should fire at least once after the child emits output"
         );
     }
+
+    /// `terminal()` hands back a clone of the shared `Arc<Mutex<Terminal>>`, and
+    /// the grid it points at reflects the session's configured size. Asserts the
+    /// exact rows/cols so a wrong dimension propagation would fail. Covers the
+    /// `terminal()` accessor (was never directly called by a test).
+    #[test]
+    fn terminal_handle_reflects_configured_size() {
+        #[cfg(windows)]
+        let session =
+            Session::spawn_program("cmd.exe", &["/C", "echo hi"], 30, 100).expect("spawn");
+        #[cfg(not(windows))]
+        let session =
+            Session::spawn_program("/bin/sh", &["-c", "echo hi"], 30, 100).expect("spawn");
+
+        let term = session.terminal();
+        let guard = term.lock().expect("lock terminal");
+        assert_eq!(guard.grid().rows(), 30, "grid rows must match spawn size");
+        assert_eq!(guard.grid().cols(), 100, "grid cols must match spawn size");
+        // Two calls return handles to the SAME underlying terminal (Arc clone).
+        drop(guard);
+        assert!(
+            Arc::ptr_eq(&session.terminal(), &session.terminal()),
+            "terminal() must return clones of one shared Arc, not new allocations"
+        );
+    }
+
+    /// `resize()` resizes the grid (the PTY resize is exercised too, but the
+    /// observable state is the grid dimensions). Asserts the new size lands —
+    /// covers the `resize` method's terminal-lock + `t.resize` branch.
+    #[test]
+    fn resize_updates_grid_dimensions() {
+        #[cfg(windows)]
+        let mut session =
+            Session::spawn_program("cmd.exe", &["/C", "echo hi"], 24, 80).expect("spawn");
+        #[cfg(not(windows))]
+        let mut session =
+            Session::spawn_program("/bin/sh", &["-c", "echo hi"], 24, 80).expect("spawn");
+
+        session.resize(40, 120).expect("resize");
+        let term = session.terminal();
+        let guard = term.lock().expect("lock");
+        assert_eq!(guard.grid().rows(), 40, "grid rows updated by resize");
+        assert_eq!(guard.grid().cols(), 120, "grid cols updated by resize");
+    }
+
+    /// `write_input` succeeds against a live child (the PTY writer accepts the
+    /// bytes). Sending a harmless newline to an interactive shell must return
+    /// `Ok` — covers `write_input`'s write_all + flush success path. We then
+    /// kill the child so the test does not leak it.
+    #[test]
+    fn write_input_to_live_child_succeeds() {
+        #[cfg(windows)]
+        let mut session = Session::spawn_program("cmd.exe", &[], 24, 80).expect("spawn");
+        #[cfg(not(windows))]
+        let mut session = Session::spawn_program("/bin/sh", &["-i"], 24, 80).expect("spawn");
+
+        // A bare newline is innocuous; the writer must accept it.
+        session
+            .write_input(b"\r\n")
+            .expect("write_input should succeed on a live PTY");
+        // Drop kills the child (see Session::Drop).
+        let _ = &mut session;
+    }
+
+    /// `is_alive()` reports `true` immediately after spawn (the reader thread is
+    /// running and the atomic was initialised to `true`). The eventual flip to
+    /// `false` is NOT asserted here because it is platform-dependent: on Windows
+    /// ConPTY the reader only observes EOF once the PTY master is CLOSED, not on
+    /// child death (documented in `Session::Drop` and `PtyProcess::Drop`), so a
+    /// bounded wait for `is_alive()==false` is flaky on Windows by design. The
+    /// `alive.store(false, ..)` end-of-reader path is exercised end-to-end by the
+    /// large-burst test (which polls `is_alive()` after the child exits) on the
+    /// POSIX reader-EOF path. This test pins only the initial-true accessor read.
+    #[test]
+    fn is_alive_is_true_immediately_after_spawn() {
+        #[cfg(windows)]
+        let session = Session::spawn_program("cmd.exe", &[], 24, 80).expect("spawn");
+        #[cfg(not(windows))]
+        let session = Session::spawn_program("/bin/sh", &["-i"], 24, 80).expect("spawn");
+
+        assert!(
+            session.is_alive(),
+            "a freshly spawned session reports its reader thread alive"
+        );
+        drop(session);
+    }
+
+    /// The `spawn_program` delegation reaches `from_pty` and produces a usable
+    /// session whose initial snapshot is a blank grid (all spaces) before any
+    /// output. Covers `snapshot_text` on a freshly-spawned session and the
+    /// constructor chain. We assert the snapshot is the right shape (24 newlines)
+    /// rather than exact spaces (output may arrive between spawn and read).
+    #[test]
+    fn fresh_session_snapshot_has_expected_row_count() {
+        #[cfg(windows)]
+        let session = Session::spawn_program("cmd.exe", &[], 24, 80).expect("spawn");
+        #[cfg(not(windows))]
+        let session = Session::spawn_program("/bin/sh", &["-i"], 24, 80).expect("spawn");
+
+        let snap = session.snapshot_text();
+        // to_text() emits one '\n' per row → 24 newlines for a 24-row grid.
+        assert_eq!(
+            snap.matches('\n').count(),
+            24,
+            "a 24-row grid snapshot must contain 24 line terminators"
+        );
+        drop(session);
+    }
 }

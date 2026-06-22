@@ -259,4 +259,144 @@ mod tests {
         // Smoke: `run` prints and returns the success code without panicking.
         assert_eq!(run(true, Some(PathBuf::from("/tmp/x"))), 0);
     }
+
+    // ---- config_status branch coverage (pure given a path) ------------------
+
+    #[test]
+    fn config_status_no_path_when_path_is_none() {
+        assert_eq!(config_status(None), ConfigStatus::NoPath);
+    }
+
+    #[test]
+    fn config_status_absent_when_file_missing() {
+        // A path that does not exist on disk → Absent (zero-config default).
+        let missing =
+            std::env::temp_dir().join(format!("c0pl4nd-diag-absent-{}.toml", std::process::id()));
+        let _ = std::fs::remove_file(&missing);
+        assert_eq!(config_status(Some(&missing)), ConfigStatus::Absent);
+    }
+
+    #[test]
+    fn config_status_invalid_when_toml_is_malformed() {
+        // A present-but-unparseable file → Invalid (carries the error text).
+        let dir = std::env::temp_dir().join(format!("c0pl4nd-diag-invalid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("config.toml");
+        // Not valid TOML at all.
+        std::fs::write(&path, b"this is = = not valid toml [[[").expect("write");
+        match config_status(Some(&path)) {
+            ConfigStatus::Invalid(_) => {}
+            other => panic!("expected Invalid for malformed TOML, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_status_loaded_when_toml_is_valid_default() {
+        // An EMPTY config file is valid (every field has a default) → Loaded.
+        let dir = std::env::temp_dir().join(format!("c0pl4nd-diag-loaded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, b"").expect("write");
+        assert_eq!(
+            config_status(Some(&path)),
+            ConfigStatus::Loaded,
+            "an empty (all-default) config is valid → Loaded"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- wgpu_backend_choice env-driven branches ----------------------------
+
+    use std::sync::Mutex;
+    static WGPU_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Scoped guard for the `WGPU_BACKEND` env var that restores it on drop.
+    struct WgpuEnvGuard {
+        prev: Option<String>,
+    }
+    impl WgpuEnvGuard {
+        fn set(val: &str) -> Self {
+            let prev = std::env::var("WGPU_BACKEND").ok();
+            std::env::set_var("WGPU_BACKEND", val);
+            Self { prev }
+        }
+        fn unset() -> Self {
+            let prev = std::env::var("WGPU_BACKEND").ok();
+            std::env::remove_var("WGPU_BACKEND");
+            Self { prev }
+        }
+    }
+    impl Drop for WgpuEnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("WGPU_BACKEND", v),
+                None => std::env::remove_var("WGPU_BACKEND"),
+            }
+        }
+    }
+
+    #[test]
+    fn wgpu_backend_choice_reports_forced_override() {
+        let _lock = WGPU_ENV_LOCK.lock().unwrap();
+        let _g = WgpuEnvGuard::set("vulkan");
+        let choice = wgpu_backend_choice();
+        assert!(
+            choice.contains("vulkan") && choice.contains("forced via WGPU_BACKEND"),
+            "a set WGPU_BACKEND must be reported as the forced backend: {choice}"
+        );
+    }
+
+    #[test]
+    fn wgpu_backend_choice_empty_override_falls_through_to_default() {
+        let _lock = WGPU_ENV_LOCK.lock().unwrap();
+        // An EMPTY WGPU_BACKEND is treated as unset → the platform default text,
+        // NEVER the "forced" wording (a mutant that drops the is_empty guard is
+        // caught here).
+        let _g = WgpuEnvGuard::set("");
+        let choice = wgpu_backend_choice();
+        assert!(
+            !choice.contains("forced via WGPU_BACKEND"),
+            "an empty WGPU_BACKEND must not be reported as forced: {choice}"
+        );
+        assert!(
+            choice.contains("override with WGPU_BACKEND"),
+            "the default text invites the override: {choice}"
+        );
+    }
+
+    #[test]
+    fn wgpu_backend_choice_default_text_matches_platform() {
+        let _lock = WGPU_ENV_LOCK.lock().unwrap();
+        let _g = WgpuEnvGuard::unset();
+        let choice = wgpu_backend_choice();
+        assert!(!choice.contains("forced"), "unset → not forced: {choice}");
+        if cfg!(target_os = "windows") {
+            assert!(
+                choice.contains("DX12") && choice.contains("Vulkan"),
+                "windows default names DX12 + Vulkan-on-transparency: {choice}"
+            );
+        } else {
+            assert!(
+                choice.contains("wgpu platform default"),
+                "non-windows default names the wgpu platform default: {choice}"
+            );
+        }
+    }
+
+    #[test]
+    fn collect_produces_a_renderable_report_without_a_window() {
+        // `collect` reads only env + config (no GPU/window). The report it
+        // produces must render and name the live version + os/arch. This proves
+        // the live-collection seam, not just the pure formatter.
+        let d = collect(true, Some(PathBuf::from("/tmp/crashes")));
+        assert_eq!(d.version, c0pl4nd_core::version());
+        assert_eq!(d.os, std::env::consts::OS);
+        assert_eq!(d.arch, std::env::consts::ARCH);
+        let report = build_report(&d);
+        assert!(report.contains("C0PL4ND diagnostics"));
+        assert!(report.contains(std::env::consts::OS));
+    }
 }

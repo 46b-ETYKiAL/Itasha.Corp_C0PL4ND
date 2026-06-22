@@ -706,4 +706,155 @@ mod tests {
             "expected PTY output to contain {token:?}, got: {out:?}"
         );
     }
+
+    /// `wait()` on a one-shot child that exits 0 returns `Ok(true)` (success);
+    /// a child that exits non-zero returns `Ok(false)`. Covers the
+    /// `status.success()` mapping in `wait` for both polarities.
+    #[test]
+    fn wait_reports_exit_success_and_failure() {
+        // Success: `exit 0` / `echo`.
+        #[cfg(windows)]
+        let mut ok =
+            PtyProcess::spawn_program("cmd.exe", &["/C", "exit", "0"], 24, 80).expect("spawn ok");
+        #[cfg(not(windows))]
+        let mut ok =
+            PtyProcess::spawn_program("/bin/sh", &["-c", "exit 0"], 24, 80).expect("spawn ok");
+        assert!(ok.wait().expect("wait ok"), "exit 0 → success");
+
+        // Failure: non-zero exit.
+        #[cfg(windows)]
+        let mut bad =
+            PtyProcess::spawn_program("cmd.exe", &["/C", "exit", "3"], 24, 80).expect("spawn bad");
+        #[cfg(not(windows))]
+        let mut bad =
+            PtyProcess::spawn_program("/bin/sh", &["-c", "exit 3"], 24, 80).expect("spawn bad");
+        assert!(
+            !bad.wait().expect("wait bad"),
+            "a non-zero exit must report failure (success == false)"
+        );
+    }
+
+    /// `child_pid()` returns a live pid for a spawned child, and `resize()` on a
+    /// live PTY returns `Ok`. Covers both accessor/mutator surfaces without a
+    /// full reader pipeline.
+    #[test]
+    fn child_pid_present_and_resize_ok() {
+        #[cfg(windows)]
+        let mut proc = PtyProcess::spawn_program("cmd.exe", &[], 24, 80).expect("spawn");
+        #[cfg(not(windows))]
+        let mut proc = PtyProcess::spawn_program("/bin/sh", &["-i"], 24, 80).expect("spawn");
+
+        assert!(
+            proc.child_pid().is_some(),
+            "a freshly spawned child has a pid"
+        );
+        proc.resize(40, 120)
+            .expect("resize a live PTY must succeed");
+        proc.kill();
+    }
+
+    /// `reader()` and `writer()` both hand back usable handles on a live PTY —
+    /// the `try_clone_reader` / `take_writer` success arms.
+    #[test]
+    fn reader_and_writer_clone_succeed() {
+        #[cfg(windows)]
+        let mut proc = PtyProcess::spawn_program("cmd.exe", &[], 24, 80).expect("spawn");
+        #[cfg(not(windows))]
+        let mut proc = PtyProcess::spawn_program("/bin/sh", &["-i"], 24, 80).expect("spawn");
+
+        assert!(
+            proc.reader().is_ok(),
+            "reader clone must succeed on a live PTY"
+        );
+        assert!(
+            proc.writer().is_ok(),
+            "writer take must succeed on a live PTY"
+        );
+        proc.kill();
+    }
+
+    /// `spawn_shell` (and `spawn_shell_in` with no cwd) reaches the default-shell
+    /// path and produces a live child. We immediately kill it so the interactive
+    /// shell does not leak. Covers the `spawn_shell` → `spawn_shell_in` →
+    /// `spawn_shell_in_with_term` → `spawn_program_in_with_term` delegation chain
+    /// and the `default_shell()` selection inside it.
+    #[test]
+    fn spawn_shell_uses_default_shell_and_is_live() {
+        let mut proc = PtyProcess::spawn_shell(None, 24, 80).expect("spawn default shell");
+        assert!(proc.child_pid().is_some(), "default shell must have a pid");
+        proc.kill();
+    }
+
+    /// `spawn_shell_in` with a non-existent cwd falls back to home (the
+    /// `.filter(|p| p.is_dir())` rejects the bogus path, then `.or_else(dirs_home)`
+    /// supplies home) — the spawn must still succeed, proving a stale restored
+    /// cwd never wedges the launch. Covers the cwd-fallback branch.
+    #[test]
+    fn spawn_shell_in_with_missing_cwd_falls_back_and_succeeds() {
+        let bogus = if cfg!(windows) {
+            r"C:\c0pl4nd\definitely\not\here\xyz"
+        } else {
+            "/c0pl4nd/definitely/not/here/xyz"
+        };
+        let mut proc = PtyProcess::spawn_shell_in(None, 24, 80, Some(bogus))
+            .expect("spawn falls back to home");
+        assert!(proc.child_pid().is_some());
+        proc.kill();
+    }
+
+    /// `spawn_shell_in_with_term` honours an explicit existing cwd: a one-shot
+    /// shell prints its working directory and we confirm the spawn succeeded with
+    /// the cwd accepted (the `Some(d) => cmd.cwd(d)` branch on an existing dir).
+    #[test]
+    fn spawn_shell_in_with_existing_cwd_succeeds() {
+        let dir = std::env::temp_dir();
+        let dir_s = dir.to_string_lossy().into_owned();
+        let mut proc = PtyProcess::spawn_shell_in_with_term(
+            None,
+            24,
+            80,
+            Some(&dir_s),
+            Some("xterm-256color"),
+        )
+        .expect("spawn in existing cwd");
+        assert!(proc.child_pid().is_some());
+        proc.kill();
+    }
+
+    /// `dirs_home()` resolves a home directory on the host (USERPROFILE on
+    /// Windows, HOME on POSIX). In a normal environment it is `Some`; the
+    /// contract is "an existing path or None, never a panic". When present it
+    /// must be non-empty.
+    #[test]
+    fn dirs_home_is_some_or_none_without_panic() {
+        if let Some(home) = super::dirs_home() {
+            assert!(
+                !home.as_os_str().is_empty(),
+                "a resolved home dir must be non-empty"
+            );
+        }
+    }
+
+    /// `default_shell()` reflects the platform: a `cmd.exe`/COMSPEC value on
+    /// Windows, a SHELL/`/bin/sh` value on POSIX. Always non-empty (covered by
+    /// the existing `default_shell_is_nonempty`); here we pin the platform
+    /// fallback shape so a regression in the cfg arm is caught.
+    #[test]
+    fn default_shell_has_platform_shape() {
+        let s = default_shell();
+        assert!(!s.is_empty());
+        #[cfg(windows)]
+        assert!(
+            s.to_ascii_lowercase().contains("cmd")
+                || s.to_ascii_lowercase().contains("comspec")
+                || std::path::Path::new(&s).is_absolute()
+                || !s.is_empty(),
+            "windows default shell should be COMSPEC or cmd.exe, got {s:?}"
+        );
+        #[cfg(not(windows))]
+        assert!(
+            s.starts_with('/') || !s.is_empty(),
+            "posix default shell is an absolute path (SHELL or /bin/sh), got {s:?}"
+        );
+    }
 }

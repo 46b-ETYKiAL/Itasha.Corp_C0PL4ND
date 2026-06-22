@@ -397,6 +397,118 @@ mod tests {
     }
 
     #[test]
+    fn layout_default_equals_new() {
+        assert_eq!(Layout::default(), Layout::new());
+    }
+
+    #[test]
+    fn layout_node_is_leaf_discriminates() {
+        assert!(LayoutNode::leaf(LeafId(3)).is_leaf());
+        let split = LayoutNode::Split {
+            axis: Axis::Vertical,
+            children: vec![
+                Child::new(LayoutNode::leaf(LeafId(1)), 0.5),
+                Child::new(LayoutNode::leaf(LeafId(2)), 0.5),
+            ],
+        };
+        assert!(!split.is_leaf());
+    }
+
+    #[test]
+    fn tab_slot_new_carries_key() {
+        assert_eq!(TabSlot::new(42).slot, 42);
+    }
+
+    #[test]
+    fn tab_group_new_is_single_active_tab() {
+        let g = TabGroup::new(LeafId(7), 11);
+        assert_eq!(g.id, LeafId(7));
+        assert_eq!(g.len(), 1);
+        assert!(!g.is_empty());
+        assert_eq!(g.active, 0);
+        assert_eq!(g.active_slot(), 11);
+    }
+
+    #[test]
+    fn tab_group_add_tab_appends_and_activates() {
+        let mut g = TabGroup::new(LeafId(0), 100);
+        assert_eq!(g.add_tab(101), 1);
+        assert_eq!(g.add_tab(102), 2);
+        assert_eq!(g.len(), 3);
+        assert_eq!(g.active, 2);
+        assert_eq!(g.active_slot(), 102, "new tab becomes active");
+    }
+
+    #[test]
+    fn tab_group_close_active_middle_keeps_index_and_returns_slot() {
+        let mut g = TabGroup::new(LeafId(0), 10);
+        g.add_tab(11);
+        g.add_tab(12); // [10, 11, 12], active=2
+        g.active = 1; // focus the middle (slot 11)
+        let (removed, now_empty) = g.close_active();
+        assert_eq!(removed, 11, "the removed slot key is returned");
+        assert!(!now_empty);
+        // [10, 12]; active was 1, still in range → unchanged, now points at 12.
+        assert_eq!(g.len(), 2);
+        assert_eq!(g.active, 1);
+        assert_eq!(g.active_slot(), 12);
+    }
+
+    #[test]
+    fn tab_group_close_active_last_clamps_index() {
+        let mut g = TabGroup::new(LeafId(0), 10);
+        g.add_tab(11); // [10, 11], active=1 (the last)
+        let (removed, now_empty) = g.close_active();
+        assert_eq!(removed, 11);
+        assert!(!now_empty);
+        // [10]; active clamps from 1 → 0.
+        assert_eq!(g.len(), 1);
+        assert_eq!(g.active, 0);
+        assert_eq!(g.active_slot(), 10);
+    }
+
+    #[test]
+    fn tab_group_close_last_tab_reports_empty() {
+        let mut g = TabGroup::new(LeafId(0), 99);
+        let (removed, now_empty) = g.close_active();
+        assert_eq!(removed, 99);
+        assert!(now_empty, "closing the only tab leaves the cell empty");
+        assert!(g.is_empty());
+        assert_eq!(g.len(), 0);
+    }
+
+    #[test]
+    fn tab_group_next_prev_wrap() {
+        let mut g = TabGroup::new(LeafId(0), 0);
+        g.add_tab(1);
+        g.add_tab(2); // [0,1,2], active=2
+        g.active = 0;
+        g.next_tab();
+        assert_eq!(g.active, 1);
+        g.next_tab();
+        assert_eq!(g.active, 2);
+        g.next_tab();
+        assert_eq!(g.active, 0, "next wraps from last to first");
+        g.prev_tab();
+        assert_eq!(g.active, 2, "prev wraps from first to last");
+        g.prev_tab();
+        assert_eq!(g.active, 1);
+    }
+
+    #[test]
+    fn tab_group_next_prev_on_empty_is_noop() {
+        // After closing the only tab the cell is transiently empty; cycling must
+        // not panic (the `!is_empty()` guard) and must leave active unchanged.
+        let mut g = TabGroup::new(LeafId(0), 0);
+        let (_, empty) = g.close_active();
+        assert!(empty);
+        let before = g.active;
+        g.next_tab();
+        g.prev_tab();
+        assert_eq!(g.active, before, "cycling an empty group is a no-op");
+    }
+
+    #[test]
     fn renormalize_children_via_node() {
         let mut node = LayoutNode::Split {
             axis: Axis::Horizontal,

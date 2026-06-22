@@ -523,6 +523,109 @@ mod tests {
     }
 
     #[test]
+    fn rebalance_reattaches_dangling_focus() {
+        // rebalance_squarest preserves the leaf-id SET, so a focus pointing at a
+        // real leaf always survives. To exercise the focus-reattach guard, point
+        // focus at a NON-existent id before rebalancing: the guard must move it
+        // onto a real leaf rather than leave it dangling.
+        let mut l = Layout::new();
+        fill_to(&mut l, 4);
+        l.focused = LeafId(9999); // not in the tree
+        assert!(!l.contains(l.focused));
+        l.rebalance_squarest();
+        assert!(
+            l.contains(l.focused),
+            "rebalance must reattach a dangling focus"
+        );
+    }
+
+    #[test]
+    fn rebalance_single_leaf_is_noop() {
+        // n <= 1 returns early without rebuilding.
+        let mut l = Layout::new();
+        let root_before = l.root.clone();
+        l.rebalance_squarest();
+        assert_eq!(l.root, root_before, "single-leaf rebalance is a no-op");
+    }
+
+    #[test]
+    fn rebalance_three_leaves_has_single_cell_last_row() {
+        // n=3 → cols=2, rows=2; the last row holds a single leaf (the take==1
+        // branch that builds a bare leaf row, not a 1-child split).
+        let mut l = Layout::new();
+        fill_to(&mut l, 3);
+        l.rebalance_squarest();
+        match &l.root {
+            LayoutNode::Split { axis, children } => {
+                assert_eq!(*axis, Axis::Vertical);
+                assert_eq!(children.len(), 2, "two rows");
+                // Row 0: a 2-leaf horizontal split. Row 1: a bare leaf.
+                assert!(
+                    matches!(children[0].node, LayoutNode::Split { .. }),
+                    "first row is a horizontal split of two"
+                );
+                assert!(
+                    children[1].node.is_leaf(),
+                    "single-cell last row is a bare leaf, not a 1-child split"
+                );
+            }
+            _ => panic!("3-leaf rebalance must be a vertical split"),
+        }
+        assert_eq!(l.leaf_count(), 3);
+    }
+
+    #[test]
+    fn main_left_three_stacked_shape() {
+        // The 1+3 preset: horizontal split of [main-leaf, vertical-split-of-3].
+        let l = Layout::from_preset(Preset::MainLeftThreeStacked);
+        assert_eq!(l.leaf_count(), 4);
+        match &l.root {
+            LayoutNode::Split { axis, children } => {
+                assert_eq!(*axis, Axis::Horizontal);
+                assert_eq!(children.len(), 2);
+                assert!(children[0].node.is_leaf(), "main pane is a leaf");
+                match &children[1].node {
+                    LayoutNode::Split { axis, children } => {
+                        assert_eq!(*axis, Axis::Vertical);
+                        assert_eq!(children.len(), 3, "side stack holds three");
+                    }
+                    _ => panic!("1+3 side must be a vertical split of 3"),
+                }
+            }
+            _ => panic!("1+3 must be a horizontal split"),
+        }
+    }
+
+    #[test]
+    fn swap_ids_handles_both_orderings() {
+        // swap_ids has two arms (`id==a` and `id==b`). Build 0 | b | c and swap
+        // 0 with c — whichever is visited first in DFS hits the other arm.
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        let c = l.alloc_id();
+        l.split(b, Axis::Horizontal, c); // 0 | b | c
+        l.focused = LeafId(0);
+        let win = Rect::new(0, 0, 900, 300);
+        // The right neighbor of leaf 0 is b; swap them.
+        assert!(l.swap_focused(Direction::Right, win));
+        let rects = l.cascade(win);
+        // Leaf b now sits leftmost, 0 sits where b was.
+        assert_eq!(rects[0].0, b);
+        assert_eq!(rects[1].0, LeafId(0));
+        assert_eq!(rects[2].0, c);
+        assert_eq!(l.leaf_count(), 3);
+    }
+
+    #[test]
+    fn at_capacity_tracks_max_panes() {
+        let mut l = Layout::new();
+        assert!(!l.at_capacity());
+        fill_to(&mut l, MAX_PANES);
+        assert!(l.at_capacity());
+    }
+
+    #[test]
     fn rebalance_preserves_leaf_ids() {
         let mut l = Layout::new();
         fill_to(&mut l, 5);

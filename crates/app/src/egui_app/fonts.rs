@@ -366,4 +366,57 @@ mod tests {
             "the chosen family's bytes are registered under its key"
         );
     }
+
+    #[test]
+    fn font_data_key_is_family_namespaced_and_case_folded() {
+        // The egui font_data key is per-family so the Family choice and a
+        // differently-named Fallback never collide; it is lowercased + trimmed
+        // so the same font under two casings maps to ONE key.
+        assert_eq!(
+            font_data_key("Cascadia Code"),
+            "c0pl4nd-user-font::cascadia code"
+        );
+        assert_eq!(
+            font_data_key("  CASCADIA code  "),
+            font_data_key("cascadia code"),
+            "trimming + case-folding give one key for one font"
+        );
+        assert_ne!(
+            font_data_key("Hack"),
+            font_data_key("Cascadia Code"),
+            "distinct families get distinct keys (no cross-font collision)"
+        );
+    }
+
+    #[test]
+    fn face_bytes_for_family_returns_none_for_empty_name() {
+        // The empty-name guard: a blank family never matches a face (and never
+        // touches the db face iterator with an empty want string).
+        let db = fontdb::Database::new();
+        assert!(face_bytes_for_family(&db, "").is_none());
+        assert!(face_bytes_for_family(&db, "   ").is_none());
+    }
+
+    #[test]
+    fn face_bytes_for_family_returns_none_when_no_face_matches() {
+        // A db with no faces (or a name no face carries) yields None — the
+        // caller skips the family gracefully rather than panicking.
+        let db = fontdb::Database::new(); // empty
+        assert!(face_bytes_for_family(&db, "Definitely Not Installed XYZ").is_none());
+    }
+
+    #[test]
+    fn build_definitions_dedupes_a_repeated_family_and_fallback() {
+        // A family repeated as a fallback (same name, different case) must not
+        // be loaded twice. With an empty db nothing loads, but the dedup of the
+        // `wanted` list is exercised (no panic, loaded_any == false).
+        let db = fontdb::Database::new();
+        let base = egui::FontDefinitions::default();
+        let (_defs, loaded) =
+            build_font_definitions(base, &db, "Hack", &["hack".to_string(), "HACK".to_string()]);
+        assert!(
+            !loaded,
+            "an uninstalled family loads nothing even when repeated"
+        );
+    }
 }

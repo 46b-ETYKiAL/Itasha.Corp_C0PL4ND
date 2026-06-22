@@ -439,4 +439,118 @@ mod tests {
         // re-check rather than suppress forever.
         assert!(is_due(1_000, Some(5_000), 24));
     }
+
+    #[test]
+    fn is_newer_handles_differing_component_counts() {
+        // A shorter version pads with implicit zeros on the right: 1.2 == 1.2.0
+        // (not newer), but 1.2.1 IS newer than 1.2, and 1.2 is newer than 1.1.9.
+        assert!(!is_newer("1.2", "1.2.0"), "1.2 == 1.2.0 → not newer");
+        assert!(!is_newer("1.2.0", "1.2"), "1.2.0 == 1.2 → not newer");
+        assert!(is_newer("1.2.1", "1.2"), "1.2.1 > 1.2 (implicit 1.2.0)");
+        assert!(is_newer("1.2", "1.1.9"), "1.2 > 1.1.9");
+        // A longer current that is equal on the shared prefix and zero beyond is
+        // not newer.
+        assert!(!is_newer("1.0", "1.0.0.0"), "trailing zeros do not bump");
+    }
+
+    #[test]
+    fn is_newer_compares_most_significant_component_first() {
+        // The FIRST differing component decides — a huge patch never overrides a
+        // larger major/minor (a mutant that compares the wrong index is caught).
+        assert!(is_newer("2.0.0", "1.99.99"), "major dominates");
+        assert!(
+            !is_newer("1.99.99", "2.0.0"),
+            "a big patch loses to a bigger major"
+        );
+        assert!(is_newer("1.3.0", "1.2.99"), "minor dominates patch");
+        assert!(!is_newer("1.2.99", "1.3.0"));
+    }
+
+    #[test]
+    fn is_newer_treats_non_numeric_component_prefix_as_its_number() {
+        // A component like `0-beta` compares on its numeric PREFIX (0), and a
+        // component with NO leading digits parses as 0 (the `unwrap_or(0)` arm).
+        assert!(
+            !is_newer("1.0.0-beta", "1.0.0"),
+            "1.0.0-beta == 1.0.0 numerically"
+        );
+        assert!(
+            is_newer("1.0.1-beta", "1.0.0"),
+            "the numeric prefix still ranks"
+        );
+        // A wholly non-numeric component is treated as 0.
+        assert!(!is_newer("1.x.0", "1.0.0"), "'x' parses to 0 → equal");
+        assert!(
+            !is_newer("v1.2.0", "v1.2.0"),
+            "leading v on both is ignored"
+        );
+    }
+
+    #[test]
+    fn parse_tag_only_reads_the_first_quoted_value_after_the_key() {
+        // The value is the FIRST quoted token after `"tag_name"` — a later
+        // `"name"` field must not be mistaken for the tag (a mutant that picks
+        // the wrong `nth` is caught).
+        let body = r#"{"tag_name":"v1.5.0","name":"Release 1.5.0","body":"notes"}"#;
+        assert_eq!(parse_tag(body).as_deref(), Some("1.5.0"));
+        // A tag with NO leading v is returned verbatim (only a `v` is stripped).
+        assert_eq!(
+            parse_tag(r#"{"tag_name":"2026.04.01"}"#).as_deref(),
+            Some("2026.04.01")
+        );
+        // Only a single leading `v` is stripped (trim_start_matches strips all).
+        assert_eq!(parse_tag(r#"{"tag_name":"vv9"}"#).as_deref(), Some("9"));
+        // An empty body or a body without the key → None.
+        assert_eq!(parse_tag(""), None);
+        assert_eq!(parse_tag("no key here"), None);
+    }
+
+    #[test]
+    fn pick_channel_tag_is_case_insensitive_on_the_channel() {
+        // The channel match folds case on BOTH sides.
+        let body = r#"{"tag_name":"v1.0.0-BETA"},{"tag_name":"v0.9.0"}"#;
+        assert_eq!(
+            pick_channel_tag(body, "beta").as_deref(),
+            Some("1.0.0-BETA"),
+            "an upper-case tag matches a lower-case channel request"
+        );
+        assert_eq!(
+            pick_channel_tag(body, "BETA").as_deref(),
+            Some("1.0.0-BETA"),
+            "an upper-case channel request matches a tag"
+        );
+    }
+
+    #[test]
+    fn pick_channel_tag_falls_back_to_the_first_listed_tag() {
+        // GitHub returns the list newest-first; with no channel match the
+        // fallback is the FIRST (newest) tag, not the last.
+        let body = r#"{"tag_name":"v3.0.0"},{"tag_name":"v2.0.0"},{"tag_name":"v1.0.0"}"#;
+        assert_eq!(
+            pick_channel_tag(body, "nightly").as_deref(),
+            Some("3.0.0"),
+            "no channel match → newest (first) tag wins, never the oldest"
+        );
+    }
+
+    #[test]
+    fn check_for_update_message_names_both_versions_and_the_page() {
+        // The user-facing notice composes correctly: it names the newer version,
+        // the current version, and the release page URL. We exercise the pure
+        // composition by reproducing the format the function uses (the function
+        // itself is network-gated; this locks the message shape it emits).
+        let latest = "9.9.9";
+        let current = current_version();
+        assert!(
+            is_newer(latest, current),
+            "9.9.9 must be newer than the build"
+        );
+        let msg = format!(
+            "C0PL4ND {latest} is available (you have {current}). Download: {}",
+            release_page_url()
+        );
+        assert!(msg.contains("9.9.9"));
+        assert!(msg.contains(current));
+        assert!(msg.contains("releases/latest"));
+    }
 }

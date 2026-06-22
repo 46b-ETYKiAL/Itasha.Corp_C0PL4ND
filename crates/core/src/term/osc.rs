@@ -446,4 +446,58 @@ mod tests {
         assert_eq!(format_color_reply((255, 0, 0)), "rgb:ffff/0000/0000");
         assert_eq!(format_color_reply((26, 27, 38)), "rgb:1a1a/1b1b/2626");
     }
+
+    #[test]
+    fn base64_roundtrips_the_two_non_alnum_alphabet_chars() {
+        // `+` (62) and `/` (63) are the only non-alphanumeric base64 symbols and
+        // have dedicated decode arms. `>>?` encodes to bytes that round-trip
+        // through both, and the encoded form `Pj4/` exercises `/` on decode.
+        let enc = base64_encode(b">>?");
+        assert_eq!(enc, "Pj4/");
+        assert_eq!(base64_decode(b"Pj4/").unwrap(), b">>?");
+        // `+` appears when encoding 0xFB 0xFF (`+/8=` -> `+`). Verify the decode
+        // arm for `+` directly.
+        assert_eq!(base64_decode(b"++++").unwrap(), vec![0xfb, 0xef, 0xbe]);
+    }
+
+    #[test]
+    fn base64_decode_rejects_embedded_equals_mid_string() {
+        // A `=` that is NOT trailing padding is invalid (the `symbols.contains('=')`
+        // guard). `aG=s` has padding-stripping leave an interior `=`.
+        assert!(base64_decode(b"aG=sbG8=").is_none());
+    }
+
+    #[test]
+    fn base64_decode_rejects_single_trailing_symbol() {
+        // A 4n+1 symbol count (tail.len() == 1) is structurally impossible for
+        // base64 and must be rejected, not silently produce a byte.
+        assert!(base64_decode(b"ZZZZZ").is_none());
+    }
+
+    #[test]
+    fn parse_color_spec_rejects_rgb_with_four_channels() {
+        // `rgb:` with a stray 4th `/`-separated part is malformed -> None
+        // (the `parts.next().is_some()` reject arm).
+        assert!(parse_color_spec("rgb:ff/00/00/00").is_none());
+    }
+
+    #[test]
+    fn scale_hex_channel_rejects_empty_and_overlong() {
+        // Empty channel and a >4-digit channel are both rejected.
+        assert!(parse_color_spec("rgb://00/00").is_none()); // empty first channel
+        assert!(parse_color_spec("rgb:fffff/0/0").is_none()); // 5-digit channel
+    }
+
+    #[test]
+    fn scale_hex_channel_two_digit_midrange_rounds() {
+        // A 2-digit channel `80` scales (0x80 * 255 + 127) / 255 = 128, exact.
+        assert_eq!(parse_color_spec("rgb:80/80/80"), Some((128, 128, 128)));
+        // 4-digit max `ffff` -> 255 (kills any divisor mutant in scale_hex_channel).
+        assert_eq!(
+            parse_color_spec("rgb:ffff/ffff/ffff"),
+            Some((255, 255, 255))
+        );
+        // 4-digit `0001` rounds to 0.
+        assert_eq!(parse_color_spec("rgb:0001/0000/0000"), Some((0, 0, 0)));
+    }
 }

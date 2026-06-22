@@ -22,6 +22,9 @@ concurrency:
 
 jobs:
   coverage:
+    # NOTE: job name kept byte-stable (NOT renamed to track the threshold) so it
+    # cannot orphan a required status check bound to this name; the enforced
+    # threshold is --fail-under-lines below (now 93). See merge-queue-check-gating.
     name: Core line coverage (>= 88%)
     runs-on: ubuntu-latest
     steps:
@@ -45,12 +48,15 @@ jobs:
           tool: cargo-llvm-cov
 
 
-      # The gate. Baseline at introduction was ~91% line coverage; 88% leaves a
-      # small ratchet of headroom while still failing on a real regression. Also
-      # emits an LCOV artifact for inspection.
+      # The gate. The coverage initiative raised core line coverage to ~96.9%
+      # (measured local Windows; the remaining misses are un-inducible PTY/IO
+      # error arms + per-platform cfg branches). Ratcheted 88 -> 93 to lock in
+      # the gain while leaving ~4pp headroom for platform variance (the CI run
+      # is Linux, where Windows-ConPTY-only arms do not compile) and a real
+      # regression. Also emits an LCOV artifact for inspection.
       - name: Measure + gate core coverage
         run: |
-          cargo llvm-cov -p c0pl4nd-core --lcov --output-path lcov.info --fail-under-lines 88
+          cargo llvm-cov -p c0pl4nd-core --lcov --output-path lcov.info --fail-under-lines 93
           cargo llvm-cov -p c0pl4nd-core --summary-only
 
       - name: Upload LCOV report

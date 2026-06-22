@@ -135,4 +135,91 @@ mod tests {
             assert!(!is_truthy(off), "{off:?} should be falsy");
         }
     }
+
+    /// `is_truthy` must treat mixed-case / padded negative forms as falsy and a
+    /// non-trivial positive token as truthy — the exact contract `reduced_motion`
+    /// relies on for the env override. Pins the eq_ignore_ascii_case branches.
+    #[test]
+    fn truthy_is_case_insensitive_and_trimmed_on_negatives() {
+        assert!(!is_truthy("OFF"));
+        assert!(!is_truthy("  NO  "));
+        assert!(!is_truthy("FALSE"));
+        assert!(!is_truthy(" 0 "));
+        // Any other word is truthy (the override means "reduce motion").
+        assert!(is_truthy("enabled"));
+        assert!(is_truthy("reduce"));
+        assert!(is_truthy("2"));
+    }
+
+    /// `query_cmd` returns `None` when the program does not exist — the
+    /// best-effort "motion allowed" fallback. This exercises the `.ok()?` early
+    /// return (spawn failure) on every host: a bogus binary name never exists.
+    #[test]
+    fn query_cmd_missing_binary_is_none() {
+        let out = query_cmd("c0pl4nd-definitely-not-a-real-binary-xyz", &["--version"]);
+        assert_eq!(out, None, "a nonexistent binary must yield None, not panic");
+    }
+
+    /// `query_cmd` returns `Some(stdout)` for a known-present command that exits
+    /// 0, proving the success path (status.success() == true → Some). We use a
+    /// cross-platform no-arg echo: Windows `cmd /C echo`, POSIX `echo`.
+    #[test]
+    fn query_cmd_success_returns_stdout() {
+        #[cfg(windows)]
+        let out = query_cmd("cmd", &["/C", "echo", "c0pl4nd_qc_ok"]);
+        #[cfg(not(windows))]
+        let out = query_cmd("echo", &["c0pl4nd_qc_ok"]);
+        // On a host missing even these, the contract is still "None, no panic";
+        // but where present, the captured stdout must contain the token.
+        if let Some(s) = out {
+            assert!(
+                s.contains("c0pl4nd_qc_ok"),
+                "captured stdout should contain the echoed token, got {s:?}"
+            );
+        }
+    }
+
+    /// `query_cmd` returns `None` when the command exits non-zero — the
+    /// `!status.success()` branch. A POSIX `false` / Windows `cmd /C exit 1`
+    /// exits 1; we assert the None mapping where the command is present.
+    #[test]
+    fn query_cmd_nonzero_exit_is_none() {
+        #[cfg(windows)]
+        let out = query_cmd("cmd", &["/C", "exit", "1"]);
+        #[cfg(not(windows))]
+        let out = query_cmd("false", &[]);
+        assert_eq!(
+            out, None,
+            "a command that exits non-zero must map to None (best-effort)"
+        );
+    }
+
+    /// `os_reduced_motion()` must never panic and returns a plain bool on this
+    /// host — it actually issues the platform query (Windows `reg`, macOS
+    /// `defaults`, Linux `gsettings`, or the `false` fallback on other targets).
+    /// We can only assert it returns *a* bool (the host's real setting is not
+    /// controllable in CI), proving the per-platform arm executes without error.
+    #[test]
+    fn os_reduced_motion_returns_a_bool_without_panicking() {
+        // The host's real setting is not controllable here, so we only assert the
+        // call completes without panicking and yields a `bool` (the `: bool`
+        // binding enforces the return type at compile time).
+        let _v: bool = os_reduced_motion();
+    }
+
+    /// `reduced_motion()` short-circuits to `true` when the env override is set,
+    /// WITHOUT consulting the OS. We cannot mutate the process-global env var in
+    /// a parallel unit test (it is `unsafe` and pollutes siblings), but the
+    /// composition is: `env_reduced_motion() || OS`. We prove the pure pieces
+    /// (`is_truthy` above) and that the cached OS path returns a stable bool.
+    #[test]
+    fn reduced_motion_is_stable_across_calls() {
+        // The OS result is cached in a OnceLock, so two calls must agree.
+        let a = reduced_motion();
+        let b = reduced_motion();
+        assert_eq!(
+            a, b,
+            "reduced_motion must be stable (OnceLock-cached OS read)"
+        );
+    }
 }
