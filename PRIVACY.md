@@ -9,26 +9,36 @@ in the source — the relevant files are named so you can check.
 
 ## The short version
 
-- **C0PL4ND does not phone home.** There is no telemetry, no analytics, no ads,
-  no crash reporting to a server, and no account or login.
+- **C0PL4ND is telemetry-free by default.** There is no telemetry, no
+  analytics, no ads, and no account or login. Nothing about how you use the app
+  is collected or transmitted in the background — ever.
+- **Crash/issue reporting is opt-in and default-OFF.** C0PL4ND now ships the
+  in-house **W1TN3SS** reporting SDK, but **nothing is ever sent without you
+  first enabling a stream and consenting to the specific report.** With every
+  stream off (the default), no report ever leaves your machine. See
+  *Opt-in crash & issue reporting* below.
 - **Your shell input and output never leave your device.** Keystrokes, command
   output, and session contents are not transmitted anywhere.
-- **The only network connection the app can make is a version check** against
-  the public GitHub Releases API. By default it runs once per launch (the
-  `notify` mode) to tell you when a newer version exists; it is **read-only,
-  sends zero identifiers**, and you can switch it to on-demand (`manual`) or off
-  (`off`). See below.
+- **The only network connection the app makes on its own is a version check**
+  against the public GitHub Releases API. By default it runs once per launch
+  (the `notify` mode) to tell you when a newer version exists; it is
+  **read-only, sends zero identifiers**, and you can switch it to on-demand
+  (`manual`) or off (`off`). See below.
 
 The codebase enforces this structurally: a CI gate (`no-network-gate.yml`) fails
-the build if any network call site appears anywhere outside the two opt-in
-updater modules. The terminal core and UI contain no network code at all.
+the build if any network call site appears anywhere in C0PL4ND's own source
+outside the two opt-in updater modules. The terminal core and UI contain no
+network code at all. Crash/issue reporting carries no network code of its own
+either — its transport lives entirely in the W1TN3SS SDK dependency and runs
+**only** after you enable a stream and consent to a report (see below).
 
 ---
 
-## The only network connection: the update check
+## The update check
 
-C0PL4ND checks whether a newer release exists. This is the **sole** outbound
-network feature, and it is designed to be minimal and privacy-respecting:
+C0PL4ND checks whether a newer release exists. This is the **only outbound
+network feature that runs on its own** (crash/issue reporting, below, only runs
+when you opt in), and it is designed to be minimal and privacy-respecting:
 
 - The default update mode is **`notify`** (`crates/core/src/config/mod.rs`,
   `UpdateMode::Notify`). At most once per launch — throttled to one check per
@@ -66,6 +76,50 @@ verified (SHA-256 then minisign signature) before anything runs; see
 GitHub may, like any web service, observe the IP address that makes the request.
 That is inherent to making an HTTPS request to GitHub at all; C0PL4ND adds
 nothing to it.
+
+---
+
+## Opt-in crash & issue reporting (W1TN3SS)
+
+C0PL4ND integrates the in-house **W1TN3SS** reporting SDK
+(`crates/app/src/reporting.rs`, `panic_hook.rs`, `issue_intake.rs`). It exists
+so that, *if you choose to*, you can help fix crashes and bugs. It is **opt-in
+and default-OFF**, and the design follows one rule: **nothing is transmitted
+without your explicit consent.**
+
+- **Telemetry-free by default; opt-in reporting available.** Every reporting
+  stream defaults to **OFF** (`ReportingMode::Off`). With the defaults, C0PL4ND
+  transmits **no reports of any kind**. An upgrade never silently turns
+  reporting on.
+- **Consent-gated, per report.** A report is only ever sent after you enable a
+  stream *and* agree in the consent dialog (or you previously chose "Always" for
+  that stream). At the type level, no consent token means no send.
+- **Previewable and editable.** Before anything leaves your machine, the consent
+  dialog shows you the exact text that would be sent, and you can edit or cancel
+  it. Reports are captured locally first and spooled — capture transmits
+  nothing.
+- **Two independent consent streams**, each separately opt-in:
+  1. a **crash-report** stream — a scrubbed, stack-only text backtrace. C0PL4ND
+     captures only a panic's `&'static str` message plus its `file:line` site; a
+     free-form `String` payload that could embed a path or environment fragment
+     is deliberately suppressed at capture, and the SDK's sanitizer normalizes
+     your home directory to `<HOME>`. Because a backtrace can still be tied back
+     to a single report, this stream is honestly **pseudonymous, not
+     anonymous**, under GDPR — we label it that way on purpose; and
+  2. a **manual "Report an issue"** stream — covered below.
+- **No persistent identifier.** Reports carry no account, install ID, or machine
+  fingerprint — only an ephemeral per-report nonce on the consent token.
+- **Self-hosted ingest only — no third parties.** A crash report is delivered by
+  a hardened HTTPS transport (no redirects, bounded timeout) to a **single,
+  config-injected self-hosted** W1TN3SS endpoint, and only when one is
+  configured. There is no default endpoint, and no data is ever sent to any
+  third-party crash or analytics vendor.
+- **Manual "Report an issue" stays manual.** The issue-intake helper only
+  pre-fills a GitHub issue when *you* invoke it; it never sends anything in the
+  background.
+
+In short: C0PL4ND is **telemetry-free by default**, and offers **opt-in,
+default-OFF** crash/issue reporting that never sends without your consent.
 
 ---
 
