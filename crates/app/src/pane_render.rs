@@ -453,4 +453,40 @@ mod tests {
         let s = cell_tabbar_text(6, 0, 5);
         assert_eq!(s.chars().count(), 5);
     }
+
+    #[test]
+    fn quad_verts_map_pixel_rect_to_clip_space_with_color() {
+        // A rect covering the whole 100x50 surface => full NDC square, y flipped.
+        let q = ColorRect::new(0, 0, 100, 50, [0.1, 0.2, 0.3, 0.4]);
+        let v = quad_verts(&q, 100.0, 50.0);
+        // Vertex 0 = top-left: NDC (-1, +1) carrying the rect's color.
+        assert_eq!(v[0], [-1.0, 1.0, 0.1, 0.2, 0.3, 0.4]);
+        // Vertex 1 = top-right: NDC (+1, +1).
+        assert_eq!(&v[1][0..2], &[1.0, 1.0]);
+        // Vertex 2 = bottom-left: NDC (-1, -1) (y flipped).
+        assert_eq!(&v[2][0..2], &[-1.0, -1.0]);
+        // Every vertex carries the identical color payload (no per-vertex drift).
+        for vert in &v {
+            assert_eq!(&vert[2..6], &[0.1, 0.2, 0.3, 0.4]);
+        }
+    }
+
+    #[test]
+    fn quad_verts_two_triangles_share_the_diagonal() {
+        let q = ColorRect::new(10, 20, 30, 40, [1.0, 1.0, 1.0, 1.0]);
+        let v = quad_verts(&q, 200.0, 120.0);
+        // tri-1 = [TL, TR, BL]; tri-2 = [TR, BR, BL]. The shared edge TR & BL.
+        assert_eq!(v[1], v[3], "top-right vertex shared across both triangles");
+        assert_eq!(v[2], v[5], "bottom-left vertex shared across both triangles");
+    }
+
+    #[test]
+    fn verts_bytes_has_exact_length_and_round_trips() {
+        let q = ColorRect::new(5, 5, 10, 10, [0.5, 0.25, 0.75, 1.0]);
+        let v = quad_verts(&q, 40.0, 40.0);
+        let bytes = verts_bytes(&v);
+        assert_eq!(bytes.len(), 6 * 6 * std::mem::size_of::<f32>());
+        let first = f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(first, v[0][0]);
+    }
 }

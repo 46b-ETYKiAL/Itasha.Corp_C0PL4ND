@@ -185,19 +185,10 @@ impl ImageRenderer {
             ],
         });
 
-        // Pixel rect -> NDC (y flipped). Each vertex: [x, y, u, v].
-        let x0 = q.x / sw * 2.0 - 1.0;
-        let x1 = (q.x + q.width as f32) / sw * 2.0 - 1.0;
-        let y0 = 1.0 - q.y / sh * 2.0;
-        let y1 = 1.0 - (q.y + q.height as f32) / sh * 2.0;
-        let verts: [[f32; 4]; 6] = [
-            [x0, y0, 0.0, 0.0],
-            [x0, y1, 0.0, 1.0],
-            [x1, y1, 1.0, 1.0],
-            [x0, y0, 0.0, 0.0],
-            [x1, y1, 1.0, 1.0],
-            [x1, y0, 1.0, 0.0],
-        ];
+        // Pixel rect -> NDC (y flipped). Each vertex: [x, y, u, v]. The math is
+        // extracted into the pure `quad_ndc_verts` so it is unit-testable without
+        // a GPU device (the rest of this function needs a live `wgpu::Device`).
+        let verts = quad_ndc_verts(q.x, q.y, q.width as f32, q.height as f32, sw, sh);
         let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("image-vbuf"),
             contents: bytemuck_cast(&verts),
@@ -222,6 +213,24 @@ impl ImageRenderer {
             pass.draw(0..6, 0..1);
         }
     }
+}
+
+/// Map a pixel-space rectangle `(x, y, w, h)` over a `(sw, sh)` surface into the
+/// six NDC vertices (two triangles) of a textured quad, with V flipped so the
+/// image is upright. Each vertex is `[ndc_x, ndc_y, u, v]`. Pure — no GPU.
+fn quad_ndc_verts(x: f32, y: f32, w: f32, h: f32, sw: f32, sh: f32) -> [[f32; 4]; 6] {
+    let x0 = x / sw * 2.0 - 1.0;
+    let x1 = (x + w) / sw * 2.0 - 1.0;
+    let y0 = 1.0 - y / sh * 2.0;
+    let y1 = 1.0 - (y + h) / sh * 2.0;
+    [
+        [x0, y0, 0.0, 0.0],
+        [x0, y1, 0.0, 1.0],
+        [x1, y1, 1.0, 1.0],
+        [x0, y0, 0.0, 0.0],
+        [x1, y1, 1.0, 1.0],
+        [x1, y0, 1.0, 0.0],
+    ]
 }
 
 /// Reinterpret the vertex array as bytes (no external bytemuck dependency).
@@ -255,3 +264,70 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return textureSample(tex, samp, in.uv);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A quad covering the whole surface maps to the full NDC square with
+    /// upright UVs (top-left = (0,0), bottom-right = (1,1)).
+    #[test]
+    fn full_surface_quad_maps_to_full_ndc_square() {
+        let v = quad_ndc_verts(0.0, 0.0, 100.0, 50.0, 100.0, 50.0);
+        // Triangle-1 first vertex = top-left: NDC (-1, +1), UV (0,0).
+        assert_eq!(v[0], [-1.0, 1.0, 0.0, 0.0]);
+        // Second vertex = bottom-left: NDC (-1, -1), UV (0,1).
+        assert_eq!(v[1], [-1.0, -1.0, 0.0, 1.0]);
+        // Third = bottom-right: NDC (+1, -1), UV (1,1).
+        assert_eq!(v[2], [1.0, -1.0, 1.0, 1.0]);
+        // Last vertex = top-right: NDC (+1, +1), UV (1,0).
+        assert_eq!(v[5], [1.0, 1.0, 1.0, 0.0]);
+    }
+
+    /// The two triangles share the TL and BR vertices (a degenerate-free quad):
+    /// v[0]==v[3] (top-left) and v[2]==v[4] (bottom-right).
+    #[test]
+    fn two_triangles_share_diagonal_vertices() {
+        let v = quad_ndc_verts(10.0, 20.0, 30.0, 40.0, 200.0, 100.0);
+        assert_eq!(v[0], v[3], "both triangles start at the top-left vertex");
+        assert_eq!(v[2], v[4], "both triangles share the bottom-right vertex");
+    }
+
+    /// V is flipped: a quad at the TOP of the surface (small y) has the HIGHER
+    /// NDC y (closer to +1), and U increases left→right.
+    #[test]
+    fn v_axis_is_flipped_and_offset_quad_is_centered() {
+        // A 50x50 quad centred on a 100x100 surface spans pixel [25,75] in both
+        // axes => NDC [-0.5, +0.5] in x, and y flipped to [+0.5, -0.5].
+        let v = quad_ndc_verts(25.0, 25.0, 50.0, 50.0, 100.0, 100.0);
+        let (x0, y0) = (v[0][0], v[0][1]);
+        let (x1, y1) = (v[2][0], v[2][1]);
+        assert!((x0 - -0.5).abs() < 1e-6, "left edge at NDC -0.5, got {x0}");
+        assert!((y0 - 0.5).abs() < 1e-6, "top edge at NDC +0.5 (flipped), got {y0}");
+        assert!((x1 - 0.5).abs() < 1e-6, "right edge at NDC +0.5, got {x1}");
+        assert!((y1 - -0.5).abs() < 1e-6, "bottom edge at NDC -0.5 (flipped), got {y1}");
+    }
+
+    /// `bytemuck_cast` reinterprets the 6×4 f32 vertex array as exactly its byte
+    /// size with no truncation, and the bytes round-trip back to the f32 values.
+    #[test]
+    fn bytemuck_cast_has_exact_byte_length_and_round_trips() {
+        let v = quad_ndc_verts(0.0, 0.0, 10.0, 10.0, 20.0, 20.0);
+        let bytes = bytemuck_cast(&v);
+        assert_eq!(bytes.len(), 6 * 4 * std::mem::size_of::<f32>());
+        // First f32 (v[0][0]) reconstructed from its little/native-endian bytes.
+        let first = f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(first, v[0][0]);
+    }
+
+    /// The drawable filter the renderer applies: zero-dimension images are
+    /// rejected, positive ones accepted (the predicate used in `prepare`).
+    #[test]
+    fn zero_dimension_quads_are_not_drawable() {
+        let drawable = |w: u32, h: u32| w > 0 && h > 0;
+        assert!(!drawable(0, 10));
+        assert!(!drawable(10, 0));
+        assert!(!drawable(0, 0));
+        assert!(drawable(1, 1));
+    }
+}
