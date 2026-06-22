@@ -406,4 +406,227 @@ mod tests {
         good.selection_foreground = "#012345".to_string();
         assert!(good.validate().is_ok());
     }
+
+    // --- additional edge-coverage -----------------------------------------
+
+    const MINIMAL_TOML: &str = r##"
+name = "mini"
+background = "#000000"
+foreground = "#ffffff"
+cursor = "#00ff00"
+[normal]
+black = "#101010"
+red = "#ff0000"
+green = "#00ff00"
+yellow = "#ffff00"
+blue = "#0000ff"
+magenta = "#ff00ff"
+cyan = "#00ffff"
+white = "#cccccc"
+[bright]
+black = "#202020"
+red = "#ff4040"
+green = "#40ff40"
+yellow = "#ffff40"
+blue = "#4040ff"
+magenta = "#ff40ff"
+cyan = "#40ffff"
+white = "#ffffff"
+"##;
+
+    #[test]
+    fn from_toml_parses_and_defaults_optional_fields() {
+        let t = Theme::from_toml(MINIMAL_TOML).expect("parse minimal theme");
+        assert_eq!(t.name, "mini");
+        // Omitted optional fields default to empty strings.
+        assert_eq!(t.author, "");
+        assert_eq!(t.cursor_text, "");
+        assert_eq!(t.selection_background, "");
+        assert_eq!(t.selection_foreground, "");
+        assert_eq!(t.normal.red, "#ff0000");
+        assert_eq!(t.bright.white, "#ffffff");
+    }
+
+    #[test]
+    fn from_toml_rejects_malformed_toml() {
+        let err = Theme::from_toml("this is = = not valid toml [[[").unwrap_err();
+        assert!(matches!(err, ThemeError::Parse(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn from_toml_rejects_bad_hex_via_validate() {
+        // Parses as TOML but a color is not a hex triple → BadHex via validate().
+        let bad = MINIMAL_TOML.replace("#ff0000", "not-a-hex");
+        let err = Theme::from_toml(&bad).unwrap_err();
+        assert!(matches!(err, ThemeError::BadHex(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn load_from_reads_disk_and_round_trips() {
+        let tmp = std::env::temp_dir()
+            .join(format!("c0pl4nd-theme-{}.toml", std::process::id()));
+        std::fs::write(&tmp, MINIMAL_TOML).unwrap();
+        let t = Theme::load_from(&tmp).expect("load_from disk");
+        assert_eq!(t.name, "mini");
+        assert_eq!(t.ansi(1), (0xff, 0, 0)); // normal red
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn load_from_missing_file_is_io_error() {
+        let missing = std::env::temp_dir().join("c0pl4nd-theme-absent-xyzzy.toml");
+        let _ = std::fs::remove_file(&missing);
+        let err = Theme::load_from(&missing).unwrap_err();
+        assert!(matches!(err, ThemeError::Io(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn theme_error_display_variants() {
+        assert!(ThemeError::Io("x".into())
+            .to_string()
+            .contains("could not read theme"));
+        assert!(ThemeError::Parse("y".into())
+            .to_string()
+            .contains("theme parse error"));
+        assert!(ThemeError::BadHex("zz".into())
+            .to_string()
+            .contains("invalid hex color"));
+    }
+
+    #[test]
+    fn ansi_resolves_every_index_to_the_right_slot() {
+        let t = Theme::builtin_void();
+        // normal row (0-7) maps black..white in order.
+        assert_eq!(t.ansi(0), parse_hex(&t.normal.black).unwrap());
+        assert_eq!(t.ansi(1), parse_hex(&t.normal.red).unwrap());
+        assert_eq!(t.ansi(2), parse_hex(&t.normal.green).unwrap());
+        assert_eq!(t.ansi(3), parse_hex(&t.normal.yellow).unwrap());
+        assert_eq!(t.ansi(4), parse_hex(&t.normal.blue).unwrap());
+        assert_eq!(t.ansi(5), parse_hex(&t.normal.magenta).unwrap());
+        assert_eq!(t.ansi(6), parse_hex(&t.normal.cyan).unwrap());
+        assert_eq!(t.ansi(7), parse_hex(&t.normal.white).unwrap());
+        // bright row (8-15) maps the bright slots.
+        assert_eq!(t.ansi(8), parse_hex(&t.bright.black).unwrap());
+        assert_eq!(t.ansi(9), parse_hex(&t.bright.red).unwrap());
+        assert_eq!(t.ansi(10), parse_hex(&t.bright.green).unwrap());
+        assert_eq!(t.ansi(11), parse_hex(&t.bright.yellow).unwrap());
+        assert_eq!(t.ansi(12), parse_hex(&t.bright.blue).unwrap());
+        assert_eq!(t.ansi(13), parse_hex(&t.bright.magenta).unwrap());
+        assert_eq!(t.ansi(14), parse_hex(&t.bright.cyan).unwrap());
+        assert_eq!(t.ansi(15), parse_hex(&t.bright.white).unwrap());
+    }
+
+    #[test]
+    fn ansi_index_above_15_wraps_via_modulo() {
+        let t = Theme::builtin_void();
+        // index 16 → bright row (>=8), 16 % 8 == 0 → bright.black.
+        assert_eq!(t.ansi(16), parse_hex(&t.bright.black).unwrap());
+    }
+
+    #[test]
+    fn ansi_falls_back_to_white_on_bad_hex() {
+        // A theme with a non-hex ANSI slot resolves that index to the
+        // (255,255,255) fallback rather than panicking.
+        let mut t = Theme::builtin_void();
+        t.normal.red = "garbage".into();
+        assert_eq!(t.ansi(1), (255, 255, 255), "bad hex → white fallback");
+    }
+
+    #[test]
+    fn resolve_color_handles_all_three_variants() {
+        use crate::grid::Color;
+        let t = Theme::builtin_void();
+        let dflt = (1, 2, 3);
+        // Default → the supplied default rgb.
+        assert_eq!(t.resolve_color(Color::Default, dflt), dflt);
+        // Indexed → the ANSI table.
+        assert_eq!(t.resolve_color(Color::Indexed(2), dflt), t.ansi(2));
+        // Rgb → passed through verbatim.
+        assert_eq!(t.resolve_color(Color::Rgb(9, 8, 7), dflt), (9, 8, 7));
+    }
+
+    #[test]
+    fn cell_colors_default_bg_yields_none() {
+        use crate::grid::{Cell, Color};
+        let t = Theme::builtin_void();
+        let cell = Cell {
+            fg: Color::Rgb(10, 20, 30),
+            bg: Color::Default,
+            ..Cell::default()
+        };
+        let (fg, bg) = t.cell_colors(&cell, (0, 0, 0), (99, 99, 99));
+        assert_eq!(fg, (10, 20, 30));
+        assert_eq!(bg, None, "Default bg → None so the renderer skips a quad");
+    }
+
+    #[test]
+    fn cell_colors_explicit_bg_is_some() {
+        use crate::grid::{Cell, Color};
+        let t = Theme::builtin_void();
+        let cell = Cell {
+            fg: Color::Rgb(1, 2, 3),
+            bg: Color::Rgb(4, 5, 6),
+            ..Cell::default()
+        };
+        let (fg, bg) = t.cell_colors(&cell, (0, 0, 0), (0, 0, 0));
+        assert_eq!(fg, (1, 2, 3));
+        assert_eq!(bg, Some((4, 5, 6)));
+    }
+
+    #[test]
+    fn cell_colors_inverse_swaps_fg_and_bg() {
+        use crate::grid::{Cell, CellFlags, Color};
+        let t = Theme::builtin_void();
+        // Inverse cell with explicit bg: effective fg becomes the bg, effective
+        // bg becomes the fg.
+        let cell = Cell {
+            fg: Color::Rgb(11, 22, 33),
+            bg: Color::Rgb(44, 55, 66),
+            flags: CellFlags {
+                inverse: true,
+                ..CellFlags::empty()
+            },
+            ..Cell::default()
+        };
+        let (fg, bg) = t.cell_colors(&cell, (0, 0, 0), (7, 7, 7));
+        assert_eq!(fg, (44, 55, 66), "inverse fg = the cell's bg");
+        assert_eq!(bg, Some((11, 22, 33)), "inverse bg = the cell's fg");
+    }
+
+    #[test]
+    fn cell_colors_inverse_with_default_bg_uses_default_bg_as_fg() {
+        use crate::grid::{Cell, CellFlags, Color};
+        let t = Theme::builtin_void();
+        // Inverse cell whose bg is Default: the effective foreground falls back to
+        // default_bg (the `bg.unwrap_or(default_bg)` branch).
+        let cell = Cell {
+            fg: Color::Rgb(200, 100, 50),
+            bg: Color::Default,
+            flags: CellFlags {
+                inverse: true,
+                ..CellFlags::empty()
+            },
+            ..Cell::default()
+        };
+        let (fg, bg) = t.cell_colors(&cell, (1, 1, 1), (9, 8, 7));
+        assert_eq!(fg, (9, 8, 7), "inverse fg falls back to default_bg");
+        assert_eq!(bg, Some((200, 100, 50)), "inverse bg = the cell's fg");
+    }
+
+    #[test]
+    fn from_itermcolors_delegates_to_importer() {
+        // Smoke the public Theme::from_itermcolors delegation path (the importer
+        // itself is unit-tested in the submodule).
+        let xml = r#"<plist><dict>
+            <key>Ansi 1 Color</key>
+            <dict>
+                <key>Red Component</key><real>1.0</real>
+                <key>Green Component</key><real>0.0</real>
+                <key>Blue Component</key><real>0.0</real>
+            </dict>
+        </dict></plist>"#;
+        let t = Theme::from_itermcolors(xml, "Imported").expect("import");
+        assert_eq!(t.name, "Imported");
+        assert_eq!(t.normal.red, "#ff0000");
+    }
 }

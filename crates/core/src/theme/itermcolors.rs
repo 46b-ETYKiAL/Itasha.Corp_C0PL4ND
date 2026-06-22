@@ -307,4 +307,136 @@ mod tests {
     fn from_itermcolors_empty_errors() {
         assert!(from_itermcolors("<plist><dict></dict></plist>", "Empty").is_err());
     }
+
+    // --- additional edge-coverage -----------------------------------------
+
+    #[test]
+    fn next_tag_returns_none_when_open_or_close_absent() {
+        // Open tag absent.
+        assert!(next_tag("<other>x</other>", "real", 0).is_none());
+        // Open present but no matching close.
+        assert!(next_tag("<real>1.0", "real", 0).is_none());
+        // Found: inner text trimmed + index past the close.
+        let (inner, after) = next_tag("<real>  0.5  </real>tail", "real", 0).unwrap();
+        assert_eq!(inner, "0.5");
+        assert_eq!(&"<real>  0.5  </real>tail"[after..], "tail");
+    }
+
+    #[test]
+    fn color_dict_body_none_when_key_missing() {
+        assert!(color_dict_body("<dict></dict>", "No Such Key").is_none());
+    }
+
+    #[test]
+    fn color_dict_body_none_when_no_dict_follows_key() {
+        // The key exists but no `<dict>` follows it before EOF.
+        let xml = "<key>Cursor Color</key><string>nope</string>";
+        assert!(color_dict_body(xml, "Cursor Color").is_none());
+    }
+
+    #[test]
+    fn color_dict_body_none_on_unbalanced_dicts() {
+        // A `<dict>` opens after the key but never closes → the balance loop
+        // exhausts both finds and returns None (no panic).
+        let xml = "<key>Cursor Color</key><dict><dict>";
+        assert!(color_dict_body(xml, "Cursor Color").is_none());
+    }
+
+    #[test]
+    fn color_dict_body_balances_nested_dicts() {
+        // The captured body must include a fully-nested inner dict, not stop at
+        // the first </dict>.
+        let xml = "<key>K</key><dict>A<dict>inner</dict>B</dict>after";
+        let body = color_dict_body(xml, "K").expect("balanced body");
+        assert!(body.contains("inner") && body.contains('A') && body.contains('B'));
+        assert!(!body.contains("after"));
+    }
+
+    #[test]
+    fn parse_color_dict_accepts_integer_value() {
+        // The `<integer>` fallback path: with NO `<real>` tokens present, each
+        // component is read from its `<integer>`. (The scan grabs the nearest
+        // <real> OR, absent any, the nearest <integer>.)
+        let body = r#"
+            <key>Red Component</key><integer>1</integer>
+            <key>Green Component</key><integer>0</integer>
+            <key>Blue Component</key><integer>0</integer>
+        "#;
+        let c = parse_color_dict(body);
+        // red=1→ff, green=0, blue=0.
+        assert_eq!(c.to_hex(), "#ff0000");
+    }
+
+    #[test]
+    fn parse_color_dict_ignores_unknown_keys() {
+        // The `_ => {}` unknown-key arm: a recognised-and-then-unknown key
+        // sequence still resolves the three components correctly.
+        let body = r#"
+            <key>Color Space</key><real>9.0</real>
+            <key>Red Component</key><real>1.0</real>
+            <key>Green Component</key><real>0.0</real>
+            <key>Blue Component</key><real>0.0</real>
+        "#;
+        let c = parse_color_dict(body);
+        // The leading unknown "Color Space" consumes the 9.0; Red then reads the
+        // next <real> (1.0), Green 0.0, Blue 0.0.
+        assert_eq!(c.to_hex(), "#ff0000");
+    }
+
+    #[test]
+    fn parse_color_dict_unparseable_value_defaults_to_zero() {
+        // A non-numeric component value falls back to 0.0 (unwrap_or), not a panic.
+        let body = r#"
+            <key>Red Component</key><real>not-a-number</real>
+            <key>Green Component</key><real>1.0</real>
+            <key>Blue Component</key><real>0.0</real>
+        "#;
+        let c = parse_color_dict(body);
+        assert_eq!(c.to_hex(), "#00ff00", "bad red → 0, green stays 1.0");
+    }
+
+    #[test]
+    fn parse_color_dict_breaks_when_key_has_no_value() {
+        // A trailing key with no following <real>/<integer> breaks the scan loop
+        // (the `else { break }` arm) without consuming a value.
+        let body = r#"
+            <key>Red Component</key><real>1.0</real>
+            <key>Green Component</key>
+        "#;
+        let c = parse_color_dict(body);
+        // Red set; green never got a value → stays default 0.0.
+        assert_eq!(c.to_hex(), "#ff0000");
+    }
+
+    #[test]
+    fn resolve_dynamic_uses_fallback_when_slot_absent() {
+        let mut found = false;
+        let hex = resolve_dynamic("<dict></dict>", "Cursor Color", "#abcdef", &mut found);
+        assert_eq!(hex, "#abcdef");
+        assert!(!found, "an absent slot does not set `found`");
+    }
+
+    #[test]
+    fn resolve_dynamic_sets_found_when_present() {
+        let xml = r#"<key>Cursor Color</key><dict>
+            <key>Red Component</key><real>1.0</real>
+            <key>Green Component</key><real>1.0</real>
+            <key>Blue Component</key><real>1.0</real>
+        </dict>"#;
+        let mut found = false;
+        let hex = resolve_dynamic(xml, "Cursor Color", "#000000", &mut found);
+        assert_eq!(hex, "#ffffff");
+        assert!(found);
+    }
+
+    #[test]
+    fn color_dict_to_hex_clamps_out_of_range_components() {
+        // Components above 1.0 / below 0.0 clamp to the [0,255] byte range.
+        let c = ColorDict {
+            red: 2.0,
+            green: -1.0,
+            blue: 0.5,
+        };
+        assert_eq!(c.to_hex(), "#ff0080");
+    }
 }
