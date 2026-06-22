@@ -1089,4 +1089,179 @@ mod tests {
             "erased cell's spacer flag is cleared (mirrors the `set` write path)"
         );
     }
+
+    // ---- degenerate dimensions, accessors, and edge branches ----
+
+    /// `Grid::new(0, 0)` clamps both dimensions to ≥ 1 so a degenerate grid is
+    /// never built (the `.max(1)` clamps).
+    #[test]
+    fn new_clamps_zero_dimensions_to_one() {
+        let g = Grid::new(0, 0);
+        assert_eq!(g.rows(), 1);
+        assert_eq!(g.cols(), 1);
+        assert_eq!(g.cell(0, 0).unwrap().c, ' ');
+    }
+
+    /// `resize` likewise clamps a zero target to 1×1.
+    #[test]
+    fn resize_clamps_zero_to_one() {
+        let mut g = Grid::new(3, 3);
+        g.resize(0, 0);
+        assert_eq!(g.rows(), 1);
+        assert_eq!(g.cols(), 1);
+    }
+
+    /// `cell()` returns `None` out of range (the row/col bounds guard).
+    #[test]
+    fn cell_out_of_range_is_none() {
+        let g = Grid::new(2, 2);
+        assert!(g.cell(2, 0).is_none(), "row past end");
+        assert!(g.cell(0, 2).is_none(), "col past end");
+        assert!(g.cell(0, 0).is_some());
+    }
+
+    /// `set` / `is_continuation` / `grapheme_at` ignore out-of-range coordinates
+    /// without panicking and report the documented defaults.
+    #[test]
+    fn out_of_range_mutators_and_accessors_are_safe() {
+        let mut g = Grid::new(2, 2);
+        g.set(9, 9, cell('z')); // no-op, no panic
+        g.set_continuation(9, 9, cell('z')); // no-op
+        g.push_combining_at(9, 9, '\u{0301}'); // no-op
+        assert!(!g.is_continuation(9, 9), "OOB continuation reads false");
+        assert_eq!(g.grapheme_at(9, 9), "", "OOB grapheme is empty");
+    }
+
+    /// `touch()` forces every row dirty after a clear (the scroll-view-moved
+    /// case where cells did not change but the window did).
+    #[test]
+    fn touch_marks_every_row_dirty() {
+        let mut g = Grid::new(3, 3);
+        g.clear_damage();
+        assert!(!g.is_damaged());
+        g.touch();
+        assert!((0..3).all(|r| g.is_row_dirty(r)), "touch dirties all rows");
+    }
+
+    /// `set_wrapped` / `is_wrapped` round-trip the soft-wrap flag, and an
+    /// out-of-range row reads `false` and is a no-op to set.
+    #[test]
+    fn wrapped_flag_round_trips_and_is_bounds_safe() {
+        let mut g = Grid::new(3, 4);
+        assert!(!g.is_wrapped(0), "default unwrapped");
+        g.set_wrapped(1, true);
+        assert!(g.is_wrapped(1));
+        g.set_wrapped(1, false);
+        assert!(!g.is_wrapped(1));
+        // OOB row: read false, set is a no-op (no panic, no growth).
+        assert!(!g.is_wrapped(99));
+        g.set_wrapped(99, true);
+        assert!(!g.is_wrapped(99));
+    }
+
+    /// On a same-WIDTH resize a wrapped row keeps its flag; on a width CHANGE the
+    /// flag is invalidated (cleared) per the reflow contract.
+    #[test]
+    fn resize_preserves_wrap_only_when_width_unchanged() {
+        let mut g = Grid::new(3, 4);
+        g.set_wrapped(0, true);
+        // Same width (4) → flag survives.
+        g.resize(5, 4);
+        assert!(g.is_wrapped(0), "same-width resize keeps the wrap flag");
+
+        let mut g2 = Grid::new(3, 4);
+        g2.set_wrapped(0, true);
+        // Width change (4→6) → flag invalidated.
+        g2.resize(3, 6);
+        assert!(!g2.is_wrapped(0), "width-changing resize clears the wrap flag");
+    }
+
+    /// `scroll_region_up` with `top > bottom` returns an empty vec and changes
+    /// nothing (the early-return guard).
+    #[test]
+    fn scroll_region_up_inverted_range_is_noop() {
+        let mut g = Grid::new(4, 1);
+        for (r, ch) in "abcd".chars().enumerate() {
+            put(&mut g, r, 0, ch);
+        }
+        let dropped = g.scroll_region_up(3, 1, 1);
+        assert!(dropped.is_empty(), "inverted range drops nothing");
+        // Content untouched.
+        assert_eq!(g.cell(0, 0).unwrap().c, 'a');
+        assert_eq!(g.cell(3, 0).unwrap().c, 'd');
+    }
+
+    /// `scroll_region_down` with `top > bottom` is a no-op (the early return).
+    #[test]
+    fn scroll_region_down_inverted_range_is_noop() {
+        let mut g = Grid::new(4, 1);
+        for (r, ch) in "abcd".chars().enumerate() {
+            put(&mut g, r, 0, ch);
+        }
+        g.scroll_region_down(3, 1, 1);
+        assert_eq!(g.cell(0, 0).unwrap().c, 'a');
+        assert_eq!(g.cell(3, 0).unwrap().c, 'd');
+    }
+
+    /// `scroll_up_returning` hands back the dropped top row's cells so the caller
+    /// can route them to scrollback. Asserts the exact dropped content.
+    #[test]
+    fn scroll_up_returning_yields_dropped_top_row() {
+        let mut g = Grid::new(2, 2);
+        put(&mut g, 0, 0, 'a');
+        put(&mut g, 0, 1, 'b');
+        put(&mut g, 1, 0, 'c');
+        let dropped = g.scroll_up_returning();
+        assert_eq!(dropped.len(), 2, "dropped row has cols cells");
+        assert_eq!(dropped[0].c, 'a');
+        assert_eq!(dropped[1].c, 'b');
+        // The bottom row scrolled up; new bottom is blank.
+        assert_eq!(g.cell(0, 0).unwrap().c, 'c');
+        assert_eq!(g.cell(1, 0).unwrap().c, ' ');
+    }
+
+    /// `row()` borrows exactly `cols` cells for the requested row, in order.
+    #[test]
+    fn row_borrows_full_row_slice() {
+        let mut g = Grid::new(2, 3);
+        for (c, ch) in "xyz".chars().enumerate() {
+            put(&mut g, 1, c, ch);
+        }
+        let r = g.row(1);
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[0].c, 'x');
+        assert_eq!(r[2].c, 'z');
+    }
+
+    /// `set_continuation` writing the SAME cell+flag twice does not re-damage
+    /// (the change-detection guard), but the first write does damage the row.
+    #[test]
+    fn set_continuation_damage_is_change_gated() {
+        let mut g = Grid::new(2, 2);
+        g.clear_damage();
+        g.set_continuation(0, 1, Cell::default());
+        assert!(g.is_damaged(), "first continuation write damages the row");
+        g.clear_damage();
+        g.set_continuation(0, 1, Cell::default());
+        assert!(
+            !g.is_damaged(),
+            "rewriting the identical continuation spacer must not re-damage"
+        );
+    }
+
+    /// `clear` blanks cells, wrap flags, continuation flags, and combining marks
+    /// all at once. Asserts each side-table is reset.
+    #[test]
+    fn clear_resets_all_side_tables() {
+        let mut g = Grid::new(2, 2);
+        g.set(0, 0, cell('a'));
+        g.push_combining_at(0, 0, '\u{0301}');
+        g.set_continuation(0, 1, Cell::default());
+        g.set_wrapped(0, true);
+        g.clear();
+        assert_eq!(g.cell(0, 0).unwrap().c, ' ', "cell blanked");
+        assert_eq!(g.grapheme_at(0, 0), " ", "combining cleared");
+        assert!(!g.is_continuation(0, 1), "continuation cleared");
+        assert!(!g.is_wrapped(0), "wrap cleared");
+    }
 }

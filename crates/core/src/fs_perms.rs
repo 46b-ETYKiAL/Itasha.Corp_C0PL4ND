@@ -94,4 +94,45 @@ mod tests {
         let _ = std::fs::remove_file(&p);
         restrict_to_owner(&p); // no panic
     }
+
+    /// Tightening must NOT alter the file's CONTENT — only its permissions. A
+    /// caller relies on `restrict_to_owner` being a pure permission op so the
+    /// just-written state survives verbatim.
+    #[test]
+    fn restrict_to_owner_preserves_content() {
+        let p = std::env::temp_dir().join(format!(
+            "c0pl4nd-fsperms-{}-{}.bin",
+            std::process::id(),
+            "content"
+        ));
+        let payload = b"workspace cwd=/home/alice/secret-project layout=v2";
+        std::fs::write(&p, payload).expect("seed");
+        restrict_to_owner(&p);
+        assert_eq!(
+            std::fs::read(&p).expect("read"),
+            payload,
+            "restrict_to_owner must leave the file content unchanged"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// A directory target is also handled best-effort without panic (the
+    /// permission op applies to any path the OS accepts; a dir is a valid path).
+    #[test]
+    fn restrict_to_owner_on_directory_is_silent() {
+        let d = std::env::temp_dir().join(format!(
+            "c0pl4nd-fsperms-dir-{}-{}",
+            std::process::id(),
+            "owner"
+        ));
+        std::fs::create_dir_all(&d).expect("mkdir");
+        restrict_to_owner(&d); // must not panic on a directory
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&d).expect("stat").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "0600 applies to the dir path on unix");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

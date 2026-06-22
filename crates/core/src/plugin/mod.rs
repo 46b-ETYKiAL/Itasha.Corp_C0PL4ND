@@ -367,4 +367,258 @@ network = true
         assert!(found.is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    /// `major()` extracts the leading numeric component and defaults to 0 on a
+    /// non-numeric or empty input — the `unwrap_or(0)` arm that drives the
+    /// api-version compatibility check.
+    #[test]
+    fn major_parses_and_defaults_to_zero() {
+        assert_eq!(major("1.2.3"), 1);
+        assert_eq!(major("0.1.0"), 0);
+        assert_eq!(major("42"), 42);
+        // Non-numeric leading component → 0 (defensive default, never panics).
+        assert_eq!(major("vX.Y"), 0);
+        assert_eq!(major(""), 0);
+        assert_eq!(major("..."), 0);
+    }
+
+    /// `from_toml` maps malformed TOML to a `PluginError::Parse` carrying the
+    /// manifest path — exercises the `map_err` arm (previously only the happy
+    /// path through `load_plugin` was covered).
+    #[test]
+    fn from_toml_maps_parse_error() {
+        let path = Path::new("/plugins/broken/extension.toml");
+        let err = ExtensionManifest::from_toml("this is = = not toml [[", path);
+        match err {
+            Err(PluginError::Parse { path: p, message }) => {
+                assert_eq!(p, path.to_path_buf());
+                assert!(!message.is_empty(), "parse error must carry a message");
+            }
+            other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    /// `theme_paths` and `keybinding_path` join the plugin dir with each declared
+    /// relative path — the accessor logic the renderer consumes. Asserts exact
+    /// resolved paths (mutation-grade: a wrong join base would fail this).
+    #[test]
+    fn theme_and_keybinding_paths_resolve_against_plugin_dir() {
+        let manifest = ExtensionManifest {
+            extension: ExtensionMeta {
+                id: "p".into(),
+                name: "P".into(),
+                version: "0.1.0".into(),
+                author: String::new(),
+                api_version: "0.1.0".into(),
+            },
+            capabilities: Capabilities::default(),
+            contributes: Contributes {
+                themes: vec!["themes/a.toml".into(), "themes/b.toml".into()],
+                keybindings: Some("keys.toml".into()),
+            },
+        };
+        let dir = Path::new("/plugins/mine");
+        let plugin = Plugin {
+            manifest,
+            dir: dir.to_path_buf(),
+            over_asked: false,
+        };
+        let themes = plugin.theme_paths();
+        assert_eq!(themes.len(), 2);
+        assert_eq!(themes[0], dir.join("themes/a.toml"));
+        assert_eq!(themes[1], dir.join("themes/b.toml"));
+        assert_eq!(plugin.keybinding_path(), Some(dir.join("keys.toml")));
+    }
+
+    /// `keybinding_path` is `None` when the manifest declares no keybindings —
+    /// the `Option::map` short-circuit.
+    #[test]
+    fn keybinding_path_is_none_when_absent() {
+        let manifest = ExtensionManifest {
+            extension: ExtensionMeta {
+                id: "p".into(),
+                name: "P".into(),
+                version: "0.1.0".into(),
+                author: String::new(),
+                api_version: "0.1.0".into(),
+            },
+            capabilities: Capabilities::default(),
+            contributes: Contributes::default(),
+        };
+        let plugin = Plugin {
+            manifest,
+            dir: Path::new("/plugins/mine").to_path_buf(),
+            over_asked: false,
+        };
+        assert_eq!(plugin.keybinding_path(), None);
+        assert!(plugin.theme_paths().is_empty());
+    }
+
+    /// A keybinding file that escapes the plugin folder is rejected with
+    /// `PathEscape` (the keybinding branch of the containment check — the theme
+    /// branch was covered, this one was not).
+    #[test]
+    fn rejects_keybinding_path_escape() {
+        let tmp = std::env::temp_dir().join(format!("c0pl4nd-plug-kbesc-{}", std::process::id()));
+        let dir = tmp.join("evilkb");
+        write(
+            &dir,
+            "extension.toml",
+            r#"
+[extension]
+id = "evilkb"
+name = "EvilKB"
+version = "0.1.0"
+api_version = "0.1.0"
+[contributes]
+keybindings = "../../../etc/shadow"
+"#,
+        );
+        assert!(matches!(
+            load_plugin(&dir),
+            Err(PluginError::PathEscape { .. })
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `load_plugin` on a folder with no `extension.toml` returns `NoManifest`
+    /// (the `read_to_string` error arm).
+    #[test]
+    fn load_plugin_missing_manifest_is_no_manifest() {
+        let tmp = std::env::temp_dir().join(format!("c0pl4nd-plug-none-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let err = load_plugin(&tmp);
+        assert!(matches!(err, Err(PluginError::NoManifest(_))));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `PluginRegistry::load` keeps only the VALID plugins (dropping the errored
+    /// ones), and `contributed_theme_paths` flattens themes across all of them.
+    /// Two plugins: one valid (1 theme), one with a bad api_version (dropped).
+    #[test]
+    fn registry_load_keeps_valid_and_flattens_themes() {
+        let tmp = std::env::temp_dir().join(format!("c0pl4nd-plug-reg-{}", std::process::id()));
+        // Valid plugin contributing one theme.
+        let good = tmp.join("good");
+        write(
+            &good,
+            "extension.toml",
+            r#"
+[extension]
+id = "good"
+name = "Good"
+version = "0.1.0"
+api_version = "0.1.0"
+[contributes]
+themes = ["t.toml"]
+"#,
+        );
+        write(&good, "t.toml", "name=\"t\"\n");
+        // Invalid plugin (incompatible api) — must be dropped by the registry.
+        let bad = tmp.join("bad");
+        write(
+            &bad,
+            "extension.toml",
+            r#"
+[extension]
+id = "bad"
+name = "Bad"
+version = "0.1.0"
+api_version = "9.0.0"
+"#,
+        );
+        let reg = PluginRegistry::load(&tmp);
+        assert_eq!(reg.plugins.len(), 1, "only the valid plugin is kept");
+        assert_eq!(reg.plugins[0].manifest.extension.id, "good");
+        let themes = reg.contributed_theme_paths();
+        assert_eq!(themes.len(), 1);
+        assert_eq!(themes[0], good.join("t.toml"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `discover` returns a per-folder result for a folder that DOES carry a
+    /// manifest (the `out.push(load_plugin(..))` arm, complementing the
+    /// skip-non-plugin test which only covered the empty path).
+    #[test]
+    fn discover_includes_plugin_folders() {
+        let tmp = std::env::temp_dir().join(format!("c0pl4nd-disc2-{}", std::process::id()));
+        let dir = tmp.join("realplug");
+        write(
+            &dir,
+            "extension.toml",
+            r#"
+[extension]
+id = "realplug"
+name = "Real"
+version = "0.1.0"
+api_version = "0.1.0"
+"#,
+        );
+        let found = discover(&tmp);
+        assert_eq!(found.len(), 1, "the manifest-bearing folder is discovered");
+        assert!(found[0].is_ok());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `discover` on a nonexistent directory returns an empty vec (the
+    /// `read_dir` Err arm: "no plugins dir → no plugins, not an error").
+    #[test]
+    fn discover_nonexistent_dir_is_empty() {
+        let missing = std::env::temp_dir().join(format!("c0pl4nd-no-such-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+        assert!(discover(&missing).is_empty());
+    }
+
+    /// `default_plugins_dir` resolves to a `plugins` folder beside the config
+    /// file when a config path is known. The result (when Some) must end in
+    /// `plugins`; when the host has no config dir it is `None` — both are valid
+    /// and must not panic.
+    #[test]
+    fn default_plugins_dir_is_plugins_beside_config() {
+        if let Some(d) = default_plugins_dir() {
+            assert_eq!(
+                d.file_name().and_then(|n| n.to_str()),
+                Some("plugins"),
+                "default plugins dir must be named `plugins`"
+            );
+        }
+    }
+
+    /// The `Capabilities::requests_dangerous` predicate fires on each dangerous
+    /// grant individually (not only `network`, which the over-ask test covered).
+    #[test]
+    fn requests_dangerous_fires_on_each_capability() {
+        let mut c = Capabilities::default();
+        assert!(!c.requests_dangerous());
+        c.pty_write = true;
+        assert!(c.requests_dangerous(), "pty_write is dangerous");
+        let mut c = Capabilities::default();
+        c.filesystem = true;
+        assert!(c.requests_dangerous(), "filesystem is dangerous");
+        let mut c = Capabilities::default();
+        c.process_spawn = true;
+        assert!(c.requests_dangerous(), "process_spawn is dangerous");
+    }
+
+    /// The `PluginError` variants render human-readable messages embedding their
+    /// fields (the `#[error(...)]` Display impls — pure formatting logic).
+    #[test]
+    fn plugin_error_display_includes_context() {
+        let api = PluginError::ApiMismatch {
+            id: "x".into(),
+            got: "9.0.0".into(),
+            host: PLUGIN_API_VERSION.to_string(),
+        };
+        let s = api.to_string();
+        assert!(s.contains("x") && s.contains("9.0.0") && s.contains(PLUGIN_API_VERSION));
+
+        let esc = PluginError::PathEscape {
+            id: "y".into(),
+            path: "../evil".into(),
+        };
+        assert!(esc.to_string().contains("../evil"));
+
+        let none = PluginError::NoManifest(PathBuf::from("/p/extension.toml"));
+        assert!(none.to_string().contains("extension.toml"));
+    }
 }

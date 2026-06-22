@@ -255,4 +255,96 @@ mod tests {
         h.record("psql --password=topsecret");
         assert_eq!(h.entries().next(), Some("psql --password=<redacted>"));
     }
+
+    /// `clear` zeroizes and empties the history. After clear, `len`/`is_empty`
+    /// report the reset state and a subsequent record starts fresh.
+    #[test]
+    fn clear_empties_and_resets() {
+        let mut h = CommandHistory::default();
+        h.record("secret-cmd --token=abc");
+        h.record("ls");
+        assert_eq!(h.len(), 2);
+        h.clear();
+        assert!(h.is_empty(), "history is empty after clear");
+        assert_eq!(h.len(), 0);
+        assert_eq!(h.search("").len(), 0, "no entries to search after clear");
+        // Recording after clear works normally.
+        h.record("after");
+        assert_eq!(h.entries().next(), Some("after"));
+    }
+
+    /// `with_capacity(0)` clamps to a usable cap of 1 (never a zero-cap that
+    /// would drop every record). Recording one keeps it; recording two keeps
+    /// only the newest.
+    #[test]
+    fn with_capacity_zero_clamps_to_one() {
+        let mut h = CommandHistory::with_capacity(0);
+        h.record("first");
+        assert_eq!(h.len(), 1, "cap clamps to >= 1");
+        h.record("second");
+        assert_eq!(h.len(), 1, "cap 1 keeps only the newest");
+        assert_eq!(h.entries().next(), Some("second"));
+    }
+
+    /// Re-running an OLD command at capacity moves it to the front by REMOVING
+    /// its prior position first (the `entries.remove(pos)` de-dup branch), so the
+    /// length does not change and no eviction happens.
+    #[test]
+    fn rerun_at_capacity_dedups_without_eviction() {
+        let mut h = CommandHistory::with_capacity(3);
+        h.record("a");
+        h.record("b");
+        h.record("c"); // full: [c, b, a]
+        h.record("a"); // re-run 'a' → [a, c, b], still len 3, 'b' NOT evicted
+        let got: Vec<&str> = h.entries().collect();
+        assert_eq!(got, vec!["a", "c", "b"], "re-run dedups and reorders, no eviction");
+        assert_eq!(h.len(), 3);
+    }
+
+    /// `len` tracks growth as distinct commands are recorded.
+    #[test]
+    fn len_tracks_distinct_records() {
+        let mut h = CommandHistory::default();
+        assert_eq!(h.len(), 0);
+        h.record("x");
+        assert_eq!(h.len(), 1);
+        h.record("y");
+        assert_eq!(h.len(), 2);
+        h.record("x"); // dedup → no growth
+        assert_eq!(h.len(), 2);
+    }
+
+    /// The redact regex handles the underscore/hyphen variants and case
+    /// insensitivity across both the flag and env forms — exercises the
+    /// `[-_]?` alternations and `(?i)` flag.
+    #[test]
+    fn redact_handles_separator_and_case_variants() {
+        assert_eq!(
+            redact_secrets("svc --AUTH_TOKEN=Bearer123"),
+            "svc --AUTH_TOKEN=<redacted>"
+        );
+        assert_eq!(
+            redact_secrets("aws --access-key=AKIA --private_key=pem"),
+            "aws --access-key=<redacted> --private_key=<redacted>"
+        );
+        // Env form, lowercase name embedded uppercase secret word still masked.
+        assert_eq!(
+            redact_secrets("MY_SECRET_VALUE=hush run"),
+            "MY_SECRET_VALUE=<redacted> run"
+        );
+    }
+
+    /// A recorded secret is stored REDACTED, so a later `search` and `clear`
+    /// never expose the plaintext — the end-to-end privacy contract.
+    #[test]
+    fn search_returns_redacted_form_not_plaintext() {
+        let mut h = CommandHistory::default();
+        h.record("deploy --token=supersecretvalue prod");
+        let hits = h.search("deploy");
+        assert_eq!(hits.len(), 1);
+        assert!(
+            hits[0].contains("<redacted>") && !hits[0].contains("supersecretvalue"),
+            "search must surface the redacted entry, never the plaintext secret"
+        );
+    }
 }

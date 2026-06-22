@@ -102,4 +102,48 @@ mod tests {
         assert!(resolve_redirect("https://api.github.com/a", "b/c").is_err());
         assert!(resolve_redirect("no-scheme", "/b").is_err());
     }
+
+    /// The exact error MESSAGES are part of the caller contract (the caller maps
+    /// the `&'static str` into its own error). Pin them so a reword is caught.
+    #[test]
+    fn resolve_redirect_error_messages_are_stable() {
+        // Origin-relative target against a base with no scheme → "malformed base URL".
+        assert_eq!(
+            resolve_redirect("no-scheme-base", "/path"),
+            Err("malformed base URL")
+        );
+        // A non-absolute, non-origin-relative target → "unsupported relative …".
+        assert_eq!(
+            resolve_redirect("https://api.github.com/a", "relative/path"),
+            Err("unsupported relative redirect target")
+        );
+    }
+
+    /// `resolve_redirect` with an origin-relative target preserves the base's
+    /// scheme+host even when the base carries a port and a query — the host is
+    /// taken from the authority up to the first `/?#`.
+    #[test]
+    fn resolve_redirect_origin_relative_keeps_scheme_and_authority() {
+        assert_eq!(
+            resolve_redirect("https://codeload.github.com:443/owner/repo?x=1", "/d/e").unwrap(),
+            "https://codeload.github.com:443/d/e",
+            "origin-relative redirect keeps the base scheme + authority (incl. port)"
+        );
+    }
+
+    /// `url_host` returns `None` for a present-but-EMPTY host (`https://:443/x`)
+    /// — the `if host.is_empty()` guard, distinct from the no-authority `None`.
+    #[test]
+    fn url_host_empty_host_is_none() {
+        assert_eq!(url_host("https://:443/x"), None, "empty host → None");
+        assert_eq!(url_host("https://@/x"), None, "userinfo then empty host → None");
+    }
+
+    /// `is_https` on a bare scheme with no authority still classifies by scheme
+    /// only (`https:` alone is true; the host check is a separate concern).
+    #[test]
+    fn is_https_scheme_only_even_without_authority() {
+        assert!(is_https("https://"), "scheme-only https is still https");
+        assert!(!is_https("HTTPX://x"));
+    }
 }

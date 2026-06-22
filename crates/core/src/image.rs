@@ -652,4 +652,123 @@ mod tests {
     fn decode_kitty_unsupported_format_is_none() {
         assert!(decode_kitty(7, 2, 2, &[0u8; 16]).is_none());
     }
+
+    /// `decode_kitty` rejects a zero width/height for the raw formats BEFORE the
+    /// length check (the `width == 0 || height == 0` guard) — both f=32 and f=24.
+    #[test]
+    fn decode_kitty_zero_dimensions_are_none() {
+        assert!(decode_kitty(32, 0, 2, &[]).is_none(), "f=32 zero width");
+        assert!(decode_kitty(32, 2, 0, &[]).is_none(), "f=32 zero height");
+        assert!(decode_kitty(24, 0, 1, &[]).is_none(), "f=24 zero width");
+        assert!(decode_kitty(24, 1, 0, &[]).is_none(), "f=24 zero height");
+    }
+
+    /// `decode_kitty` f=24 rejects a wrong-length payload (needs `w*h*3`).
+    #[test]
+    fn decode_kitty_f24_rejects_wrong_length() {
+        // 2x1 RGB needs 6 bytes; give 5.
+        assert!(decode_kitty(24, 2, 1, &[0u8; 5]).is_none());
+    }
+
+    /// `decode_kitty` f=100 returns `None` on bytes that are not a valid PNG —
+    /// the `reader.decode().ok()?` early return.
+    #[test]
+    fn decode_kitty_f100_rejects_non_png() {
+        assert!(
+            decode_kitty(100, 0, 0, b"not a png at all").is_none(),
+            "garbage PNG bytes must decode to None, not panic"
+        );
+    }
+
+    /// `parse_kitty` returns `None` on non-UTF8 control bytes (the
+    /// `str::from_utf8(body).ok()?` guard).
+    #[test]
+    fn parse_kitty_rejects_non_utf8() {
+        assert!(parse_kitty(&[0xff, 0xfe, 0x80]).is_none());
+    }
+
+    /// `parse_kitty` with NO `;` separator treats the whole body as control and
+    /// the payload as empty (the `None => (s, Vec::new())` arm). An unknown key
+    /// is ignored (the `_ => {}` arm), and bad numeric values default sanely.
+    #[test]
+    fn parse_kitty_no_payload_and_unknown_keys() {
+        let cmd = parse_kitty(b"f=32,zz=hello,s=4,v=5").expect("parsed control-only");
+        assert_eq!(cmd.format, 32);
+        assert_eq!(cmd.width, 4);
+        assert_eq!(cmd.height, 5);
+        assert!(cmd.payload.is_empty(), "no ';' → empty payload");
+
+        // Non-numeric f/s/v/i default to 0 (the `.unwrap_or(0)` arms).
+        let bad = parse_kitty(b"f=xx,s=yy,v=zz,i=qq;").expect("parsed");
+        assert_eq!(bad.format, 0);
+        assert_eq!(bad.width, 0);
+        assert_eq!(bad.height, 0);
+        assert_eq!(bad.id, 0);
+    }
+
+    /// Sixel raster-attributes (`"Pan;Pad;Ph;Pv`) are parsed-and-skipped: the
+    /// digits/`;` run after `"` is consumed and the following sixel still draws.
+    /// Covers the `b'"'` skip-to-non-digit branch.
+    #[test]
+    fn sixel_raster_attributes_are_skipped() {
+        // "1;1;2;6 sets raster attrs, then colour 0 red, then one full sixel.
+        let data = b"\"1;1;2;6#0;2;100;0;0#0~";
+        let img = decode_sixel(data).expect("decoded after raster attrs");
+        assert_eq!(img.width, 1);
+        assert_eq!(img.height, 6);
+        assert_eq!(img.pixel(0, 0), [255, 0, 0, 255]);
+    }
+
+    /// A `#Pc` colour SELECT for an index that was never DEFINED leaves the
+    /// current colour unchanged (the `palette.get(&n).unwrap_or(&color)` arm):
+    /// the default white is used, so the pixel is white.
+    #[test]
+    fn sixel_select_undefined_color_keeps_current() {
+        // Select colour 5 (never defined) then draw → uses the default white.
+        let data = b"#5~";
+        let img = decode_sixel(data).expect("decoded");
+        assert_eq!(
+            img.pixel(0, 0),
+            [255, 255, 255, 255],
+            "selecting an undefined colour keeps the current (default white)"
+        );
+    }
+
+    /// A colour DEFINITION with a non-RGB mode (`;1;…` HLS, not `;2;…`) is parsed
+    /// but NOT inserted into the palette (only `nums[0] == 2` inserts). The
+    /// subsequent draw therefore uses the default colour, proving the
+    /// `nums.len() == 4 && nums[0] == 2` guard rejects the HLS form here.
+    #[test]
+    fn sixel_non_rgb_color_definition_is_not_inserted() {
+        // #0;1;0;0;0 = define index 0 as HLS (mode 1) — our decoder only honours
+        // mode 2 (RGB), so index 0 stays undefined; the draw uses default white.
+        let data = b"#0;1;0;0;0#0~";
+        let img = decode_sixel(data).expect("decoded");
+        assert_eq!(
+            img.pixel(0, 0),
+            [255, 255, 255, 255],
+            "an HLS (mode 1) definition is ignored; default colour is used"
+        );
+    }
+
+    /// The graphics-CR (`$`) resets x to the band start so a second run overlaps
+    /// the first column rather than extending width. Covers the `b'$'` arm.
+    #[test]
+    fn sixel_graphics_cr_resets_column() {
+        // Draw at x=0 (green), $, draw again at x=0 (red overwrites) → width 1.
+        let data = b"#0;2;0;100;0~$#1;2;100;0;0#1~";
+        let img = decode_sixel(data).expect("decoded");
+        assert_eq!(img.width, 1, "graphics-CR returns to column 0 → width stays 1");
+        assert_eq!(img.pixel(0, 0), [255, 0, 0, 255], "second draw overwrites with red");
+    }
+
+    /// Unknown / ignorable bytes between tokens are skipped (the `_ => i += 1`
+    /// arm) without corrupting the decode.
+    #[test]
+    fn sixel_ignores_unknown_bytes() {
+        // Stray spaces/letters around a valid colour+sixel are ignored.
+        let data = b"  #0;2;100;0;0  #0~  ";
+        let img = decode_sixel(data).expect("decoded despite stray bytes");
+        assert_eq!(img.pixel(0, 0), [255, 0, 0, 255]);
+    }
 }
