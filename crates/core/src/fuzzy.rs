@@ -6,6 +6,24 @@
 
 /// Score `item` against `query`. Higher is better; `None` = no match.
 /// An empty query matches everything with score 0 (preserves input order).
+///
+/// # Examples
+///
+/// ```
+/// use c0pl4nd_core::fuzzy::score;
+///
+/// // Every query char must appear in order (case-insensitive).
+/// assert!(score("New Tab", "nt").is_some());
+/// assert!(score("New Tab", "xyz").is_none());
+///
+/// // A contiguous run outscores a scattered subsequence.
+/// let contiguous = score("close tab", "clos").unwrap();
+/// let scattered = score("close tab", "ctb").unwrap();
+/// assert!(contiguous > scattered);
+///
+/// // An empty query matches everything with score 0.
+/// assert_eq!(score("anything", ""), Some(0));
+/// ```
 pub fn score(item: &str, query: &str) -> Option<i32> {
     if query.is_empty() {
         return Some(0);
@@ -42,6 +60,20 @@ pub fn score(item: &str, query: &str) -> Option<i32> {
 }
 
 /// Filter and rank `items` by `query`, best first. Stable for equal scores.
+///
+/// # Examples
+///
+/// ```
+/// use c0pl4nd_core::fuzzy::filter_sorted;
+///
+/// let items = ["New Tab", "Search", "Quit"];
+/// // Only items that match the query as a subsequence are kept.
+/// assert_eq!(filter_sorted(&items, "se"), vec!["Search"]);
+///
+/// // All three contain "tab", so all survive the filter.
+/// let tabs = ["New Tab", "Close Tab", "Next Tab"];
+/// assert_eq!(filter_sorted(&tabs, "tab").len(), 3);
+/// ```
 pub fn filter_sorted<'a>(items: &[&'a str], query: &str) -> Vec<&'a str> {
     let mut scored: Vec<(i32, usize, &str)> = items
         .iter()

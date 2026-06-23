@@ -16,6 +16,17 @@ pub struct SearchMatch {
 }
 
 /// Search options.
+///
+/// # Examples
+///
+/// ```
+/// use c0pl4nd_core::search::SearchOptions;
+///
+/// // The default is a case-insensitive literal (non-regex) search.
+/// let opts = SearchOptions::default();
+/// assert!(!opts.regex);
+/// assert!(opts.case_insensitive);
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct SearchOptions {
     pub regex: bool,
@@ -43,6 +54,35 @@ impl Default for SearchOptions {
 /// so any such char before a match shifted the highlight/jump to the wrong
 /// column. Routing the literal path through `regex::escape` keeps the query's
 /// characters verbatim while giving source-relative offsets.
+///
+/// # Examples
+///
+/// ```
+/// use c0pl4nd_core::search::{find, SearchOptions, SearchMatch};
+///
+/// let lines = vec![
+///     "error: file not found".to_string(),
+///     "ok".to_string(),
+///     "another ERROR here".to_string(),
+/// ];
+///
+/// // Case-insensitive literal search finds both "error" and "ERROR".
+/// let matches = find(&lines, "error", SearchOptions::default());
+/// assert_eq!(matches.len(), 2);
+/// assert_eq!(matches[0], SearchMatch { line: 0, start: 0, end: 5 });
+/// assert_eq!(matches[1].line, 2);
+///
+/// // The match span indexes the ORIGINAL line.
+/// assert_eq!(&lines[0][matches[0].start..matches[0].end], "error");
+///
+/// // A regex query anchors to line start.
+/// let re = find(&lines, r"^error", SearchOptions { regex: true, case_insensitive: true });
+/// assert_eq!(re.len(), 1);
+/// assert_eq!(re[0].line, 0);
+///
+/// // An empty query matches nothing.
+/// assert!(find(&lines, "", SearchOptions::default()).is_empty());
+/// ```
 pub fn find(lines: &[String], query: &str, opts: SearchOptions) -> Vec<SearchMatch> {
     if query.is_empty() {
         return Vec::new();
