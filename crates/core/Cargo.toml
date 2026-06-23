@@ -6,8 +6,21 @@ license.workspace = true
 repository.workspace = true
 description = "C0PL4ND core engine: PTY, VT parsing, grid model, config, and theming."
 
-[lints]
-workspace = true
+# NOTE: this crate cannot use the bare `[lints] workspace = true` form because it
+# must additionally register `loom` as a known cfg (the cfg(loom)-gated
+# concurrency tests + import shim in session.rs would otherwise emit
+# `unexpected_cfgs` warnings, which the repo's `clippy --all-targets -D warnings`
+# discipline escalates to a hard error). The two workspace lints below are
+# re-declared inline to stay in sync with [workspace.lints.*] in the root
+# Cargo.toml; `loom` is only ever set via `RUSTFLAGS="--cfg loom"` for permutation
+# testing — never in a normal/CI/release build.
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [dependencies]
 anyhow.workspace = true
@@ -58,6 +71,21 @@ criterion = { version = "0.8", default-features = false }
 # the failing seed is persisted so a fixed bug stays fixed. Dev-only — never in
 # the production graph. Pinned to the current stable 1.x line.
 proptest = "1"
+
+# Concurrency-permutation testing for the in-house PTY-reader/UI synchronization
+# (the `Arc<Mutex<WakeFn>>` wake slot + the `AtomicBool` liveness flag in
+# `session.rs`). Declared under `[target.'cfg(loom)'.dependencies]` (NOT
+# dev-dependencies) because session.rs swaps its `Arc`/`Mutex`/`AtomicBool`
+# imports to loom's instrumented equivalents inside the *library* crate under
+# `--cfg loom`, so loom must be linkable by the lib itself — a dev-dependency is
+# only visible to test/bench targets and would leave the lib's `use loom::...`
+# unresolved. The `cfg(loom)` gate keeps it OUT of every normal/CI/release build
+# (loom is set ONLY via `RUSTFLAGS="--cfg loom"` for permutation testing), so it
+# never enters the production graph. Pure-Rust dev tool, zero egress at runtime;
+# exact-pinned per dependency-management.md. Run via:
+#   RUSTFLAGS="--cfg loom" cargo test -p c0pl4nd-core loom_
+[target.'cfg(loom)'.dependencies]
+loom = "=0.7.2"
 
 [[bench]]
 name = "throughput"
