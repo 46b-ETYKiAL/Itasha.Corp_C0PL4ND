@@ -42,6 +42,16 @@ impl Rect {
     }
 
     /// Area in square pixels.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::layout::Rect;
+    ///
+    /// assert_eq!(Rect::new(10, 20, 100, 50).area(), 5000);
+    /// // Negative extents clamp to 0 — area is never negative.
+    /// assert_eq!(Rect::new(0, 0, -4, 10).area(), 0);
+    /// ```
     #[must_use]
     pub fn area(&self) -> i64 {
         i64::from(self.w.max(0)) * i64::from(self.h.max(0))
@@ -49,12 +59,35 @@ impl Rect {
 
     /// `true` when `(px, py)` lies inside the rect (left/top inclusive,
     /// right/bottom exclusive).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::layout::Rect;
+    ///
+    /// let r = Rect::new(10, 20, 100, 50);
+    /// assert!(r.contains_point(10, 20));   // top-left is inclusive
+    /// assert!(r.contains_point(109, 69));  // last interior pixel
+    /// assert!(!r.contains_point(110, 20)); // right edge is exclusive
+    /// assert!(!r.contains_point(9, 20));   // left of the rect
+    /// ```
     #[must_use]
     pub fn contains_point(&self, px: i32, py: i32) -> bool {
         px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
     }
 
     /// The extent of this rect along `axis`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::layout::Rect;
+    /// use c0pl4nd_core::layout::Axis;
+    ///
+    /// let r = Rect::new(0, 0, 100, 50);
+    /// assert_eq!(r.extent(Axis::Horizontal), 100); // width
+    /// assert_eq!(r.extent(Axis::Vertical), 50);    // height
+    /// ```
     #[must_use]
     pub fn extent(&self, axis: Axis) -> i32 {
         match axis {
@@ -64,6 +97,14 @@ impl Rect {
     }
 
     /// Center point of the rect.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::layout::Rect;
+    ///
+    /// assert_eq!(Rect::new(10, 20, 100, 50).center(), (60, 45));
+    /// ```
     #[must_use]
     pub fn center(&self) -> (i32, i32) {
         (self.x + self.w / 2, self.y + self.h / 2)
