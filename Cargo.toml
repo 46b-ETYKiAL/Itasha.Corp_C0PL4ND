@@ -31,11 +31,24 @@ serde = { version = "=1.0.228", features = ["derive"] }
 toml = "=1.1.2"
 
 # --- W1TN3SS opt-in crash/error/issue reporting SDK (first-party, pinned git
-#     tag; default-OFF, consent-gated, no vendor SaaS/telemetry). Consumed as a
+#     rev; default-OFF, consent-gated, no vendor SaaS/telemetry). Consumed as a
 #     pure dependency — this app authors no SDK code (the fleet-rollout
-#     integration). Pinned to the exact release tag per dependency-management.md
-#     so an SDK change cannot float into the app until it explicitly bumps. ---
-itasha-report-core = { git = "https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-W1TN3SS.git", tag = "itasha-report-core-v0.2.0" }
+#     integration). Pinned to the EXACT commit rev (dependency-management.md) so
+#     an SDK change cannot float into the app until it explicitly bumps. The pin
+#     is the W1TN3SS `main` HEAD that carries the content-scrubbing (PR#1) +
+#     crash-capture (PR#3) hardening which landed AFTER the
+#     `itasha-report-core-v0.2.0` tag (that tag points at an ancestor WITHOUT the
+#     hardening, and there is no tag on HEAD — so the bump is by rev, not tag).
+#     The crate's own version field stays "0.2.0" (unchanged in the SDK). ---
+itasha-report-core = { git = "https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-W1TN3SS.git", rev = "7464eab1e4b7374f811ea4668b4696b0a533f2fc" }
+
+# --- W1TN3SS opt-in Tor-onion transport (first-party, SAME pinned rev). A
+#     SEPARATE crate so report-core's dependency tree stays unchanged for the
+#     default (non-opt-in) build. This crate pulls the Arti pure-Rust Tor stack;
+#     it is compiled in unconditionally but only EXERCISED when the user
+#     configures an onion address (`C0PL4ND_REPORT_ONION`). Default = clearnet —
+#     nothing changes for users who never set an onion address. ---
+itasha-report-transport-tor = { git = "https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-W1TN3SS.git", rev = "7464eab1e4b7374f811ea4668b4696b0a533f2fc" }
 
 # --- GPU/windowing anchor (promoted to workspace so the egui bundle and the
 #     existing terminal-grid renderer share ONE pinned wgpu/winit/glyphon). ---

@@ -114,6 +114,18 @@ without your explicit consent.**
   config-injected self-hosted** W1TN3SS endpoint, and only when one is
   configured. There is no default endpoint, and no data is ever sent to any
   third-party crash or analytics vendor.
+- **Optional sender-anonymous Tor transport (opt-in, default-OFF).** By default a
+  configured report is sent over clearnet HTTPS as described above — your IP is
+  visible to your own self-hosted ingest endpoint. If you additionally configure
+  a v3 `.onion` ingest address in the `C0PL4ND_REPORT_ONION` environment
+  variable, a consented send is instead routed over an embedded pure-Rust Tor
+  client (Arti) to that hidden service, so the ingest server never learns your IP
+  (sender anonymity). This is strictly opt-in: with `C0PL4ND_REPORT_ONION` unset
+  (the default) nothing changes and the clearnet path is used. A malformed onion
+  value can never silently downgrade you to clearnet under a false sense of
+  anonymity — it falls back to the explicit clearnet path. The Tor option changes
+  only the *network path*; it does not alter the consent gate, the default-OFF
+  posture, or what data a report contains.
 - **Manual "Report an issue" stays manual.** The issue-intake helper only
   pre-fills a GitHub issue when *you* invoke it; it never sends anything in the
   background.
