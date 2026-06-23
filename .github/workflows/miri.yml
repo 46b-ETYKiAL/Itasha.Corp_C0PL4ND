@@ -1,0 +1,82 @@
+name: Miri (UB / soundness)
+
+# Interprets the deterministic core engine's tests under Miri to catch undefined
+# behaviour — out-of-bounds, use-after-free, invalid pointer casts, data races,
+# uninitialised reads — that a normal test run cannot observe. Miri exercises
+# the VT parser's `unsafe` memchr fast-path and the grid/reflow memory model.
+#
+# SCOPE (honest, deliberate):
+#   * Runs ONLY the pure, deterministic core integration tests
+#     (vt_conformance, grid_snapshot, layout_actions, drop_zones). These feed
+#     bytes to the in-house parser/grid and assert the resulting state — exactly
+#     the memory-touching surface Miri can validate.
+#   * EXCLUDES anything Miri structurally cannot run:
+#       - PTY / portable-pty FFI (`integration.rs`, pty module) — Miri does not
+#         execute foreign functions or spawn real processes.
+#       - GPU paint (the egui `app` crate: image_render/pane_render byte casts) —
+#         Miri cannot run a windowing/GPU stack; that unsafe is covered by the
+#         headed egui_kittest tests instead.
+#       - Timing / proptest-heavy suites (perf_smoke, proptest_*) — Miri is
+#         ~100x slower; a bounded deterministic corpus is the right Miri input.
+#   This is a SOUNDNESS gate on the pure engine, not a full-suite re-run.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: miri-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep Miri isolation ON (stricter): the scoped tests are pure and need no
+  # host time/env/file access. If a future scoped test legitimately needs it,
+  # add `-Zmiri-disable-isolation` here with a justification — never silently.
+  MIRIFLAGS: "-Zmiri-strict-provenance"
+
+jobs:
+  miri:
+    name: Miri soundness (pure core engine)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        # step-security/harden-runner@v2.19.4
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Install nightly Rust toolchain (+ miri)
+        # dtolnay/rust-toolchain @master commit (channel selected via toolchain:)
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: nightly
+          components: miri, rust-src
+
+      - name: Cache cargo registry and target
+        # Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          key: miri
+
+      - name: Setup Miri
+        run: cargo +nightly miri setup
+
+      - name: Run Miri on the pure core engine tests
+        run: |
+          cargo +nightly miri test -p c0pl4nd-core \
+            --test vt_conformance \
+            --test grid_snapshot \
+            --test layout_actions \
+            --test drop_zones
