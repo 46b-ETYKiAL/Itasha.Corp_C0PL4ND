@@ -1730,4 +1730,410 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ======================================================================
+    // SECURITY / PRIVACY TESTS (W1TN3SS reporting-transport boundary)
+    // ----------------------------------------------------------------------
+    // These are mutation-grade: a wrong implementation (default-ON, a clearnet
+    // leak on the onion path, a best-effort fallback transmit on a malformed
+    // config, or an unsanitized payload at the transport hand-off) fails them.
+    // ======================================================================
+
+    // ---- 1. default-OFF: no transmit path is reachable without opt-in ----
+
+    #[test]
+    fn security_reporting_default_is_off_for_both_streams() {
+        // The privacy posture: the host's reporting config defaults to Off for
+        // BOTH streams. A mutant that flips a stream's default to AskEachTime or
+        // Always (an on-by-default mis-build that could phone home) fails here.
+        let mode = ReportingMode::default();
+        assert_eq!(
+            mode,
+            ReportingMode::Off,
+            "the reporting mode MUST default to Off (default-OFF posture)"
+        );
+        // The default mode permits NO transmission and NO auto-send.
+        assert!(
+            !ReportingMode::default().permits_reporting(),
+            "default Off must permit NO reporting at all"
+        );
+        assert!(
+            !ReportingMode::default().is_always(),
+            "default Off is never an auto-send (Always) mode"
+        );
+    }
+
+    #[test]
+    fn security_only_always_mode_permits_unprompted_autosend() {
+        // The auto-send-without-dialog path (`auto_send_spooled_crashes`) is the
+        // ONLY mode that may transmit without a per-event prompt — and ONLY when
+        // the stream is `Always`. Off and AskEachTime must NOT be auto-send.
+        // A mutant that widens `is_always` (e.g. matches AskEachTime too) fails.
+        assert!(
+            ReportingMode::Always.is_always(),
+            "Always is the auto-send mode"
+        );
+        assert!(
+            !ReportingMode::AskEachTime.is_always(),
+            "AskEachTime requires a per-event prompt — never unprompted auto-send"
+        );
+        assert!(!ReportingMode::Off.is_always(), "Off never auto-sends");
+        // Off is the only mode that forbids ALL reporting; the other two permit it.
+        assert!(!ReportingMode::Off.permits_reporting());
+        assert!(ReportingMode::AskEachTime.permits_reporting());
+        assert!(ReportingMode::Always.permits_reporting());
+    }
+
+    #[test]
+    fn security_default_constructed_dialog_reaches_no_transmit_path() {
+        // A default-constructed consent dialog (no config dir bound, no opt-in)
+        // is fully inert: nothing is presented, so `consent_and_send` — the ONLY
+        // method that calls `send_report` — short-circuits to None and never
+        // reaches a transport. A mutant that lets `consent_and_send` proceed past
+        // an absent `current` (e.g. drops the `?` early-return) fails here.
+        let mut st = CrashConsentState::default();
+        assert!(!st.has_pending(), "default dialog has nothing to send");
+        assert_eq!(
+            st.consent_and_send(),
+            None,
+            "with nothing pending, the send path is never entered (no transmit)"
+        );
+    }
+
+    // ---- 2. no clearnet leak on the onion/Tor path ----
+
+    #[test]
+    fn security_onion_path_never_carries_a_clearnet_endpoint() {
+        // When the Tor transport is selected, the resolved descriptor MUST be a
+        // `Tor { onion }` whose address is a `.onion` host — it can NEVER be a
+        // `Clearnet { endpoint }` carrying a clearnet host, even though a clearnet
+        // endpoint is ALSO configured. A mutant that returns the clearnet variant
+        // (or embeds the endpoint) on the onion path leaks the clearnet host.
+        let choice = choose_transport(
+            Some(VALID_V3_ONION),
+            Some("https://ingest.clearnet.example"),
+        );
+        match &choice {
+            TransportChoice::Tor { onion } => {
+                assert!(
+                    onion.ends_with(".onion"),
+                    "the onion-path endpoint MUST be a .onion host, never a clearnet URL: {onion:?}"
+                );
+                assert!(
+                    !onion.contains("clearnet")
+                        && !onion.starts_with("http://")
+                        && !onion.starts_with("https://"),
+                    "no clearnet URL/host may appear in the onion descriptor: {onion:?}"
+                );
+            }
+            other => panic!(
+                "a valid onion MUST select the Tor transport, never clearnet — got {other:?}"
+            ),
+        }
+        // The log class is the anonymous class, never a clearnet label.
+        assert_eq!(choice.class(), "tor");
+        assert_ne!(choice.class(), "clearnet");
+        assert_ne!(choice.class(), "clearnet-no-endpoint");
+    }
+
+    #[test]
+    fn security_onion_descriptor_is_byte_for_byte_the_configured_onion_no_url_wrap() {
+        // Defense against a mutant that wraps the onion in a clearnet URL
+        // (e.g. "https://<onion>/ingest") on the way to the transport. The Tor
+        // descriptor MUST be the bare onion host the user configured — no scheme,
+        // no path, no port suffix that could be a clearnet exit fingerprint.
+        let choice = choose_transport(Some(VALID_V3_ONION), None);
+        assert_eq!(
+            choice,
+            TransportChoice::Tor {
+                onion: VALID_V3_ONION.to_string()
+            },
+            "the Tor descriptor is the bare configured onion, not a wrapped clearnet URL"
+        );
+        if let TransportChoice::Tor { onion } = choice {
+            assert!(
+                !onion.contains("://"),
+                "no URL scheme may be present: {onion:?}"
+            );
+            assert!(
+                !onion.contains('/'),
+                "no path component may be present: {onion:?}"
+            );
+        }
+    }
+
+    // ---- 3. malformed / empty config never transmits (no best-effort fallback) ----
+
+    #[test]
+    fn security_fully_empty_config_resolves_to_no_transmit() {
+        // The empty config (no onion, no clearnet endpoint) MUST resolve to the
+        // do-nothing descriptor — `Clearnet { endpoint: None }` — which carries
+        // no host and therefore cannot transmit. A mutant that fabricates a
+        // default endpoint (a hardcoded phone-home URL) fails: the endpoint stays
+        // None.
+        let choice = choose_transport(None, None);
+        assert_eq!(
+            choice,
+            TransportChoice::Clearnet { endpoint: None },
+            "an empty config must resolve to the spool-only, no-transmit descriptor"
+        );
+        match choice {
+            TransportChoice::Clearnet { endpoint } => assert!(
+                endpoint.is_none(),
+                "no endpoint may be conjured for an empty config (no silent phone-home)"
+            ),
+            TransportChoice::Tor { .. } => {
+                panic!("an empty config must NEVER select the Tor (or any transmitting) path")
+            }
+        }
+    }
+
+    #[test]
+    fn security_malformed_onion_with_no_endpoint_never_transmits() {
+        // The dangerous case: a user TYPED an onion (so they expect anonymity)
+        // but it is malformed, and there is NO clearnet endpoint. The result MUST
+        // be the no-transmit descriptor — NOT a Tor transmit (the address is
+        // invalid) and NOT a best-effort clearnet fallback (there is no endpoint
+        // to fall back to). A mutant that treats a malformed onion as valid, or
+        // that fabricates a fallback endpoint, fails here.
+        for bad in [
+            "not-an-onion",
+            "short.onion",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCD.onion", // uppercase
+            &("a".repeat(55) + ".onion"),                                     // 55 != 56
+            &("a".repeat(57) + ".onion"),                                     // 57 != 56
+        ] {
+            let choice = choose_transport(Some(bad), None);
+            assert_eq!(
+                choice,
+                TransportChoice::Clearnet { endpoint: None },
+                "a malformed onion with no endpoint ({bad:?}) must resolve to NO transmit"
+            );
+            assert_eq!(
+                choice.class(),
+                "clearnet-no-endpoint",
+                "the no-transmit class must be reported (never a silent anonymity claim)"
+            );
+        }
+    }
+
+    #[test]
+    fn security_consented_send_with_empty_config_transmits_nothing() {
+        // End-to-end through the env-reading send seam: a CONSENTED send with
+        // BOTH env vars unset (the empty/default config) returns the structured
+        // refusal and transmits nothing. This is the strongest default-OFF claim:
+        // even WITH a valid consent token, an unconfigured build cannot phone
+        // home. A mutant that maps an empty config to a `Sent` (fake success) or
+        // to a transmit attempt fails here.
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let _ge = EnvGuard::unset(REPORT_ENDPOINT_ENV);
+        let _go = EnvGuard::unset(REPORT_ONION_ENV);
+        let report = build_crash_report("boom", "src/x.rs:1");
+        let token = ConsentToken::granted();
+        let outcome = send_report(&report, &token);
+        assert_eq!(
+            outcome,
+            ReportOutcome::RefusedNoEndpoint,
+            "an empty config + consent → structured refusal, never a transmit or fake Sent"
+        );
+        // The refusal is NOT a success and NOT a silent drop — it is the explicit
+        // retain-for-later outcome.
+        assert_ne!(
+            outcome,
+            ReportOutcome::Sent,
+            "an empty config must never report Sent"
+        );
+    }
+
+    #[test]
+    fn security_malformed_onion_env_with_no_endpoint_consented_send_refuses() {
+        // The same dangerous case as the selection test, but driven through the
+        // real env readers in `send_report`: a malformed onion env + no endpoint
+        // env + a consent token MUST still refuse (no Tor transmit on an invalid
+        // address, no clearnet fallback when no endpoint exists).
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let _ge = EnvGuard::unset(REPORT_ENDPOINT_ENV);
+        let _go = EnvGuard::set(REPORT_ONION_ENV, "not-a-valid-onion");
+        let report = build_crash_report("boom", "src/x.rs:1");
+        let token = ConsentToken::granted();
+        assert_eq!(
+            send_report(&report, &token),
+            ReportOutcome::RefusedNoEndpoint,
+            "a malformed onion env with no endpoint must refuse, never transmit"
+        );
+    }
+
+    // ---- 4. sanitization is applied on the transport boundary ----
+
+    #[test]
+    fn security_email_and_url_in_panic_are_scrubbed_before_any_transport() {
+        // `build_crash_report` runs the report through the SDK Sanitizer — the
+        // gate every report passes BEFORE preview/spool/transmit. A panic message
+        // that interpolated an email and a URL (the #1 free-text leak vector) MUST
+        // have those tokens scrubbed to the uniform <redacted> marker in the body
+        // that would reach the transport. A mutant that skips the sanitize call
+        // (returns the raw report) leaks the email/URL and fails here.
+        let report = build_crash_report(
+            "auth failed for alice@secret.example via https://internal.corp/login",
+            "src/auth.rs:7",
+        );
+        assert!(
+            !report.body.contains("alice@secret.example"),
+            "the email must be scrubbed before transport: {:?}",
+            report.body
+        );
+        assert!(
+            !report.body.contains("https://internal.corp"),
+            "the URL must be scrubbed before transport: {:?}",
+            report.body
+        );
+        assert!(
+            report.body.contains("<redacted>"),
+            "sensitive tokens collapse to the uniform <redacted> marker: {:?}",
+            report.body
+        );
+        // The structural panic SITE (the dedup signal, not PII) survives.
+        assert!(
+            report.body.contains("src/auth.rs:7"),
+            "the non-PII panic site survives sanitization: {:?}",
+            report.body
+        );
+    }
+
+    #[test]
+    fn security_sanitization_is_applied_at_capture_and_persists_through_the_spool() {
+        // The sanitized envelope is what reaches the transport: capture builds a
+        // sanitized report, the spool round-trips it unchanged, and the consent
+        // dialog's preview (which `consent_and_send` turns into the sent body)
+        // shows the ALREADY-scrubbed text. Assert a bare IP embedded in the panic
+        // is gone in the spooled+previewed envelope — proving the scrub is at the
+        // boundary, not merely cosmetic at the preview layer. A mutant that drops
+        // the sanitize call at capture leaks the IP and fails here.
+        let dir = report_scratch_dir("sec-sanitize-boundary");
+        let spool = open_spool_in(&dir).expect("open spool");
+        let report = build_crash_report(
+            "connect failed to host 203.0.113.42 refused",
+            "src/net.rs:9",
+        );
+        // Already scrubbed at capture (build) time.
+        assert!(
+            !report.body.contains("203.0.113.42"),
+            "the bare IP is scrubbed at capture: {:?}",
+            report.body
+        );
+        let path = spool.enqueue(&report).expect("enqueue");
+        let loaded = spool.load(&path).expect("load");
+        assert!(
+            !loaded.body.contains("203.0.113.42"),
+            "the scrubbed body persists through the spool to the transport boundary: {:?}",
+            loaded.body
+        );
+        assert!(
+            loaded.body.contains("<redacted>"),
+            "the IP collapsed to <redacted>"
+        );
+        // The preview the user/transport sees is the scrubbed text.
+        let preview = preview_text(&loaded);
+        assert!(
+            !preview.contains("203.0.113.42"),
+            "the preview presented before send is already scrubbed: {preview:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn security_user_redactions_in_preview_are_what_reach_the_transport() {
+        // The send seam (`consent_and_send`) rebuilds the report from the EDITED
+        // preview text via `edited_report_from_preview_text`. A span the user
+        // redacts in the preview BODY MUST be what flows to `send_report` — the
+        // original (pre-edit) text must NOT survive. A mutant that ignores the
+        // user's edits and sends the original body re-introduces what the user
+        // chose to strip.
+        let original = build_crash_report("boom in widget", "src/x.rs:1");
+        let preview = preview_text(&original);
+        // The capture-time body is "panic: boom in widget (at src/x.rs:1)".
+        // The user redacts the "widget" span inside the BODY (before the metadata
+        // footer) — this is the surface `edited_report_from_preview_text` reads.
+        assert!(
+            preview.contains("widget"),
+            "the body word is present pre-edit: {preview:?}"
+        );
+        let edited_text = preview.replace("widget", "[user-redacted]");
+        let edited = edited_report_from_preview_text(&edited_text, &original);
+        assert!(
+            edited.body.contains("[user-redacted]"),
+            "the user's edited body is what reaches the transport: {:?}",
+            edited.body
+        );
+        assert!(
+            !edited.body.contains("widget"),
+            "the original span the user redacted must NOT survive into the sent body: {:?}",
+            edited.body
+        );
+        // The metadata footer is never re-injected into the sent body.
+        assert!(
+            !edited.body.contains("--- metadata ---"),
+            "the metadata footer must not leak into the transmitted body: {:?}",
+            edited.body
+        );
+        // Stream + metadata are preserved (the edit only redacts the body).
+        assert_eq!(edited.stream, Stream::CrashReports);
+        assert_eq!(edited.metadata, original.metadata);
+    }
+
+    #[test]
+    fn security_finding_bare_ip_with_port_suffix_survives_sdk_sanitizer() {
+        // FINDING (SDK sanitization gap, NOT a c0pl4nd bug): the SDK's free-text
+        // redactor detects a BARE IPv4 (e.g. `203.0.113.42` → <redacted>) but a
+        // panic embedding `IP:PORT` (the common Rust networking-panic shape, e.g.
+        // a `connect to 203.0.113.42:443 refused`) leaks the IP — the `:443`
+        // suffix defeats the redactor's octet-split (`is_ipv4` sees a 4th "octet"
+        // of `42:443` and rejects the whole token, so it is kept verbatim).
+        //
+        // This test PINS the current behaviour so a future SDK bump that closes
+        // the gap is noticed (the assert flips and the test is updated). It does
+        // NOT assert a c0pl4nd defect — the fix belongs in the SDK redactor,
+        // which is out of this crate's scope. A bare IP IS scrubbed (proven by
+        // `security_sanitization_is_applied_at_capture_and_persists_through_the_spool`).
+        let bare = build_crash_report("connect failed to host 203.0.113.42 refused", "src/n.rs:1");
+        assert!(
+            !bare.body.contains("203.0.113.42"),
+            "a BARE IP is scrubbed by the SDK: {:?}",
+            bare.body
+        );
+        let with_port =
+            build_crash_report("connect failed to 203.0.113.42:443 refused", "src/n.rs:1");
+        // Current SDK behaviour: the IP:PORT token survives. Documented gap.
+        assert!(
+            with_port.body.contains("203.0.113.42"),
+            "current SDK behaviour: an IP:PORT token leaks (documented gap, fix is SDK-side): {:?}",
+            with_port.body
+        );
+    }
+
+    #[test]
+    fn security_metadata_values_are_sanitized_before_transport() {
+        // The Sanitizer scrubs metadata VALUES too (not just the body). A panic
+        // captured with metadata holding an absolute path / secret must have that
+        // value scrubbed in the envelope. We drive a report whose metadata value
+        // carries an email through the SDK sanitizer the same way capture does.
+        let raw = Report::crash("panic: boom (at src/x.rs:1)")
+            .with_metadata("contact", "ops@secret.example")
+            .with_metadata("app_version", env!("CARGO_PKG_VERSION"));
+        let sanitized = Sanitizer::new().sanitize(raw);
+        let contact = sanitized
+            .metadata
+            .iter()
+            .find(|(k, _)| k == "contact")
+            .map(|(_, v)| v.as_str())
+            .expect("the contact metadata key survives");
+        assert!(
+            !contact.contains("ops@secret.example"),
+            "a sensitive metadata VALUE must be scrubbed before transport: {contact:?}"
+        );
+        assert!(
+            contact.contains("<redacted>"),
+            "the scrubbed metadata value collapses to <redacted>: {contact:?}"
+        );
+    }
 }
