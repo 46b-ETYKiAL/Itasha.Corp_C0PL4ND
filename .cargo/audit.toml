@@ -28,4 +28,22 @@ ignore = [
   #     DELETE this ignore. Until then, a working terminal outweighs
   #     clearing a non-exploitable unmaintained-dep notice.
   "RUSTSEC-2017-0008",
+  # RUSTSEC-2023-0071 — the `rsa` crate's Marvin Attack timing side-channel.
+  #
+  #   Why accepted:
+  #     * NO PATCH IS AVAILABLE upstream (the advisory states a constant-time
+  #       implementation is still in progress — there is no fixed version to
+  #       bump to).
+  #     * `rsa` is a TRANSITIVE dependency that enters the tree ONLY through the
+  #       Arti Tor directory-crypto stack, pulled by the opt-in
+  #       `itasha-report-transport-tor` anonymous-transport crate (the onion
+  #       transport is OFF by default). The RSA operations are Tor's own
+  #       directory/handshake crypto operated by Arti, not C0PL4ND-supplied
+  #       keys, and the attack requires an adversary to observe RSA-operation
+  #       timing over the network.
+  #
+  #   Re-evaluation trigger:
+  #     Drop this ignore once `rsa` ships a constant-time release AND Arti
+  #     adopts it (bump arti-client / the transport crate accordingly).
+  "RUSTSEC-2023-0071",
 ]

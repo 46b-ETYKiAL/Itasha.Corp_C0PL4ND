@@ -10,4 +10,19 @@
 # open Windows ConPTY regression https://github.com/wezterm/wezterm/issues/6783
 # (0.9.0 is the latest crates.io release). Re-evaluate and remove this entry
 # when portable-pty > 0.9.0 ships the fix. See .github/scorecard-notes.md.
-ignore = ["RUSTSEC-2017-0008"]
+#
+# RUSTSEC-2023-0071: `rsa` Marvin-Attack timing side-channel. NO PATCH AVAILABLE
+# upstream. Transitive via the Arti Tor directory-crypto stack, pulled ONLY by
+# the opt-in `itasha-report-transport-tor` anonymous transport (OFF by default).
+# Mirrors the deny.toml ignore. Drop when `rsa` ships a constant-time release
+# and Arti adopts it.
+# RUSTSEC-2024-0436 / RUSTSEC-2026-0173: `paste` / `proc-macro-error2` are
+# UNMAINTAINED build-time proc-macro helpers (compile-time only, not runtime
+# attack surface) entering transitively via the Arti stack / the W1TN3SS SDK's
+# `age` E2E stack. Mirrors the deny.toml ignores.
+ignore = [
+    "RUSTSEC-2017-0008",
+    "RUSTSEC-2023-0071",
+    "RUSTSEC-2024-0436",
+    "RUSTSEC-2026-0173",
+]

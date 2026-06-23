@@ -22,7 +22,32 @@ yanked = "deny"
 # compile time). `cargo audit` already classifies it as an allowed warning; this
 # mirrors that accepted-risk posture for `cargo deny`. Re-evaluate and drop this
 # ignore when `age` / `i18n-embed-fl` migrate off `proc-macro-error2`.
-ignore = ["RUSTSEC-2017-0008", "RUSTSEC-2026-0173"]
+#
+# RUSTSEC-2024-0436: `paste` is UNMAINTAINED (informational advisory, NOT an
+# exploitable vulnerability). It is a BUILD-TIME proc-macro helper pulled
+# transitively by the Arti Tor stack (`paste` <- `tor-error` <- arti-client),
+# which enters the tree ONLY via the opt-in `itasha-report-transport-tor`
+# anonymous-transport crate. proc-macros run at compile time only and never
+# enter the shipped binary's runtime attack surface. There is no maintained
+# drop-in replacement upstream Arti has migrated to yet. Re-evaluate and drop
+# this ignore when the Arti `tor-error` line migrates off `paste`.
+#
+# RUSTSEC-2023-0071: `rsa` Marvin Attack — a timing side-channel in the `rsa`
+# crate. NO PATCH IS AVAILABLE upstream (the advisory itself states a
+# constant-time implementation is still in progress). It enters the tree ONLY
+# transitively through the Arti Tor directory-crypto stack pulled by the opt-in
+# `itasha-report-transport-tor` crate. The attack requires an adversary to
+# observe RSA-operation timing over the network; in the W1TN3SS onion-transport
+# context the RSA usage is in Tor's own directory/handshake crypto (operated by
+# Arti, not by C0PL4ND-supplied keys), and the option is OFF by default. There
+# is no available fix to bump to. Re-evaluate and drop this ignore when `rsa`
+# ships a constant-time release and Arti adopts it.
+ignore = [
+    "RUSTSEC-2017-0008",
+    "RUSTSEC-2026-0173",
+    "RUSTSEC-2024-0436",
+    "RUSTSEC-2023-0071",
+]
 
 [licenses]
 version = 2
@@ -51,6 +76,12 @@ allow = [
     # bundled fonts is compliant. The fonts ship as data; no code is OFL/UFL.
     "OFL-1.1",
     "Ubuntu-font-1.0",
+    # The Unlicense (public-domain dedication; OSI-approved + FSF Free/Libre).
+    # Entered the tree transitively via `async_executors` <- `tor-rtcompat` <-
+    # arti-client (pulled only by the opt-in `itasha-report-transport-tor`
+    # anonymous Tor transport). Public-domain dedication is maximally permissive
+    # and compatible with shipping; no copyleft obligation.
+    "Unlicense",
 ]
 confidence-threshold = 0.8
 
@@ -63,5 +94,6 @@ wildcards = "warn"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# In-house W1TN3SS opt-in crash/issue reporting SDK (first-party, pinned by tag).
+# In-house W1TN3SS opt-in crash/issue reporting SDK + opt-in Tor transport
+# (first-party, pinned by exact commit rev).
 allow-git = ["https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-W1TN3SS.git"]
