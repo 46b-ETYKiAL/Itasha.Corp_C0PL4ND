@@ -721,6 +721,20 @@ impl Config {
     }
 
     /// Parse a TOML string into a `Config`, surfacing a readable error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::path::Path;
+    /// use c0pl4nd_core::config::Config;
+    ///
+    /// // An empty document yields the default config (every field optional).
+    /// let cfg = Config::from_toml("", Path::new("config.toml")).unwrap();
+    /// assert!(cfg.effective_ui_scale() > 0.0);
+    ///
+    /// // Malformed TOML is surfaced as an error, never a silent default.
+    /// assert!(Config::from_toml("not valid =", Path::new("config.toml")).is_err());
+    /// ```
     pub fn from_toml(src: &str, path: &Path) -> Result<Config, ConfigError> {
         let mut cfg: Config = toml::from_str(src).map_err(|e| ConfigError::Parse {
             path: path.to_path_buf(),

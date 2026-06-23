@@ -49,6 +49,19 @@ pub struct Theme {
 }
 
 /// Parse `#RRGGBB` into an `(r, g, b)` triple.
+///
+/// # Examples
+///
+/// ```
+/// use c0pl4nd_core::theme::parse_hex;
+///
+/// assert_eq!(parse_hex("#ff0090").unwrap(), (255, 0, 144));
+/// // The leading '#' is optional and surrounding whitespace is trimmed.
+/// assert_eq!(parse_hex("  00ff90 ").unwrap(), (0, 255, 144));
+/// // Wrong length or non-hex digits are rejected.
+/// assert!(parse_hex("#fff").is_err());
+/// assert!(parse_hex("#gggggg").is_err());
+/// ```
 pub fn parse_hex(s: &str) -> Result<(u8, u8, u8), ThemeError> {
     let h = s.trim().trim_start_matches('#');
     if h.len() != 6 {
@@ -115,6 +128,17 @@ impl Theme {
     }
 
     /// Resolve an ANSI index (0-15) to an `(r,g,b)` triple.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::theme::{Theme, parse_hex};
+    ///
+    /// let t = Theme::builtin_void();
+    /// // Index 0..8 read the `normal` row; 8..16 read the `bright` row.
+    /// assert_eq!(t.ansi(0), parse_hex(&t.normal.black).unwrap());
+    /// assert_eq!(t.ansi(9), parse_hex(&t.bright.red).unwrap());
+    /// ```
     pub fn ansi(&self, index: u8) -> (u8, u8, u8) {
         let row = if index < 8 {
             &self.normal
@@ -191,6 +215,17 @@ impl Theme {
 
     /// A hard-coded fallback used only when no theme file can be loaded —
     /// keeps the terminal usable even if the themes dir is missing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::theme::Theme;
+    ///
+    /// // The builtin is always self-consistent (every colour parses, etc.).
+    /// let t = Theme::builtin_void();
+    /// assert!(t.validate().is_ok());
+    /// assert!(!t.name.is_empty());
+    /// ```
     pub fn builtin_void() -> Theme {
         let row = |k: &str| k.to_string();
         // Itasha.Corp — the house brand default, shared by every Itasha.Corp
