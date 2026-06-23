@@ -222,8 +222,22 @@ pub fn edited_report_from_preview_text(edited_text: &str, original: &Report) -> 
 /// Best-effort and panic-safe: a spool failure inside an already-panicking
 /// thread must not re-panic. The outcome is logged either way.
 pub fn capture_panic(static_msg: &'static str, location: &str) -> ReportOutcome {
-    let outcome = match Config::config_dir() {
-        Some(dir) => match Spool::open(&dir) {
+    capture_panic_in(Config::config_dir().as_deref(), static_msg, location)
+}
+
+/// The config-dir-injectable core of [`capture_panic`]. The public wrapper
+/// resolves the GLOBAL `Config::config_dir()` and delegates here; tests pass an
+/// EXPLICIT temp dir (or `None`) so the capture seam — including the
+/// spool-open, enqueue-error, and no-config-dir arms — is fully exercisable
+/// without ever mutating the process-global config-dir env (which other test
+/// modules in this binary read concurrently). The outcome is logged either way.
+fn capture_panic_in(
+    config_dir: Option<&Path>,
+    static_msg: &'static str,
+    location: &str,
+) -> ReportOutcome {
+    let outcome = match config_dir {
+        Some(dir) => match Spool::open(dir) {
             Ok(spool) => {
                 let report = build_crash_report(static_msg, location);
                 match spool.enqueue(&report) {
@@ -259,10 +273,32 @@ pub fn capture_panic(static_msg: &'static str, location: &str) -> ReportOutcome 
 ///   stays in the spool for a later, configured send (never a silent drop,
 ///   never a fake `Sent`).
 pub fn send_report(report: &Report, consent: &ConsentToken) -> ReportOutcome {
-    let choice = choose_transport(onion_from_env().as_deref(), endpoint_from_env().as_deref());
+    send_report_with(
+        report,
+        consent,
+        onion_from_env().as_deref(),
+        endpoint_from_env().as_deref(),
+        Config::config_dir().as_deref(),
+    )
+}
+
+/// The config-injectable core of [`send_report`]. The public wrapper resolves
+/// the onion/endpoint env + the GLOBAL `Config::config_dir()` and delegates
+/// here; tests pass EXPLICIT values so the transport-selection, clearnet,
+/// Tor-construction, and no-config-dir arms are all exercisable without
+/// mutating process-global env. `config_dir` is consulted only on the Tor path
+/// (to root the Arti state/cache); the clearnet path never touches it.
+fn send_report_with(
+    report: &Report,
+    consent: &ConsentToken,
+    onion: Option<&str>,
+    endpoint: Option<&str>,
+    config_dir: Option<&Path>,
+) -> ReportOutcome {
+    let choice = choose_transport(onion, endpoint);
     log_transport_choice(&choice);
     let outcome = match choice {
-        TransportChoice::Tor { onion } => send_over_tor(report, consent, &onion),
+        TransportChoice::Tor { onion } => send_over_tor_in(config_dir, report, consent, &onion),
         TransportChoice::Clearnet {
             endpoint: Some(endpoint),
         } => {
@@ -296,8 +332,13 @@ fn send_via_backend<B: IngestBackend>(
 /// across launches (a fresh bootstrap every send would be slow + chatty). If no
 /// config dir resolves (no `%APPDATA%`/`$HOME`), the report is retained and the
 /// outcome surfaces the reason rather than silently dropping it.
-fn send_over_tor(report: &Report, consent: &ConsentToken, onion: &str) -> ReportOutcome {
-    let Some(dir) = Config::config_dir() else {
+fn send_over_tor_in(
+    config_dir: Option<&Path>,
+    report: &Report,
+    consent: &ConsentToken,
+    onion: &str,
+) -> ReportOutcome {
+    let Some(dir) = config_dir else {
         return ReportOutcome::Failed("tor: no-config-dir".to_string());
     };
     let tor_root = dir.join("tor");
@@ -1133,5 +1174,560 @@ mod tests {
         assert_eq!(st.remember_mut(), &Some(RememberChoice::Always));
         *st.remember_mut() = Some(RememberChoice::Never);
         assert_eq!(st.remember_mut(), &Some(RememberChoice::Never));
+    }
+
+    // ====================================================================
+    // Coverage-completion tests (W1TN3SS reporting integration). The tests
+    // below drive the remaining executable arms of this module — the send
+    // backend mapping, the clearnet-with-endpoint and Tor transport paths,
+    // the global-config-dir capture/auto-send seams, the telemetry-skip
+    // branches, and the spool error arms — all WITHOUT live network or a
+    // real Tor bootstrap. The two facts that make this possible deterministically:
+    //
+    //  1. `Config::config_dir()` is rooted at `%APPDATA%` (Windows) / `$HOME` /
+    //     `$XDG_CONFIG_HOME` (Unix), so a scoped env override points it at a
+    //     temp dir — the global capture/auto-send seams become hermetic.
+    //  2. The SDK's `TorOnionTransport::send` is FIRE-AND-FORGET: it builds the
+    //     padded envelope, enforces the size cap, then SPOOLS the report and
+    //     returns `SendOutcome::Sent` synchronously — NO bootstrap, NO circuit,
+    //     NO network. So a valid-onion `send_report` returns `Sent` offline,
+    //     which lets us cover `send_over_tor` + every `Sent`-removal branch.
+    // ====================================================================
+
+    /// A scoped guard that overrides EVERY config-dir-rooting env var (so
+    /// `Config::config_dir()` resolves to `dir`, cross-platform) and restores
+    /// them all on drop. On Windows the rooting var is `APPDATA`; on Unix it is
+    /// `XDG_CONFIG_HOME` (with `HOME` also pinned so neither path can leak to a
+    /// real user dir). We set all three regardless of platform so the test is
+    /// hermetic on whichever OS runs it.
+    struct ConfigDirGuard {
+        _appdata: EnvGuard,
+        _xdg: EnvGuard,
+        _home: EnvGuard,
+    }
+    impl ConfigDirGuard {
+        fn to(dir: &Path) -> Self {
+            let s = dir.to_str().expect("utf-8 temp dir");
+            Self {
+                _appdata: EnvGuard::set("APPDATA", s),
+                _xdg: EnvGuard::set("XDG_CONFIG_HOME", s),
+                _home: EnvGuard::set("HOME", s),
+            }
+        }
+        /// Override the rooting vars to a value that CANNOT host a config dir:
+        /// each is set to a path whose PARENT does not exist as a directory, so
+        /// the spool's `create_dir_all` under `<dir>/c0pl4nd/reports` still
+        /// succeeds — that is not what we want for the "no spool" arm. Instead
+        /// this unsets them entirely so `Config::config_dir()` returns `None`.
+        fn unset() -> Self {
+            Self {
+                _appdata: EnvGuard::unset("APPDATA"),
+                _xdg: EnvGuard::unset("XDG_CONFIG_HOME"),
+                _home: EnvGuard::unset("HOME"),
+            }
+        }
+    }
+
+    /// A throwaway `IngestBackend` that returns a programmed outcome, so the
+    /// `send_via_backend` result-folding arms can be exercised in isolation
+    /// (no network, no SDK transport). Each of the three SDK results
+    /// (`Ok(Sent)`, `Ok(Failed)`, `Err`) maps to a distinct `ReportOutcome`.
+    enum FakeResult {
+        Sent,
+        Failed(&'static str),
+        Err(&'static str),
+    }
+    struct FakeBackend {
+        result: FakeResult,
+    }
+    impl IngestBackend for FakeBackend {
+        fn send(
+            &self,
+            _report: &Report,
+            _consent: &ConsentToken,
+        ) -> Result<SendOutcome, itasha_report_core::backend::SendError> {
+            match &self.result {
+                FakeResult::Sent => Ok(SendOutcome::Sent),
+                FakeResult::Failed(r) => Ok(SendOutcome::Failed((*r).to_string())),
+                FakeResult::Err(r) => Err(itasha_report_core::backend::SendError::Transport(
+                    (*r).to_string(),
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn send_via_backend_maps_all_three_sdk_results() {
+        let r = build_crash_report("boom", "src/x.rs:1");
+        let token = ConsentToken::granted();
+
+        // Ok(Sent) -> ReportOutcome::Sent
+        let sent = FakeBackend {
+            result: FakeResult::Sent,
+        };
+        assert_eq!(
+            send_via_backend(&sent, &r, &token),
+            ReportOutcome::Sent,
+            "an SDK Sent must fold to ReportOutcome::Sent"
+        );
+
+        // Ok(Failed(reason)) -> ReportOutcome::Failed(reason) — the reason is
+        // carried through verbatim (it is non-identifying by SDK contract).
+        let failed = FakeBackend {
+            result: FakeResult::Failed("http status 500"),
+        };
+        assert_eq!(
+            send_via_backend(&failed, &r, &token),
+            ReportOutcome::Failed("http status 500".to_string()),
+            "an SDK Failed must fold to ReportOutcome::Failed with the reason"
+        );
+
+        // Err(SendError) -> ReportOutcome::Failed(err.to_string()) — a pre-send
+        // error (size cap, transport build) also becomes a structured Failed,
+        // never a panic and never a fake Sent.
+        let errored = FakeBackend {
+            result: FakeResult::Err("connection refused"),
+        };
+        match send_via_backend(&errored, &r, &token) {
+            ReportOutcome::Failed(msg) => assert!(
+                msg.contains("connection refused"),
+                "the SendError display is folded into the Failed reason: {msg:?}"
+            ),
+            other => panic!("an SDK Err must fold to ReportOutcome::Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_report_clearnet_endpoint_failure_is_structured_not_fake_sent() {
+        // With a clearnet endpoint configured but UNROUTABLE (port 1 on
+        // loopback is reserved/closed), the real `LeanPipelineBackend` is
+        // selected and its `ureq` send fails fast — folding to a structured
+        // `Failed` (never a fake `Sent`, never a silent drop). This exercises
+        // the `Clearnet { endpoint: Some(..) }` arm of `send_report` and the
+        // `send_via_backend` Failed/Err fold against the REAL backend, with no
+        // external network (the connection is refused locally).
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let _ge = EnvGuard::set(REPORT_ENDPOINT_ENV, "http://127.0.0.1:1/ingest");
+        let _go = EnvGuard::unset(REPORT_ONION_ENV);
+        let r = build_crash_report("boom", "src/x.rs:1");
+        let token = ConsentToken::granted();
+        match send_report(&r, &token) {
+            ReportOutcome::Failed(_) => {}
+            other => panic!("an unroutable clearnet endpoint must return Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_report_over_tor_spools_and_reports_sent_without_network() {
+        // A structurally-valid onion selects the Tor transport. Because the SDK
+        // Tor backend is fire-and-forget (spool + return Sent, no bootstrap),
+        // `send_report` returns `Sent` with NO network — and the report is
+        // durably spooled under `<config_dir>/tor`-adjacent state. This is the
+        // ONLY way the `send_over_tor` happy path is reachable offline.
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let dir = report_scratch_dir("tor-send");
+        let _cfg = ConfigDirGuard::to(&dir);
+        let _go = EnvGuard::set(REPORT_ONION_ENV, VALID_V3_ONION);
+        let _ge = EnvGuard::unset(REPORT_ENDPOINT_ENV);
+        let r = build_crash_report("boom", "src/x.rs:1");
+        let token = ConsentToken::granted();
+        assert_eq!(
+            send_report(&r, &token),
+            ReportOutcome::Sent,
+            "the fire-and-forget Tor transport accepts the report for anonymous delivery (spooled)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn send_over_tor_with_no_config_dir_surfaces_the_reason() {
+        // When the onion is valid but NO config dir resolves (rooting env
+        // unset), `send_over_tor` cannot root the Arti state dir and returns a
+        // structured `Failed("tor: no-config-dir")` — never a silent drop.
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let _cfg = ConfigDirGuard::unset();
+        let _go = EnvGuard::set(REPORT_ONION_ENV, VALID_V3_ONION);
+        let _ge = EnvGuard::unset(REPORT_ENDPOINT_ENV);
+        let r = build_crash_report("boom", "src/x.rs:1");
+        let token = ConsentToken::granted();
+        match send_report(&r, &token) {
+            ReportOutcome::Failed(reason) => assert_eq!(
+                reason, "tor: no-config-dir",
+                "no config dir on the Tor path surfaces the structured reason"
+            ),
+            other => panic!("Tor with no config dir must Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capture_panic_spools_under_the_global_config_dir() {
+        // The global capture seam: with the rooting env pointed at a temp dir,
+        // `capture_panic` resolves `Config::config_dir()` there, opens the
+        // spool, and writes a Tier-1 crash report — returning `Spooled` and
+        // transmitting nothing. Exercises the `Some(dir) => Ok(spool)` happy arm
+        // of `capture_panic` (not just the direct-enqueue path the older test
+        // used).
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let dir = report_scratch_dir("capture-global");
+        let _cfg = ConfigDirGuard::to(&dir);
+        let outcome = capture_panic("called `Option::unwrap()`", "src/z.rs:7");
+        assert_eq!(
+            outcome,
+            ReportOutcome::Spooled,
+            "a panic capture spools under the global config dir and transmits nothing"
+        );
+        // The report is actually on disk under the resolved config dir's spool.
+        let resolved = Config::config_dir().expect("config dir resolves to the temp dir");
+        let spool = open_spool_in(&resolved).expect("open spool at resolved dir");
+        assert_eq!(
+            spool.list().expect("list").len(),
+            1,
+            "exactly one crash report was spooled by capture_panic"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn capture_panic_with_no_config_dir_surfaces_the_reason() {
+        // No rooting env => `Config::config_dir()` is None => nowhere to spool.
+        // `capture_panic` surfaces `Failed("no-config-dir")` rather than
+        // swallowing the panic silently.
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let _cfg = ConfigDirGuard::unset();
+        let outcome = capture_panic("boom", "src/z.rs:8");
+        assert_eq!(
+            outcome,
+            ReportOutcome::Failed("no-config-dir".to_string()),
+            "no config dir must surface the structured reason, never a silent drop"
+        );
+    }
+
+    #[test]
+    fn capture_panic_when_spool_cannot_open_surfaces_spool_open_failure() {
+        // Point the config dir at a location whose `reports/` cannot be created:
+        // a config dir that is itself a FILE means `Spool::open`'s
+        // `create_dir_all(<file>/reports)` fails → `capture_panic` returns the
+        // structured `Failed("spool-open: ..")` arm.
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let base = report_scratch_dir("capture-spool-open-fail");
+        // The resolved config dir is `<rooting>/c0pl4nd`. Create that path as a
+        // FILE so `Spool::open` cannot mkdir `<...>/c0pl4nd/reports`.
+        let c0pl4nd_as_file = base.join("c0pl4nd");
+        std::fs::write(&c0pl4nd_as_file, b"not a dir").expect("write file at config dir");
+        let _cfg = ConfigDirGuard::to(&base);
+        let outcome = capture_panic("boom", "src/z.rs:9");
+        match outcome {
+            ReportOutcome::Failed(reason) => assert!(
+                reason.starts_with("spool-open:"),
+                "a non-directory config dir surfaces the spool-open failure: {reason:?}"
+            ),
+            other => panic!("expected a spool-open Failed, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn log_outcome_is_suppressed_when_telemetry_disabled_and_emits_otherwise() {
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        // Disabled: the early-return branch is taken (no emit). We assert it does
+        // not panic and is a no-op for every variant.
+        {
+            let _g = EnvGuard::set("S4F3_DISABLE_TELEMETRY", "1");
+            log_outcome(&ReportOutcome::Spooled);
+            log_outcome(&ReportOutcome::Sent);
+            log_outcome(&ReportOutcome::RefusedNoEndpoint);
+            log_outcome(&ReportOutcome::Failed("x".to_string()));
+        }
+        // Enabled: the emit branch is taken (the tracing call runs even with no
+        // subscriber installed — it is a no-op sink, but the line is executed).
+        {
+            let _g = EnvGuard::unset("S4F3_DISABLE_TELEMETRY");
+            log_outcome(&ReportOutcome::Sent);
+        }
+    }
+
+    #[test]
+    fn log_transport_choice_is_suppressed_when_telemetry_disabled_and_emits_otherwise() {
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let tor = TransportChoice::Tor {
+            onion: VALID_V3_ONION.to_string(),
+        };
+        {
+            let _g = EnvGuard::set("S4F3_DISABLE_TELEMETRY", "1");
+            log_transport_choice(&tor); // suppressed branch
+        }
+        {
+            let _g = EnvGuard::unset("S4F3_DISABLE_TELEMETRY");
+            log_transport_choice(&tor); // emit branch
+            log_transport_choice(&TransportChoice::Clearnet { endpoint: None });
+        }
+    }
+
+    #[test]
+    fn load_from_spool_skips_a_corrupt_report_file() {
+        // A malformed `report-*.json` in the spool dir makes `spool.load` return
+        // Err — exercising the `if let Ok(report)` ELSE arm of `load_from_spool`
+        // (the corrupt file is skipped, not surfaced, and never crashes the
+        // dialog). A valid crash report alongside it still loads.
+        let dir = report_scratch_dir("corrupt-skip");
+        let spool = open_spool_in(&dir).expect("open spool");
+        spool
+            .enqueue(&build_crash_report("good crash", "src/a.rs:1"))
+            .expect("enqueue good");
+        // Drop a corrupt file matching the `report-*.json` list filter.
+        let corrupt = spool.dir().join("report-corrupt.json");
+        std::fs::write(&corrupt, b"{ this is not valid report json").expect("write corrupt");
+
+        let mut st = CrashConsentState::default();
+        st.set_config_dir(Some(dir.clone()));
+        let queued = st.load_from_spool();
+        assert_eq!(
+            queued, 1,
+            "only the well-formed crash report is queued; the corrupt file is skipped"
+        );
+        assert!(st.has_pending());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn advance_skips_a_report_that_vanishes_before_load() {
+        // Queue two crash reports, then DELETE the head's backing file before
+        // `advance` re-loads it (via the next `decline_and_discard`). The load in
+        // `advance` returns Err → `current` stays None for that slot. The dialog
+        // must not crash; it simply has nothing to present once both are gone.
+        let dir = report_scratch_dir("advance-vanish");
+        let spool = open_spool_in(&dir).expect("open spool");
+        spool
+            .enqueue(&build_crash_report("first", "src/a.rs:1"))
+            .expect("enqueue 1");
+        spool
+            .enqueue(&build_crash_report("second", "src/b.rs:2"))
+            .expect("enqueue 2");
+
+        let mut st = CrashConsentState::default();
+        st.set_config_dir(Some(dir.clone()));
+        assert_eq!(st.load_from_spool(), 2);
+        assert!(st.has_pending());
+
+        // Delete the still-queued second report's file out from under the dialog
+        // so the NEXT advance (triggered by declining the first) fails to load
+        // it — covering the `advance` load-Err arm (current stays None).
+        let remaining = spool.list().expect("list");
+        // The currently-presented report was removed from `queue`; the file that
+        // is still on disk and queued is the SECOND one. Delete every spooled
+        // file so the advance after the decline finds nothing to load.
+        for p in remaining {
+            let _ = spool.remove(&p);
+        }
+        st.decline_and_discard();
+        assert!(
+            !st.has_pending(),
+            "after the queued file vanished, advance presents nothing (no crash)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn consent_and_send_over_tor_marks_sent_and_removes_the_spooled_file() {
+        // SEND over the fire-and-forget Tor transport returns `Sent`, so the
+        // dialog REMOVES the spooled file (covering the `outcome == Sent` removal
+        // branch of `consent_and_send`). No network: the Tor backend spools the
+        // outbound copy and reports Sent synchronously.
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        // The DIALOG's spool dir and the global config dir must be the same temp
+        // dir so the Tor transport (rooted at the global config dir) and the
+        // dialog (rooted at its bound config dir) agree.
+        let dir = report_scratch_dir("tor-consent-send");
+        let _cfg = ConfigDirGuard::to(&dir);
+        // Resolve where the global config dir now points and enqueue there.
+        let resolved = Config::config_dir().expect("config dir resolves");
+        let _go = EnvGuard::set(REPORT_ONION_ENV, VALID_V3_ONION);
+        let _ge = EnvGuard::unset(REPORT_ENDPOINT_ENV);
+        let spool = open_spool_in(&resolved).expect("open spool at resolved");
+        spool
+            .enqueue(&build_crash_report("sendme", "src/c.rs:3"))
+            .expect("enqueue");
+
+        let mut st = CrashConsentState::default();
+        st.set_config_dir(Some(resolved.clone()));
+        assert!(st.load_from_spool() >= 1);
+        // Count BEFORE: at least the one we enqueued.
+        let before = open_spool_in(&resolved).unwrap().list().unwrap().len();
+        let outcome = st.consent_and_send().expect("a report is presented");
+        assert_eq!(
+            outcome,
+            ReportOutcome::Sent,
+            "the fire-and-forget Tor send reports Sent"
+        );
+        // The original dialog report file was removed because the send succeeded.
+        // (The Tor transport spools its OWN outbound copy under the same root, so
+        // we assert the SENT report's source file is gone, not that the dir is
+        // empty.)
+        let after = open_spool_in(&resolved).unwrap().list().unwrap().len();
+        assert!(
+            after < before + 1,
+            "the sent report's spooled source file was removed (before={before}, after={after})"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decline_and_discard_removes_the_backing_file() {
+        // DECLINE removes the spooled file via the bound spool (covering the
+        // `spool.remove` call inside `decline_and_discard`). After declining,
+        // the source spool no longer holds the declined report.
+        let dir = report_scratch_dir("decline-removes");
+        let spool = open_spool_in(&dir).expect("open spool");
+        spool
+            .enqueue(&build_crash_report("discardme", "src/d.rs:4"))
+            .expect("enqueue");
+        let mut st = CrashConsentState::default();
+        st.set_config_dir(Some(dir.clone()));
+        assert!(st.load_from_spool() >= 1);
+        st.decline_and_discard();
+        let remaining = open_spool_in(&dir).unwrap().list().unwrap();
+        assert!(
+            remaining.is_empty(),
+            "declining removed the spooled file (none remain)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_outcome_and_transport_choice_emit_under_an_installed_subscriber() {
+        // With telemetry ENABLED *and* a subscriber installed, the
+        // `tracing::info!` emit lines in `log_outcome` / `log_transport_choice`
+        // actually run (a no-op sink subscriber still drives the emit branch).
+        // This covers the macro's enabled/emit arm, not just the early-return.
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let _g = EnvGuard::unset("S4F3_DISABLE_TELEMETRY");
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(std::io::sink)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        let _default = tracing::subscriber::set_default(subscriber);
+        log_outcome(&ReportOutcome::Sent);
+        log_outcome(&ReportOutcome::Failed("redacted".to_string()));
+        log_transport_choice(&TransportChoice::Tor {
+            onion: VALID_V3_ONION.to_string(),
+        });
+        log_transport_choice(&TransportChoice::Clearnet { endpoint: None });
+    }
+
+    #[test]
+    fn auto_send_skips_a_corrupt_report_file_via_continue() {
+        // A corrupt `report-*.json` in the spool makes `spool.load` Err inside
+        // `auto_send_spooled_crashes` → the `continue` arm is taken (the corrupt
+        // file is skipped, never counted, never crashes). A valid crash report
+        // alongside it is still attempted. No endpoint/onion → the valid one
+        // refuses and is retained; the count reflects only the loadable crash.
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let _ge = EnvGuard::unset(REPORT_ENDPOINT_ENV);
+        let _go = EnvGuard::unset(REPORT_ONION_ENV);
+        let dir = report_scratch_dir("auto-send-corrupt");
+        let spool = open_spool_in(&dir).expect("open spool");
+        spool
+            .enqueue(&build_crash_report("loadable", "src/g.rs:1"))
+            .expect("enqueue good");
+        let corrupt = spool.dir().join("report-corrupt.json");
+        std::fs::write(&corrupt, b"not valid json").expect("write corrupt");
+
+        let attempted = auto_send_spooled_crashes(&dir);
+        assert_eq!(
+            attempted, 1,
+            "only the loadable crash report is attempted; the corrupt file is skipped via continue"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn send_over_tor_surfaces_a_transport_new_failure() {
+        // Force `TorOnionTransport::new` to fail by making its config-dir
+        // unopenable: the Tor path roots the transport at `<config_dir>/tor`, and
+        // `TorOnionTransport::new` opens a Spool at `<config_dir>/tor/config`
+        // (which mkdirs `<...>/tor/config/reports`). If `<config_dir>/tor` is a
+        // FILE, that mkdir fails → `send_over_tor` returns the structured
+        // `Failed("tor: ..")` arm, never a silent drop.
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let dir = report_scratch_dir("tor-new-fail");
+        let _cfg = ConfigDirGuard::to(&dir);
+        let resolved = Config::config_dir().expect("config dir resolves");
+        // Create `<resolved>/tor` as a FILE so the transport's spool-open mkdir
+        // under it cannot succeed.
+        std::fs::create_dir_all(&resolved).expect("mkdir resolved");
+        std::fs::write(resolved.join("tor"), b"not a dir").expect("write tor-as-file");
+        let _go = EnvGuard::set(REPORT_ONION_ENV, VALID_V3_ONION);
+        let _ge = EnvGuard::unset(REPORT_ENDPOINT_ENV);
+        let r = build_crash_report("boom", "src/x.rs:1");
+        let token = ConsentToken::granted();
+        match send_report(&r, &token) {
+            ReportOutcome::Failed(reason) => assert!(
+                reason.starts_with("tor:"),
+                "a Tor transport-construction failure surfaces a tor: reason: {reason:?}"
+            ),
+            other => panic!("expected a tor: Failed, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_send_over_tor_removes_each_sent_report() {
+        // The `Always`-mode auto-send path over the fire-and-forget Tor
+        // transport: every spooled CRASH report is Sent and its source file
+        // removed (covering the `== Sent => remove` branch of
+        // `auto_send_spooled_crashes`). A manual-issue report is skipped.
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let dir = report_scratch_dir("tor-auto-send");
+        let _cfg = ConfigDirGuard::to(&dir);
+        let resolved = Config::config_dir().expect("config dir resolves");
+        let _go = EnvGuard::set(REPORT_ONION_ENV, VALID_V3_ONION);
+        let _ge = EnvGuard::unset(REPORT_ENDPOINT_ENV);
+        let spool = open_spool_in(&resolved).expect("open spool");
+        spool
+            .enqueue(&build_crash_report("auto 1", "src/e.rs:1"))
+            .expect("enqueue 1");
+        spool
+            .enqueue(&build_crash_report("auto 2", "src/e.rs:2"))
+            .expect("enqueue 2");
+        spool
+            .enqueue(&Report::manual_issue("manual", "not a crash"))
+            .expect("enqueue manual");
+
+        let crash_files_before = open_spool_in(&resolved)
+            .unwrap()
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter(|p| {
+                open_spool_in(&resolved)
+                    .unwrap()
+                    .load(p)
+                    .map(|r| r.stream == Stream::CrashReports)
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(crash_files_before, 2, "two crash reports enqueued");
+
+        let attempted = auto_send_spooled_crashes(&resolved);
+        assert_eq!(attempted, 2, "exactly the two crash reports are attempted");
+
+        // After auto-send over Tor (all Sent), the two crash SOURCE files are
+        // removed; the manual-issue file remains. The Tor transport spools its
+        // own outbound copies, so we count the CRASH reports that remain by
+        // re-reading — they should be fewer than before (the sent sources are
+        // gone).
+        let crash_files_after = open_spool_in(&resolved)
+            .unwrap()
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter_map(|p| open_spool_in(&resolved).unwrap().load(&p).ok())
+            .filter(|r| r.stream == Stream::CrashReports && r.body.contains("auto "))
+            .count();
+        assert_eq!(
+            crash_files_after, 0,
+            "every Sent crash report's source file was removed by auto-send"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

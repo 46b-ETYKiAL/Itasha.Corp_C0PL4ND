@@ -66,3 +66,38 @@ jobs:
           name: coverage-lcov
           path: lcov.info
           if-no-files-found: ignore
+
+  # Per-file coverage gate for the W1TN3SS reporting INTEGRATION module
+  # (crates/app/src/reporting.rs). Distinct from the core gate above: the
+  # reporting glue lives in the `c0pl4nd` BIN (the app crate also holds the
+  # display-gated egui shell, deliberately excluded), so we gate the one file via
+  # scripts/coverage-reporting.sh (llvm-cov JSON + a per-file line-% floor). The
+  # job NAME is independent of the floor value so it cannot orphan a required
+  # status check; the enforced floor is REPORTING_COVERAGE_FLOOR below.
+  reporting-coverage:
+    name: W1TN3SS reporting-integration coverage
+    runs-on: ubuntu-latest
+    env:
+      REPORTING_COVERAGE_FLOOR: "95"
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v5
+
+      - name: Install Rust toolchain (+ llvm-tools)
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595 # v2.79.10
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Gate reporting-integration line coverage (>= 95%)
+        run: bash scripts/coverage-reporting.sh

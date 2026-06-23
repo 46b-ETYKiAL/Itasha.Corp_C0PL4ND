@@ -18,3 +18,6 @@ egui-*.png
 
 # cargo-mutants run output (transient local mutation-testing artifacts).
 mutants.out/
+
+# transient cargo-llvm-cov JSON emitted by scripts/coverage-reporting.sh
+reporting-cov.json
