@@ -11,6 +11,7 @@
 
 use std::time::Instant;
 
+use c0pl4nd_core::search::{find, SearchOptions};
 use c0pl4nd_core::term::osc::base64_encode;
 use c0pl4nd_core::Terminal;
 
@@ -202,4 +203,73 @@ fn reflow_stress_across_many_resizes_is_bounded() {
     );
     // The engine is still coherent after the resize storm.
     assert!(t.grid().rows() >= 1 && t.grid().cols() >= 1);
+}
+
+/// (f) Search across a deep scrollback. `search::find` runs over `all_lines()`
+/// on every query keystroke in the find bar, so it must stay linear in the
+/// buffer size — a regex backtracking blowup or an accidental re-scan per line
+/// would be a user-facing hang. Sized for a debug CI run: ~1.5k lines x 8 mixed
+/// literal/regex/case-insensitive query-runs lands well under the 3s bound on a
+/// healthy engine (regex compilation + scanning in a debug build dominates),
+/// while an O(n^2) / catastrophic-backtracking regression blows far past it.
+/// The 3s bound matches the reflow tripwire's allowance for debug + CI-runner
+/// variability.
+#[test]
+fn search_over_deep_scrollback_is_bounded() {
+    let mut t = Terminal::with_scrollback(40, 120, 2_000);
+    let mut feed: Vec<u8> = Vec::with_capacity(120_000);
+    for i in 0..1_500 {
+        feed.extend_from_slice(
+            format!("log line {i} status=ok user=operator path=/tmp/run-{i}.log\r\n").as_bytes(),
+        );
+    }
+    t.advance(&feed);
+    let lines = t.all_lines();
+    assert!(lines.len() >= 1_300, "expected a deep scrollback to search");
+
+    // A mix that exercises the literal-escape path, the (?i) case-insensitive
+    // flag, a real regex with a quantifier, and a guaranteed-miss query.
+    let queries: [(&str, SearchOptions); 4] = [
+        ("operator", SearchOptions::default()),
+        (
+            "STATUS=OK",
+            SearchOptions {
+                regex: false,
+                case_insensitive: true,
+            },
+        ),
+        (
+            r"line \d{3,}",
+            SearchOptions {
+                regex: true,
+                case_insensitive: false,
+            },
+        ),
+        ("needle-that-never-occurs", SearchOptions::default()),
+    ];
+
+    let iterations = 2usize;
+    let start = Instant::now();
+    let mut total_matches = 0usize;
+    for _ in 0..iterations {
+        for (q, opts) in queries.iter() {
+            total_matches += find(&lines, q, *opts).len();
+        }
+    }
+    let elapsed = start.elapsed();
+    eprintln!(
+        "search x{} over ~1.5k-line scrollback: {elapsed:?} ({total_matches} matches)",
+        iterations * queries.len()
+    );
+    assert!(
+        elapsed.as_secs_f64() < 3.0,
+        "{} searches over scrollback took {elapsed:?}, over the 3s regression bound",
+        iterations * queries.len()
+    );
+    // The literal + case-insensitive + regex queries all match the seeded lines;
+    // a zero here means search silently stopped working (not a perf pass).
+    assert!(
+        total_matches > 0,
+        "the matching queries returned nothing — search regressed, not just slow"
+    );
 }
