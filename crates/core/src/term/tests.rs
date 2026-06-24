@@ -77,6 +77,36 @@ fn sgr_color_operands_clamp_not_wrap() {
 }
 
 #[test]
+fn sgr_truecolor_channels_map_to_distinct_positions_and_advance() {
+    // Mutation-hardening for parse_extended_color: DISTINCT in-range channels
+    // prove r/g/b read the correct positions (a `len - n` → `len / n` index
+    // mutant would swap a channel), and a trailing SGR after the truecolor
+    // proves the parser advanced past EXACTLY the colour's codes (a wrong `*i`
+    // advance would drop or misread the trailing `1` = bold).
+    let mut t = Terminal::new(2, 12);
+    t.advance(b"\x1b[38;2;10;20;30;1mX"); // semicolon form + trailing bold
+    let cell = t.grid().cell(0, 0).unwrap();
+    assert_eq!(
+        cell.fg,
+        Color::Rgb(10, 20, 30),
+        "r/g/b must map to their own positions, not a swapped index"
+    );
+    assert!(
+        cell.flags.bold,
+        "the trailing `;1` (bold) after the truecolor must be parsed — proves \
+         parse_extended_color advanced the code index correctly"
+    );
+    // Colon form with three distinct channels (no empty colorspace slot).
+    let mut t2 = Terminal::new(2, 12);
+    t2.advance(b"\x1b[38:2:40:50:60mY");
+    assert_eq!(
+        t2.grid().cell(0, 0).unwrap().fg,
+        Color::Rgb(40, 50, 60),
+        "colon-form r/g/b must map to their own positions"
+    );
+}
+
+#[test]
 fn erase_display_clears() {
     let mut t = Terminal::new(2, 10);
     t.advance(b"junk\x1b[2J");
