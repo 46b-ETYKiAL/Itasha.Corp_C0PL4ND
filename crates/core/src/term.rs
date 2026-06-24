@@ -193,6 +193,14 @@ fn bool_mode(active: bool) -> u8 {
     }
 }
 
+/// Saturate a 16-bit SGR colour channel / palette index to `u8`. A bare `as u8`
+/// WRAPS (`300 → 44`), turning an out-of-range truecolor channel or 256-colour
+/// index into a silently wrong colour; clamping to 255 is the xterm-compatible
+/// behaviour for out-of-range operands.
+fn clamp_u8(v: u16) -> u8 {
+    v.min(255) as u8
+}
+
 /// Decode an ASCII-hex byte string (XTGETTCAP capability name) into a UTF-8
 /// string. Returns `None` on odd length, non-hex bytes, or invalid UTF-8.
 fn hex_decode(hex: &[u8]) -> Option<String> {
@@ -1315,7 +1323,10 @@ impl Screen {
         if group.len() >= 2 {
             let kind = group[1];
             if kind == 5 {
-                return group.get(2).map(|&n| Color::Indexed(n as u8));
+                // CLAMP, never wrap: an out-of-range palette index (>255) must
+                // saturate to 255, not wrap mod 256 (a bare `as u8` turns
+                // `38:5:300` into index 44 — a silently wrong colour). `clamp_u8`.
+                return group.get(2).map(|&n| Color::Indexed(clamp_u8(n)));
             }
             if kind == 2 {
                 // `58:2::r:g:b` carries an empty colorspace slot at index 2, so
@@ -1323,9 +1334,9 @@ impl Screen {
                 // values present after the kind as r/g/b.
                 let chans: Vec<u16> = group[2..].to_vec();
                 if chans.len() >= 3 {
-                    let r = chans[chans.len() - 3] as u8;
-                    let g = chans[chans.len() - 2] as u8;
-                    let b = chans[chans.len() - 1] as u8;
+                    let r = clamp_u8(chans[chans.len() - 3]);
+                    let g = clamp_u8(chans[chans.len() - 2]);
+                    let b = clamp_u8(chans[chans.len() - 1]);
                     return Some(Color::Rgb(r, g, b));
                 }
                 return None;
@@ -1337,14 +1348,14 @@ impl Screen {
             Some(5) => {
                 let n = codes.get(*i + 2).copied()?;
                 *i += 2;
-                Some(Color::Indexed(n as u8))
+                Some(Color::Indexed(clamp_u8(n)))
             }
             Some(2) => {
                 let r = codes.get(*i + 2).copied()?;
                 let g = codes.get(*i + 3).copied()?;
                 let b = codes.get(*i + 4).copied()?;
                 *i += 4;
-                Some(Color::Rgb(r as u8, g as u8, b as u8))
+                Some(Color::Rgb(clamp_u8(r), clamp_u8(g), clamp_u8(b)))
             }
             _ => None,
         }

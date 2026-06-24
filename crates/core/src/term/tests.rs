@@ -57,6 +57,26 @@ fn sgr_truecolor() {
 }
 
 #[test]
+fn sgr_color_operands_clamp_not_wrap() {
+    // Regression (audit EN-1): out-of-range SGR colour operands must CLAMP to
+    // 255, never wrap mod 256 (a bare `as u8` turned `38;5;300` into index 44
+    // and `38;2;300;..` into channel 44 — silently wrong colours).
+    let mut t = Terminal::new(2, 10);
+    // Truecolor, semicolon form: every channel saturates to 255.
+    t.advance(b"\x1b[38;2;300;511;256mA");
+    assert_eq!(t.grid().cell(0, 0).unwrap().fg, Color::Rgb(255, 255, 255));
+    // 256-colour indexed, semicolon form: index saturates to 255.
+    t.advance(b"\x1b[38;5;300mB");
+    assert_eq!(t.grid().cell(0, 1).unwrap().fg, Color::Indexed(255));
+    // Colon sub-parameter form clamps identically (underline colour, SGR 58).
+    t.advance(b"\x1b[58:2::400:0:0mC");
+    assert_eq!(
+        t.grid().cell(0, 2).unwrap().underline_color,
+        Some(Color::Rgb(255, 0, 0))
+    );
+}
+
+#[test]
 fn erase_display_clears() {
     let mut t = Terminal::new(2, 10);
     t.advance(b"junk\x1b[2J");

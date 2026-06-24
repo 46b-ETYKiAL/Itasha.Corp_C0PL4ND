@@ -68,7 +68,35 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         return Err(e);
     }
 
+    sync_parent_dir(path);
     Ok(())
+}
+
+/// Best-effort fsync of `path`'s PARENT directory so the rename itself reaches
+/// stable storage (audit LO-2). The data is `sync_all`'d before the rename, but
+/// without also syncing the directory entry a hard crash immediately after a
+/// successful rename can revert the directory to its pre-rename state — losing
+/// the just-written save (the module's own "never a torn restore" contract).
+/// Unix-only: directory fsync is unsupported on Windows, where
+/// `MoveFileEx(REPLACE_EXISTING)` already orders the metadata update. Best-effort
+/// — a failure here never fails the write (the rename already succeeded).
+fn sync_parent_dir(path: &Path) {
+    #[cfg(unix)]
+    {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let dir = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        if let Ok(d) = fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }
 
 /// Atomically write `bytes` to `path` and tighten it to **owner-only** access.
@@ -123,6 +151,7 @@ pub fn atomic_write_owner_only(path: &Path, bytes: &[u8]) -> io::Result<()> {
     #[cfg(windows)]
     crate::fs_perms::restrict_to_owner(path);
 
+    sync_parent_dir(path);
     Ok(())
 }
 

@@ -312,7 +312,16 @@ fn resize_in(node: &mut LayoutNode, leaf: LeafId, delta: f32, axis_extent: i32) 
         } else {
             0.05
         };
-        let new_a = (children[a].flex + delta).clamp(min_frac, 1.0 - min_frac);
+        // Clamp `a` against the (a,b) PAIR budget, not the whole split. With ≥3
+        // children, `flex[a] + flex[b] < 1.0`, so clamping the upper bound to
+        // `1.0 - min_frac` (audit LO-1) let `a` grow past `a+b` and drove
+        // `b.flex` negative — `normalize_flex` then zeroed `b` and silently stole
+        // the deficit from uninvolved siblings. The pair budget keeps the resize
+        // local: `b = pair - a` stays ≥ `min_frac`. (`.max(min_frac)` keeps the
+        // clamp's hi ≥ lo for a degenerate tiny pair, so `clamp` never panics.)
+        let pair = children[a].flex + children[b].flex;
+        let hi = (pair - min_frac).max(min_frac);
+        let new_a = (children[a].flex + delta).clamp(min_frac, hi);
         let actual = new_a - children[a].flex;
         children[a].flex += actual;
         children[b].flex -= actual;
@@ -495,6 +504,48 @@ mod tests {
         l.split(LeafId(0), Axis::Horizontal, b);
         // Resize the LAST child (b) — should pair with the previous (0).
         assert!(l.resize(b, 0.1, 800));
+        assert!(flex_sum_ok(&l.root));
+    }
+
+    #[test]
+    fn resize_in_three_child_split_does_not_rob_uninvolved_sibling() {
+        // Regression (audit LO-1): growing the first leaf in a flat 3-child
+        // split must steal only from its immediate sibling, never past the
+        // (a,b) pair budget — which previously drove the sibling's flex negative
+        // and let normalize_flex silently rescale the THIRD, uninvolved pane.
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        let c = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        l.split(b, Axis::Horizontal, c);
+        assert_eq!(
+            root_child_leaf_ids(&l).len(),
+            3,
+            "this regression needs a FLAT 3-child split"
+        );
+
+        let flex_of = |l: &Layout, want: LeafId| -> f32 {
+            match &l.root {
+                LayoutNode::Split { children, .. } => children
+                    .iter()
+                    .find(|ch| matches!(ch.node, LayoutNode::Leaf(id) if id == want))
+                    .map(|ch| ch.flex)
+                    .expect("leaf present"),
+                LayoutNode::Leaf(_) => panic!("root is not a split"),
+            }
+        };
+        let c_before = flex_of(&l, c);
+        // A huge grow of leaf 0 over a small extent — would underflow the
+        // sibling `b` past zero under the bug.
+        l.resize(LeafId(0), 5.0, 400);
+        assert!(
+            flex_of(&l, b) >= 0.0,
+            "the resized sibling must never go negative"
+        );
+        assert!(
+            (flex_of(&l, c) - c_before).abs() < 1e-4,
+            "resizing (leaf0, b) must NOT rob the uninvolved third pane c"
+        );
         assert!(flex_sum_ok(&l.root));
     }
 
