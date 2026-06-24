@@ -369,10 +369,12 @@ fn ctrl_shift_pageup_jumps_to_an_older_prompt_mark() {
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let mut h = harness(&app);
 
-    // Ten prompt blocks: a prompt mark, then a handful of output lines each.
+    // Twenty prompt blocks: a prompt mark, then a handful of output lines each.
+    // Twenty ensures several marks survive in the retained scrollback (above the
+    // live viewport) so the chord has multiple distinct marks to step through.
     {
         let mut a = app.borrow_mut();
-        for block in 0..10 {
+        for block in 0..20 {
             a.test_feed_focused(b"\x1b]133;A\x07"); // OSC 133 ; A = prompt mark
             for line in 0..6 {
                 a.test_feed_focused(format!("blk{block} line{line}\r\n").as_bytes());
@@ -395,13 +397,41 @@ fn ctrl_shift_pageup_jumps_to_an_older_prompt_mark() {
         "the view starts at the live bottom"
     );
 
+    // PageUp lands ON an older prompt mark (offset > 0).
     press_ctrl_shift(&mut h, egui::Key::PageUp);
-    let off = app
+    let o1 = app
         .borrow()
         .test_focused_view_offset()
         .expect("focused pane exists");
     assert!(
-        off > 0,
-        "Ctrl+Shift+PageUp must scroll back to an older prompt mark (offset {off} > 0)"
+        o1 > 0,
+        "Ctrl+Shift+PageUp must scroll back to an older prompt mark (offset {o1} > 0)"
+    );
+
+    // A SECOND PageUp steps to a STILL-older mark — the offset strictly
+    // increases. This kills a "set offset to a constant" mutant: a constant
+    // satisfies `> 0` but never the strict monotonic step to the next mark.
+    press_ctrl_shift(&mut h, egui::Key::PageUp);
+    let o2 = app
+        .borrow()
+        .test_focused_view_offset()
+        .expect("focused pane exists");
+    assert!(
+        o2 > o1,
+        "a second Ctrl+Shift+PageUp must step to an OLDER mark (offset {o2} > {o1})"
+    );
+
+    // PageDown reverses direction: it steps back toward live output to a NEWER
+    // mark, so the offset strictly decreases. This kills a PageUp/PageDown
+    // direction-swap mutant (which would instead increase the offset).
+    press_ctrl_shift(&mut h, egui::Key::PageDown);
+    let o3 = app
+        .borrow()
+        .test_focused_view_offset()
+        .expect("focused pane exists");
+    assert!(
+        o3 < o2,
+        "Ctrl+Shift+PageDown must step toward live output to a NEWER mark \
+         (offset {o3} < {o2})"
     );
 }
