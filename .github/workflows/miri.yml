@@ -64,11 +64,12 @@ jobs:
           toolchain: nightly
           components: miri, rust-src
 
-      - name: Cache cargo registry and target
-        # Swatinem/rust-cache@v2.9.1
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
-        with:
-          key: miri
+      # NOTE: no Swatinem/rust-cache step here (unlike the other workflows). The
+      # dependency-review action mis-detects that action's license as LGPL-3.0
+      # and fails this NEW workflow's PR review on it. Miri compiles its own
+      # sysroot and runs only a small bounded corpus, so caching is a marginal
+      # convenience not worth tripping the per-PR license gate; the soundness
+      # gate runs uncached.
 
       - name: Setup Miri
         run: cargo +nightly miri setup
