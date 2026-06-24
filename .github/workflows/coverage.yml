@@ -66,3 +66,78 @@ jobs:
           name: coverage-lcov
           path: lcov.info
           if-no-files-found: ignore
+
+  # Per-OS coverage REPORT + GATE (audit #4). The Linux job above stays the
+  # primary gate (byte-stable name, threshold 93). These two make the OTHER
+  # platforms' coverage legible + gated instead of invisible: the same core
+  # crate reads LOWER on Windows because the `#[cfg(windows)]` ConPTY/IO error
+  # arms compile + are counted there (they don't compile on Linux, so they
+  # leave the Linux denominator). The thresholds are HONEST exclusion-adjusted
+  # floors per platform, set conservatively and ratchetable upward — they answer
+  # "why 86 vs 93" with three written numbers instead of a hidden surface.
+  coverage-windows:
+    name: Core line coverage (windows)
+    runs-on: windows-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v5
+      - name: Install Rust toolchain (+ llvm-tools)
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595 # v2.79.10
+        with:
+          tool: cargo-llvm-cov
+      # 78 is an honest floor: Windows counts the un-inducible ConPTY/IO error
+      # arms (measured ~86% locally), so it cannot match the Linux 93. Ratchet up
+      # as those arms become inducible via injected IO seams.
+      - name: Measure + gate core coverage (windows)
+        run: |
+          cargo llvm-cov -p c0pl4nd-core --lcov --output-path lcov-windows.info --fail-under-lines 78
+          cargo llvm-cov -p c0pl4nd-core --summary-only
+      - name: Upload LCOV report (windows)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-lcov-windows
+          path: lcov-windows.info
+          if-no-files-found: ignore
+
+  coverage-macos:
+    name: Core line coverage (macos)
+    runs-on: macos-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v5
+      - name: Install Rust toolchain (+ llvm-tools)
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595 # v2.79.10
+        with:
+          tool: cargo-llvm-cov
+      # macOS compiles the `#[cfg(unix)]` paths like Linux (no ConPTY arms), so
+      # it tracks the Linux number; 88 leaves margin for per-toolchain variance.
+      - name: Measure + gate core coverage (macos)
+        run: |
+          cargo llvm-cov -p c0pl4nd-core --lcov --output-path lcov-macos.info --fail-under-lines 88
+          cargo llvm-cov -p c0pl4nd-core --summary-only
+      - name: Upload LCOV report (macos)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-lcov-macos
+          path: lcov-macos.info
+          if-no-files-found: ignore
