@@ -727,8 +727,45 @@ impl Config {
             message: e.to_string(),
         })?;
         cfg.migrate_legacy_transparency();
+        cfg.clamp_values();
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Clamp out-of-range / non-finite numeric values to their documented ranges
+    /// at LOAD (audit LO-3). A hand-edited or corrupt config could feed a garbage
+    /// font size, a non-finite / zero line-height, an absurd update interval, or
+    /// a multi-GB scrollback request straight into the renderer / scheduler,
+    /// because `validate()` only checks keybindings and several fields were only
+    /// clamped inconsistently at use-site. This CLAMPS (never rejects) — a bad
+    /// value degrades to a sane one rather than failing the whole load, matching
+    /// the graceful-degradation contract.
+    fn clamp_values(&mut self) {
+        // Font: size + line-height must be finite and positive; clamp to a band
+        // that stays renderable. A non-finite or non-positive value resets to the
+        // default before the band clamp (so `0`/`NaN`/`-1` never reach the layout).
+        if !self.font.size.is_finite() || self.font.size <= 0.0 {
+            self.font.size = FontConfig::default().size;
+        }
+        self.font.size = self.font.size.clamp(4.0, 256.0);
+        if !self.font.line_height.is_finite() || self.font.line_height <= 0.0 {
+            self.font.line_height = FontConfig::default().line_height;
+        }
+        self.font.line_height = self.font.line_height.clamp(1.0, 512.0);
+        // `ui_scale`'s in-RANGE clamp intentionally stays at use-site
+        // (`effective_ui_scale`); fix only finiteness here so a NaN/inf cannot
+        // propagate. (`opacity` / `tint_strength` are deliberately left alone —
+        // `validate()` already REJECTS an out-of-range value there, a stricter
+        // contract this clamp must not soften; only the fields validate() omits
+        // are clamped here.)
+        if !self.ui_scale.is_finite() {
+            self.ui_scale = default_ui_scale();
+        }
+        // Update check interval: documented 1..=168 hours.
+        self.update.check_interval_hours = self.update.check_interval_hours.clamp(1, 168);
+        // Scrollback: cap to a generous ceiling so a typo cannot request a
+        // multi-GB history allocation.
+        self.scrollback_lines = self.scrollback_lines.min(10_000_000);
     }
 
     /// Whether translucency should actually be rendered: the master toggle is
@@ -902,6 +939,33 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamp_values_bounds_out_of_range_fields() {
+        // audit LO-3: out-of-range / non-finite numeric fields clamp at load to
+        // their documented ranges (never reach the renderer / scheduler raw).
+        let mut cfg = Config::default();
+        cfg.font.size = 0.0; // non-positive → reset + band-clamp
+        cfg.font.line_height = -10.0; // negative → reset
+        cfg.ui_scale = f32::INFINITY; // non-finite → reset
+        cfg.update.check_interval_hours = 9999; // > 168
+        cfg.scrollback_lines = 999_999_999_999; // absurd
+        cfg.clamp_values();
+        assert!(
+            (4.0..=256.0).contains(&cfg.font.size),
+            "font.size clamped: {}",
+            cfg.font.size
+        );
+        assert!(cfg.font.line_height >= 1.0, "line_height positive");
+        assert!(cfg.ui_scale.is_finite(), "ui_scale finite");
+        assert!(
+            (1..=168).contains(&cfg.update.check_interval_hours),
+            "interval clamped"
+        );
+        assert!(cfg.scrollback_lines <= 10_000_000, "scrollback capped");
+        // opacity / tint_strength are intentionally NOT clamped here — validate()
+        // rejects an out-of-range value, a stricter contract this must not soften.
+    }
 
     #[test]
     fn defaults_are_sane_and_valid() {
