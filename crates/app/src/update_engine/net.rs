@@ -329,7 +329,14 @@ fn assert_allowed_host(url: &str) -> Result<(), String> {
 fn confined_get(url: &str, headers: &[(&str, &str)]) -> Result<ureq::Response, String> {
     assert_https(url)?;
     assert_allowed_host(url)?;
-    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    // Connect/read timeouts bound a hung update thread: without them a stalled
+    // or slow-loris peer keeps the download/check thread (and any window waiting
+    // on it) alive forever. Matches the legacy `update::http_get` bounds.
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(30))
+        .build();
     let mut current = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
         let mut req = agent.get(&current).set("User-Agent", USER_AGENT);
@@ -378,7 +385,7 @@ fn download_small(url: &str) -> Result<Vec<u8>, String> {
 /// (`downloaded`, `total`). `total` is read from `Content-Length`; if absent it
 /// is reported as `0` (the UI shows an indeterminate bar). Returns the full
 /// asset bytes.
-fn download_asset(url: &str, mut progress: impl FnMut(u64, u64)) -> Result<Vec<u8>, String> {
+fn download_asset(url: &str, progress: impl FnMut(u64, u64)) -> Result<Vec<u8>, String> {
     let resp = confined_get(url, &[])?;
 
     let total: u64 = resp
@@ -396,20 +403,43 @@ fn download_asset(url: &str, mut progress: impl FnMut(u64, u64)) -> Result<Vec<u
             "refusing download: declared size {total} B exceeds cap {MAX_DOWNLOAD_BYTES} B"
         ));
     }
-    let mut reader = resp.into_reader();
-    let mut buf: Vec<u8> = Vec::with_capacity(total.min(MAX_DOWNLOAD_BYTES) as usize);
+    let reader = resp.into_reader();
+    read_capped(reader, MAX_DOWNLOAD_BYTES, total, progress).map_err(|e| format!("{e} for {url}"))
+}
+
+/// Read `reader` to EOF into a buffer, aborting the moment the STREAMED body
+/// exceeds `cap`. This is the load-bearing guard (CWE-789) the header check
+/// cannot provide: a response that lies about or OMITS `Content-Length` (so the
+/// declared-size pre-check passes with `total == 0`) must not be able to grow the
+/// buffer without bound and OOM the process before signature verification runs.
+/// `total` is the declared size, forwarded to `progress` for the UI bar ONLY —
+/// it is never trusted as a bound. The cap is checked BEFORE each append, so the
+/// buffer never exceeds `cap` bytes.
+fn read_capped<R: std::io::Read>(
+    mut reader: R,
+    cap: u64,
+    total: u64,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<Vec<u8>, String> {
+    let mut buf: Vec<u8> = Vec::with_capacity(total.min(cap) as usize);
     let mut chunk = [0u8; 64 * 1024];
     let mut downloaded: u64 = 0;
     progress(0, total);
     loop {
         let n = reader
             .read(&mut chunk)
-            .map_err(|e| format!("read failed for {url}: {e}"))?;
+            .map_err(|e| format!("read failed: {e}"))?;
         if n == 0 {
             break;
         }
-        buf.extend_from_slice(&chunk[..n]);
         downloaded += n as u64;
+        if downloaded > cap {
+            return Err(format!(
+                "refusing download: streamed body exceeds cap {cap} B \
+                 (declared {total} B) — possible lying/absent Content-Length"
+            ));
+        }
+        buf.extend_from_slice(&chunk[..n]);
         progress(downloaded, total);
     }
     Ok(buf)
@@ -685,6 +715,35 @@ mod tests {
         const { assert!(MAX_SIDECAR_BYTES < MAX_RELEASE_JSON_BYTES) };
         const { assert!(MAX_RELEASE_JSON_BYTES < MAX_DOWNLOAD_BYTES) };
         const { assert!(MAX_DOWNLOAD_BYTES == MAX_EXTRACTED_BYTES) };
+    }
+
+    #[test]
+    fn read_capped_aborts_on_streamed_body_over_cap() {
+        use std::io::Cursor;
+        // The load-bearing guard: a body whose declared size is a LIE (total = 0,
+        // so the header pre-check is bypassed) must still be stopped by the
+        // streamed cap before it can grow without bound. 100 bytes streamed
+        // against a 50-byte cap must error, not OOM.
+        let body = vec![0u8; 100];
+        let err = read_capped(Cursor::new(body), 50, 0, |_, _| {})
+            .expect_err("an over-cap streamed body must be rejected");
+        assert!(
+            err.contains("exceeds cap"),
+            "the error must name the cap breach: {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_capped_accepts_body_at_or_under_cap() {
+        use std::io::Cursor;
+        // A body exactly at the cap is accepted and returned verbatim; progress
+        // reports the streamed length, never a trusted header value.
+        let body = vec![7u8; 50];
+        let mut last = 0u64;
+        let out = read_capped(Cursor::new(body.clone()), 50, 50, |d, _| last = d)
+            .expect("a body within the cap must be accepted");
+        assert_eq!(out, body, "the full in-cap body is returned");
+        assert_eq!(last, 50, "progress reports the streamed byte count");
     }
 
     #[test]
