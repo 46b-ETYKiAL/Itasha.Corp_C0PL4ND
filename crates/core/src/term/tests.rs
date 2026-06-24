@@ -404,6 +404,34 @@ fn erase_scrollback_reanchors_and_drops_stale_marks() {
 }
 
 #[test]
+fn scrollback_eviction_rebases_anchored_marks() {
+    // audit EN-2: routine scrollback eviction (history.pop_front over the cap)
+    // must rebase the absolute `history.len()+row` anchors, exactly like a
+    // scrollback CLEAR does — otherwise old prompt/image/command anchors dangle
+    // (point at the wrong physical line) once enough plain scrolling evicts
+    // scrollback. Previously only ESC[3J re-anchored.
+    let mut t = Terminal::with_scrollback(2, 8, 3); // tiny: 3 history rows kept
+                                                    // Mark the very first line as a prompt, then scroll far past the cap.
+    t.advance(b"\x1b]133;A\x07first\r\n");
+    assert_eq!(t.prompt_marks().len(), 1, "prompt mark recorded");
+    for _ in 0..20 {
+        t.advance(b"x\r\n");
+    }
+    // No surviving mark may dangle above the live coordinate space …
+    let live = t.scrollback_len() + t.grid().rows();
+    for &m in t.prompt_marks() {
+        assert!(m < live, "anchor {m} dangles above live space {live}");
+    }
+    // … and the first-line mark scrolled off a 3-row scrollback, so it must be
+    // DROPPED, not left pointing at a now-wrong absolute line (the bug kept it).
+    assert!(
+        t.prompt_marks().is_empty(),
+        "the evicted first-line prompt mark must be dropped: {:?}",
+        t.prompt_marks()
+    );
+}
+
+#[test]
 fn hard_reset_clears_anchored_metadata() {
     let mut t = Terminal::with_scrollback(2, 8, 100);
     t.advance(b"\x1b]8;;https://x\x07L\x1b]8;;\x07");

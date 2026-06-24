@@ -888,7 +888,13 @@ impl Config {
         cfg.window.size_h = window.size_h;
         cfg.window.maximized = window.maximized;
         cfg.window.monitor = window.monitor;
-        cfg.save_to(&path).ok()?;
+        // Surface a save failure (audit LO-4): previously `.ok()?` swallowed it
+        // silently, unlike the loader's `tracing::warn!` convention, so a
+        // persistently-unwritable config dir lost window geometry with no trace.
+        if let Err(e) = cfg.save_to(&path) {
+            tracing::warn!("failed to persist window geometry to {path:?}: {e}");
+            return None;
+        }
         Some(path)
     }
 }
