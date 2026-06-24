@@ -299,7 +299,10 @@ fn reflow_under_resize_of_large_grid_is_bounded() {
         feed.push_str("\r\n");
     }
     t.advance(feed.as_bytes());
-    assert!(t.scrollback_len() >= 1_500, "expected a deep scrollback to reflow");
+    assert!(
+        t.scrollback_len() >= 1_500,
+        "expected a deep scrollback to reflow"
+    );
 
     // Cycle through a spread of widths: each transition re-wraps every logical
     // line. 24 resizes is enough to surface a per-resize quadratic.
@@ -472,9 +475,7 @@ fn scrollback_churn_is_bounded() {
     let start = Instant::now();
     t.advance(&feed);
     let elapsed = start.elapsed();
-    eprintln!(
-        "scrollback churn ({line_count} lines, cap {max_scrollback}): {elapsed:?}"
-    );
+    eprintln!("scrollback churn ({line_count} lines, cap {max_scrollback}): {elapsed:?}");
     assert!(
         elapsed.as_secs_f64() < 3.0,
         "pushing {line_count} lines took {elapsed:?}, over the 3s regression bound"

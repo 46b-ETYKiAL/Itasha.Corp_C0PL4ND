@@ -278,8 +278,14 @@ mod tests {
             Session::spawn_program("/bin/sh", &["-c", &format!("printf '{token}'")], 24, 80)
                 .expect("spawn session");
 
-        // Poll the grid for up to ~3s for the token to appear.
-        let deadline = Instant::now() + Duration::from_secs(3);
+        // Poll the grid for the token to appear. The bound is generous (30s, vs
+        // a healthy <250ms locally) on purpose: spawning cmd.exe/ConPTY (or sh)
+        // and rendering its first output is wall-clock-variable on a saturated
+        // machine — a shared CI runner or a concurrent local build can push the
+        // first paint well past a tight few-second window. A genuinely-broken
+        // reader (token never rendered) still fails, just later; only flaky
+        // under-load timeouts are absorbed.
+        let deadline = Instant::now() + Duration::from_secs(30);
         let mut seen = false;
         while Instant::now() < deadline {
             if session.snapshot_text().contains(token) {
@@ -581,8 +587,7 @@ mod loom_tests {
     fn loom_wake_slot_clone_out_of_lock_never_deadlocks() {
         loom::model(|| {
             // The in-house wake slot, mirroring `Session::wake`.
-            let slot: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>> =
-                Arc::new(Mutex::new(None));
+            let slot: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>> = Arc::new(Mutex::new(None));
             // Counts callback invocations; the callback asserts the slot lock is
             // free when it runs (the clone-out-of-lock invariant).
             let wakes = Arc::new(AtomicUsize::new(0));
