@@ -395,6 +395,11 @@ pub struct C0pl4ndApp {
     /// selected). Drag selects; release copies (when `copy_on_select`); a plain
     /// click clears it. Ctrl/Cmd+Shift+C copies the live selection on demand.
     selection: Option<Selection>,
+    /// When `Some`, render ONLY this pane full-size (siblings hidden) — the
+    /// zoom-pane toggle (Ctrl/Cmd+Shift+Z). The grid tree is NOT mutated, so
+    /// un-zooming restores the exact prior layout. Runtime-only (not persisted);
+    /// cleared if the zoomed pane is closed.
+    zoomed_pane: Option<PaneId>,
     /// Per-(pane,row) laid-out galley cache for [`paint_grid_native`] (audit #2).
     /// A row's galley is re-laid-out only when its content/style key changes, so
     /// an idle or partially-changed grid does not re-run text layout for every
@@ -668,6 +673,7 @@ impl C0pl4ndApp {
             fullscreen: false,
             was_focused: true,
             selection: None,
+            zoomed_pane: None,
             galley_cache: GalleyCache::default(),
             image_textures: ImageTextureCache::default(),
             pending_fonts: None,
@@ -1923,6 +1929,12 @@ impl C0pl4ndApp {
         // takes effect this frame. Captured before the disjoint-borrow block
         // (which takes `&mut self.terms`).
         let view_mode = self.config.view_mode;
+        // The zoom-pane override, captured before the disjoint-borrow block (like
+        // `view_mode`): when `Some` and the pane still exists, only that pane is
+        // rendered full-size this frame.
+        let zoomed_pane = self
+            .zoomed_pane
+            .filter(|z| grid::tile_of_pane(&self.grid_tree, *z).is_some());
 
         // Snapshot BEFORE the frame so we can revert a drag that exceeds the cap.
         let pre = self.grid_tree.clone();
@@ -2050,7 +2062,14 @@ impl C0pl4ndApp {
             //   the multi-pane egui_tiles layout is skipped entirely this frame.
             //   The grid tree is NOT mutated, so flipping back to Grid restores
             //   the exact prior layout.
-            if view_mode == c0pl4nd_core::config::ViewMode::Tabs {
+            if let Some(zoomed) = zoomed_pane {
+                // Zoom-pane (Ctrl/Cmd+Shift+Z): render ONLY the zoomed pane
+                // full-size (siblings hidden), like Tabs mode but for the explicit
+                // single-pane zoom toggle. The grid tree is NOT mutated, so
+                // un-zooming restores the exact prior layout. `zoomed_pane` was
+                // already filtered to a still-live pane above.
+                render_body(ui, zoomed);
+            } else if view_mode == c0pl4nd_core::config::ViewMode::Tabs {
                 // The focused pane must exist in the tree; if it somehow does not
                 // (defensive — focus is always re-anchored to a live pane), fall
                 // back to the first pane so the content area is never blank.
@@ -2124,6 +2143,25 @@ impl C0pl4ndApp {
         }
     }
 
+    /// Toggle zoom on the focused pane: when off, zoom the focused pane (render
+    /// it full-size, siblings hidden); when on, un-zoom (restore the full
+    /// layout). The grid tree is never mutated — zoom is a pure render override —
+    /// so un-zooming restores the exact prior layout.
+    fn toggle_zoom_pane(&mut self) {
+        self.zoomed_pane = if self.zoomed_pane.is_some() {
+            None
+        } else {
+            Some(self.focused_pane)
+        };
+    }
+
+    /// The currently zoomed pane, if any (Ctrl/Cmd+Shift+Z). Exposed so the
+    /// interaction test can assert the toggle's observable state.
+    #[allow(dead_code)]
+    pub fn zoomed_pane(&self) -> Option<PaneId> {
+        self.zoomed_pane
+    }
+
     /// Apply a right-click context-menu action that needs `&mut self` (it mutates
     /// the tiles tree): split the focused pane, open a new tab, or close a pane.
     /// Copy + Clear-scrollback are NOT routed here — they run inline in the menu
@@ -2160,6 +2198,11 @@ impl C0pl4ndApp {
         // A selection holds grid coordinates of a now-removed pane; drop it so it
         // cannot paint against a different pane after the focus re-anchors below.
         self.selection = None;
+        // Drop a stale zoom on the closed pane so the next frame does not try to
+        // render a pane that no longer exists (it would fall through to the grid).
+        if self.zoomed_pane == Some(pid) {
+            self.zoomed_pane = None;
+        }
         // Re-anchor focus if the focused pane was closed.
         if grid::tile_of_pane(&self.grid_tree, self.focused_pane).is_none() {
             if let Some((p, _)) = self.pane_titles().first() {
@@ -3950,6 +3993,7 @@ impl C0pl4ndApp {
         let mut act_close = false;
         let mut act_split_h = false;
         let mut act_split_v = false;
+        let mut act_zoom = false;
         let mut act_settings = false;
         ctx.input_mut(|i| {
             i.events.retain(|ev| {
@@ -3979,6 +4023,10 @@ impl C0pl4ndApp {
                                 act_split_v = true;
                                 return false;
                             }
+                            egui::Key::Z => {
+                                act_zoom = true;
+                                return false;
+                            }
                             _ => {}
                         }
                     }
@@ -4001,6 +4049,9 @@ impl C0pl4ndApp {
         }
         if act_close {
             self.close_pane(self.focused_pane);
+        }
+        if act_zoom {
+            self.toggle_zoom_pane();
         }
         if act_settings {
             self.settings_open = !self.settings_open;

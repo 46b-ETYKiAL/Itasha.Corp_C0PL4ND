@@ -435,3 +435,58 @@ fn ctrl_shift_pageup_jumps_to_an_older_prompt_mark() {
          (offset {o3} < {o2})"
     );
 }
+
+// ---- zoom-pane toggle (Ctrl+Shift+Z) ----------------------------------------
+
+#[test]
+fn ctrl_shift_z_toggles_pane_zoom() {
+    // Ctrl+Shift+Z zooms the focused pane (render it full-size, siblings hidden);
+    // pressing it again un-zooms. Driven through the REAL frame_tick chord +
+    // render path (the zoomed frame renders only the one pane).
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    // Need at least two panes for zoom to be meaningful.
+    press_ctrl_shift(&mut h, egui::Key::D);
+    assert_eq!(app.borrow().pane_count(), 2, "split makes two panes");
+    assert_eq!(app.borrow().zoomed_pane(), None, "starts un-zoomed");
+
+    press_ctrl_shift(&mut h, egui::Key::Z);
+    let zoomed = app.borrow().zoomed_pane();
+    let focused = app.borrow().focused_pane();
+    assert_eq!(
+        zoomed,
+        Some(focused),
+        "Ctrl+Shift+Z must zoom the focused pane"
+    );
+
+    press_ctrl_shift(&mut h, egui::Key::Z);
+    assert_eq!(
+        app.borrow().zoomed_pane(),
+        None,
+        "Ctrl+Shift+Z again must un-zoom"
+    );
+}
+
+#[test]
+fn closing_the_zoomed_pane_clears_the_zoom() {
+    // Closing the pane that is currently zoomed must clear the zoom, so the next
+    // frame never tries to render a pane that no longer exists.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    press_ctrl_shift(&mut h, egui::Key::D); // two panes
+    press_ctrl_shift(&mut h, egui::Key::Z); // zoom the focused one
+    assert!(
+        app.borrow().zoomed_pane().is_some(),
+        "focused pane is zoomed"
+    );
+
+    press_ctrl_shift(&mut h, egui::Key::W); // close the focused (zoomed) pane
+    assert_eq!(app.borrow().pane_count(), 1, "back to a single pane");
+    assert_eq!(
+        app.borrow().zoomed_pane(),
+        None,
+        "closing the zoomed pane must clear the zoom"
+    );
+}
