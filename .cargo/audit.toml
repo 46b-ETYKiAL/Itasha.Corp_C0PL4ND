@@ -46,4 +46,19 @@ ignore = [
   #     Drop this ignore once `rsa` ships a constant-time release AND Arti
   #     adopts it (bump arti-client / the transport crate accordingly).
   "RUSTSEC-2023-0071",
+  # RUSTSEC-2026-0173 — `proc-macro-error2` is UNMAINTAINED (informational
+  # advisory, NOT exploitable). Kept in lockstep with deny.toml (audit SC-1: a
+  # divergent ignore-list let a green `cargo deny` coexist with a red `cargo
+  # audit`). BUILD-TIME proc-macro helper pulled transitively by
+  # `i18n-embed-fl` <- `age` <- the in-house `itasha-report-core` SDK; runs only
+  # at compile time, never in the shipped binary's runtime attack surface.
+  # Re-evaluate when `age`/`i18n-embed-fl` migrate off `proc-macro-error2`.
+  "RUSTSEC-2026-0173",
+  # RUSTSEC-2024-0436 — `paste` is UNMAINTAINED (informational advisory, NOT
+  # exploitable). Kept in lockstep with deny.toml. BUILD-TIME proc-macro helper
+  # pulled transitively by the Arti Tor stack (`paste` <- `tor-error` <-
+  # arti-client), entering the tree ONLY via the opt-in
+  # `itasha-report-transport-tor` crate; compile-time only. No maintained drop-in
+  # upstream Arti has migrated to yet. Re-evaluate when `tor-error` drops `paste`.
+  "RUSTSEC-2024-0436",
 ]
