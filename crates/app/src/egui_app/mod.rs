@@ -1361,6 +1361,37 @@ impl C0pl4ndApp {
                         mouse_captured = true;
                     }
                 }
+                // Double-click selects the WORD under the cursor; triple-click
+                // selects the whole LINE. Both set an absolute-coords selection
+                // AND copy it immediately (so even a single-char word copies),
+                // the table-stakes terminal gesture the egui shell lacked. The
+                // release-clear below is suppressed on these frames so it cannot
+                // wipe the fresh selection.
+                let multi_click = resp.double_clicked() || resp.triple_clicked();
+                if multi_click {
+                    if let Some((line, c)) = cell0 {
+                        let r = line.saturating_sub(window_start);
+                        let (start, end) = if resp.triple_clicked() {
+                            let cols = pane_size.map(|(cc, _)| cc as usize).unwrap_or(0);
+                            (0, cols.saturating_sub(1))
+                        } else {
+                            let row = terms
+                                .get(&pane_id)
+                                .map(|t| t.display_row_chars(r))
+                                .unwrap_or_default();
+                            word_bounds(&row, c)
+                        };
+                        *selection = Some(Selection {
+                            pane: pane_id,
+                            anchor: (line, start),
+                            head: (line, end),
+                        });
+                        if let Some(term) = terms.get(&pane_id) {
+                            copy_selection = term.selection_text((r, start), (r, end));
+                        }
+                        mouse_captured = true;
+                    }
+                }
                 if resp.dragged() {
                     if let (Some(sel), Some((line, c))) = (selection.as_mut(), cell0) {
                         if sel.pane == pane_id {
@@ -1369,7 +1400,9 @@ impl C0pl4ndApp {
                         }
                     }
                 }
-                if ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary)) {
+                if !multi_click
+                    && ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary))
+                {
                     if let Some(sel) = *selection {
                         if sel.pane == pane_id {
                             if sel.anchor == sel.head {
@@ -4639,6 +4672,35 @@ fn cell_at_pos(pos: egui::Pos2, origin: egui::Pos2, cw: f32, ch: f32) -> Option<
     let col = ((pos.x - origin.x) / cw).floor() as usize;
     let row = ((pos.y - origin.y) / ch).floor() as usize;
     Some((row, col))
+}
+
+/// True for a character that double-click word-selection treats as part of a
+/// "word". Beyond alphanumerics this keeps the path / URL / identifier
+/// punctuation (`_-./~:@`) so a double-click grabs a whole filename, flag, or
+/// URL rather than stopping at the first dot or slash — matching the default
+/// word class of mainstream terminals.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || "_-./~:@".contains(c)
+}
+
+/// The inclusive `(start_col, end_col)` span of the word under `col` in `row`
+/// (one `char` per grid column). A maximal run of [`is_word_char`] cells around
+/// `col`; clicking a non-word cell (whitespace, punctuation outside the word
+/// class) selects just that single cell `(col, col)`. Pure + column-indexed so
+/// it is wide-glyph-safe and unit-testable without a live grid.
+fn word_bounds(row: &[char], col: usize) -> (usize, usize) {
+    if row.get(col).copied().map(is_word_char) != Some(true) {
+        return (col, col);
+    }
+    let mut start = col;
+    while start > 0 && row.get(start - 1).copied().map(is_word_char) == Some(true) {
+        start -= 1;
+    }
+    let mut end = col;
+    while end + 1 < row.len() && row.get(end + 1).copied().map(is_word_char) == Some(true) {
+        end += 1;
+    }
+    (start, end)
 }
 
 /// Strip characters that are dangerous to render in app chrome from `s`,

@@ -1165,3 +1165,75 @@ fn selection_fully_scrolled_out_is_none() {
     // Zero-row window.
     assert_eq!(selection_visible_rows((100, 0), (110, 0), 100, 0), None);
 }
+
+// ---- double-click word selection bounds -------------------------------------
+
+#[test]
+fn word_bounds_expands_to_the_whole_word_from_any_interior_column() {
+    // "  hello world  " — clicking any column inside "hello" (cols 2..=6) must
+    // grab the whole word, regardless of which interior cell was hit.
+    let row: Vec<char> = "  hello world  ".chars().collect();
+    for col in 2..=6 {
+        assert_eq!(
+            word_bounds(&row, col),
+            (2, 6),
+            "double-click at col {col} selects all of 'hello' (cols 2..=6)"
+        );
+    }
+    // "world" is cols 8..=12.
+    for col in 8..=12 {
+        assert_eq!(word_bounds(&row, col), (8, 12), "selects all of 'world'");
+    }
+}
+
+#[test]
+fn word_bounds_on_whitespace_selects_only_that_cell() {
+    // Clicking the gap between words (a space) selects just that one cell, so a
+    // double-click on empty space copies nothing rather than a whole line.
+    let row: Vec<char> = "ab cd".chars().collect();
+    assert_eq!(
+        word_bounds(&row, 2),
+        (2, 2),
+        "the space at col 2 is its own cell"
+    );
+}
+
+#[test]
+fn word_bounds_keeps_path_and_url_punctuation_in_one_word() {
+    // The word class includes path / URL punctuation so a double-click grabs a
+    // whole filename or URL instead of stopping at the first dot or slash.
+    // "see " is cols 0..=3 (space at 3); "/usr/local/bin/foo.sh" is cols 4..=24.
+    let row: Vec<char> = "see /usr/local/bin/foo.sh now".chars().collect();
+    assert_eq!(
+        word_bounds(&row, 10),
+        (4, 24),
+        "the whole path /usr/local/bin/foo.sh is one word (cols 4..=24)"
+    );
+    // "http://example.com/p" is cols 0..=19 (space at 20).
+    let url: Vec<char> = "http://example.com/p done".chars().collect();
+    assert_eq!(
+        word_bounds(&url, 5),
+        (0, 19),
+        "the whole URL is one word (cols 0..=19)"
+    );
+}
+
+#[test]
+fn word_bounds_single_char_word_is_itself() {
+    // A one-character word still selects that single cell (and the gesture path
+    // copies it directly, so a single-char word is not lost).
+    let row: Vec<char> = "a bc".chars().collect();
+    assert_eq!(
+        word_bounds(&row, 0),
+        (0, 0),
+        "single-char word 'a' is (0,0)"
+    );
+}
+
+#[test]
+fn word_bounds_out_of_range_column_is_inert() {
+    // A column past the row length is treated as a non-word cell: it returns
+    // itself and never panics (defensive against a stale hit-test).
+    let row: Vec<char> = "abc".chars().collect();
+    assert_eq!(word_bounds(&row, 99), (99, 99));
+}

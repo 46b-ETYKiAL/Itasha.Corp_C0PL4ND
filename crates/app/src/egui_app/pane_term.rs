@@ -786,6 +786,25 @@ impl PaneTerm {
         }
     }
 
+    /// The current display row `r` as one `char` per grid COLUMN (the wide-glyph
+    /// spacer cell is included as its blank char), so a caller can do
+    /// column-accurate word-boundary detection that lines up with the grid
+    /// coordinates the mouse hit-test produces. Empty for a dead pane, a poisoned
+    /// lock, or an out-of-range row.
+    pub fn display_row_chars(&self, r: usize) -> Vec<char> {
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        let term_arc = session.terminal();
+        let Ok(term) = term_arc.lock() else {
+            return Vec::new();
+        };
+        term.display_rows()
+            .get(r)
+            .map(|row| row.iter().map(|cell| cell.c).collect())
+            .unwrap_or_default()
+    }
+
     /// Placement metadata for every inline image (Sixel / Kitty graphics)
     /// currently VISIBLE in the display window. Computed under the terminal lock
     /// WITHOUT cloning pixel data (the renderer fetches bytes via
