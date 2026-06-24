@@ -47,6 +47,10 @@ These controls are handled directly by the app and are **not** configurable via
 |-----|--------|----------------|
 | `F11` | Toggle borderless fullscreen | Always |
 | `Esc` | Exit fullscreen | In fullscreen, and no overlay is open |
+| `mod+shift+Home` | Scroll to the top of the scrollback (oldest line) | Always |
+| `mod+shift+End` | Scroll back to following live output (bottom) | Always |
+| `mod+shift+PageUp` | Jump to the previous shell-prompt mark (OSC 133) | Always |
+| `mod+shift+PageDown` | Jump to the next shell-prompt mark (OSC 133) | Always |
 | `Enter` / `F3` | Jump to next search match | Find overlay open |
 | `Shift+F3` | Jump to previous search match | Find overlay open |
 | `Esc` | Close the find overlay | Find overlay open |
@@ -55,10 +59,10 @@ These controls are handled directly by the app and are **not** configurable via
 | `Esc` | Close the command palette | Palette open |
 | `Enter` / `Esc` | Confirm / cancel a multi-line paste | Paste-confirm overlay open |
 
-The fullscreen, find, palette, history, and paste-confirm chords are
-implemented in `crates/app/src/egui_app/mod.rs`. They are deliberately consumed
-before keystrokes reach the shell, so opening an overlay never leaks a stray
-control byte to the running program.
+The fullscreen, scroll-to-edge, jump-to-prompt, find, palette, history, and
+paste-confirm chords are implemented in `crates/app/src/egui_app/mod.rs`. They
+are deliberately consumed before keystrokes reach the shell, so the chord never
+leaks a stray control byte to the running program.
 
 ## Related selection behaviour
 
