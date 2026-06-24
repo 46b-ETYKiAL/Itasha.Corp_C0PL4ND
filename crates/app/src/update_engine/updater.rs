@@ -258,13 +258,21 @@ impl Updater {
             return;
         }
 
+        // Capture the running exe path ONCE, BEFORE the swap. After
+        // `replace_running_executable` the OS may report `current_exe()` as a
+        // moved/deleted path (Linux "(deleted)", Windows rename-aside), which
+        // would make the anti-rollback record write below silently no-op and the
+        // relaunch target wrong. The path is stable across an in-place swap, so
+        // capture it now and reuse it for backup, the high-water record, and the
+        // relaunch.
+        let pre_swap_exe = std::env::current_exe().ok();
         // Best-effort keep-one-prior backup of the current exe, so a botched
         // install is recoverable via `apply::rollback`.
-        let backup = std::env::current_exe()
-            .ok()
+        let backup = pre_swap_exe
+            .as_ref()
             .map(|exe| exe.with_extension("c0pl4nd-bak"));
-        if let (Ok(exe), Some(bak)) = (std::env::current_exe(), backup.as_ref()) {
-            let _ = super::apply::back_up(&exe, bak);
+        if let (Some(exe), Some(bak)) = (pre_swap_exe.as_ref(), backup.as_ref()) {
+            let _ = super::apply::back_up(exe, bak);
         }
 
         let swap = super::apply::replace_running_executable(&staged);
@@ -280,20 +288,20 @@ impl Updater {
                 // record write never blocks the applied update, because the
                 // freshly-installed binary's own compiled CARGO_PKG_VERSION will
                 // govern the floor on the next launch regardless.
-                if let (Ok(exe), Ok(applied)) =
-                    (std::env::current_exe(), semver::Version::parse(&version))
+                if let (Some(exe), Ok(applied)) =
+                    (pre_swap_exe.as_ref(), semver::Version::parse(&version))
                 {
-                    let _ = super::rollback_guard::record_installed(&exe, &applied);
+                    let _ = super::rollback_guard::record_installed(exe, &applied);
                 }
-                if let Ok(exe) = std::env::current_exe() {
-                    match std::process::Command::new(&exe).spawn() {
+                if let Some(exe) = pre_swap_exe.as_ref() {
+                    match std::process::Command::new(exe).spawn() {
                         Ok(_) => {}
                         Err(e) => {
                             // Relaunch of the swapped binary failed — restore the
                             // prior exe from the backup so the user is not left
                             // with a non-starting install.
                             if let Some(bak) = backup.as_ref() {
-                                let _ = super::apply::rollback(bak, &exe);
+                                let _ = super::apply::rollback(bak, exe);
                             }
                             self.state =
                                 UpdateState::Failed(format!("relaunch failed, rolled back: {e}"));
