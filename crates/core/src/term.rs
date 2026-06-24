@@ -1120,6 +1120,7 @@ impl Screen {
     /// own buffer must never flood the user's scrollback — and when scrollback
     /// is disabled. Shared by LF (`newline`) and SU (`CSI S`) on a full region.
     fn scroll_up_into_history(&mut self, n: usize) {
+        let mut evicted = 0usize;
         for _ in 0..n {
             let dropped_wrapped = self.grid.is_wrapped(0);
             let dropped = self.grid.scroll_up_returning();
@@ -1129,8 +1130,21 @@ impl Screen {
                 while self.history.len() > self.max_scrollback {
                     self.history.pop_front();
                     self.history_wrapped.pop_front();
+                    evicted += 1;
                 }
             }
+        }
+        // Rebase anchored metadata (images / prompt_marks / command_marks) by the
+        // number of scrollback rows EVICTED (audit EN-2). Anchors use an absolute
+        // `history.len() + grid_row` line index, which is invariant under plain
+        // scrolling (grid_row falls by one exactly as history.len() rises), so no
+        // rebase is needed there. But each `pop_front` shifts the whole timeline
+        // down by one, so without this the anchors dangle (point at the wrong
+        // physical line) once enough routine scrolling evicts scrollback —
+        // previously only a full scrollback CLEAR re-anchored. The shift logic is
+        // identical to a clear of `evicted` rows.
+        if evicted > 0 {
+            self.reanchor_after_scrollback_clear(evicted);
         }
     }
 
