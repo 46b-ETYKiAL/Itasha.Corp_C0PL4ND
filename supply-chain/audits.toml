@@ -2,3 +2,963 @@
 # cargo-vet audits file
 
 [audits]
+
+[[trusted.aho-corasick]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-03-28"
+end = "2027-06-24"
+
+[[trusted.anstyle]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2022-05-18"
+end = "2027-06-24"
+
+[[trusted.anyhow]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-10-05"
+end = "2027-06-24"
+
+[[trusted.arti-client]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.async-trait]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-07-23"
+end = "2027-06-24"
+
+[[trusted.atomic]]
+criteria = "safe-to-deploy"
+user-id = 2915 # Amanieu d'Antras (Amanieu)
+start = "2019-02-22"
+end = "2027-06-24"
+
+[[trusted.autocfg]]
+criteria = "safe-to-deploy"
+user-id = 539 # Josh Stone (cuviper)
+start = "2019-05-22"
+end = "2027-06-24"
+
+[[trusted.bincode]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-04-08"
+end = "2027-06-24"
+
+[[trusted.bstr]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-04-02"
+end = "2027-06-24"
+
+[[trusted.by_address]]
+criteria = "safe-to-deploy"
+user-id = 2017 # Matt Brubeck (mbrubeck)
+start = "2019-04-22"
+end = "2027-06-24"
+
+[[trusted.bytes]]
+criteria = "safe-to-deploy"
+user-id = 359 # Sean McArthur (seanmonstar)
+start = "2019-11-27"
+end = "2027-06-24"
+
+[[trusted.caret]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-06-05"
+end = "2027-06-24"
+
+[[trusted.cc]]
+criteria = "safe-to-deploy"
+user-id = 2915 # Amanieu d'Antras (Amanieu)
+start = "2024-02-20"
+end = "2027-06-24"
+
+[[trusted.clap]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2021-12-08"
+end = "2027-06-24"
+
+[[trusted.clap_builder]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2023-03-28"
+end = "2027-06-24"
+
+[[trusted.clap_lex]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2022-04-15"
+end = "2027-06-24"
+
+[[trusted.derive_more]]
+criteria = "safe-to-deploy"
+user-id = 3797 # Jelte Fennema-Nio (JelteF)
+start = "2019-05-25"
+end = "2027-06-24"
+
+[[trusted.derive_more-impl]]
+criteria = "safe-to-deploy"
+user-id = 3797 # Jelte Fennema-Nio (JelteF)
+start = "2023-07-23"
+end = "2027-06-24"
+
+[[trusted.displaydoc]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2024-06-20"
+end = "2027-06-24"
+
+[[trusted.dyn-clone]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-12-23"
+end = "2027-06-24"
+
+[[trusted.enumn]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-08-18"
+end = "2027-06-24"
+
+[[trusted.find-msvc-tools]]
+criteria = "safe-to-deploy"
+user-id = 539 # Josh Stone (cuviper)
+start = "2025-08-29"
+end = "2027-06-24"
+
+[[trusted.flate2]]
+criteria = "safe-to-deploy"
+user-id = 980 # Sebastian Thiel (Byron)
+start = "2023-08-15"
+end = "2027-06-24"
+
+[[trusted.fs-mistrust]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.fslock-guard]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.hashbrown]]
+criteria = "safe-to-deploy"
+user-id = 2915 # Amanieu d'Antras (Amanieu)
+start = "2019-04-02"
+end = "2027-06-24"
+
+[[trusted.http]]
+criteria = "safe-to-deploy"
+user-id = 359 # Sean McArthur (seanmonstar)
+start = "2019-04-05"
+end = "2027-06-24"
+
+[[trusted.httparse]]
+criteria = "safe-to-deploy"
+user-id = 359 # Sean McArthur (seanmonstar)
+start = "2019-07-03"
+end = "2027-06-24"
+
+[[trusted.icu_collections]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2022-09-27"
+end = "2027-06-24"
+
+[[trusted.icu_locale_core]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2025-02-26"
+end = "2027-06-24"
+
+[[trusted.icu_normalizer]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2021-04-29"
+end = "2027-06-24"
+
+[[trusted.icu_normalizer_data]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2023-10-03"
+end = "2027-06-24"
+
+[[trusted.icu_properties]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2022-01-31"
+end = "2027-06-24"
+
+[[trusted.icu_properties_data]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2023-10-03"
+end = "2027-06-24"
+
+[[trusted.icu_provider]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2022-01-31"
+end = "2027-06-24"
+
+[[trusted.id-arena]]
+criteria = "safe-to-deploy"
+user-id = 696 # Nick Fitzgerald (fitzgen)
+start = "2026-01-14"
+end = "2027-06-24"
+
+[[trusted.indexmap]]
+criteria = "safe-to-deploy"
+user-id = 539 # Josh Stone (cuviper)
+start = "2020-01-15"
+end = "2027-06-24"
+
+[[trusted.inventory]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-08-15"
+end = "2027-06-24"
+
+[[trusted.itoa]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-05-02"
+end = "2027-06-24"
+
+[[trusted.libc]]
+criteria = "safe-to-deploy"
+user-id = 2915 # Amanieu d'Antras (Amanieu)
+start = "2021-01-27"
+end = "2027-06-24"
+
+[[trusted.libm]]
+criteria = "safe-to-deploy"
+user-id = 2915 # Amanieu d'Antras (Amanieu)
+start = "2022-02-06"
+end = "2027-06-24"
+
+[[trusted.linux-raw-sys]]
+criteria = "safe-to-deploy"
+user-id = 6825 # Dan Gohman (sunfishcode)
+start = "2021-06-12"
+end = "2027-06-24"
+
+[[trusted.litemap]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2021-02-23"
+end = "2027-06-24"
+
+[[trusted.lock_api]]
+criteria = "safe-to-deploy"
+user-id = 2915 # Amanieu d'Antras (Amanieu)
+start = "2019-05-04"
+end = "2027-06-24"
+
+[[trusted.memchr]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-07-07"
+end = "2027-06-24"
+
+[[trusted.num-bigint]]
+criteria = "safe-to-deploy"
+user-id = 539 # Josh Stone (cuviper)
+start = "2019-09-04"
+end = "2027-06-24"
+
+[[trusted.oneshot-fused-workaround]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-09-03"
+end = "2027-06-24"
+
+[[trusted.open]]
+criteria = "safe-to-deploy"
+user-id = 980 # Sebastian Thiel (Byron)
+start = "2019-07-03"
+end = "2027-06-24"
+
+[[trusted.ordered-float]]
+criteria = "safe-to-deploy"
+user-id = 2017 # Matt Brubeck (mbrubeck)
+start = "2019-03-13"
+end = "2027-06-24"
+
+[[trusted.parking_lot]]
+criteria = "safe-to-deploy"
+user-id = 2915 # Amanieu d'Antras (Amanieu)
+start = "2019-05-04"
+end = "2027-06-24"
+
+[[trusted.parking_lot_core]]
+criteria = "safe-to-deploy"
+user-id = 2915 # Amanieu d'Antras (Amanieu)
+start = "2019-05-04"
+end = "2027-06-24"
+
+[[trusted.paste]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-03-19"
+end = "2027-06-24"
+
+[[trusted.pathdiff]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2020-04-20"
+end = "2027-06-24"
+
+[[trusted.potential_utf]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2024-11-23"
+end = "2027-06-24"
+
+[[trusted.prettyplease]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2022-01-04"
+end = "2027-06-24"
+
+[[trusted.rayon]]
+criteria = "safe-to-deploy"
+user-id = 539 # Josh Stone (cuviper)
+start = "2019-06-13"
+end = "2027-06-24"
+
+[[trusted.ref-cast]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-05-05"
+end = "2027-06-24"
+
+[[trusted.ref-cast-impl]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-05-05"
+end = "2027-06-24"
+
+[[trusted.regex]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-02-27"
+end = "2027-06-24"
+
+[[trusted.regex-automata]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-02-25"
+end = "2027-06-24"
+
+[[trusted.regex-syntax]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-03-30"
+end = "2027-06-24"
+
+[[trusted.retry-error]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-06-05"
+end = "2027-06-24"
+
+[[trusted.rustix]]
+criteria = "safe-to-deploy"
+user-id = 6825 # Dan Gohman (sunfishcode)
+start = "2021-10-29"
+end = "2027-06-24"
+
+[[trusted.safelog]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-06-05"
+end = "2027-06-24"
+
+[[trusted.same-file]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-07-16"
+end = "2027-06-24"
+
+[[trusted.scopeguard]]
+criteria = "safe-to-deploy"
+user-id = 2915 # Amanieu d'Antras (Amanieu)
+start = "2020-02-16"
+end = "2027-06-24"
+
+[[trusted.semver]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2021-05-25"
+end = "2027-06-24"
+
+[[trusted.serde_ignored]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-08-18"
+end = "2027-06-24"
+
+[[trusted.serde_json]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-02-28"
+end = "2027-06-24"
+
+[[trusted.serde_repr]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-04-26"
+end = "2027-06-24"
+
+[[trusted.serde_spanned]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2023-01-20"
+end = "2027-06-24"
+
+[[trusted.slotmap-careful]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-09-03"
+end = "2027-06-24"
+
+[[trusted.ssh-cipher-fork-arti]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2026-03-16"
+end = "2027-06-24"
+
+[[trusted.ssh-encoding-fork-arti]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2026-03-16"
+end = "2027-06-24"
+
+[[trusted.ssh-key-fork-arti]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2026-03-16"
+end = "2027-06-24"
+
+[[trusted.syn]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-03-01"
+end = "2027-06-24"
+
+[[trusted.termcolor]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-06-04"
+end = "2027-06-24"
+
+[[trusted.thiserror]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-10-09"
+end = "2027-06-24"
+
+[[trusted.thiserror-impl]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-10-09"
+end = "2027-06-24"
+
+[[trusted.tinystr]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2021-01-14"
+end = "2027-06-24"
+
+[[trusted.toml]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2022-12-14"
+end = "2027-06-24"
+
+[[trusted.toml_datetime]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2022-10-21"
+end = "2027-06-24"
+
+[[trusted.toml_edit]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2021-09-13"
+end = "2027-06-24"
+
+[[trusted.toml_parser]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2025-07-08"
+end = "2027-06-24"
+
+[[trusted.toml_write]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2025-04-25"
+end = "2027-06-24"
+
+[[trusted.toml_writer]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2025-07-08"
+end = "2027-06-24"
+
+[[trusted.tor-async-utils]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-06-05"
+end = "2027-06-24"
+
+[[trusted.tor-basic-utils]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-06-05"
+end = "2027-06-24"
+
+[[trusted.tor-bytes]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-06-05"
+end = "2027-06-24"
+
+[[trusted.tor-cell]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-cert]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-chanmgr]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-checkable]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-circmgr]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-config]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-config-path]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-12-02"
+end = "2027-06-24"
+
+[[trusted.tor-consdiff]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-06-05"
+end = "2027-06-24"
+
+[[trusted.tor-dirclient]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-dircommon]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2025-10-06"
+end = "2027-06-24"
+
+[[trusted.tor-dirmgr]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-error]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-06-05"
+end = "2027-06-24"
+
+[[trusted.tor-general-addr]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-12-02"
+end = "2027-06-24"
+
+[[trusted.tor-guardmgr]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-hsclient]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-hscrypto]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-key-forge]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-12-02"
+end = "2027-06-24"
+
+[[trusted.tor-keymgr]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-linkspec]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-llcrypto]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-06-05"
+end = "2027-06-24"
+
+[[trusted.tor-log-ratelim]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-06-05"
+end = "2027-06-24"
+
+[[trusted.tor-memquota]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-09-03"
+end = "2027-06-24"
+
+[[trusted.tor-memquota-cost]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2026-03-03"
+end = "2027-06-24"
+
+[[trusted.tor-netdir]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-netdoc]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-persist]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-proto]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.tor-protover]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-06-05"
+end = "2027-06-24"
+
+[[trusted.tor-relay-selection]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-06-05"
+end = "2027-06-24"
+
+[[trusted.tor-rtcompat]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-06-05"
+end = "2027-06-24"
+
+[[trusted.tor-rtmock]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-06-05"
+end = "2027-06-24"
+
+[[trusted.tor-socksproto]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-06-05"
+end = "2027-06-24"
+
+[[trusted.tor-units]]
+criteria = "safe-to-deploy"
+user-id = 31201 # Gabi Moldovan (gabi-250)
+start = "2024-03-04"
+end = "2027-06-24"
+
+[[trusted.typeid]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2024-05-13"
+end = "2027-06-24"
+
+[[trusted.unicode-ident]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2021-10-02"
+end = "2027-06-24"
+
+[[trusted.unicode-script]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2020-01-02"
+end = "2027-06-24"
+
+[[trusted.url]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2021-02-18"
+end = "2027-06-24"
+
+[[trusted.walkdir]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-06-09"
+end = "2027-06-24"
+
+[[trusted.wasi]]
+criteria = "safe-to-deploy"
+user-id = 6825 # Dan Gohman (sunfishcode)
+start = "2019-07-22"
+end = "2027-06-24"
+
+[[trusted.winapi-util]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2020-01-11"
+end = "2027-06-24"
+
+[[trusted.windows]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-01-15"
+end = "2027-06-24"
+
+[[trusted.windows-collections]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2025-02-06"
+end = "2027-06-24"
+
+[[trusted.windows-core]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-11-15"
+end = "2027-06-24"
+
+[[trusted.windows-future]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2025-02-10"
+end = "2027-06-24"
+
+[[trusted.windows-implement]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2022-01-27"
+end = "2027-06-24"
+
+[[trusted.windows-interface]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2022-02-18"
+end = "2027-06-24"
+
+[[trusted.windows-numerics]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2023-05-15"
+end = "2027-06-24"
+
+[[trusted.windows-result]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2024-02-02"
+end = "2027-06-24"
+
+[[trusted.windows-strings]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2024-02-02"
+end = "2027-06-24"
+
+[[trusted.windows-sys]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-11-15"
+end = "2027-06-24"
+
+[[trusted.windows-targets]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2022-09-09"
+end = "2027-06-24"
+
+[[trusted.windows-threading]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2025-04-29"
+end = "2027-06-24"
+
+[[trusted.windows-version]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2023-03-07"
+end = "2027-06-24"
+
+[[trusted.windows_aarch64_gnullvm]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2022-09-01"
+end = "2027-06-24"
+
+[[trusted.windows_aarch64_msvc]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-11-05"
+end = "2027-06-24"
+
+[[trusted.windows_i686_gnu]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-10-28"
+end = "2027-06-24"
+
+[[trusted.windows_i686_gnullvm]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2024-04-02"
+end = "2027-06-24"
+
+[[trusted.windows_i686_msvc]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-10-27"
+end = "2027-06-24"
+
+[[trusted.windows_x86_64_gnu]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-10-28"
+end = "2027-06-24"
+
+[[trusted.windows_x86_64_gnullvm]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2022-09-01"
+end = "2027-06-24"
+
+[[trusted.windows_x86_64_msvc]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-10-27"
+end = "2027-06-24"
+
+[[trusted.winnow]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2023-02-22"
+end = "2027-06-24"
+
+[[trusted.writeable]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2021-11-01"
+end = "2027-06-24"
+
+[[trusted.yoke]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2021-05-01"
+end = "2027-06-24"
+
+[[trusted.yoke-derive]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2021-07-02"
+end = "2027-06-24"
+
+[[trusted.zerofrom]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2022-04-06"
+end = "2027-06-24"
+
+[[trusted.zerofrom-derive]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2022-04-06"
+end = "2027-06-24"
+
+[[trusted.zerotrie]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2023-10-03"
+end = "2027-06-24"
+
+[[trusted.zerovec]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2021-04-19"
+end = "2027-06-24"
+
+[[trusted.zerovec-derive]]
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2021-12-11"
+end = "2027-06-24"
+
+[[trusted.zmij]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2025-12-18"
+end = "2027-06-24"
