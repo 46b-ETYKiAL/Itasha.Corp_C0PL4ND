@@ -51,6 +51,8 @@ These controls are handled directly by the app and are **not** configurable via
 | `mod+shift+End` | Scroll back to following live output (bottom) | Always |
 | `mod+shift+PageUp` | Jump to the previous shell-prompt mark (OSC 133) | Always |
 | `mod+shift+PageDown` | Jump to the next shell-prompt mark (OSC 133) | Always |
+| `mod+shift+Z` | Toggle zoom on the focused pane (full-size; siblings hidden) | Always |
+| `mod+shift+←` / `→` / `↑` / `↓` | Move focus to the adjacent pane in that direction | Multiple panes |
 | `Enter` / `F3` | Jump to next search match | Find overlay open |
 | `Shift+F3` | Jump to previous search match | Find overlay open |
 | `Esc` | Close the find overlay | Find overlay open |

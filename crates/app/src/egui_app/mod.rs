@@ -400,6 +400,11 @@ pub struct C0pl4ndApp {
     /// un-zooming restores the exact prior layout. Runtime-only (not persisted);
     /// cleared if the zoomed pane is closed.
     zoomed_pane: Option<PaneId>,
+    /// Each pane's screen-space body rect, captured every frame during the grid
+    /// render. Consumed by directional pane focus (Ctrl/Cmd+Shift+Arrow) to find
+    /// the geometric neighbour in a direction. Rebuilt each frame, so it tracks
+    /// the live layout (empty before the first render).
+    pane_rects: HashMap<PaneId, egui::Rect>,
     /// Per-(pane,row) laid-out galley cache for [`paint_grid_native`] (audit #2).
     /// A row's galley is re-laid-out only when its content/style key changes, so
     /// an idle or partially-changed grid does not re-run text layout for every
@@ -674,6 +679,7 @@ impl C0pl4ndApp {
             was_focused: true,
             selection: None,
             zoomed_pane: None,
+            pane_rects: HashMap::new(),
             galley_cache: GalleyCache::default(),
             image_textures: ImageTextureCache::default(),
             pending_fonts: None,
@@ -1660,6 +1666,7 @@ impl C0pl4ndApp {
             ime_cursor_rect,
             copy_selection,
             context_menu_action,
+            body_rect: rect,
         }
     }
 
@@ -1688,6 +1695,10 @@ impl C0pl4ndApp {
         // borrow closes. `Some(Some(s))` = set/replace the preedit; `Some(None)`
         // = clear it; `None` = no IME event this frame, leave it as-is (F3-1).
         let mut ime_update: Option<Option<String>> = None;
+        // Ctrl/Cmd+Shift+Arrow requests a directional pane-focus move; captured
+        // here and applied after the forward loop so the arrow is NOT also sent to
+        // the PTY as a cursor sequence.
+        let mut dir_focus: Option<Direction> = None;
         ctx.input(|i| {
             let mods = KeyModifiers {
                 ctrl: i.modifiers.ctrl,
@@ -1763,6 +1774,27 @@ impl C0pl4ndApp {
                         } else {
                             KeyEventKind::Press
                         };
+                        // Ctrl/Cmd+Shift+Arrow moves keyboard focus to the
+                        // adjacent pane instead of sending a cursor sequence to
+                        // the PTY. Capture the direction and skip forwarding the
+                        // arrow (the ctrl-OR-command discipline used everywhere).
+                        if *pressed
+                            && (modifiers.ctrl || modifiers.command)
+                            && modifiers.shift
+                            && !modifiers.alt
+                        {
+                            let d = match key {
+                                egui::Key::ArrowLeft => Some(Direction::Left),
+                                egui::Key::ArrowRight => Some(Direction::Right),
+                                egui::Key::ArrowUp => Some(Direction::Up),
+                                egui::Key::ArrowDown => Some(Direction::Down),
+                                _ => None,
+                            };
+                            if let Some(d) = d {
+                                dir_focus = Some(d);
+                                continue;
+                            }
+                        }
                         let m = KeyModifiers {
                             ctrl: modifiers.ctrl,
                             alt: modifiers.alt,
@@ -1811,6 +1843,14 @@ impl C0pl4ndApp {
                     term.forward_key_event(lk, *m, *kind)
                 });
             }
+        }
+
+        // Apply a directional pane-focus move AFTER forwarding this frame's other
+        // keys (so they reach the previously-focused pane). Uses the pane rects
+        // captured during the last grid render (the layout is stable frame to
+        // frame); a no-op before the first render or with no neighbour.
+        if let Some(dir) = dir_focus {
+            self.focus_directional(dir);
         }
 
         // Paste handling — SECURITY: every paste goes through the core paste-
@@ -1884,6 +1924,7 @@ impl C0pl4ndApp {
         let focused = self.focused_pane;
         let mut clicked: Option<PaneId> = None;
         let mut pending_ctx_action: Option<ContextMenuAction> = None;
+        let mut frame_pane_rects: HashMap<PaneId, egui::Rect> = HashMap::new();
         let mut focused_size: Option<(f32, f32)> = None;
         let mut opened_url: Option<String> = None;
         // The focused pane's IME cursor rect, captured from the render closure
@@ -2040,6 +2081,7 @@ impl C0pl4ndApp {
                 if let Some(act) = outcome.context_menu_action {
                     pending_ctx_action = Some(act);
                 }
+                frame_pane_rects.insert(pid, outcome.body_rect);
                 // Copy-on-select: a just-completed selection goes to the OS
                 // clipboard only when the user enabled it.
                 if let Some(text) = outcome.copy_selection {
@@ -2115,6 +2157,10 @@ impl C0pl4ndApp {
         if let Some(url) = opened_url {
             self.last_opened_url = Some(url);
         }
+        // Record this frame's per-pane body rects for directional pane focus.
+        // In Tabs / zoom mode only the single visible pane is captured (so
+        // directional focus finds no neighbour — correct, there is only one).
+        self.pane_rects = frame_pane_rects;
 
         // Enforce the cap: a drag-to-split that pushed us over 6 reverts.
         if count_panes(&self.grid_tree) > grid::MAX_PANES {
@@ -2160,6 +2206,73 @@ impl C0pl4ndApp {
     #[allow(dead_code)]
     pub fn zoomed_pane(&self) -> Option<PaneId> {
         self.zoomed_pane
+    }
+
+    /// The pane geometrically adjacent to `focus` in `dir`, using the body rects
+    /// captured during the last grid render. A candidate must lie in the
+    /// requested direction (its centre past the focused centre on the primary
+    /// axis) AND overlap the focused pane on the orthogonal axis; among those the
+    /// nearest on the primary axis wins, tie-broken by orthogonal-centre
+    /// proximity. `None` when there is no such neighbour (or no rects yet).
+    fn neighbor_pane(&self, focus: PaneId, dir: Direction) -> Option<PaneId> {
+        let f = self.pane_rects.get(&focus)?;
+        let fc = f.center();
+        let mut best: Option<(PaneId, f32, f32)> = None;
+        for (&pid, r) in &self.pane_rects {
+            if pid == focus {
+                continue;
+            }
+            let c = r.center();
+            let (primary, ortho, in_dir, overlap) = match dir {
+                Direction::Left => (
+                    fc.x - c.x,
+                    (c.y - fc.y).abs(),
+                    c.x < fc.x,
+                    ranges_overlap(f.y_range(), r.y_range()),
+                ),
+                Direction::Right => (
+                    c.x - fc.x,
+                    (c.y - fc.y).abs(),
+                    c.x > fc.x,
+                    ranges_overlap(f.y_range(), r.y_range()),
+                ),
+                Direction::Up => (
+                    fc.y - c.y,
+                    (c.x - fc.x).abs(),
+                    c.y < fc.y,
+                    ranges_overlap(f.x_range(), r.x_range()),
+                ),
+                Direction::Down => (
+                    c.y - fc.y,
+                    (c.x - fc.x).abs(),
+                    c.y > fc.y,
+                    ranges_overlap(f.x_range(), r.x_range()),
+                ),
+            };
+            if !in_dir || !overlap {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some((_, bp, bo)) => primary < bp || (primary == bp && ortho < bo),
+            };
+            if better {
+                best = Some((pid, primary, ortho));
+            }
+        }
+        best.map(|(id, _, _)| id)
+    }
+
+    /// Move keyboard focus to the pane adjacent to the focused pane in `dir`
+    /// (Ctrl/Cmd+Shift+Arrow). A no-op when there is no neighbour in that
+    /// direction. Clears the per-pane typed-line accumulator on a real move.
+    fn focus_directional(&mut self, dir: Direction) {
+        if let Some(neighbor) = self.neighbor_pane(self.focused_pane, dir) {
+            if neighbor != self.focused_pane {
+                self.input_line.clear();
+                self.focused_pane = neighbor;
+            }
+        }
     }
 
     /// Apply a right-click context-menu action that needs `&mut self` (it mutates
@@ -4683,6 +4796,15 @@ enum ContextMenuAction {
     ClosePane(PaneId),
 }
 
+/// A spatial direction for directional pane focus (Ctrl/Cmd+Shift+Arrow).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 struct PaneBodyOutcome {
     /// Whether the pane reported it wants to begin an egui_tiles drag.
     drag_started: bool,
@@ -4710,6 +4832,9 @@ struct PaneBodyOutcome {
     /// frame that needs `&mut self`; applied by the caller after the egui_tiles
     /// render closure releases its borrows. `None` when no such item was chosen.
     context_menu_action: Option<ContextMenuAction>,
+    /// This pane's screen-space body rect this frame. The caller records it in
+    /// [`C0pl4ndApp::pane_rects`] for directional pane focus (geometry).
+    body_rect: egui::Rect,
 }
 
 /// An in-progress or completed mouse text selection over a pane.
@@ -4824,6 +4949,12 @@ fn cell_at_pos(pos: egui::Pos2, origin: egui::Pos2, cw: f32, ch: f32) -> Option<
     let col = ((pos.x - origin.x) / cw).floor() as usize;
     let row = ((pos.y - origin.y) / ch).floor() as usize;
     Some((row, col))
+}
+
+/// Whether two 1-D ranges overlap (open-interval test), used by directional
+/// pane focus to require orthogonal-axis overlap between two pane rects.
+fn ranges_overlap(a: egui::Rangef, b: egui::Rangef) -> bool {
+    a.min < b.max && b.min < a.max
 }
 
 /// True for a character that double-click word-selection treats as part of a

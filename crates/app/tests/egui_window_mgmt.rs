@@ -490,3 +490,37 @@ fn closing_the_zoomed_pane_clears_the_zoom() {
         "closing the zoomed pane must clear the zoom"
     );
 }
+
+// ---- directional pane focus (Ctrl+Shift+Arrow) ------------------------------
+
+#[test]
+fn ctrl_shift_arrow_moves_directional_pane_focus_across_a_split() {
+    // Ctrl/Cmd+Shift+Arrow moves keyboard focus to the geometrically adjacent
+    // pane. Build a side-by-side split, render so both pane rects are captured,
+    // then assert Left and Right address two DIFFERENT panes (robust to whichever
+    // pane the split leaves focused). Driven through the REAL frame_tick path
+    // (the chord is intercepted before the arrow reaches the PTY).
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    press_ctrl_shift(&mut h, egui::Key::D); // split right → two side-by-side panes
+    assert_eq!(app.borrow().pane_count(), 2, "split makes two panes");
+    h.run(); // a full render populates pane_rects for both panes
+
+    press_ctrl_shift(&mut h, egui::Key::ArrowLeft);
+    let after_left = app.borrow().focused_pane();
+    press_ctrl_shift(&mut h, egui::Key::ArrowRight);
+    let after_right = app.borrow().focused_pane();
+    assert_ne!(
+        after_left, after_right,
+        "Ctrl+Shift+Left and Ctrl+Shift+Right must focus the two different panes"
+    );
+
+    // At the left edge there is no pane further left, so a second Left is a no-op.
+    press_ctrl_shift(&mut h, egui::Key::ArrowLeft);
+    assert_eq!(
+        app.borrow().focused_pane(),
+        after_left,
+        "Ctrl+Shift+Left at the left edge is idempotent (no pane further left)"
+    );
+}
