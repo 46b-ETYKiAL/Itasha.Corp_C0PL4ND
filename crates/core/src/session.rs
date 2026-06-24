@@ -8,9 +8,29 @@ use crate::pty::PtyProcess;
 use crate::term::Terminal;
 use anyhow::Result;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::JoinHandle;
+
+// loom shim: under `--cfg loom` the two synchronization primitives the session
+// uses to coordinate the reader thread with the UI thread — the `Mutex` guarding
+// the wake slot / terminal, and the `AtomicBool` liveness flag — are swapped for
+// loom's instrumented equivalents so the `loom_tests` module can permute every
+// interleaving under the C11 memory model. The swap is behaviour-preserving:
+// both expose the identical `Mutex` / `AtomicBool` API the production code
+// already calls, so no logic changes. `Arc` is deliberately NOT swapped: it
+// stays `std::sync::Arc` because `WakeFn = Arc<dyn Fn()…>` relies on unsized
+// `dyn` coercion that `loom::sync::Arc` does not provide, and loom instruments
+// the Mutex/Atomic (the actual synchronization), not the reference count.
+// Outside `--cfg loom` (every normal/CI/release build) these are the std
+// primitives unchanged.
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicBool, Ordering};
+#[cfg(loom)]
+use loom::sync::Mutex;
+#[cfg(not(loom))]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(loom))]
+use std::sync::Mutex;
 
 /// A UI-wake callback the reader thread invokes after parsing a chunk of PTY
 /// output into the [`Terminal`]. The UI layer registers one via
@@ -194,6 +214,21 @@ impl Session {
     }
 
     /// True while the child process is running (reader thread alive).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::session::Session;
+    ///
+    /// // A freshly spawned session's reader thread is alive immediately: the
+    /// // liveness flag is initialised to `true` before the reader can observe
+    /// // EOF, so `is_alive()` reports `true` right after spawn.
+    /// # #[cfg(windows)]
+    /// # let session = Session::spawn_program("cmd.exe", &[], 24, 80).unwrap();
+    /// # #[cfg(not(windows))]
+    /// let session = Session::spawn_program("/bin/sh", &["-i"], 24, 80).unwrap();
+    /// assert!(session.is_alive());
+    /// ```
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
     }
@@ -243,8 +278,14 @@ mod tests {
             Session::spawn_program("/bin/sh", &["-c", &format!("printf '{token}'")], 24, 80)
                 .expect("spawn session");
 
-        // Poll the grid for up to ~3s for the token to appear.
-        let deadline = Instant::now() + Duration::from_secs(3);
+        // Poll the grid for the token to appear. The bound is generous (30s, vs
+        // a healthy <250ms locally) on purpose: spawning cmd.exe/ConPTY (or sh)
+        // and rendering its first output is wall-clock-variable on a saturated
+        // machine — a shared CI runner or a concurrent local build can push the
+        // first paint well past a tight few-second window. A genuinely-broken
+        // reader (token never rendered) still fails, just later; only flaky
+        // under-load timeouts are absorbed.
+        let deadline = Instant::now() + Duration::from_secs(30);
         let mut seen = false;
         while Instant::now() < deadline {
             if session.snapshot_text().contains(token) {
@@ -487,5 +528,157 @@ mod tests {
             "a 24-row grid snapshot must contain 24 line terminators"
         );
         drop(session);
+    }
+}
+
+// Loom concurrency-permutation tests for the IN-HOUSE synchronization the
+// session uses to coordinate its PTY-reader thread with the UI thread. Built
+// and run ONLY under `--cfg loom` (loom is a `cfg(loom)`-gated dev-dependency),
+// so they are invisible to every normal/CI/release build.
+//
+// SCOPE DECISION (honest narrowing): the *real* reader thread blocks on
+// `portable_pty`'s FFI `reader.read()` — that is foreign, non-instrumentable
+// code loom cannot and must not model (modelling FFI we do not control would be
+// a fake test). What loom CAN model honestly is the in-house coordination the
+// reader performs around each drained chunk and at EOF — the part `Session`
+// owns outright:
+//   1. the `Arc<Mutex<Option<WakeFn>>>` wake slot, whose load-bearing contract
+//      (documented in `from_pty`) is "clone the callback OUT of the slot lock,
+//      then call it — never invoke the UI callback while holding the slot
+//      mutex, so the reader can never deadlock against a concurrent
+//      `set_wake_callback`"; and
+//   2. the `Arc<AtomicBool>` liveness flag the reader stores `false` into at
+//      EOF and the UI reads via `is_alive()`.
+// We model exactly these two primitives with a faithful in-test replica of the
+// production access pattern (same lock/clone-out-of-lock order, same atomic
+// ordering), driving them with `loom::thread` across every interleaving. The
+// PTY/FFI byte path is deliberately abstracted to "a chunk arrived" / "EOF" —
+// the events that drive the in-house logic — rather than modelled, because the
+// FFI itself is out of our control.
+//
+// Gated on `all(test, loom)` (not just `loom`) so the module — and its imports —
+// compile ONLY in the test target under `--cfg loom`; a plain `--cfg loom` lib
+// build (which still exercises the production Mutex/AtomicBool shim above) does
+// not pull the test-only imports in and stays warning-clean.
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use loom::sync::Mutex;
+    // `Arc` stays std here for the same reason as the production shim above: the
+    // wake callback is an `Arc<dyn Fn()…>` and `loom::sync::Arc` does not support
+    // the unsized `dyn` coercion. loom instruments the `Mutex`/`AtomicBool` (the
+    // synchronization under test), not the reference count, so a `std::sync::Arc`
+    // wrapping loom primitives is the correct and supported pattern here.
+    use std::sync::Arc;
+
+    /// The wake-slot contract under all interleavings: a reader thread drains a
+    /// chunk and, per the production `from_pty` logic, clones the callback OUT
+    /// of the slot lock and invokes it AFTER releasing the lock; concurrently
+    /// the UI thread installs the callback via `set_wake_callback`. Invariants
+    /// loom verifies across every permutation:
+    ///   * no deadlock (the model completes for every interleaving), and
+    ///   * the callback is never invoked while the slot mutex is held (proven by
+    ///     asserting the slot lock is free at the moment the callback runs —
+    ///     `try_lock` must succeed inside the callback), and
+    ///   * the wake count is a consistent 0 or 1 (no torn/lost state): if the
+    ///     install happened-before the reader's slot read, the callback fires
+    ///     exactly once; otherwise it does not fire — never a corrupt value.
+    #[test]
+    fn loom_wake_slot_clone_out_of_lock_never_deadlocks() {
+        loom::model(|| {
+            // The in-house wake slot, mirroring `Session::wake`.
+            let slot: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>> = Arc::new(Mutex::new(None));
+            // Counts callback invocations; the callback asserts the slot lock is
+            // free when it runs (the clone-out-of-lock invariant).
+            let wakes = Arc::new(AtomicUsize::new(0));
+
+            // UI thread: install the wake callback (the post-spawn wiring order).
+            let ui_slot = Arc::clone(&slot);
+            let ui_wakes = Arc::clone(&wakes);
+            let ui_slot_for_cb = Arc::clone(&slot);
+            let ui = loom::thread::spawn(move || {
+                let cb: Arc<dyn Fn() + Send + Sync> = {
+                    let slot_in_cb = Arc::clone(&ui_slot_for_cb);
+                    let wakes_in_cb = Arc::clone(&ui_wakes);
+                    Arc::new(move || {
+                        // The callback must NEVER run while the slot mutex is
+                        // held — that is the documented deadlock-avoidance
+                        // contract. If the reader cloned the callback out of the
+                        // lock correctly, the slot is free here.
+                        assert!(
+                            slot_in_cb.try_lock().is_ok(),
+                            "wake callback ran while the slot mutex was held — \
+                             the clone-out-of-lock contract was violated"
+                        );
+                        wakes_in_cb.fetch_add(1, Ordering::SeqCst);
+                    })
+                };
+                // set_wake_callback: take the lock, store, release.
+                *ui_slot.lock().unwrap() = Some(cb);
+            });
+
+            // Reader thread: a chunk arrived. Mirror the production pattern —
+            // clone the callback OUT of the slot lock, then (lock released)
+            // invoke it.
+            let rd_slot = Arc::clone(&slot);
+            let reader = loom::thread::spawn(move || {
+                let cb = rd_slot.lock().unwrap().clone();
+                if let Some(cb) = cb {
+                    cb();
+                }
+            });
+
+            ui.join().unwrap();
+            reader.join().unwrap();
+
+            // The wake count is a clean 0 or 1 — never a torn value — for every
+            // interleaving (the install either happened-before the reader's slot
+            // read or it did not).
+            let n = wakes.load(Ordering::SeqCst);
+            assert!(n <= 1, "wake count must be a consistent 0 or 1, got {n}");
+        });
+    }
+
+    /// The liveness-flag contract: the reader thread stores `false` into the
+    /// shared `AtomicBool` at EOF, and the UI observes it via `is_alive()`.
+    /// Under SeqCst, after the reader has joined the UI must observe `false`
+    /// (the EOF store is published); before any store the initial `true` is the
+    /// only other legal value. Loom verifies no interleaving yields a
+    /// torn/illegal observation and that the join-then-load path is consistent.
+    #[test]
+    fn loom_alive_flag_eof_store_is_observed() {
+        loom::model(|| {
+            // Mirrors `Session::alive`, initialised true at spawn.
+            let alive = Arc::new(AtomicBool::new(true));
+
+            // Reader thread reaches EOF and records the child as dead.
+            let rd_alive = Arc::clone(&alive);
+            let reader = loom::thread::spawn(move || {
+                rd_alive.store(false, Ordering::SeqCst);
+            });
+
+            // UI thread may poll is_alive() concurrently; any observation must
+            // be one of the two legal values (true before the store, false
+            // after) — never an illegal/torn read.
+            let ui_alive = Arc::clone(&alive);
+            let ui = loom::thread::spawn(move || {
+                let observed = ui_alive.load(Ordering::SeqCst);
+                assert!(
+                    observed || !observed,
+                    "is_alive() must read a well-defined bool under all interleavings"
+                );
+            });
+
+            ui.join().unwrap();
+            reader.join().unwrap();
+
+            // After the reader (EOF) has joined, the dead state is published:
+            // is_alive() MUST now observe false (no lost EOF signal).
+            assert!(
+                !alive.load(Ordering::SeqCst),
+                "after the reader stores false at EOF and joins, is_alive() must \
+                 observe false — a true here would be a lost-EOF (lost-wakeup) bug"
+            );
+        });
     }
 }

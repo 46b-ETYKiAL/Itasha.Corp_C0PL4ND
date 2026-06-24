@@ -2661,6 +2661,16 @@ impl Terminal {
     /// Construct a terminal of `rows` × `cols` with the default scrollback cap
     /// ([`DEFAULT_SCROLLBACK`]). Use [`Terminal::with_scrollback`] for an
     /// explicit cap.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::term::Terminal;
+    ///
+    /// let t = Terminal::new(24, 80);
+    /// assert_eq!(t.grid().rows(), 24);
+    /// assert_eq!(t.grid().cols(), 80);
+    /// ```
     pub fn new(rows: usize, cols: usize) -> Self {
         Self::with_scrollback(rows, cols, DEFAULT_SCROLLBACK)
     }
@@ -2695,6 +2705,22 @@ impl Terminal {
     /// forwards every non-APC byte to the `vte` parser in its original order.
     /// Passthrough bytes are batched in a scratch buffer and flushed to the
     /// parser on each state transition so byte ordering is preserved exactly.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::term::Terminal;
+    ///
+    /// let mut t = Terminal::new(2, 10);
+    /// t.advance(b"hi");
+    /// let grid = t.grid();
+    /// assert_eq!(grid.cell(0, 0).unwrap().c, 'h');
+    /// assert_eq!(grid.cell(0, 1).unwrap().c, 'i');
+    ///
+    /// // A CR+LF moves the cursor to the start of the next row.
+    /// t.advance(b"\r\nx");
+    /// assert_eq!(t.grid().cell(1, 0).unwrap().c, 'x');
+    /// ```
     pub fn advance(&mut self, bytes: &[u8]) {
         // UTF-8 read-boundary reassembly. The PTY reader can split a multibyte
         // codepoint's bytes across two `advance()` calls; `vte` 0.15 then drops
@@ -2893,6 +2919,18 @@ impl Terminal {
     }
 
     /// The current window title, as set by the program via OSC 0/2.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::term::Terminal;
+    ///
+    /// let mut t = Terminal::new(2, 20);
+    /// assert_eq!(t.title(), "");
+    /// // OSC 2 sets the window title; ST here is BEL (0x07).
+    /// t.advance(b"\x1b]2;hello\x07");
+    /// assert_eq!(t.title(), "hello");
+    /// ```
     pub fn title(&self) -> &str {
         &self.screen.title
     }

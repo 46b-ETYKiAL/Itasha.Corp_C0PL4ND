@@ -59,4 +59,15 @@ jobs:
           # `(MIT OR Apache-2.0) AND NCSA` — the NCSA term (a permissive
           # BSD-style license used by LLVM) isn't worth adding tree-wide; exempt
           # the fuzz-only dev dependency. Not shipped in any release binary.
-          allow-dependencies-licenses: pkg:cargo/filetime@0.2.29, pkg:cargo/libfuzzer-sys@0.4.10
+          # `generator` (pulled in by the `loom` concurrency-test dev-dependency)
+          # has the SAME deprecated `MIT/Apache-2.0` slash-syntax quirk as
+          # `filetime` above — mis-parsed as `LicenseRef-bad-mitapache-2.0`. Both
+          # halves are in the allow-list; it is a `#[cfg(loom)]`-only dev dep
+          # never compiled into a release binary. Parser quirk, not a real issue.
+          # `Swatinem/rust-cache` is the repo-standard CI cache action (used by 6
+          # workflows). Its license IS genuinely LGPL-3.0 (verified) — but it is a
+          # build-time CI action, never linked into the shipped product, so LGPL
+          # carries no contamination risk. The `pkg:githubactions/...` purl (no
+          # version: the dep graph reports the pinned tag, not the SHA) allowlists
+          # it so a NEW workflow file referencing it does not fail this per-PR gate.
+          allow-dependencies-licenses: pkg:cargo/filetime@0.2.29, pkg:cargo/libfuzzer-sys@0.4.10, pkg:cargo/generator@0.8.9, pkg:githubactions/Swatinem/rust-cache

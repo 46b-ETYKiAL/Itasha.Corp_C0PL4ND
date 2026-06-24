@@ -29,6 +29,25 @@ use crate::fuzzy;
 /// echoed by the tty, and the app drops non-echoed lines before they ever reach
 /// `record`. The ambiguous short `-p<value>` flag is deliberately NOT matched
 /// (it collides with non-secret uses like `cp -p`); precision over recall.
+///
+/// # Examples
+///
+/// ```
+/// use c0pl4nd_core::command_history::redact_secrets;
+///
+/// // Credential flags and secret-named env assignments are masked.
+/// assert_eq!(
+///     redact_secrets("mysql --password=hunter2 -h db"),
+///     "mysql --password=<redacted> -h db"
+/// );
+/// assert_eq!(
+///     redact_secrets("export API_KEY=sk-secret"),
+///     "export API_KEY=<redacted>"
+/// );
+///
+/// // Ordinary commands are left untouched (precision over recall).
+/// assert_eq!(redact_secrets("cp -p src dst"), "cp -p src dst");
+/// ```
 pub fn redact_secrets(line: &str) -> String {
     static FLAG: OnceLock<Regex> = OnceLock::new();
     static ENV: OnceLock<Regex> = OnceLock::new();
@@ -66,6 +85,23 @@ impl Default for CommandHistory {
 
 impl CommandHistory {
     /// A history bounded to at most `cap` entries (clamped to ≥ 1).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::command_history::CommandHistory;
+    ///
+    /// let mut h = CommandHistory::with_capacity(2);
+    /// h.record("one");
+    /// h.record("two");
+    /// h.record("three"); // evicts the oldest ("one")
+    /// assert_eq!(h.entries().collect::<Vec<_>>(), vec!["three", "two"]);
+    ///
+    /// // A zero capacity is clamped up to 1 (never a drop-everything cap).
+    /// let mut z = CommandHistory::with_capacity(0);
+    /// z.record("kept");
+    /// assert_eq!(z.len(), 1);
+    /// ```
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             entries: VecDeque::new(),
@@ -76,6 +112,27 @@ impl CommandHistory {
     /// Record `command` as the most recent. Whitespace-only input is ignored.
     /// An existing identical entry is moved to the front (no duplicate). Trims
     /// to the capacity, dropping the oldest entries.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::command_history::CommandHistory;
+    ///
+    /// let mut h = CommandHistory::default();
+    /// h.record("ls");
+    /// h.record("cargo build");
+    /// // Most-recent-first.
+    /// assert_eq!(h.entries().collect::<Vec<_>>(), vec!["cargo build", "ls"]);
+    ///
+    /// // Re-running an old command moves it to the front (no duplicate).
+    /// h.record("ls");
+    /// assert_eq!(h.entries().collect::<Vec<_>>(), vec!["ls", "cargo build"]);
+    /// assert_eq!(h.len(), 2);
+    ///
+    /// // Whitespace-only input is ignored.
+    /// h.record("   ");
+    /// assert_eq!(h.len(), 2);
+    /// ```
     pub fn record(&mut self, command: impl Into<String>) {
         let command = command.into();
         let trimmed = command.trim();
@@ -126,6 +183,23 @@ impl CommandHistory {
     /// most-recent-first order. Results are OWNED strings so a caller can hold
     /// them across a mutable borrow of the surrounding UI state (the egui
     /// command palette computes this before borrowing `self` for its widgets).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::command_history::CommandHistory;
+    ///
+    /// let mut h = CommandHistory::default();
+    /// h.record("cargo build");
+    /// h.record("cargo test");
+    /// h.record("ls -la");
+    ///
+    /// // An empty query returns everything, most-recent-first.
+    /// assert_eq!(h.search(""), vec!["ls -la", "cargo test", "cargo build"]);
+    ///
+    /// // A fuzzy subsequence narrows the results.
+    /// assert_eq!(h.search("crgts"), vec!["cargo test".to_string()]);
+    /// ```
     pub fn search(&self, query: &str) -> Vec<String> {
         let items: Vec<&str> = self.entries.iter().map(String::as_str).collect();
         fuzzy::filter_sorted(&items, query)

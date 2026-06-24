@@ -59,6 +59,21 @@ pub struct CellFlags {
 
 impl CellFlags {
     /// No attributes set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::grid::{CellFlags, UnderlineStyle};
+    ///
+    /// let f = CellFlags::empty();
+    /// assert!(!f.bold);
+    /// assert!(!f.italic);
+    /// assert!(!f.inverse);
+    /// assert!(!f.strikeout);
+    /// assert_eq!(f.underline_style, UnderlineStyle::None);
+    /// // No rendition implies no underline.
+    /// assert!(!f.underline());
+    /// ```
     pub const fn empty() -> Self {
         CellFlags {
             bold: false,
@@ -71,6 +86,19 @@ impl CellFlags {
 
     /// Whether ANY underline is active (legacy boolean accessor). `true` for
     /// every [`UnderlineStyle`] variant except [`UnderlineStyle::None`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::grid::{CellFlags, UnderlineStyle};
+    ///
+    /// let mut f = CellFlags::empty();
+    /// assert!(!f.underline());
+    ///
+    /// // Any non-None style counts as "underlined".
+    /// f.underline_style = UnderlineStyle::Curly;
+    /// assert!(f.underline());
+    /// ```
     pub fn underline(&self) -> bool {
         self.underline_style != UnderlineStyle::None
     }
@@ -154,6 +182,24 @@ impl Grid {
 
     /// Create a blank grid of `rows` × `cols` cells. Both dimensions are
     /// clamped to a minimum of 1 so a degenerate `0`-sized grid is never built.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::grid::Grid;
+    ///
+    /// let g = Grid::new(3, 4);
+    /// assert_eq!(g.rows(), 3);
+    /// assert_eq!(g.cols(), 4);
+    /// // Every cell starts blank, and a fresh grid is fully damaged.
+    /// assert_eq!(g.cell(0, 0).unwrap().c, ' ');
+    /// assert!(g.is_damaged());
+    ///
+    /// // Zero dimensions are clamped up to 1 (never a 0-sized grid).
+    /// let degenerate = Grid::new(0, 0);
+    /// assert_eq!(degenerate.rows(), 1);
+    /// assert_eq!(degenerate.cols(), 1);
+    /// ```
     pub fn new(rows: usize, cols: usize) -> Self {
         let rows = rows.max(1);
         let cols = cols.max(1);
@@ -237,6 +283,23 @@ impl Grid {
     /// The full grapheme rendered at `(row, col)`: the base char plus any
     /// combining marks held in the side-table (C27 / C34). Allocates only when
     /// combining marks are present. Returns an empty string out of bounds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::grid::{Cell, Grid};
+    ///
+    /// let mut g = Grid::new(1, 2);
+    /// g.set(0, 0, Cell { c: 'e', ..Default::default() });
+    /// assert_eq!(g.grapheme_at(0, 0), "e");
+    ///
+    /// // A combining acute accent fuses onto the base char.
+    /// g.push_combining_at(0, 0, '\u{0301}');
+    /// assert_eq!(g.grapheme_at(0, 0), "e\u{0301}");
+    ///
+    /// // Out of bounds yields an empty string, never a panic.
+    /// assert_eq!(g.grapheme_at(9, 9), "");
+    /// ```
     pub fn grapheme_at(&self, row: usize, col: usize) -> String {
         if row < self.rows && col < self.cols {
             let i = self.idx(row, col);
@@ -320,6 +383,23 @@ impl Grid {
     /// Write `cell` at `(row, col)`. Out-of-range coordinates are ignored. The
     /// affected row is marked dirty and any wide-glyph continuation marker on
     /// the cell is cleared.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::grid::{Cell, Grid};
+    ///
+    /// let mut g = Grid::new(2, 2);
+    /// g.clear_damage();
+    /// g.set(0, 1, Cell { c: 'z', ..Default::default() });
+    /// assert_eq!(g.cell(0, 1).unwrap().c, 'z');
+    /// // Writing a changed cell re-damages its row.
+    /// assert!(g.is_row_dirty(0));
+    ///
+    /// // Out-of-range writes are silently ignored (no panic, no effect).
+    /// g.set(99, 99, Cell { c: 'q', ..Default::default() });
+    /// assert!(g.cell(99, 99).is_none());
+    /// ```
     pub fn set(&mut self, row: usize, col: usize, cell: Cell) {
         if row < self.rows && col < self.cols {
             let i = self.idx(row, col);
@@ -591,6 +671,18 @@ impl Grid {
 
     /// Render the grid to a plain `String` (one line per row) — used by tests
     /// and the headless smoke test before the GPU renderer is wired.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use c0pl4nd_core::grid::{Cell, Grid};
+    ///
+    /// let mut g = Grid::new(2, 2);
+    /// g.set(0, 0, Cell { c: 'h', ..Default::default() });
+    /// g.set(0, 1, Cell { c: 'i', ..Default::default() });
+    /// // One line per row, trailing newline per row; unset cells stay blank.
+    /// assert_eq!(g.to_text(), "hi\n  \n");
+    /// ```
     pub fn to_text(&self) -> String {
         let mut out = String::with_capacity(self.rows * (self.cols + 1));
         for r in 0..self.rows {

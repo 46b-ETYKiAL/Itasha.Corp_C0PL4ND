@@ -177,6 +177,16 @@ impl Drop for PtyProcess {
 /// child's `TERM` must agree, or a freshly GUI-launched TUI mis-detects colour
 /// support (the F1-1 failure: a child spawned from a Windows GUI process inherits
 /// no `TERM`/`COLORTERM` at all).
+///
+/// # Examples
+///
+/// ```
+/// use c0pl4nd_core::pty::DEFAULT_TERM;
+///
+/// // The advertised TERM matches the emulator's on-the-wire DA/XTGETTCAP
+/// // identity (an xterm-256color-class terminal).
+/// assert_eq!(DEFAULT_TERM, "xterm-256color");
+/// ```
 pub const DEFAULT_TERM: &str = "xterm-256color";
 
 /// The `COLORTERM` value C0PL4ND advertises. `truecolor` tells colour-aware
@@ -302,6 +312,17 @@ fn dirs_home() -> Option<std::path::PathBuf> {
 }
 
 /// The platform default interactive shell.
+///
+/// # Examples
+///
+/// ```
+/// use c0pl4nd_core::pty::default_shell;
+///
+/// // The default shell is always a non-empty program name (COMSPEC/cmd.exe on
+/// // Windows, $SHELL or /bin/sh on POSIX) — it never resolves to an empty
+/// // string, so a spawn always has something to launch.
+/// assert!(!default_shell().is_empty());
+/// ```
 pub fn default_shell() -> String {
     #[cfg(windows)]
     {

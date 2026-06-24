@@ -651,6 +651,173 @@ fn ansi_sys_save_restore_aliases() {
 }
 
 // ===========================================================================
+// 10. Charset switching via SI/SO with a G1 line-drawing designation.
+//
+// The vttest "Test of character sets" family designates a charset into G1
+// (`ESC ) 0`), then flips GL between G0 and G1 with the C0 controls SO (0x0E,
+// "shift out", invoke G1) and SI (0x0F, "shift in", return to G0). This is the
+// idiom `tput smacs`/`rmacs` and ncurses box-drawing actually emit — distinct
+// from the `ESC ( 0` G0-designation path already covered in section 8.
+// ===========================================================================
+
+#[test]
+fn so_invokes_g1_line_drawing_then_si_returns_to_ascii() {
+    let mut t = term(2, 12);
+    // Designate DEC Special Graphics into G1; G0 stays ASCII.
+    t.advance(b"\x1b)0");
+    // While in G0 (default), 'q' prints literally.
+    t.advance(b"q");
+    assert_eq!(ch(&t, 0, 0), 'q', "G0 active: ASCII 'q' prints literally");
+    // SO invokes G1 (line-drawing) into GL: 'q' -> U+2500 horizontal bar,
+    // 'x' -> U+2502 vertical bar, 'n' -> U+253C crossing.
+    t.advance(b"\x0e"); // SO
+    t.advance(b"qxn");
+    assert_eq!(ch(&t, 0, 1), '\u{2500}', "G1 line-drawing: q -> ─");
+    assert_eq!(ch(&t, 0, 2), '\u{2502}', "G1 line-drawing: x -> │");
+    assert_eq!(ch(&t, 0, 3), '\u{253c}', "G1 line-drawing: n -> ┼");
+    // SI returns GL to G0 (ASCII): 'q' is literal again.
+    t.advance(b"\x0f"); // SI
+    t.advance(b"q");
+    assert_eq!(ch(&t, 0, 4), 'q', "SI restored G0 ASCII: 'q' literal again");
+    assert_cursor(&t, 0, 5);
+}
+
+#[test]
+fn g0_ascii_unaffected_by_g1_designation_until_so() {
+    // Designating G1 must NOT change what GL (G0) prints until SO flips to G1.
+    let mut t = term(2, 8);
+    t.advance(b"\x1b)0"); // G1 = line-drawing, but GL is still G0 = ASCII
+    t.advance(b"jk"); // these map under line-drawing ONLY when G1 is invoked
+    assert_eq!(ch(&t, 0, 0), 'j', "no SO yet: 'j' prints literally");
+    assert_eq!(ch(&t, 0, 1), 'k', "no SO yet: 'k' prints literally");
+}
+
+// ===========================================================================
+// 11. Index / Reverse-Index / Next-Line (IND `ESC D`, RI `ESC M`, NEL `ESC E`).
+//
+// These ESC-level cursor controls are the column-preserving (IND/RI) and
+// column-homing (NEL) siblings of LF, and they honour the scroll region the
+// same way LF does. The vttest cursor-movement family exercises them directly.
+// ===========================================================================
+
+#[test]
+fn ind_advances_row_and_preserves_column() {
+    let mut t = term(4, 10);
+    t.advance(b"\x1b[1;4H"); // (0,3)
+    t.advance(b"\x1bD"); // IND — down one row, column unchanged (like LF, no CR)
+    assert_cursor(&t, 1, 3);
+}
+
+#[test]
+fn ind_at_bottom_scrolls_the_screen_up() {
+    let mut t = term(3, 6);
+    t.advance(b"r0\r\nr1\r\nr2"); // cursor parks on the bottom row
+    assert_cursor(&t, 2, 2);
+    t.advance(b"\x1bD"); // IND at the bottom margin scrolls the region up
+    assert_eq!(&row(&t, 0)[..2], "r1", "r0 scrolled off the top");
+    assert_eq!(&row(&t, 1)[..2], "r2");
+    assert_eq!(row(&t, 2), "      ", "blank pulled in at the bottom");
+    // IND keeps the column even when it scrolls at the bottom margin.
+    assert_cursor(&t, 2, 2);
+}
+
+#[test]
+fn ri_moves_up_and_scrolls_down_at_top_margin() {
+    let mut t = term(3, 6);
+    t.advance(b"r0\r\nr1\r\nr2");
+    t.advance(b"\x1b[1;1H"); // home -> top margin (0,0)
+    t.advance(b"\x1bM"); // RI at the top margin scrolls the region DOWN
+    assert_eq!(row(&t, 0), "      ", "blank pushed in at the top");
+    assert_eq!(&row(&t, 1)[..2], "r0", "r0 pushed down");
+    assert_eq!(&row(&t, 2)[..2], "r1", "r2 scrolled off the bottom");
+    assert_cursor(&t, 0, 0);
+}
+
+#[test]
+fn ri_above_top_margin_just_moves_up() {
+    let mut t = term(4, 6);
+    t.advance(b"\x1b[3;5H"); // (2,4)
+    t.advance(b"\x1bM"); // RI not at top margin -> simple up-one, column kept
+    assert_cursor(&t, 1, 4);
+}
+
+#[test]
+fn nel_homes_column_and_advances_row() {
+    let mut t = term(4, 10);
+    t.advance(b"\x1b[1;5H"); // (0,4)
+    t.advance(b"\x1bE"); // NEL — CR + LF: column to 0, row down one
+    assert_cursor(&t, 1, 0);
+}
+
+// ===========================================================================
+// 12. Tab-stop semantics: HTS sets, TBC clears, `\t` advances to the next set
+// stop. Section 6 covered the single-stop and clear-all cases; these pin the
+// MULTI-stop interplay (two custom stops + advance across both, and the
+// "no stop ahead -> last column" fallback after a targeted clear).
+// ===========================================================================
+
+#[test]
+fn two_custom_tab_stops_are_visited_in_order() {
+    let mut t = term(2, 20);
+    // Clear the default 8-col grid first so only our custom stops exist.
+    t.advance(b"\x1b[3g"); // TBC 3: clear every stop
+    t.advance(b"\x1b[1;4H"); // col 4 (1-based) -> (0,3)
+    t.advance(b"\x1bH"); // HTS: stop at col 3
+    t.advance(b"\x1b[1;10H"); // col 10 -> (0,9)
+    t.advance(b"\x1bH"); // HTS: stop at col 9
+    t.advance(b"\r"); // back to col 0
+    t.advance(b"\t"); // first custom stop -> col 3
+    assert_cursor(&t, 0, 3);
+    t.advance(b"\t"); // second custom stop -> col 9
+    assert_cursor(&t, 0, 9);
+    // No stop beyond col 9 -> the next tab lands on the last column.
+    t.advance(b"\t");
+    assert_cursor(&t, 0, 19);
+}
+
+#[test]
+fn tab_advances_across_two_default_stops() {
+    let mut t = term(2, 40);
+    // Default 8-col stops: col 8, 16, 24, ...
+    t.advance(b"\t\t"); // two tabs from col 0 -> col 16
+    assert_cursor(&t, 0, 16);
+}
+
+#[test]
+fn cleared_stop_is_skipped_to_the_next_stop() {
+    let mut t = term(2, 40);
+    // Clear the col-8 stop; a tab from col 0 then skips to col 16.
+    t.advance(b"\x1b[1;9H"); // col 9 -> (0,8)
+    t.advance(b"\x1b[g"); // TBC 0 at the cursor column (8)
+    t.advance(b"\r"); // back to col 0
+    t.advance(b"\t");
+    // col-8 stop cleared -> tab skips to the next surviving stop at col 16.
+    assert_cursor(&t, 0, 16);
+    // The col-16 stop survives: a second tab advances to col 24.
+    t.advance(b"\t");
+    assert_cursor(&t, 0, 24);
+}
+
+// ===========================================================================
+// 13. Scroll-region edge interplay: IND honours a SET margin (the ESC-level
+// sibling of the `line_feed_scrolls_within_region_only` LF case in section 3).
+// ===========================================================================
+
+#[test]
+fn ind_scrolls_only_within_a_set_region() {
+    let mut t = term(6, 6);
+    t.advance(b"r0\r\nr1\r\nr2\r\nr3\r\nr4\r\nr5");
+    t.advance(b"\x1b[2;4r"); // region rows 2..4 (1-based) -> [1,3]
+    t.advance(b"\x1b[4;1H"); // to the bottom margin (row 4 1-based -> (3,0))
+    t.advance(b"\x1bD"); // IND at the bottom margin: region scrolls, outside fixed
+    assert_eq!(&row(&t, 0)[..2], "r0", "above region fixed");
+    assert_eq!(&row(&t, 1)[..2], "r2", "region scrolled: r1 dropped");
+    assert_eq!(&row(&t, 2)[..2], "r3");
+    assert_eq!(row(&t, 3), "      ", "blank pulled in at region bottom");
+    assert_eq!(&row(&t, 4)[..2], "r4", "below region fixed");
+}
+
+// ===========================================================================
 // Conformance notes (gaps discovered while authoring this corpus):
 //
 //  * CUP into the LAST column clamps the cursor to `cols-1` (see
