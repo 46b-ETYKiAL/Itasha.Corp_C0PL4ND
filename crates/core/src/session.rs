@@ -57,6 +57,73 @@ pub struct Session {
     reader_thread: Option<JoinHandle<()>>,
 }
 
+/// Spawn the PTY-reader thread: drain `reader` in ≤64 KiB chunks, parse each
+/// chunk into `terminal`, fire the UI-wake callback once per chunk, and clear
+/// `alive` on EOF (child exited) or a read error.
+///
+/// Generic over the byte source (`R: Read`) on purpose: tests drive the EXACT
+/// reader→parser→grid→wake loop the live session uses with an in-memory
+/// `Cursor<Vec<u8>>` (deterministic — no real PTY, no thread race, no wall-clock
+/// deadline). The live caller passes the PTY master reader (`Box<dyn Read + Send>`).
+fn spawn_reader_thread<R: Read + Send + 'static>(
+    mut reader: R,
+    terminal: Arc<Mutex<Terminal>>,
+    alive: Arc<AtomicBool>,
+    wake: Arc<Mutex<Option<WakeFn>>>,
+) -> std::io::Result<JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("c0pl4nd-pty-reader".into())
+        .spawn(move || {
+            // 64 KiB read buffer (was 8 KiB). Under a flood (`cat bigfile`,
+            // `yes`, a large paste) a blocking `read()` returns as many bytes
+            // as are currently available up to the buffer size, so a larger
+            // buffer drains a burst in up to ~8× fewer syscalls AND ~8× fewer
+            // `Terminal` mutex acquisitions — the UI thread is starved far
+            // less because the reader holds the render lock once per drained
+            // chunk rather than once per 8 KiB. WezTerm/Alacritty read into
+            // 64 KiB–1 MiB buffers for exactly this reason.
+            //
+            // We deliberately do NOT issue a speculative second `read()` to
+            // coalesce multiple chunks under one lock: `portable_pty`'s reader
+            // is BLOCKING with no readiness probe, so an extra `read()` after a
+            // full-buffer read would block until the next byte arrives if the
+            // producer happens to pause on a 64 KiB boundary — re-introducing
+            // input-echo latency (the exact "over-batch" risk the roadmap
+            // warns about). A single blocking read per wake, into a larger
+            // buffer, is the correct latency-safe form: the kernel already
+            // hands back everything currently buffered (up to 64 KiB) in one
+            // call, so a real burst is drained per-chunk with no extra
+            // round-trips and no risk of waiting for bytes that are not coming.
+            //
+            // The buffer is heap-allocated (a 64 KiB array would risk the
+            // thread stack on some targets) and reused for the thread's
+            // lifetime (zero per-read allocation).
+            const READ_BUF: usize = 64 * 1024;
+            let mut buf = vec![0u8; READ_BUF];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break, // EOF: child exited
+                    Ok(n) => {
+                        if let Ok(mut term) = terminal.lock() {
+                            term.advance(&buf[..n]);
+                        }
+                        // Wake the UI so it repaints the new output, then sleeps
+                        // again. Clone the callback OUT of the lock so it is never
+                        // invoked while the slot mutex is held (the callback runs
+                        // UI code and must not be able to deadlock the reader
+                        // against a `set_wake_callback`).
+                        let cb = wake.lock().ok().and_then(|g| g.clone());
+                        if let Some(cb) = cb {
+                            cb();
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            alive.store(false, Ordering::SeqCst);
+        })
+}
+
 impl Session {
     /// Spawn the platform default (or configured) shell.
     pub fn spawn_shell(shell: Option<&str>, rows: u16, cols: u16) -> Result<Self> {
@@ -110,67 +177,18 @@ impl Session {
     }
 
     fn from_pty(pty: PtyProcess, rows: u16, cols: u16) -> Result<Self> {
-        let mut reader = pty.reader()?;
+        let reader = pty.reader()?;
         let writer = pty.writer()?;
         let terminal = Arc::new(Mutex::new(Terminal::new(rows as usize, cols as usize)));
         let alive = Arc::new(AtomicBool::new(true));
-
         let wake: Arc<Mutex<Option<WakeFn>>> = Arc::new(Mutex::new(None));
 
-        let term_for_thread = Arc::clone(&terminal);
-        let alive_for_thread = Arc::clone(&alive);
-        let wake_for_thread = Arc::clone(&wake);
-        let reader_thread = std::thread::Builder::new()
-            .name("c0pl4nd-pty-reader".into())
-            .spawn(move || {
-                // 64 KiB read buffer (was 8 KiB). Under a flood (`cat bigfile`,
-                // `yes`, a large paste) a blocking `read()` returns as many bytes
-                // as are currently available up to the buffer size, so a larger
-                // buffer drains a burst in up to ~8× fewer syscalls AND ~8× fewer
-                // `Terminal` mutex acquisitions — the UI thread is starved far
-                // less because the reader holds the render lock once per drained
-                // chunk rather than once per 8 KiB. WezTerm/Alacritty read into
-                // 64 KiB–1 MiB buffers for exactly this reason.
-                //
-                // We deliberately do NOT issue a speculative second `read()` to
-                // coalesce multiple chunks under one lock: `portable_pty`'s reader
-                // is BLOCKING with no readiness probe, so an extra `read()` after a
-                // full-buffer read would block until the next byte arrives if the
-                // producer happens to pause on a 64 KiB boundary — re-introducing
-                // input-echo latency (the exact "over-batch" risk the roadmap
-                // warns about). A single blocking read per wake, into a larger
-                // buffer, is the correct latency-safe form: the kernel already
-                // hands back everything currently buffered (up to 64 KiB) in one
-                // call, so a real burst is drained per-chunk with no extra
-                // round-trips and no risk of waiting for bytes that are not coming.
-                //
-                // The buffer is heap-allocated (a 64 KiB array would risk the
-                // thread stack on some targets) and reused for the thread's
-                // lifetime (zero per-read allocation).
-                const READ_BUF: usize = 64 * 1024;
-                let mut buf = vec![0u8; READ_BUF];
-                loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) => break, // EOF: child exited
-                        Ok(n) => {
-                            if let Ok(mut term) = term_for_thread.lock() {
-                                term.advance(&buf[..n]);
-                            }
-                            // Wake the UI so it repaints the new output, then
-                            // sleeps again. Clone the callback OUT of the lock so
-                            // it is never invoked while the slot mutex is held
-                            // (the callback runs UI code and must not be able to
-                            // deadlock the reader against a `set_wake_callback`).
-                            let cb = wake_for_thread.lock().ok().and_then(|g| g.clone());
-                            if let Some(cb) = cb {
-                                cb();
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                alive_for_thread.store(false, Ordering::SeqCst);
-            })?;
+        let reader_thread = spawn_reader_thread(
+            reader,
+            Arc::clone(&terminal),
+            Arc::clone(&alive),
+            Arc::clone(&wake),
+        )?;
 
         Ok(Session {
             pty,
@@ -264,108 +282,151 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::time::{Duration, Instant};
 
-    #[test]
-    fn session_renders_command_output() {
-        let token = "c0pl4nd_session_ok";
-        #[cfg(windows)]
-        let mut session =
-            Session::spawn_program("cmd.exe", &["/C", &format!("echo {token}")], 24, 80)
-                .expect("spawn session");
-        #[cfg(not(windows))]
-        let mut session =
-            Session::spawn_program("/bin/sh", &["-c", &format!("printf '{token}'")], 24, 80)
-                .expect("spawn session");
-
-        // Poll the grid for the token to appear. The bound is generous (30s, vs
-        // a healthy <250ms locally) on purpose: spawning cmd.exe/ConPTY (or sh)
-        // and rendering its first output is wall-clock-variable on a saturated
-        // machine — a shared CI runner or a concurrent local build can push the
-        // first paint well past a tight few-second window. A genuinely-broken
-        // reader (token never rendered) still fails, just later; only flaky
-        // under-load timeouts are absorbed.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let mut seen = false;
-        while Instant::now() < deadline {
-            if session.snapshot_text().contains(token) {
-                seen = true;
-                break;
+    /// A `Read` that hands back at most `chunk` bytes per call, so a test can
+    /// drive the reader thread's MULTI-read burst-drain loop deterministically —
+    /// a single `Cursor` read would return everything in one call and never
+    /// exercise the per-chunk path.
+    struct ChunkedReader {
+        data: Vec<u8>,
+        pos: usize,
+        chunk: usize,
+    }
+    impl Read for ChunkedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let remaining = self.data.len() - self.pos;
+            if remaining == 0 {
+                return Ok(0); // EOF — deterministic, no blocking
             }
-            std::thread::sleep(Duration::from_millis(50));
+            let n = remaining.min(self.chunk).min(buf.len());
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
         }
-        let _ = &mut session;
-        assert!(seen, "expected grid to contain {token:?}");
+    }
+
+    /// Serialize the real-PTY smoke tests against each other so their ConPTY /
+    /// process-creation latency does not compound under load. The deterministic
+    /// `spawn_reader_thread` tests below are the always-on signal; the real-PTY
+    /// smoke only confirms the OS plumbing, so it tolerates a generous bound.
+    static REAL_PTY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Tier B (deterministic): drive the EXACT reader→parser→grid→wake loop the
+    /// live session uses, but with an in-memory reader instead of a real PTY.
+    /// The reader EOFs after the feed, so `join()` makes the wait deterministic
+    /// (no poll, no thread race, no wall-clock deadline). This — not the real-PTY
+    /// smoke — is the always-on proof that PTY output reaches the grid.
+    #[test]
+    fn reader_thread_parses_feed_into_grid() {
+        let token = "c0pl4nd_session_ok";
+        let terminal = Arc::new(Mutex::new(Terminal::new(24, 80)));
+        let alive = Arc::new(AtomicBool::new(true));
+        let wake: Arc<Mutex<Option<WakeFn>>> = Arc::new(Mutex::new(None));
+
+        let feed = format!("{token}\r\nsecond line\r\n").into_bytes();
+        let handle = spawn_reader_thread(
+            Cursor::new(feed),
+            Arc::clone(&terminal),
+            Arc::clone(&alive),
+            Arc::clone(&wake),
+        )
+        .expect("spawn reader thread");
+        handle.join().expect("reader thread joins on EOF");
+
+        // After EOF the whole feed is parsed and `alive` is cleared (the reader
+        // stores `false` only AFTER the final `advance`, so this ordering holds).
+        let text = terminal.lock().unwrap().grid().to_text();
+        assert!(
+            text.contains(token),
+            "the parsed grid must contain {token:?}; got {text:?}"
+        );
+        assert!(
+            !alive.load(Ordering::SeqCst),
+            "the reader must clear `alive` on EOF"
+        );
+    }
+
+    /// Tier C (smoke): the real cmd.exe/sh → ConPTY → reader → grid path end to
+    /// end. Deterministic on success — it waits for the definitive `!is_alive`
+    /// EOF signal (after which ALL output is guaranteed parsed) and asserts ONCE,
+    /// instead of racing a poll-for-token. The 10 s bound is a safety net for a
+    /// wedged spawn, not a race line; the spawn (not the assertion) is retried.
+    #[test]
+    fn session_renders_real_pty_output_smoke() {
+        let _serial = REAL_PTY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let token = "c0pl4nd_session_ok";
+
+        let mut session = None;
+        for _ in 0..3 {
+            #[cfg(windows)]
+            let attempt =
+                Session::spawn_program("cmd.exe", &["/C", &format!("echo {token}")], 24, 80);
+            #[cfg(not(windows))]
+            let attempt =
+                Session::spawn_program("/bin/sh", &["-c", &format!("printf '{token}'")], 24, 80);
+            match attempt {
+                Ok(s) => {
+                    session = Some(s);
+                    break;
+                }
+                // Retry only a transient spawn failure under load — never the
+                // assertion (a missing token is a real bug, not flakiness).
+                Err(_) => std::thread::sleep(Duration::from_millis(200)),
+            }
+        }
+        let session = session.expect("spawn real PTY session (after retries)");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while session.is_alive() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            session.snapshot_text().contains(token),
+            "real PTY output must reach the grid; got {:?}",
+            session.snapshot_text()
+        );
     }
 
     /// A large burst of output (far bigger than one read buffer) must be
-    /// delivered and parsed without loss — exercises the 64 KiB burst-drain
-    /// reader path. We print many uniquely-numbered lines and assert that the
-    /// LAST line (which can only appear once the whole stream has been read and
-    /// scrolled through the grid) lands on screen.
+    /// delivered and parsed without loss — exercises the MULTI-read burst-drain
+    /// reader path. Tier B (deterministic): feed ~2000 uniquely-numbered lines
+    /// through `ChunkedReader` (4 KiB per read, so the loop iterates many times),
+    /// join on EOF, and assert the LAST line reached the grid — the tail can only
+    /// appear once the whole stream was read, parsed, and scrolled. No real PTY,
+    /// no shell loop, no wall-clock deadline.
     #[test]
-    fn session_handles_large_burst_without_loss() {
-        // ~2000 lines of "L<NNN>" — well over a single 64 KiB read on its own
-        // and forces many scrolls, so seeing the final line proves the tail of
-        // the burst was read and parsed (not truncated mid-stream).
+    fn reader_drains_large_burst_without_loss() {
         let last = 1999u32;
         let last_token = format!("L{last}");
-
-        #[cfg(windows)]
-        let mut session = Session::spawn_program(
-            "cmd.exe",
-            &["/C", "for /L %i in (0,1,1999) do @echo L%i"],
-            24,
-            80,
-        )
-        .expect("spawn session");
-        #[cfg(not(windows))]
-        let mut session = Session::spawn_program(
-            "/bin/sh",
-            &[
-                "-c",
-                "i=0; while [ $i -le 1999 ]; do echo L$i; i=$((i+1)); done",
-            ],
-            24,
-            80,
-        )
-        .expect("spawn session");
-
-        // Robust polling (no fixed wall-clock flake): wait patiently WHILE the
-        // child is still emitting, and once it has EXITED do a bounded final
-        // drain before deciding. This decouples the assertion from system load —
-        // the only way to fail is genuine data loss (the tail never arriving),
-        // not "the shell was slow under a loaded CI box". The 60 s cap is a
-        // safety net for a wedged spawn; the normal path completes in well under
-        // a second.
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let mut seen = false;
-        loop {
-            if session.snapshot_text().contains(&last_token) {
-                seen = true;
-                break;
-            }
-            // Child finished: all its bytes are in the PTY. Give the reader
-            // thread a bounded grace to drain the tail, then stop polling.
-            if !session.is_alive() {
-                for _ in 0..80 {
-                    if session.snapshot_text().contains(&last_token) {
-                        seen = true;
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                break;
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
+        let mut feed = Vec::with_capacity(2000 * 8);
+        for i in 0..=last {
+            feed.extend_from_slice(format!("L{i}\r\n").as_bytes());
         }
-        let _ = &mut session;
+
+        let terminal = Arc::new(Mutex::new(Terminal::new(24, 80)));
+        let alive = Arc::new(AtomicBool::new(true));
+        let wake: Arc<Mutex<Option<WakeFn>>> = Arc::new(Mutex::new(None));
+        let handle = spawn_reader_thread(
+            ChunkedReader {
+                data: feed,
+                pos: 0,
+                chunk: 4096,
+            },
+            Arc::clone(&terminal),
+            Arc::clone(&alive),
+            Arc::clone(&wake),
+        )
+        .expect("spawn reader thread");
+        handle.join().expect("reader thread joins on EOF");
+
+        let text = terminal.lock().unwrap().grid().to_text();
         assert!(
-            seen,
-            "expected the final line {last_token:?} of a large burst to reach the grid"
+            text.contains(&last_token),
+            "the final line {last_token:?} of a large burst must reach the grid"
         );
     }
 
