@@ -69,7 +69,7 @@ jobs:
 
       - name: Install Rust toolchain
         # dtolnay/rust-toolchain @master commit
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
@@ -225,7 +225,7 @@ jobs:
 
       - name: Install Rust toolchain
         # dtolnay/rust-toolchain @master commit
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537
         with:
           toolchain: stable
 
@@ -349,7 +349,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537
         with:
           toolchain: stable
       - name: Cache cargo + installer target
