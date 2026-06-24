@@ -1237,3 +1237,39 @@ fn word_bounds_out_of_range_column_is_inert() {
     let row: Vec<char> = "abc".chars().collect();
     assert_eq!(word_bounds(&row, 99), (99, 99));
 }
+
+// ---- right-click context-menu actions ---------------------------------------
+
+#[test]
+fn context_menu_actions_change_the_pane_count() {
+    // The split / new-tab / close items drive the same tree mutations as the
+    // keyboard chords; assert the observable pane-count effect of each.
+    let mut app = C0pl4ndApp::bootstrap();
+    let base = app.pane_count();
+
+    app.apply_context_menu_action(ContextMenuAction::SplitRight);
+    assert_eq!(app.pane_count(), base + 1, "Split right adds one pane");
+    app.apply_context_menu_action(ContextMenuAction::SplitDown);
+    assert_eq!(app.pane_count(), base + 2, "Split down adds one pane");
+    app.apply_context_menu_action(ContextMenuAction::NewTerminal);
+    assert_eq!(app.pane_count(), base + 3, "New tab adds one pane");
+
+    let focused = app.focused_pane();
+    app.apply_context_menu_action(ContextMenuAction::ClosePane(focused));
+    assert_eq!(app.pane_count(), base + 2, "Close pane removes one pane");
+}
+
+#[test]
+fn context_menu_close_never_removes_the_last_pane() {
+    // The Close-Pane item routes through close_pane, which keeps at least one
+    // pane alive — so the menu can never leave the app with zero panes.
+    let mut app = C0pl4ndApp::bootstrap();
+    while app.pane_count() > 1 {
+        let f = app.focused_pane();
+        app.apply_context_menu_action(ContextMenuAction::ClosePane(f));
+    }
+    assert_eq!(app.pane_count(), 1, "closed down to a single pane");
+    let f = app.focused_pane();
+    app.apply_context_menu_action(ContextMenuAction::ClosePane(f));
+    assert_eq!(app.pane_count(), 1, "the last pane is never closed");
+}

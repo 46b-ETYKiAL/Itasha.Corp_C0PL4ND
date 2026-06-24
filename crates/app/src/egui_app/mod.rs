@@ -1038,6 +1038,63 @@ impl C0pl4ndApp {
     ) -> PaneBodyOutcome {
         let (rect, resp) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+
+        // Right-click context menu (table-stakes terminal gesture). Copy +
+        // Clear-scrollback run INLINE here (they only touch `terms`); split /
+        // new / close need `&mut self`, so they are QUEUED into the outcome and
+        // applied by the caller after the egui_tiles closure releases its
+        // borrows. Paste is intentionally disabled: egui exposes no clipboard
+        // READ, so paste can only arrive via the OS Ctrl/Cmd+Shift+V event.
+        let mut context_menu_action: Option<ContextMenuAction> = None;
+        resp.context_menu(|ui| {
+            let has_selection = selection
+                .as_ref()
+                .is_some_and(|s| s.pane == pane_id && s.anchor != s.head);
+            if ui
+                .add_enabled(has_selection, egui::Button::new("Copy"))
+                .clicked()
+            {
+                if let Some(sel) = *selection {
+                    if sel.pane == pane_id {
+                        if let Some(text) = terms
+                            .get(&pane_id)
+                            .and_then(|t| t.selection_text(sel.anchor, sel.head))
+                        {
+                            ui.ctx().copy_text(text);
+                        }
+                    }
+                }
+                ui.close_kind(egui::UiKind::Menu);
+            }
+            ui.add_enabled(false, egui::Button::new("Paste"))
+                .on_hover_text("Paste with the keyboard shortcut (Ctrl/Cmd+Shift+V)");
+            ui.separator();
+            if ui.button("Clear scrollback").clicked() {
+                if let Some(t) = terms.get_mut(&pane_id) {
+                    t.write_bytes(b"\x1b[3J");
+                }
+                ui.close_kind(egui::UiKind::Menu);
+            }
+            ui.separator();
+            if ui.button("Split right").clicked() {
+                context_menu_action = Some(ContextMenuAction::SplitRight);
+                ui.close_kind(egui::UiKind::Menu);
+            }
+            if ui.button("Split down").clicked() {
+                context_menu_action = Some(ContextMenuAction::SplitDown);
+                ui.close_kind(egui::UiKind::Menu);
+            }
+            if ui.button("New tab").clicked() {
+                context_menu_action = Some(ContextMenuAction::NewTerminal);
+                ui.close_kind(egui::UiKind::Menu);
+            }
+            ui.separator();
+            if ui.button("Close pane").clicked() {
+                context_menu_action = Some(ContextMenuAction::ClosePane(pane_id));
+                ui.close_kind(egui::UiKind::Menu);
+            }
+        });
+
         let ppp = ui.ctx().pixels_per_point();
         let painter = ui.painter_at(rect);
         // Cell metrics from the SAME monospace font the grid is drawn with, so
@@ -1596,6 +1653,7 @@ impl C0pl4ndApp {
             opened_url,
             ime_cursor_rect,
             copy_selection,
+            context_menu_action,
         }
     }
 
@@ -1819,6 +1877,7 @@ impl C0pl4ndApp {
         let mut closes: Vec<PaneId> = Vec::new();
         let focused = self.focused_pane;
         let mut clicked: Option<PaneId> = None;
+        let mut pending_ctx_action: Option<ContextMenuAction> = None;
         let mut focused_size: Option<(f32, f32)> = None;
         let mut opened_url: Option<String> = None;
         // The focused pane's IME cursor rect, captured from the render closure
@@ -1966,6 +2025,9 @@ impl C0pl4ndApp {
                 if let Some(url) = outcome.opened_url {
                     opened_url = Some(url);
                 }
+                if let Some(act) = outcome.context_menu_action {
+                    pending_ctx_action = Some(act);
+                }
                 // Copy-on-select: a just-completed selection goes to the OS
                 // clipboard only when the user enabled it.
                 if let Some(text) = outcome.copy_selection {
@@ -2048,10 +2110,31 @@ impl C0pl4ndApp {
             self.focused_pane = pid;
         }
 
+        // Apply a queued right-click context-menu action (split / new / close)
+        // now that the egui_tiles render closure has released its borrows and
+        // `self` is available again (Copy + Clear ran inline in the menu).
+        if let Some(action) = pending_ctx_action {
+            self.apply_context_menu_action(action);
+        }
+
         // Apply close requests; keep at least one pane alive. Drop the closed
         // pane's terminal (PTY + reader thread) so it does not leak.
         for pid in closes {
             self.close_pane(pid);
+        }
+    }
+
+    /// Apply a right-click context-menu action that needs `&mut self` (it mutates
+    /// the tiles tree): split the focused pane, open a new tab, or close a pane.
+    /// Copy + Clear-scrollback are NOT routed here — they run inline in the menu
+    /// closure (they only touch `terms`). Extracted from `frame_tick` so the
+    /// action→effect mapping is unit-testable without driving the egui menu UI.
+    fn apply_context_menu_action(&mut self, action: ContextMenuAction) {
+        match action {
+            ContextMenuAction::SplitRight => self.split(egui_tiles::LinearDir::Horizontal),
+            ContextMenuAction::SplitDown => self.split(egui_tiles::LinearDir::Vertical),
+            ContextMenuAction::NewTerminal => self.new_terminal(),
+            ContextMenuAction::ClosePane(pid) => self.close_pane(pid),
         }
     }
 
@@ -4535,6 +4618,20 @@ fn monospace_cell_metrics(
 }
 
 /// Outcome of painting one terminal pane's body for a frame.
+/// A pane action requested from the right-click context menu that needs
+/// `&mut self` (it mutates the tiles tree), so it cannot run inside the
+/// egui_tiles render closure — it is queued in [`PaneBodyOutcome`] and applied
+/// by the caller in `frame_tick` after the closure releases its borrows. Copy
+/// and Clear-scrollback run INLINE in the menu closure (they only touch
+/// `terms`) and never reach this enum.
+#[derive(Debug, Clone, Copy)]
+enum ContextMenuAction {
+    SplitRight,
+    SplitDown,
+    NewTerminal,
+    ClosePane(PaneId),
+}
+
 struct PaneBodyOutcome {
     /// Whether the pane reported it wants to begin an egui_tiles drag.
     drag_started: bool,
@@ -4558,6 +4655,10 @@ struct PaneBodyOutcome {
     /// clipboard when `config.copy_on_select` is enabled; an explicit
     /// Ctrl/Cmd+Shift+C copies the live selection regardless.
     copy_selection: Option<String>,
+    /// A right-click context-menu action (split / new / close) requested this
+    /// frame that needs `&mut self`; applied by the caller after the egui_tiles
+    /// render closure releases its borrows. `None` when no such item was chosen.
+    context_menu_action: Option<ContextMenuAction>,
 }
 
 /// An in-progress or completed mouse text selection over a pane.
