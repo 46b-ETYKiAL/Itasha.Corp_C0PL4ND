@@ -905,10 +905,6 @@ version = "0.1.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.itertools]]
-version = "0.13.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.itertools]]
 version = "0.14.0"
 criteria = "safe-to-deploy"
 
@@ -1437,7 +1433,7 @@ version = "0.17.14"
 criteria = "safe-to-deploy"
 
 [[exemptions.ron]]
-version = "0.12.1"
+version = "0.12.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.roxmltree]]
@@ -1709,7 +1705,7 @@ version = "0.38.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.sysinfo]]
-version = "0.39.3"
+version = "0.39.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.tar]]
