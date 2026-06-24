@@ -1,7 +1,9 @@
 //! Headless **interaction** tests for C0PL4ND surfaces not covered by the
-//! existing suites: the command-history quick-run SIDEBAR (Ctrl+Shift+H, #21) and
+//! existing suites: the command-history quick-run SIDEBAR (Ctrl+Shift+H, #21),
 //! the window-management KEYBOARD shortcuts (Ctrl/Cmd+Shift+{D,E,W} split/close
-//! and Ctrl/Cmd+, settings), driven by `egui_kittest`.
+//! and Ctrl/Cmd+, settings), and the scrollback navigation chords (Ctrl+Shift+
+//! Home/End scroll-to-edge and Ctrl+Shift+PageUp jump-to-prompt-mark), driven by
+//! `egui_kittest`.
 //!
 //! ## Discipline (non-negotiable)
 //!
@@ -294,5 +296,112 @@ fn ctrl_comma_toggles_the_settings_window() {
     assert!(
         !app.borrow().settings_is_open(),
         "Ctrl+, again must close the settings window"
+    );
+}
+
+// ---- scroll-to-edge shortcuts (best-in-class parity) -------------------------
+
+#[test]
+fn ctrl_shift_home_and_end_scroll_to_the_scrollback_edges() {
+    // Ctrl+Shift+Home jumps the focused pane to the oldest retained scrollback
+    // line; Ctrl+Shift+End snaps it back to following live output. We build
+    // deterministic scrollback by feeding lines straight into the focused
+    // emulator (no live shell needed) and assert the observable scroll offset the
+    // chord produced — driven through the REAL `frame_tick` chord handler.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    // Feed 200 newline-terminated lines. The per-frame scrollback cap is >=100
+    // lines, so the history is guaranteed non-empty after this.
+    {
+        let mut a = app.borrow_mut();
+        for i in 0..200 {
+            a.test_feed_focused(format!("line {i}\r\n").as_bytes());
+        }
+    }
+    h.step();
+
+    // Confirm the feed built a non-empty scrollback before asserting the chord
+    // (diagnostic split: distinguishes a feed problem from a chord problem).
+    let sb = app
+        .borrow()
+        .test_focused_scrollback_len()
+        .expect("focused pane exists");
+    assert!(
+        sb > 0,
+        "feeding 200 lines must build a non-empty scrollback (got {sb})"
+    );
+
+    assert_eq!(
+        app.borrow().test_focused_view_offset(),
+        Some(0),
+        "the view follows live output before any scroll chord"
+    );
+
+    // Ctrl+Shift+Home scrolls up into the scrollback (offset moves above 0).
+    press_ctrl_shift(&mut h, egui::Key::Home);
+    let top = app
+        .borrow()
+        .test_focused_view_offset()
+        .expect("focused pane exists");
+    assert!(
+        top > 0,
+        "Ctrl+Shift+Home must scroll up into the scrollback (offset {top} > 0)"
+    );
+
+    // Ctrl+Shift+End snaps back to live output (offset 0).
+    press_ctrl_shift(&mut h, egui::Key::End);
+    assert_eq!(
+        app.borrow().test_focused_view_offset(),
+        Some(0),
+        "Ctrl+Shift+End must snap back to following live output"
+    );
+}
+
+#[test]
+fn ctrl_shift_pageup_jumps_to_an_older_prompt_mark() {
+    // Ctrl+Shift+PageUp scrolls the focused pane back to the previous OSC-133
+    // prompt mark. We seed scrollback with prompt marks (ESC ] 133 ; A BEL) above
+    // the live viewport and assert the chord scrolls into the scrollback —
+    // driven through the REAL `frame_tick` handler. This also guards the
+    // explicit ctrl-OR-command chord match (the prior `consume_key` form silently
+    // failed to fire under ctrl-only events).
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    // Ten prompt blocks: a prompt mark, then a handful of output lines each.
+    {
+        let mut a = app.borrow_mut();
+        for block in 0..10 {
+            a.test_feed_focused(b"\x1b]133;A\x07"); // OSC 133 ; A = prompt mark
+            for line in 0..6 {
+                a.test_feed_focused(format!("blk{block} line{line}\r\n").as_bytes());
+            }
+        }
+    }
+    h.step();
+
+    let sb = app
+        .borrow()
+        .test_focused_scrollback_len()
+        .expect("focused pane exists");
+    assert!(
+        sb > 0,
+        "seeding must build a non-empty scrollback (got {sb})"
+    );
+    assert_eq!(
+        app.borrow().test_focused_view_offset(),
+        Some(0),
+        "the view starts at the live bottom"
+    );
+
+    press_ctrl_shift(&mut h, egui::Key::PageUp);
+    let off = app
+        .borrow()
+        .test_focused_view_offset()
+        .expect("focused pane exists");
+    assert!(
+        off > 0,
+        "Ctrl+Shift+PageUp must scroll back to an older prompt mark (offset {off} > 0)"
     );
 }

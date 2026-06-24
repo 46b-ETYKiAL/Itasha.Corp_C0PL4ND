@@ -4030,6 +4030,40 @@ fn view_scroll_helpers_clamp_correctly() {
 }
 
 #[test]
+fn scroll_to_top_jumps_to_oldest_line_and_reports_movement() {
+    let mut t = Terminal::with_scrollback(2, 4, 100);
+    t.advance(b"a\r\nb\r\nc\r\nd\r\ne"); // build scrollback
+    let sb = t.scrollback_len();
+    assert!(sb >= 1, "test needs a non-empty scrollback");
+
+    // From the live bottom, scroll_to_top must pin the view at the full history
+    // length (oldest retained line at the top) and report that it moved.
+    assert_eq!(t.view_offset(), 0, "starts following live output");
+    assert!(t.scroll_to_top(), "scroll_to_top reports it moved the view");
+    assert_eq!(
+        t.view_offset(),
+        sb,
+        "scroll_to_top pins the view at the maximum scroll-up offset"
+    );
+
+    // Idempotent: a second scroll_to_top while already at the top is a no-op
+    // and reports no movement (so the caller skips a needless repaint).
+    assert!(
+        !t.scroll_to_top(),
+        "scroll_to_top at the top reports no movement"
+    );
+    assert_eq!(t.view_offset(), sb, "view stays pinned at the top");
+
+    // scroll_to_top is the exact mirror of scroll_to_bottom.
+    t.scroll_to_bottom();
+    assert_eq!(
+        t.view_offset(),
+        0,
+        "scroll_to_bottom returns to live output"
+    );
+}
+
+#[test]
 fn for_visible_rows_walks_scrollback_when_offset_set() {
     let mut t = Terminal::with_scrollback(2, 4, 100);
     t.advance(b"L0\r\nL1\r\nL2\r\nL3"); // L0/L1 scroll into history

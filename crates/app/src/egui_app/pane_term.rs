@@ -663,6 +663,72 @@ impl PaneTerm {
         }
     }
 
+    /// The current scroll-up offset (0 = following live output). Returns 0 for a
+    /// dead pane or a poisoned lock (the live-output default).
+    pub fn view_offset(&self) -> usize {
+        let Some(session) = self.session.as_ref() else {
+            return 0;
+        };
+        session
+            .terminal()
+            .lock()
+            .map(|t| t.view_offset())
+            .unwrap_or(0)
+    }
+
+    /// The number of lines currently retained in scrollback history. Returns 0
+    /// for a dead pane / poisoned lock. Exposed for the scroll-edge test to
+    /// confirm a non-empty history was built before asserting the chord.
+    #[allow(dead_code)]
+    pub fn scrollback_len(&self) -> usize {
+        let Some(session) = self.session.as_ref() else {
+            return 0;
+        };
+        session
+            .terminal()
+            .lock()
+            .map(|t| t.scrollback_len())
+            .unwrap_or(0)
+    }
+
+    /// Jump the scrollback view to the oldest retained line (the top edge).
+    /// Returns `true` when the view moved (so the caller repaints). No-op for a
+    /// dead pane / poisoned lock.
+    pub fn scroll_to_top(&mut self) -> bool {
+        let Some(session) = self.session.as_ref() else {
+            return false;
+        };
+        match session.terminal().lock() {
+            Ok(mut term) => term.scroll_to_top(),
+            Err(_) => false,
+        }
+    }
+
+    /// Snap the scrollback view back to following live output (the bottom edge).
+    /// No-op for a dead pane / poisoned lock.
+    pub fn scroll_to_bottom(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if let Ok(mut term) = session.terminal().lock() {
+            term.scroll_to_bottom();
+        }
+    }
+
+    /// Feed raw bytes straight into the emulator (bypassing the PTY) so a
+    /// headless test can build deterministic scrollback. Test-only — the
+    /// shipping binary feeds the emulator exclusively via the PTY pump, so this
+    /// is dead code there (never called).
+    #[allow(dead_code)]
+    pub fn test_advance(&mut self, bytes: &[u8]) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if let Ok(mut term) = session.terminal().lock() {
+            term.advance(bytes);
+        }
+    }
+
     /// Apply the configured scrollback line cap to this pane's live terminal.
     /// No-op for a dead pane / poisoned lock. The app calls this when the
     /// `scrollback_lines` config differs from what was last applied, so the

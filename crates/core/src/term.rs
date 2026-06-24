@@ -3444,6 +3444,24 @@ impl Terminal {
         }
     }
 
+    /// Jump to the very top of the scrollback (the oldest retained line).
+    ///
+    /// The mirror of [`scroll_to_bottom`](Self::scroll_to_bottom): it pins the
+    /// view at the maximum scroll-up offset (the full history length), so the
+    /// first retained line sits at the top of the viewport. A no-op when the
+    /// view is already at the top. Returns `true` when the offset moved (so the
+    /// caller can request a repaint only when something changed).
+    pub fn scroll_to_top(&mut self) -> bool {
+        let max = self.screen.history.len();
+        if self.screen.view_offset != max {
+            self.screen.view_offset = max;
+            self.screen.grid.touch();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Walk the `rows` rows currently visible (accounting for scrollback offset)
     /// WITHOUT cloning, invoking `f(visible_row_index, row_cells)` for each.
     ///

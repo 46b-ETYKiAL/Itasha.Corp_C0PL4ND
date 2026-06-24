@@ -3204,6 +3204,36 @@ impl C0pl4ndApp {
         }
     }
 
+    /// Feed raw bytes straight into the FOCUSED pane's terminal emulator,
+    /// bypassing the PTY — so a headless test can build deterministic scrollback
+    /// (e.g. many `\r\n`-terminated lines) without depending on a live shell.
+    /// The shipping binary never calls this; production output always arrives via
+    /// the PTY pump.
+    #[allow(dead_code)]
+    pub fn test_feed_focused(&mut self, bytes: &[u8]) {
+        if let Some(term) = self.terms.get_mut(&self.focused_pane) {
+            term.test_advance(bytes);
+        }
+    }
+
+    /// The FOCUSED pane's current scroll-up offset (0 = following live output).
+    /// Exposed so the scroll-to-edge chord test can assert the observable scroll
+    /// position the keybinding produced.
+    #[allow(dead_code)]
+    pub fn test_focused_view_offset(&self) -> Option<usize> {
+        self.terms.get(&self.focused_pane).map(|t| t.view_offset())
+    }
+
+    /// The FOCUSED pane's scrollback history length. Exposed so the scroll-edge
+    /// chord test can confirm a non-empty history was built before asserting the
+    /// chord scrolled into it.
+    #[allow(dead_code)]
+    pub fn test_focused_scrollback_len(&self) -> Option<usize> {
+        self.terms
+            .get(&self.focused_pane)
+            .map(|t| t.scrollback_len())
+    }
+
     /// The current match set converted to CELL spans over the focused pane's
     /// grid text, ready for the highlight painter. Converts each match's BYTE
     /// span to character columns via [`byte_to_col`] against the matched line, so
@@ -3694,20 +3724,88 @@ impl C0pl4ndApp {
 
         // 0a'''''') jump-to-prompt (E-parity): Ctrl+Shift+PageUp/PageDown scrolls
         //           the scrollback to the previous/next OSC 133 prompt mark. The
-        //           chord is consumed so PageUp/Down don't also reach the PTY.
+        //           chord is removed from the event stream so PageUp/Down don't
+        //           also reach the PTY. The ctrl-OR-command match is done
+        //           explicitly via events.retain (NOT consume_key): consume_key
+        //           only matches when the `command` modifier bool is set, which
+        //           real winit on Windows/Linux (ctrl) and synthetic test events
+        //           do not set — the same cross-platform discipline the
+        //           palette/find/history chords above use.
         let jump = ctx.input_mut(|i| {
-            let z = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
-            if i.consume_key(z, egui::Key::PageUp) {
-                Some(false) // backward → older prompt
-            } else if i.consume_key(z, egui::Key::PageDown) {
-                Some(true) // forward → newer prompt
-            } else {
-                None
-            }
+            let mut dir: Option<bool> = None;
+            i.events.retain(|ev| {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = ev
+                {
+                    let cmd = modifiers.ctrl || modifiers.command;
+                    if cmd && modifiers.shift && !modifiers.alt {
+                        if *key == egui::Key::PageUp {
+                            dir = Some(false); // backward → older prompt
+                            return false;
+                        } else if *key == egui::Key::PageDown {
+                            dir = Some(true); // forward → newer prompt
+                            return false;
+                        }
+                    }
+                }
+                true
+            });
+            dir
         });
         if let Some(forward) = jump {
             if let Some(term) = self.terms.get_mut(&self.focused_pane) {
                 if term.jump_to_prompt(forward) {
+                    ctx.request_repaint();
+                }
+            }
+        }
+
+        // 0a'''''')b scroll-to-edge (best-in-class parity): Ctrl+Shift+Home jumps
+        //           the scrollback to the oldest retained line; Ctrl+Shift+End
+        //           snaps back to live output. The chord is removed from the event
+        //           stream so Home/End don't also reach the PTY as cursor-motion
+        //           bytes. Explicit ctrl-OR-command match via events.retain (NOT
+        //           consume_key), same cross-platform discipline as jump-to-prompt
+        //           above.
+        let scroll_edge = ctx.input_mut(|i| {
+            let mut to_top: Option<bool> = None;
+            i.events.retain(|ev| {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = ev
+                {
+                    let cmd = modifiers.ctrl || modifiers.command;
+                    if cmd && modifiers.shift && !modifiers.alt {
+                        if *key == egui::Key::Home {
+                            to_top = Some(true); // to top (oldest)
+                            return false;
+                        } else if *key == egui::Key::End {
+                            to_top = Some(false); // to bottom (live)
+                            return false;
+                        }
+                    }
+                }
+                true
+            });
+            to_top
+        });
+        if let Some(to_top) = scroll_edge {
+            if let Some(term) = self.terms.get_mut(&self.focused_pane) {
+                let moved = if to_top {
+                    term.scroll_to_top()
+                } else {
+                    let was = term.view_offset();
+                    term.scroll_to_bottom();
+                    was != 0
+                };
+                if moved {
                     ctx.request_repaint();
                 }
             }
