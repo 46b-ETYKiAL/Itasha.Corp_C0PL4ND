@@ -3445,7 +3445,18 @@ impl ApplicationHandler for App {
             attrs =
                 attrs.with_inner_size(winit::dpi::LogicalSize::new(width as f64, height as f64));
         }
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+        // Audit UI-2: exit gracefully instead of panicking when the window
+        // cannot be created (e.g. started with no display / headless session) —
+        // a panic in the winit `resumed` callback aborts the process with a
+        // backtrace; a clean `exit()` lets the event loop unwind normally.
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                tracing::error!("failed to create the main window: {e}; exiting");
+                event_loop.exit();
+                return;
+            }
+        };
 
         // D4 (Windows): re-enable Aero Snap / maximize animations on the
         // frameless window by installing the custom-frame subclass. No-op off
@@ -4963,12 +4974,18 @@ impl Gpu {
             .await?;
 
         let caps = surface.get_capabilities(&adapter);
+        // Prefer an sRGB format; else the surface's first reported format; else a
+        // universal default. Audit UI-1: the old `caps.formats[0]` index panicked
+        // if the surface reported zero formats — wgpu guarantees >=1 for a valid
+        // surface/adapter pair (so this is unreachable), but a no-panic fallback
+        // keeps a misbehaving backend from crashing the render init.
         let format = caps
             .formats
             .iter()
             .copied()
             .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+            .or_else(|| caps.formats.first().copied())
+            .unwrap_or(wgpu::TextureFormat::Bgra8UnormSrgb);
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
