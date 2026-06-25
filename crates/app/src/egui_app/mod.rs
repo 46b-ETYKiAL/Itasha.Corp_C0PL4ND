@@ -1068,9 +1068,10 @@ impl C0pl4ndApp {
             {
                 if let Some(sel) = *selection {
                     if sel.pane == pane_id {
+                        let block = sel.mode == SelectionMode::Block;
                         if let Some(text) = terms
                             .get(&pane_id)
-                            .and_then(|t| t.selection_text(sel.anchor, sel.head))
+                            .and_then(|t| t.selection_text(sel.anchor, sel.head, block))
                         {
                             ui.ctx().copy_text(text);
                         }
@@ -1422,10 +1423,19 @@ impl C0pl4ndApp {
                     .map(|(r, c)| (window_start + r, c));
                 if ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) {
                     if let Some((line, c)) = cell0 {
+                        // Alt-drag selects a rectangular BLOCK; a plain drag is
+                        // line-wise. The mode is fixed at press and carried for the
+                        // whole drag.
+                        let mode = if ui.input(|i| i.modifiers.alt) {
+                            SelectionMode::Block
+                        } else {
+                            SelectionMode::Linewise
+                        };
                         *selection = Some(Selection {
                             pane: pane_id,
                             anchor: (line, c),
                             head: (line, c),
+                            mode,
                         });
                         mouse_captured = true;
                     }
@@ -1454,9 +1464,10 @@ impl C0pl4ndApp {
                             pane: pane_id,
                             anchor: (line, start),
                             head: (line, end),
+                            mode: SelectionMode::Linewise,
                         });
                         if let Some(term) = terms.get(&pane_id) {
-                            copy_selection = term.selection_text((r, start), (r, end));
+                            copy_selection = term.selection_text((r, start), (r, end), false);
                         }
                         mouse_captured = true;
                     }
@@ -1485,7 +1496,8 @@ impl C0pl4ndApp {
                                 if let Some((a, b)) =
                                     selection_visible_rows(sel.anchor, sel.head, window_start, rows)
                                 {
-                                    copy_selection = term.selection_text(a, b);
+                                    copy_selection =
+                                        term.selection_text(a, b, sel.mode == SelectionMode::Block);
                                 }
                             }
                         }
@@ -1575,11 +1587,27 @@ impl C0pl4ndApp {
                     .unwrap_or(0);
                 if let Some((start, end)) = selection_visible_rows(sel.anchor, sel.head, ws, rows) {
                     let wash = egui::Color32::from_rgba_unmultiplied(0x60, 0x80, 0xc0, 0x60);
+                    let block = sel.mode == SelectionMode::Block;
+                    // Block mode: every row shares the same column range; the wash
+                    // must paint the SAME rectangle each row so it matches the
+                    // block-mode copy (anchored to the endpoint columns).
+                    let (block_lo, block_hi) = (
+                        sel.anchor.1.min(sel.head.1),
+                        sel.anchor.1.max(sel.head.1).min(cols.saturating_sub(1)),
+                    );
                     for r in start.0..=end.0 {
-                        let lo = if r == start.0 { start.1 } else { 0 };
+                        let lo = if block {
+                            block_lo
+                        } else if r == start.0 {
+                            start.1
+                        } else {
+                            0
+                        };
                         // `end.1` may be usize::MAX (selection end scrolled below
                         // the bottom → to line end); clamp to the last column.
-                        let hi_raw = if r == end.0 {
+                        let hi_raw = if block {
+                            block_hi
+                        } else if r == end.0 {
                             end.1
                         } else {
                             cols.saturating_sub(1)
@@ -4198,7 +4226,9 @@ impl C0pl4ndApp {
                         let ws = term.window_start().unwrap_or(0);
                         if let Some((a, b)) = selection_visible_rows(sel.anchor, sel.head, ws, rows)
                         {
-                            if let Some(text) = term.selection_text(a, b) {
+                            if let Some(text) =
+                                term.selection_text(a, b, sel.mode == SelectionMode::Block)
+                            {
                                 ctx.copy_text(text);
                             }
                         }
@@ -4845,11 +4875,24 @@ struct PaneBodyOutcome {
 /// view scrolls / jumps to a prompt / receives new output — the painter and copy
 /// map absolute → current display row via [`selection_visible_rows`]. A selection
 /// where `anchor == head` is an empty (click, not drag) selection.
+/// Whether a mouse selection extracts text LINE-WISE (the default — the first
+/// row runs from the anchor column to end-of-row, inner rows are full, the last
+/// row runs to the head column) or as a rectangular BLOCK (every row clipped to
+/// the same `[min_col, max_col]` column range). Block mode is engaged by holding
+/// Alt while dragging.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum SelectionMode {
+    #[default]
+    Linewise,
+    Block,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 struct Selection {
     pane: PaneId,
     anchor: (usize, usize),
     head: (usize, usize),
+    mode: SelectionMode,
 }
 
 /// Map an absolute-line selection to display-row endpoint tuples for the CURRENT

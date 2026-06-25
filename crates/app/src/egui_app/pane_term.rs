@@ -760,19 +760,36 @@ impl PaneTerm {
     /// trimmed, and rows joined with `\n` — the conventional terminal copy
     /// shape. Returns `None` for an empty selection or a dead pane. Ported from
     /// the legacy shell's `selection_text` so the two shells copy identically.
-    pub fn selection_text(&self, a: (usize, usize), b: (usize, usize)) -> Option<String> {
+    ///
+    /// When `block` is `true` the selection is RECTANGULAR: every row is clipped
+    /// to the same `[min_col, max_col]` column range (the min/max of the two
+    /// endpoints' columns) instead of the line-wise first-row-to-last-row span.
+    pub fn selection_text(
+        &self,
+        a: (usize, usize),
+        b: (usize, usize),
+        block: bool,
+    ) -> Option<String> {
         let (start, end) = if a <= b { (a, b) } else { (b, a) };
         let session = self.session.as_ref()?;
         let rows = session.terminal().lock().ok()?.display_rows();
         let width = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+        // Block mode: a fixed column range applied to every row.
+        let block_lo = a.1.min(b.1);
+        let block_hi = a.1.max(b.1).min(width.saturating_sub(1));
         let mut out = String::new();
         for r in start.0..=end.0 {
             let Some(row) = rows.get(r) else { break };
-            let lo = if r == start.0 { start.1 } else { 0 };
-            let hi = if r == end.0 {
-                end.1.min(width.saturating_sub(1))
+            let (lo, hi) = if block {
+                (block_lo, block_hi)
             } else {
-                width.saturating_sub(1)
+                let lo = if r == start.0 { start.1 } else { 0 };
+                let hi = if r == end.0 {
+                    end.1.min(width.saturating_sub(1))
+                } else {
+                    width.saturating_sub(1)
+                };
+                (lo, hi)
             };
             out.push_str(&copy_row_text(row, lo, hi));
             if r != end.0 {
@@ -1750,19 +1767,52 @@ mod tests {
         }
         // Single-row slice: cols 0..=4 of row 0 → "hello".
         assert_eq!(
-            pane.selection_text((0, 0), (0, 4)).as_deref(),
+            pane.selection_text((0, 0), (0, 4), false).as_deref(),
             Some("hello")
         );
         // Two-row selection, given BOTTOM-UP — must order to the same result and
         // join with a newline; trailing blanks on each row are trimmed.
-        let two = pane.selection_text((1, 10), (0, 0));
+        let two = pane.selection_text((1, 10), (0, 0), false);
         assert_eq!(
             two.as_deref(),
             Some("hello world\nsecond line"),
             "rows ordered + joined with newline, trailing blanks trimmed"
         );
         // An empty (zero-width, all-blank) selection on a blank row → None.
-        assert_eq!(pane.selection_text((3, 0), (3, 0)), None);
+        assert_eq!(pane.selection_text((3, 0), (3, 0), false), None);
+    }
+
+    /// In BLOCK mode every row is clipped to the SAME `[min_col, max_col]` column
+    /// range (the rectangular selection), not the line-wise first-row-to-last-row
+    /// span. A drag from (row0,col6) to (row1,col10) over "hello world" /
+    /// "second line" must yield the column slice 6..=10 of EACH row.
+    #[test]
+    fn selection_text_block_mode_clips_every_row_to_the_column_range() {
+        let pane = PaneTerm::spawn(void_theme(), 80, 4);
+        let Some(term) = pane.terminal_for_test() else {
+            return;
+        };
+        {
+            let mut t = term.lock().unwrap();
+            t.advance(b"hello world\r\nsecond line\r\n");
+        }
+        // Columns 6..=10 of EACH row: "hello world"[6..=10] = "world";
+        // "second line"[6..=10] = " line" (col 6 is the space; only TRAILING
+        // whitespace is trimmed, so the leading space is kept).
+        let block = pane.selection_text((0, 6), (1, 10), true);
+        assert_eq!(
+            block.as_deref(),
+            Some("world\n line"),
+            "block mode clips BOTH rows to the same column range 6..=10"
+        );
+        // The SAME endpoints line-wise would instead run row0 from col6 to EOL and
+        // row1 from start to col10 — a different, larger extraction.
+        let linewise = pane.selection_text((0, 6), (1, 10), false);
+        assert_eq!(
+            linewise.as_deref(),
+            Some("world\nsecond line"),
+            "line-wise mode spans first-row-tail + last-row-head"
+        );
     }
 
     /// `image_display_row` maps an absolute image line to a 0-based display row,
