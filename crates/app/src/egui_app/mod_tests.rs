@@ -1304,3 +1304,49 @@ fn context_menu_close_never_removes_the_last_pane() {
     app.apply_context_menu_action(ContextMenuAction::ClosePane(f));
     assert_eq!(app.pane_count(), 1, "the last pane is never closed");
 }
+
+// ---- directional-focus geometry ---------------------------------------------
+
+#[test]
+fn neighbor_in_rects_picks_the_correct_directional_neighbour() {
+    // A 2x2 grid of pane rects (screen coords, y DOWN):
+    //   TL(0) TR(1)
+    //   BL(2) BR(3)
+    // The geometry must pick the TRUE directional neighbour — not merely "a
+    // different pane" (which a focus-cycle would also satisfy) — and must respect
+    // the orthogonal-overlap requirement (Right from TL is TR, never the
+    // diagonal BR).
+    let r = |x0: f32, y0: f32| {
+        egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x0 + 100.0, y0 + 100.0))
+    };
+    let (tl, tr, bl, br) = (PaneId(0), PaneId(1), PaneId(2), PaneId(3));
+    let mut rects: HashMap<PaneId, egui::Rect> = HashMap::new();
+    rects.insert(tl, r(0.0, 0.0));
+    rects.insert(tr, r(100.0, 0.0));
+    rects.insert(bl, r(0.0, 100.0));
+    rects.insert(br, r(100.0, 100.0));
+
+    // From the top-left pane.
+    assert_eq!(neighbor_in_rects(&rects, tl, Direction::Right), Some(tr));
+    assert_eq!(neighbor_in_rects(&rects, tl, Direction::Down), Some(bl));
+    assert_eq!(
+        neighbor_in_rects(&rects, tl, Direction::Left),
+        None,
+        "no pane to the left of the top-left pane"
+    );
+    assert_eq!(
+        neighbor_in_rects(&rects, tl, Direction::Up),
+        None,
+        "no pane above the top-left pane"
+    );
+
+    // From the bottom-right pane (the mirror image) — proves Left/Up are not
+    // swapped with Right/Down.
+    assert_eq!(neighbor_in_rects(&rects, br, Direction::Left), Some(bl));
+    assert_eq!(neighbor_in_rects(&rects, br, Direction::Up), Some(tr));
+    assert_eq!(neighbor_in_rects(&rects, br, Direction::Right), None);
+    assert_eq!(neighbor_in_rects(&rects, br, Direction::Down), None);
+
+    // A focus id with no rect has no neighbour (defensive, never panics).
+    assert_eq!(neighbor_in_rects(&rects, PaneId(99), Direction::Left), None);
+}

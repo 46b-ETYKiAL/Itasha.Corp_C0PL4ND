@@ -1073,12 +1073,24 @@ impl C0pl4ndApp {
             {
                 if let Some(sel) = *selection {
                     if sel.pane == pane_id {
-                        let block = sel.mode == SelectionMode::Block;
-                        if let Some(text) = terms
-                            .get(&pane_id)
-                            .and_then(|t| t.selection_text(sel.anchor, sel.head, block))
-                        {
-                            ui.ctx().copy_text(text);
+                        if let Some(term) = terms.get(&pane_id) {
+                            // Selection anchors are ABSOLUTE scrollback lines; map
+                            // them to the CURRENT display rows before extracting
+                            // (the view may be scrolled back), exactly like the
+                            // drag-release and Ctrl/Cmd+Shift+C copy paths. Passing
+                            // the absolute coords straight to `selection_text`
+                            // (which takes DISPLAY coords) would copy the wrong
+                            // rows whenever the pane is scrolled up.
+                            let rows = term.size().1 as usize;
+                            let ws = term.window_start().unwrap_or(0);
+                            if let Some((a, b)) =
+                                selection_visible_rows(sel.anchor, sel.head, ws, rows)
+                            {
+                                let block = sel.mode == SelectionMode::Block;
+                                if let Some(text) = term.selection_text(a, b, block) {
+                                    ui.ctx().copy_text(text);
+                                }
+                            }
                         }
                     }
                 }
@@ -2264,58 +2276,10 @@ impl C0pl4ndApp {
     }
 
     /// The pane geometrically adjacent to `focus` in `dir`, using the body rects
-    /// captured during the last grid render. A candidate must lie in the
-    /// requested direction (its centre past the focused centre on the primary
-    /// axis) AND overlap the focused pane on the orthogonal axis; among those the
-    /// nearest on the primary axis wins, tie-broken by orthogonal-centre
-    /// proximity. `None` when there is no such neighbour (or no rects yet).
+    /// captured during the last grid render. Delegates to the pure
+    /// [`neighbor_in_rects`] (unit-tested against synthetic layouts).
     fn neighbor_pane(&self, focus: PaneId, dir: Direction) -> Option<PaneId> {
-        let f = self.pane_rects.get(&focus)?;
-        let fc = f.center();
-        let mut best: Option<(PaneId, f32, f32)> = None;
-        for (&pid, r) in &self.pane_rects {
-            if pid == focus {
-                continue;
-            }
-            let c = r.center();
-            let (primary, ortho, in_dir, overlap) = match dir {
-                Direction::Left => (
-                    fc.x - c.x,
-                    (c.y - fc.y).abs(),
-                    c.x < fc.x,
-                    ranges_overlap(f.y_range(), r.y_range()),
-                ),
-                Direction::Right => (
-                    c.x - fc.x,
-                    (c.y - fc.y).abs(),
-                    c.x > fc.x,
-                    ranges_overlap(f.y_range(), r.y_range()),
-                ),
-                Direction::Up => (
-                    fc.y - c.y,
-                    (c.x - fc.x).abs(),
-                    c.y < fc.y,
-                    ranges_overlap(f.x_range(), r.x_range()),
-                ),
-                Direction::Down => (
-                    c.y - fc.y,
-                    (c.x - fc.x).abs(),
-                    c.y > fc.y,
-                    ranges_overlap(f.x_range(), r.x_range()),
-                ),
-            };
-            if !in_dir || !overlap {
-                continue;
-            }
-            let better = match best {
-                None => true,
-                Some((_, bp, bo)) => primary < bp || (primary == bp && ortho < bo),
-            };
-            if better {
-                best = Some((pid, primary, ortho));
-            }
-        }
-        best.map(|(id, _, _)| id)
+        neighbor_in_rects(&self.pane_rects, focus, dir)
     }
 
     /// Move keyboard focus to the pane adjacent to the focused pane in `dir`
@@ -5030,6 +4994,66 @@ fn cell_at_pos(pos: egui::Pos2, origin: egui::Pos2, cw: f32, ch: f32) -> Option<
 /// pane focus to require orthogonal-axis overlap between two pane rects.
 fn ranges_overlap(a: egui::Rangef, b: egui::Rangef) -> bool {
     a.min < b.max && b.min < a.max
+}
+
+/// The pane geometrically adjacent to `focus` in `dir` among `rects`. A
+/// candidate must lie in the requested direction (its centre past the focused
+/// centre on the primary axis) AND overlap the focused pane on the orthogonal
+/// axis; among those the nearest on the primary axis wins, tie-broken by
+/// orthogonal-centre proximity. `None` when there is no such neighbour (or
+/// `focus` has no rect). Pure (no `self`) so it is unit-testable against
+/// synthetic layouts.
+fn neighbor_in_rects(
+    rects: &HashMap<PaneId, egui::Rect>,
+    focus: PaneId,
+    dir: Direction,
+) -> Option<PaneId> {
+    let f = rects.get(&focus)?;
+    let fc = f.center();
+    let mut best: Option<(PaneId, f32, f32)> = None;
+    for (&pid, r) in rects {
+        if pid == focus {
+            continue;
+        }
+        let c = r.center();
+        let (primary, ortho, in_dir, overlap) = match dir {
+            Direction::Left => (
+                fc.x - c.x,
+                (c.y - fc.y).abs(),
+                c.x < fc.x,
+                ranges_overlap(f.y_range(), r.y_range()),
+            ),
+            Direction::Right => (
+                c.x - fc.x,
+                (c.y - fc.y).abs(),
+                c.x > fc.x,
+                ranges_overlap(f.y_range(), r.y_range()),
+            ),
+            Direction::Up => (
+                fc.y - c.y,
+                (c.x - fc.x).abs(),
+                c.y < fc.y,
+                ranges_overlap(f.x_range(), r.x_range()),
+            ),
+            Direction::Down => (
+                c.y - fc.y,
+                (c.x - fc.x).abs(),
+                c.y > fc.y,
+                ranges_overlap(f.x_range(), r.x_range()),
+            ),
+        };
+        if !in_dir || !overlap {
+            continue;
+        }
+        let better = match best {
+            None => true,
+            Some((_, bp, bo)) => primary < bp || (primary == bp && ortho < bo),
+        };
+        if better {
+            best = Some((pid, primary, ortho));
+        }
+    }
+    best.map(|(id, _, _)| id)
 }
 
 /// True for a character that double-click word-selection treats as part of a
