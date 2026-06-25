@@ -8,6 +8,51 @@ Full per-release artifacts (signed binaries, SBOMs, provenance) are on the
 [GitHub Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases)
 page.
 
+## [0.4.8] - 2026-06-25
+
+A best-in-class interaction wave bringing the egui shell to parity with
+mainstream terminals — selection, navigation, and pane management — followed by
+a production-scale QA pass (full feature inventory, risk-based edge cases, and
+the complete issue-finding tool sweep).
+
+### Added
+
+- **Scrollback navigation chords.** `mod+shift+Home` / `mod+shift+End` jump to
+  the top / bottom of the scrollback; `mod+shift+PageUp` / `mod+shift+PageDown`
+  jump to the previous / next shell-prompt mark (OSC 133). All are consumed
+  before reaching the shell, so the chord never leaks a control byte to the PTY.
+- **Word and line selection.** Double-click selects the word under the cursor
+  (its run includes path / URL / identifier punctuation); triple-click selects
+  the whole line.
+- **Block (rectangular) selection.** Hold `Alt` while dragging to clip every row
+  to the same column range instead of the line-wise span.
+- **Right-click pane context menu.** Copy (when a selection exists), Clear
+  scrollback, Split right, Split down, New tab, and Close pane. (Paste is offered
+  via the keyboard shortcut.)
+- **Zoom-pane toggle (`mod+shift+Z`).** Render only the focused pane full-size,
+  siblings hidden; toggle again to restore the exact prior layout.
+- **Directional pane focus (`mod+shift+Arrow`).** Move keyboard focus to the
+  geometrically adjacent pane.
+- **Hover-URL affordance.** A detected URL underlines and shows the hand cursor
+  on plain hover (no modifier), signalling it is `mod`-clickable to open.
+
+### Fixed
+
+- **Jump-to-prompt-mark chords now fire on Windows and Linux.** The
+  `mod+shift+PageUp/PageDown` chords were silently dead off-macOS because the
+  matcher required the platform `command` modifier; they now use the same
+  explicit ctrl-or-command discipline as the other chords.
+- **Zoom no longer shows a stale pane after focus moves.** Switching tabs (or
+  opening a new tab) while zoomed kept the old pane on screen while keystrokes
+  routed to the now-focused hidden pane; a per-frame reconcile drops the zoom
+  when focus diverges, so the focused pane is always the one shown.
+
+### Documentation
+
+- `KEYBINDINGS.md` corrected to reflect that the shell's shortcuts are currently
+  fixed (not yet user-rebindable) — matching the Settings panel — and a mouse-
+  gestures reference table was added.
+
 ## [0.4.7] - 2026-06-17
 
 ### Changed
