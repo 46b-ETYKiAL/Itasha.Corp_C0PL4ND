@@ -1,30 +1,30 @@
 # Keybindings
 
-C0PL4ND ships with sensible default keybindings. Every binding in the first
-table is **rebindable** — override any of them in the `[keybindings]` section of
-your `config.toml` (see [CONFIG.md](../CONFIG.md)). The bindings in the second
-table are built-in window/overlay controls.
+C0PL4ND ships with the keybindings below. In the current shell these shortcuts
+are **fixed** — they are not yet user-rebindable. The `[keybindings]` section of
+`config.toml` (and its read-only mirror in the Settings window) is reserved for a
+future rebinding dispatcher; editing it does not yet change the live shortcuts.
+The second table lists built-in window/overlay controls.
 
-The `mod` modifier in a binding string maps to the platform's primary modifier:
-**Ctrl** on Windows and Linux, **Cmd** (⌘) on macOS. So `mod+shift+c` is
-`Ctrl+Shift+C` on Windows/Linux and `Cmd+Shift+C` on macOS.
+The `mod` modifier below maps to the platform's primary modifier: **Ctrl** on
+Windows and Linux, **Cmd** (⌘) on macOS. So `mod+shift+c` is `Ctrl+Shift+C` on
+Windows/Linux and `Cmd+Shift+C` on macOS.
 
 > Tip: open the **command palette** (`mod+shift+p`) at any time to discover the
-> available actions and their current shortcuts.
+> available actions and their shortcuts.
 
-## Rebindable actions (defaults)
+## Action shortcuts (fixed)
 
-These are the default bindings from the built-in keymap. Each is the value of a
-field in the `[keybindings]` config table; set a field to a different combo to
-rebind it, or to `"none"` to disable it.
+These shortcuts are implemented (hardcoded) in the shell's `frame_tick`. The
+`Config key` column names the corresponding `[keybindings]` field — shown in the
+Settings → Keybindings panel as a read-only reference until rebinding is wired.
 
-| Action | Config key | Default (Win / Linux) | Default (macOS) |
-|--------|------------|-----------------------|-----------------|
+| Action | Config key | Win / Linux | macOS |
+|--------|------------|-------------|-------|
 | Copy selection | `copy` | `Ctrl+Shift+C` | `Cmd+Shift+C` |
 | Paste | `paste` | `Ctrl+Shift+V` | `Cmd+Shift+V` |
 | New tab | `new_tab` | `Ctrl+Shift+T` | `Cmd+Shift+T` |
 | Close tab | `close_tab` | `Ctrl+Shift+W` | `Cmd+Shift+W` |
-| Next tab | `next_tab` | `Ctrl+Shift+]` | `Cmd+Shift+]` |
 | Split pane right | `split_right` | `Ctrl+Shift+D` | `Cmd+Shift+D` |
 | Split pane down | `split_down` | `Ctrl+Shift+E` | `Cmd+Shift+E` |
 | Open find / search | `search` | `Ctrl+Shift+F` | `Cmd+Shift+F` |
@@ -33,10 +33,9 @@ rebind it, or to `"none"` to disable it.
 | Increase font size | `increase_font` | `Ctrl++` | `Cmd++` |
 | Decrease font size | `decrease_font` | `Ctrl+-` | `Cmd+-` |
 
-These defaults are defined in `crates/core/src/config/mod.rs`
-(`Keybindings::default()`). The config layer is the single source of truth — if
-you change a default in your `config.toml`, the table above no longer reflects
-your install; the command palette always shows the live values.
+The default field values live in `crates/core/src/config/mod.rs`
+(`Keybindings::default()`); the shell's actual chords are hardcoded to match them
+in `crates/app/src/egui_app/mod.rs`.
 
 ## Built-in window & overlay controls
 

@@ -225,6 +225,32 @@ fn an_out_of_range_history_row_runs_nothing() {
 // ---- window-management keyboard shortcuts (F-parity) -------------------------
 
 #[test]
+fn a_consumed_chord_fires_its_action_and_leaks_no_byte_to_the_pty() {
+    // SECURITY/correctness: a window-management chord (here Ctrl+Shift+D = split)
+    // must be CONSUMED before reaching the PTY — its control byte must NOT also be
+    // forwarded to the shell. An action-only assertion (pane_count grew) would
+    // NOT catch a regression where the chord's `events.retain` keeps the event:
+    // that would fire the action AND forward the byte. Assert BOTH: the action
+    // fired AND nothing was forwarded this frame.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let before = app.borrow().pane_count();
+    let mut h = harness(&app);
+
+    press_ctrl_shift(&mut h, egui::Key::D);
+
+    assert_eq!(
+        app.borrow().pane_count(),
+        before + 1,
+        "Ctrl+Shift+D fires its action (the pane split)"
+    );
+    assert!(
+        app.borrow().test_last_forwarded().is_empty(),
+        "the consumed chord must forward NO byte to the PTY (got {:?})",
+        app.borrow().test_last_forwarded()
+    );
+}
+
+#[test]
 fn ctrl_shift_d_splits_the_focused_pane_horizontally() {
     // Ctrl/Cmd+Shift+D splits the focused pane left|right, adding a pane. The egui
     // shell offered split only as chrome before; this asserts the keyboard parity.
@@ -488,6 +514,36 @@ fn closing_the_zoomed_pane_clears_the_zoom() {
         app.borrow().zoomed_pane(),
         None,
         "closing the zoomed pane must clear the zoom"
+    );
+}
+
+#[test]
+fn opening_a_new_tab_while_zoomed_exits_zoom() {
+    // A zoom renders ONLY the zoomed pane, but focus can move to a DIFFERENT pane
+    // while zoomed (here via Ctrl+Shift+T opening a new, focused tab). The
+    // zoom↔focus reconcile must drop the zoom so the newly-focused pane is the one
+    // shown — otherwise the screen keeps showing the old pane while keystrokes go
+    // to the now-focused hidden pane (a silent display/input mismatch).
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    press_ctrl_shift(&mut h, egui::Key::Z); // zoom the focused pane
+    assert!(
+        app.borrow().zoomed_pane().is_some(),
+        "the focused pane is zoomed"
+    );
+
+    press_ctrl_shift(&mut h, egui::Key::T); // new tab → focus moves to the new pane
+    h.step(); // the start-of-frame reconcile runs on the next frame
+    assert_eq!(
+        app.borrow().zoomed_pane(),
+        None,
+        "opening a new tab (focus diverges from the zoomed pane) must exit zoom"
+    );
+    assert_eq!(
+        app.borrow().pane_count(),
+        2,
+        "the new tab was created (the focus divergence that triggered the un-zoom)"
     );
 }
 

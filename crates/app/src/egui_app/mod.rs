@@ -405,6 +405,13 @@ pub struct C0pl4ndApp {
     /// the geometric neighbour in a direction. Rebuilt each frame, so it tracks
     /// the live layout (empty before the first render).
     pane_rects: HashMap<PaneId, egui::Rect>,
+    /// The bytes `forward_input_to_focused` sent to the focused PTY on the most
+    /// recent no-overlay frame. Kept so a test can assert that a consumed chord
+    /// (e.g. Ctrl+Shift+D) leaked NOTHING to the shell — a regression where a
+    /// chord's `events.retain` keeps the event would fire the action AND forward
+    /// the control byte, which no action-only assertion would catch.
+    #[allow(dead_code)]
+    last_forwarded: Vec<u8>,
     /// Per-(pane,row) laid-out galley cache for [`paint_grid_native`] (audit #2).
     /// A row's galley is re-laid-out only when its content/style key changes, so
     /// an idle or partially-changed grid does not re-run text layout for every
@@ -680,6 +687,7 @@ impl C0pl4ndApp {
             selection: None,
             zoomed_pane: None,
             pane_rects: HashMap::new(),
+            last_forwarded: Vec::new(),
             galley_cache: GalleyCache::default(),
             image_textures: ImageTextureCache::default(),
             pending_fonts: None,
@@ -2275,6 +2283,13 @@ impl C0pl4ndApp {
             .map(|s| (s.anchor, s.head, s.mode == SelectionMode::Block))
     }
 
+    /// The bytes forwarded to the focused PTY on the most recent no-overlay
+    /// frame. Exposed so a test can assert a consumed chord leaked nothing.
+    #[allow(dead_code)]
+    pub fn test_last_forwarded(&self) -> &[u8] {
+        &self.last_forwarded
+    }
+
     /// The pane geometrically adjacent to `focus` in `dir`, using the body rects
     /// captured during the last grid render. Delegates to the pure
     /// [`neighbor_in_rects`] (unit-tested against synthetic layouts).
@@ -3731,6 +3746,17 @@ impl C0pl4ndApp {
             self.applied_font_family = font_apply_key(&self.config.font);
             self.fonts_installed = true;
         }
+        // Zoom↔focus reconcile: a zoom (Ctrl+Shift+Z) renders ONLY the zoomed
+        // pane, but focus can move to a DIFFERENT pane while zoomed (switching
+        // tabs, or Ctrl+Shift+T opening a new tab). Without this, the screen would
+        // keep showing the old zoomed pane while keystrokes route to the now-
+        // focused (hidden) pane — a silent display/input mismatch. Drop the zoom
+        // whenever focus diverges from the zoomed pane, so the focused pane is
+        // always the one on screen. (Focus is applied at the END of the previous
+        // frame, so this start-of-frame check corrects before this frame renders.)
+        if self.zoomed_pane.is_some_and(|z| z != self.focused_pane) {
+            self.zoomed_pane = None;
+        }
         // F2-3: apply the persisted UI scale (accessibility zoom) to the whole
         // egui context — ONLY when the configured value changed since last
         // applied, so it is a no-op on steady-state frames and never overrides
@@ -4299,7 +4325,7 @@ impl C0pl4ndApp {
                 self.recompute_search();
             }
         } else {
-            self.forward_input_to_focused(ctx);
+            self.last_forwarded = self.forward_input_to_focused(ctx);
         }
 
         // 0c) Frameless window edge/corner RESIZE (#24). The decorations are off,
