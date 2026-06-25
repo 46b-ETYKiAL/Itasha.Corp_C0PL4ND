@@ -1039,6 +1039,11 @@ impl C0pl4ndApp {
         bg_alpha: u8,
         search: Option<SearchHighlight<'_>>,
         links: &[(CellSpan, String)],
+        // True while Ctrl/Cmd is held: enables the whole-pane link underline +
+        // click-to-open (the hover underline shows regardless). Gating click on
+        // this — not on `links` being non-empty — is what lets links be detected
+        // every frame for the hover affordance without a plain click opening one.
+        link_modifier: bool,
         // The focused pane's in-progress IME pre-edit (composition) string, for
         // display at the cursor (F3-1). `None` for non-focused panes and when no
         // composition is active. Never sent to the PTY — display only.
@@ -1248,26 +1253,37 @@ impl C0pl4ndApp {
             }
         }
 
-        // Ctrl-clickable hyperlinks. `links` is non-empty ONLY for the focused
-        // pane while Ctrl (or Cmd) is held — the caller gates it — so its mere
-        // presence means "the modifier is down this frame". Underline every URL,
-        // show a hand cursor over the one under the pointer, and open the one a
-        // click lands on. The pixel→cell mapping ([`cell_at_pos`]) and the span
-        // hit test ([`link_url_at_cell`]) are pure + unit-tested; only this thin
-        // wiring + the OS-opener side effect live here.
+        // Hyperlinks. `links` holds the detected URL spans for the FOCUSED pane
+        // (empty for the others), computed EVERY frame. `link_modifier` is true
+        // while Ctrl/Cmd is held. Affordances:
+        //   - HOVER (always, no modifier): underline the URL under the pointer +
+        //     show the hand cursor, so a link is discoverable; the hand signals
+        //     "Ctrl/Cmd+click to open".
+        //   - Ctrl/Cmd HELD: underline EVERY URL (the whole-pane click affordance)
+        //     and OPEN the one a click lands on.
+        // The pixel→cell mapping ([`cell_at_pos`]) and the span hit test are pure
+        // + unit-tested; only this thin wiring + the OS-opener side effect live
+        // here.
         let mut opened_url = None;
         if !links.is_empty() {
             let (cw, ch) = monospace_cell_points(&painter, font_size, line_height_px);
             let origin = grid_text_origin(rect, pad);
-            paint_link_underlines(&painter, origin, cw, ch, &pane_colors, links);
+            if link_modifier {
+                paint_link_underlines(&painter, origin, cw, ch, &pane_colors, links);
+            }
             if let Some(hover) = resp.hover_pos() {
                 if let Some((r, c)) = cell_at_pos(hover, origin, cw, ch) {
-                    if link_url_at_cell(links, r, c).is_some() {
+                    if let Some(span) = link_span_at_cell(links, r, c) {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        // Without the modifier, underline JUST the hovered link
+                        // (with it, every link is already underlined above).
+                        if !link_modifier {
+                            paint_one_link_underline(&painter, origin, cw, ch, &pane_colors, span);
+                        }
                     }
                 }
             }
-            if resp.clicked() {
+            if link_modifier && resp.clicked() {
                 if let Some(click) = resp.interact_pointer_pos() {
                     if let Some((r, c)) = cell_at_pos(click, origin, cw, ch) {
                         if let Some(url) = link_url_at_cell(links, r, c) {
@@ -1331,8 +1347,9 @@ impl C0pl4ndApp {
                 .map(PaneTerm::mouse_mode)
                 .unwrap_or(MouseMode::Off);
             // Report to the program only when it grabbed the mouse, Shift is not
-            // forcing local selection, and we are not in ctrl-click-link mode.
-            let report = mode != MouseMode::Off && !m.shift && links.is_empty();
+            // forcing local selection, and the link modifier is not held (a
+            // Ctrl/Cmd+click opens a hovered link instead of being reported).
+            let report = mode != MouseMode::Off && !m.shift && !link_modifier;
             if report {
                 // Button press/release at the interacted cell.
                 let buttons = [
@@ -1971,11 +1988,11 @@ impl C0pl4ndApp {
         // overlay open AND Ctrl held the grid was cloned twice per frame. Compute
         // it a single time only when at least one consumer needs it.
         let link_modifier = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
-        let search_lines: Vec<String> = if self.search_open || link_modifier {
-            self.focused_search_lines()
-        } else {
-            Vec::new()
-        };
+        // The focused grid text, snapshotted ONCE per frame for both the find
+        // highlight and the hyperlink spans. Computed every frame now (not only
+        // when the overlay is open or Ctrl is held) because the hyperlink HOVER
+        // affordance must detect a link under the pointer without the modifier.
+        let search_lines: Vec<String> = self.focused_search_lines();
         let search_spans: Vec<CellSpan> = if self.search_open {
             self.cell_spans_for_search(&search_lines)
         } else {
@@ -1983,16 +2000,13 @@ impl C0pl4ndApp {
         };
         let search_sel = self.search_sel;
 
-        // Ctrl-clickable hyperlinks: only built while the modifier (Ctrl, or Cmd
-        // on macOS) is held, so URLs underline ON Ctrl-hover and a Ctrl-click
-        // opens one — a plain click stays a normal pane interaction. Built HERE
-        // (before the disjoint-borrow block) for the same reason as the search
-        // spans; `find_urls` reads the focused grid via `focused_search_lines`.
-        let link_spans: Vec<(CellSpan, String)> = if link_modifier {
-            self.cell_spans_for_hyperlinks(&search_lines)
-        } else {
-            Vec::new()
-        };
+        // Detected URL spans in the focused pane's visible grid, computed EVERY
+        // frame (like the search spans) so a plain HOVER can underline the link
+        // under the pointer (the discoverability affordance). Whether a click
+        // OPENS a link is gated separately by `link_modifier` (Ctrl/Cmd held), so
+        // detecting links every frame does not make a plain click open one.
+        // `find_urls` reads the focused grid via `focused_search_lines`.
+        let link_spans: Vec<(CellSpan, String)> = self.cell_spans_for_hyperlinks(&search_lines);
 
         // The active pane shell layout (#30), read LIVE so the titlebar toggle
         // takes effect this frame. Captured before the disjoint-borrow block
@@ -2097,6 +2111,10 @@ impl C0pl4ndApp {
                     bg_alpha,
                     search,
                     links,
+                    // Link click/all-underline gated to the focused pane with the
+                    // modifier held; the hover underline shows regardless (but
+                    // only the focused pane has a non-empty `links` slice).
+                    link_modifier && pid == focused,
                     if pid == focused { ime_preedit } else { None },
                     selection,
                 );
@@ -5080,6 +5098,37 @@ fn link_url_at_cell(links: &[(CellSpan, String)], row: usize, col: usize) -> Opt
         .iter()
         .find(|(s, _)| s.line == row && col >= s.col_start && col < s.col_end)
         .map(|(_, url)| url.as_str())
+}
+
+/// The URL SPAN whose cells cover `(row, col)`, if any — the geometry the
+/// hover-underline affordance paints (the sibling of [`link_url_at_cell`], which
+/// returns the URL string).
+fn link_span_at_cell(links: &[(CellSpan, String)], row: usize, col: usize) -> Option<&CellSpan> {
+    links
+        .iter()
+        .find(|(s, _)| s.line == row && col >= s.col_start && col < s.col_end)
+        .map(|(s, _)| s)
+}
+
+/// Underline a SINGLE URL span (the hovered link's discoverability affordance),
+/// slightly heavier than the Ctrl-held all-links underline so the hovered link
+/// reads as the actionable one. Same geometry as [`paint_link_underlines`].
+fn paint_one_link_underline(
+    painter: &egui::Painter,
+    origin: egui::Pos2,
+    cw: f32,
+    ch: f32,
+    colors: &theme::ChromeColors,
+    s: &CellSpan,
+) {
+    let col_end = s.col_end.max(s.col_start + 1);
+    let x0 = origin.x + s.col_start as f32 * cw;
+    let x1 = origin.x + col_end as f32 * cw;
+    let y = origin.y + s.line as f32 * ch + ch - 1.0;
+    painter.line_segment(
+        [egui::pos2(x0, y), egui::pos2(x1, y)],
+        egui::Stroke::new(1.5, colors.accent),
+    );
 }
 
 /// Cell `(width, height)` in POINTS for the terminal grid: the width is the

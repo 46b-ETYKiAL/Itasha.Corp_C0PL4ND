@@ -351,6 +351,37 @@ fn link_url_at_cell_matches_half_open_span() {
 }
 
 #[test]
+fn link_span_at_cell_returns_the_hovered_span_geometry() {
+    // The hover-underline affordance hit-tests with link_span_at_cell, which must
+    // share link_url_at_cell's half-open semantics but return the SPAN (the
+    // geometry the underline paints) rather than the URL string.
+    let links = vec![(
+        CellSpan {
+            line: 0,
+            col_start: 4,
+            col_end: 25,
+        },
+        "https://example.com".to_string(),
+    )];
+    let hit = link_span_at_cell(&links, 0, 4).expect("col_start is inside");
+    assert_eq!(
+        (hit.line, hit.col_start, hit.col_end),
+        (0, 4, 25),
+        "returns the matched span's geometry"
+    );
+    assert!(
+        link_span_at_cell(&links, 0, 24).is_some(),
+        "last col is inside"
+    );
+    assert!(
+        link_span_at_cell(&links, 0, 25).is_none(),
+        "end col is exclusive (matches link_url_at_cell)"
+    );
+    assert!(link_span_at_cell(&links, 0, 3).is_none(), "before the span");
+    assert!(link_span_at_cell(&links, 1, 10).is_none(), "wrong row");
+}
+
+#[test]
 fn ctrl_click_on_a_seeded_url_records_it() {
     // Drive the SAME span-build + hit-test path a real Ctrl-click uses, over a
     // KNOWN seeded grid (PTY-independent). The URL "https://example.com" sits

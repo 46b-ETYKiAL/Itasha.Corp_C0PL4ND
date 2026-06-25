@@ -66,6 +66,19 @@ paste-confirm chords are implemented in `crates/app/src/egui_app/mod.rs`. They
 are deliberately consumed before keystrokes reach the shell, so the chord never
 leaks a stray control byte to the running program.
 
+## Mouse gestures
+
+| Gesture | Action |
+|---------|--------|
+| Drag | Select text (line-wise) |
+| **Alt + drag** | Select a rectangular **block** (each row clipped to the same columns) |
+| **Double-click** | Select the word under the cursor |
+| **Triple-click** | Select the whole line |
+| Hover a URL | Underline it + show the hand cursor (Ctrl/Cmd-click to open) |
+| Ctrl/Cmd + click a URL | Open the link in the browser |
+| **Right-click** | Open the pane context menu (Copy, Clear scrollback, Split, New tab, Close) |
+| Wheel | Scroll this pane's scrollback (when no program grabbed the mouse) |
+
 ## Related selection behaviour
 
 - **Copy-on-select** (`copy_on_select`, default `false`): when enabled, ending a
