@@ -80,23 +80,40 @@ pub fn verify_signature_bound(
 
     let sig =
         minisign_verify::Signature::decode(sig_str).map_err(|e| format!("bad signature: {e}"))?;
-    let trusted = sig.trusted_comment();
-    // The trusted comment is `\t`-separated `key:value` fields. Find `file:`.
+    trusted_comment_binds_asset(sig.trusted_comment(), expected_asset)
+}
+
+/// The basename of a path-or-filename: the final component after any `/` or `\`
+/// separator (so `release/foo.zip` and `foo.zip` both yield `foo.zip`).
+fn basename(s: &str) -> &str {
+    let s = s.trim();
+    s.rsplit(['/', '\\']).next().unwrap_or(s).trim()
+}
+
+/// Bind a minisign trusted comment to the asset the updater resolved. The
+/// comment is `\t`-separated `key:value` fields; if a `file:` token is present
+/// its BASENAME must equal the BASENAME of `expected_asset` (case-insensitive).
+///
+/// Both sides are reduced to their basename so a signer invoked with a path
+/// argument (e.g. `rsign sign release/foo.zip`, which writes
+/// `file:release/foo.zip`) still matches the bare downloaded `foo.zip`. Without
+/// this, a correctly-signed artifact was rejected with "signature trusted-comment
+/// file mismatch" — the `release/`-prefix in-app-updater failure this fixes
+/// (alongside the release workflow now signing bare filenames).
+///
+/// Conservative-by-construction: a comment with NO `file:` token returns `Ok`
+/// (the binding is purely additive over the cryptographic signature + checksum);
+/// a `file:` token PRESENT but with a mismatched basename is a hard failure.
+fn trusted_comment_binds_asset(trusted: &str, expected_asset: &str) -> Result<(), String> {
     if let Some(signed_file) = trusted
         .split('\t')
         .find_map(|field| field.trim().strip_prefix("file:"))
     {
-        let signed_file = signed_file.trim();
-        // Compare against the basename only — the trusted comment records the
-        // bare filename passed to the signer, never a directory path.
-        let expected = expected_asset
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(expected_asset)
-            .trim();
-        if !signed_file.eq_ignore_ascii_case(expected) {
+        let signed = basename(signed_file);
+        let expected = basename(expected_asset);
+        if !signed.eq_ignore_ascii_case(expected) {
             return Err(format!(
-                "signature trusted-comment file mismatch: signed for {signed_file:?}, \
+                "signature trusted-comment file mismatch: signed for {signed:?}, \
                  expected {expected:?}"
             ));
         }
@@ -137,6 +154,52 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn trusted_comment_binding_compares_basenames() {
+        let asset = "c0pl4nd-v0.4.8-x86_64-pc-windows-msvc.zip";
+
+        // Bare filename in the trusted comment (the intended form) → matches.
+        assert!(
+            trusted_comment_binds_asset(&format!("timestamp:123\tfile:{asset}"), asset).is_ok()
+        );
+
+        // REGRESSION (the in-app-update failure): the signer was invoked with a
+        // `release/` PATH prefix, so the trusted comment carries
+        // `file:release/<asset>`. The basename comparison must still accept it.
+        assert!(
+            trusted_comment_binds_asset(&format!("timestamp:123\tfile:release/{asset}"), asset)
+                .is_ok(),
+            "a release/-prefixed trusted comment must bind to the bare asset"
+        );
+        // Windows-style separator too.
+        assert!(trusted_comment_binds_asset(
+            &format!("timestamp:123\tfile:release\\{asset}"),
+            asset
+        )
+        .is_ok());
+
+        // Case-insensitive on the filename.
+        assert!(trusted_comment_binds_asset(
+            &format!("timestamp:123\tfile:{}", asset.to_uppercase()),
+            asset
+        )
+        .is_ok());
+
+        // A genuinely DIFFERENT asset (wrong-artifact substitution) → hard fail.
+        let err = trusted_comment_binds_asset(
+            "timestamp:123\tfile:c0pl4nd-v0.4.8-x86_64-unknown-linux-gnu.tar.gz",
+            asset,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("mismatch"),
+            "wrong asset must be rejected: {err}"
+        );
+
+        // No `file:` token (hand-rolled comment) → binding skipped (additive).
+        assert!(trusted_comment_binds_asset("timestamp:123", asset).is_ok());
     }
 
     #[test]

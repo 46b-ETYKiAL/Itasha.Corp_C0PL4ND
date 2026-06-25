@@ -504,16 +504,39 @@ jobs:
           fi
           cargo install rsign2 --locked --version "^0.6"
           umask 077
-          printf '%s\n' "$MINISIGN_SECRET_KEY" > sk.key
+          keypath="$PWD/sk.key"
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$keypath"
           count=0
           # Sign every release asset except the signatures themselves (matches the
           # in-app updater, which fetches each archive's `.minisig` sibling).
+          #
+          # CRITICAL: sign with the BARE filename (from INSIDE release/), so the
+          # minisign trusted comment records `file:<name>` and NOT
+          # `file:release/<name>`. The in-app updater binds the trusted-comment
+          # `file:` token to the bare downloaded asset name; signing a path-
+          # prefixed argument writes the prefix into the trusted comment and the
+          # fail-closed updater rejects the artifact ("trusted-comment file
+          # mismatch"), breaking auto-update for EVERY deployed client.
           while IFS= read -r f; do
-            rsign sign -W -s sk.key -x "$f.minisig" "$f"
+            base=$(basename "$f")
+            ( cd "$(dirname "$f")" && rsign sign -W -s "$keypath" -x "${base}.minisig" "$base" )
             count=$((count + 1))
           done < <(find release -type f ! -name '*.minisig')
-          shred -u sk.key 2>/dev/null || rm -f sk.key
+          shred -u "$keypath" 2>/dev/null || rm -f "$keypath"
           echo "signed $count release artifact(s)"
+          # Guard: every trusted comment MUST be a bare filename — a path in the
+          # `file:` token is the regression that broke v0.4.8 auto-update. Fail the
+          # release loudly if any signature carries a directory prefix.
+          for sig in release/*.minisig; do
+            ft=$(grep -m1 '^trusted comment:' "$sig" | grep -oE 'file:[^[:space:]]+' | head -1)
+            case "$ft" in
+              */*|*\\*)
+                echo "::error::$sig trusted comment carries a PATH, not a bare filename ($ft) — the in-app updater would reject it. Aborting."
+                exit 1
+                ;;
+            esac
+          done
+          echo "verified all trusted comments are bare filenames (no path prefix)"
           ls -la release
 
       - name: Create GitHub Release

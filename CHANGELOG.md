@@ -8,6 +8,23 @@ Full per-release artifacts (signed binaries, SBOMs, provenance) are on the
 [GitHub Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases)
 page.
 
+## [0.4.9] - 2026-06-25
+
+### Fixed
+
+- **In-app auto-update was rejecting the download** with *"signature
+  trusted-comment file mismatch: signed for `release/c0pl4nd-…`, expected
+  `c0pl4nd-…`"*. The release workflow signed each artifact by its `release/<name>`
+  path, which minisign records verbatim in the signature's trusted comment
+  (`file:release/<name>`); the fail-closed updater binds that token to the **bare**
+  asset name and so refused the otherwise-valid, correctly-checksummed artifact —
+  breaking auto-update for every deployed client. The release now signs **bare
+  filenames** (trusted comment `file:<name>`), so every existing client can verify
+  and install the update; a CI guard fails the release if any signature carries a
+  path prefix. The updater's trusted-comment binding was additionally hardened to
+  compare basenames on both sides (defence-in-depth for future builds). If you are
+  on an older version, update to v0.4.9 — it installs cleanly.
+
 ## [0.4.8] - 2026-06-25
 
 A best-in-class interaction wave bringing the egui shell to parity with
