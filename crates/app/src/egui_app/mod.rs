@@ -2254,6 +2254,15 @@ impl C0pl4ndApp {
         self.zoomed_pane
     }
 
+    /// The active mouse selection as `(anchor, head, is_block)`, if any. Exposed
+    /// so an interaction test can assert a drag produced a (block-or-line)
+    /// selection.
+    #[allow(dead_code)]
+    pub fn test_selection(&self) -> Option<TestSelection> {
+        self.selection
+            .map(|s| (s.anchor, s.head, s.mode == SelectionMode::Block))
+    }
+
     /// The pane geometrically adjacent to `focus` in `dir`, using the body rects
     /// captured during the last grid render. A candidate must lie in the
     /// requested direction (its centre past the focused centre on the primary
@@ -4893,6 +4902,11 @@ struct PaneBodyOutcome {
 /// view scrolls / jumps to a prompt / receives new output — the painter and copy
 /// map absolute → current display row via [`selection_visible_rows`]. A selection
 /// where `anchor == head` is an empty (click, not drag) selection.
+/// A test-only view of the active selection: `(anchor, head, is_block)` in
+/// `(absolute-line, column)` coordinates. Returned by
+/// [`C0pl4ndApp::test_selection`] for the interaction tests.
+type TestSelection = ((usize, usize), (usize, usize), bool);
+
 /// Whether a mouse selection extracts text LINE-WISE (the default — the first
 /// row runs from the anchor column to end-of-row, inner rows are full, the last
 /// row runs to the head column) or as a rectangular BLOCK (every row clipped to

@@ -524,3 +524,97 @@ fn ctrl_shift_arrow_moves_directional_pane_focus_across_a_split() {
         "Ctrl+Shift+Left at the left edge is idempotent (no pane further left)"
     );
 }
+
+// ---- pointer-driven mouse gestures ------------------------------------------
+
+/// Send a primary pointer button press/release at `pos`.
+fn pointer_primary(h: &mut Harness<'_>, pos: egui::Pos2, pressed: bool) {
+    h.event(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::default(),
+    });
+}
+
+#[test]
+fn mouse_wheel_scrolls_the_pane_scrollback() {
+    // Hovering a pane and rolling the wheel UP scrolls its LOCAL scrollback back
+    // into history (no program has grabbed the mouse). Driven through the real
+    // frame_tick wheel handler; the observable is the focused pane's view offset.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+    {
+        let mut a = app.borrow_mut();
+        for i in 0..200 {
+            a.test_feed_focused(format!("line {i}\r\n").as_bytes());
+        }
+    }
+    h.run();
+    assert_eq!(
+        app.borrow().test_focused_view_offset(),
+        Some(0),
+        "the view starts at the live bottom"
+    );
+
+    // Hover the pane centre, then wheel up (positive y → back into history).
+    h.event(egui::Event::PointerMoved(egui::pos2(600.0, 400.0)));
+    h.step();
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: egui::vec2(0.0, 5.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::default(),
+    });
+    h.step();
+
+    let off = app
+        .borrow()
+        .test_focused_view_offset()
+        .expect("focused pane exists");
+    assert!(
+        off > 0,
+        "wheel up must scroll into the pane scrollback (offset {off} > 0)"
+    );
+}
+
+#[test]
+fn primary_drag_selects_text_in_the_pane() {
+    // A primary-button drag across the pane grid selects text (line-wise). With
+    // copy_on_select off (the default) the selection persists after release, so
+    // we can assert the non-empty selection the drag produced.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+    {
+        let mut a = app.borrow_mut();
+        a.test_feed_focused(b"hello world this is a line of selectable text\r\n");
+    }
+    h.run();
+    assert!(
+        app.borrow().test_selection().is_none(),
+        "there is no selection before the drag"
+    );
+
+    // Press at one cell and drag well to the right (past the drag threshold).
+    let p0 = egui::pos2(120.0, 200.0);
+    let p1 = egui::pos2(420.0, 200.0);
+    h.event(egui::Event::PointerMoved(p0));
+    pointer_primary(&mut h, p0, true);
+    h.step();
+    h.event(egui::Event::PointerMoved(p1));
+    h.step();
+    pointer_primary(&mut h, p1, false);
+    h.step();
+
+    let (anchor, head, is_block) = app
+        .borrow()
+        .test_selection()
+        .expect("a primary drag must produce a selection");
+    assert_ne!(anchor, head, "the drag selects a non-empty range");
+    assert!(!is_block, "a plain (non-Alt) drag is line-wise, not block");
+    // NOTE: Alt+drag (block selection) is exercised deterministically by the core
+    // `selection_text_block_mode_clips_every_row_to_the_column_range` unit test
+    // (the rectangular extraction). It is not driven here because egui's kittest
+    // synthetic drag detection does not register a drag when a modifier is held
+    // on the pointer events (a harness limitation, not a real-app behaviour).
+}
