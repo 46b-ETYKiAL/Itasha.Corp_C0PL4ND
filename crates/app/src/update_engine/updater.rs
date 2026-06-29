@@ -87,8 +87,14 @@ pub enum UpdateState {
     Available(ReleaseInfo),
     /// The asset is downloading (`received`/`total` bytes).
     Downloading { received: u64, total: u64 },
-    /// A verified new binary has been staged; restart to finish.
-    ReadyToApply { staged: PathBuf, version: String },
+    /// A verified new binary has been staged; restart to finish. `release_index`
+    /// is the Tier-1 manifest ordinal to persist on a successful apply (`None`
+    /// for a legacy, manifest-absent update).
+    ReadyToApply {
+        staged: PathBuf,
+        version: String,
+        release_index: Option<u64>,
+    },
     /// The verified binary was swapped in; restart to run it.
     Applied { version: String },
     /// The last operation failed; `String` is a human-readable reason.
@@ -98,8 +104,14 @@ pub enum UpdateState {
 /// Cross-thread messages from a worker back to the UI thread.
 enum UpdateMsg {
     CheckResult(Result<Option<ReleaseInfo>, String>),
-    Progress { received: u64, total: u64 },
-    Downloaded(Result<(PathBuf, String), String>),
+    Progress {
+        received: u64,
+        total: u64,
+    },
+    /// `Ok((staged_path, version, release_index))` — `release_index` is the
+    /// Tier-1 manifest ordinal to persist on a successful apply (`None` for a
+    /// legacy, manifest-absent update path).
+    Downloaded(Result<(PathBuf, String, Option<u64>), String>),
 }
 
 /// UI-thread updater model: a polled [`UpdateState`] plus the channel to the
@@ -194,13 +206,15 @@ impl Updater {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let version = info.version.to_string();
+            // Tier-1 manifest ordinal to persist after a successful apply.
+            let release_index = info.release_index;
             let ptx = tx.clone();
             let pctx = ctx.clone();
             let result = net::download_verify_extract(&info, &staging, move |received, total| {
                 let _ = ptx.send(UpdateMsg::Progress { received, total });
                 pctx.request_repaint();
             })
-            .map(|path| (path, version));
+            .map(|path| (path, version, release_index));
             let _ = tx.send(UpdateMsg::Downloaded(result));
             ctx.request_repaint();
         });
@@ -238,10 +252,15 @@ impl Updater {
     /// backup is the recovery surface. The backup is best-effort — a failure to
     /// write it never blocks an otherwise-valid update.
     pub fn apply_and_restart(&mut self, ctx: &egui::Context) {
-        let UpdateState::ReadyToApply { staged, version } = &self.state else {
+        let UpdateState::ReadyToApply {
+            staged,
+            version,
+            release_index,
+        } = &self.state
+        else {
             return;
         };
-        let (staged, version) = (staged.clone(), version.clone());
+        let (staged, version, release_index) = (staged.clone(), version.clone(), *release_index);
 
         // Anti-rollback gate (fail-closed): refuse to INSTALL anything that is
         // not strictly newer than the highest version ever installed, even
@@ -292,6 +311,13 @@ impl Updater {
                     (pre_swap_exe.as_ref(), semver::Version::parse(&version))
                 {
                     let _ = super::rollback_guard::record_installed(exe, &applied);
+                }
+                // Tier-1: advance the persisted `release_index` high-water mark
+                // (monotonic, best-effort) so a later replay of an older signed
+                // manifest is refused at the next check. A failed write never
+                // blocks the applied update (the version floor still governs).
+                if let Some(idx) = release_index {
+                    super::update_state::record_applied_index_for_current_exe(idx);
                 }
                 if let Some(exe) = pre_swap_exe.as_ref() {
                     match std::process::Command::new(exe).spawn() {
@@ -346,8 +372,12 @@ impl Updater {
                 Ok(UpdateMsg::Progress { received, total }) => {
                     self.state = UpdateState::Downloading { received, total };
                 }
-                Ok(UpdateMsg::Downloaded(Ok((staged, version)))) => {
-                    self.state = UpdateState::ReadyToApply { staged, version };
+                Ok(UpdateMsg::Downloaded(Ok((staged, version, release_index)))) => {
+                    self.state = UpdateState::ReadyToApply {
+                        staged,
+                        version,
+                        release_index,
+                    };
                 }
                 Ok(UpdateMsg::Downloaded(Err(e))) => {
                     // Verify/extract failed — `download_verify_extract` already
@@ -416,6 +446,7 @@ mod tests {
             !updater_in(UpdateState::ReadyToApply {
                 staged: PathBuf::from("x"),
                 version: "1.0.0".into(),
+                release_index: None,
             })
             .is_busy(),
             "ready-to-apply is idle (awaits a user click)"
@@ -439,6 +470,7 @@ mod tests {
         let mut u = updater_in(UpdateState::ReadyToApply {
             staged: PathBuf::from("nonexistent-staged-binary"),
             version: "0.0.1".into(),
+            release_index: None,
         });
         u.apply_and_restart(&ctx);
         match &u.state {
@@ -461,6 +493,7 @@ mod tests {
         let mut u = updater_in(UpdateState::ReadyToApply {
             staged: PathBuf::from("nonexistent-staged-binary"),
             version: "not-a-version".into(),
+            release_index: None,
         });
         u.apply_and_restart(&ctx);
         match &u.state {
@@ -494,6 +527,8 @@ mod tests {
             sig_url: "https://dl/c0pl4nd.zip.minisig".to_string(),
             sha_url: "https://dl/c0pl4nd.zip.sha256".to_string(),
             html_url: "https://github.com/o/r".to_string(),
+            pinned_sha256: "deadbeef".to_string(),
+            release_index: None,
         }
     }
 
@@ -586,6 +621,7 @@ mod tests {
         tx.send(UpdateMsg::Downloaded(Ok((
             PathBuf::from("/staging/c0pl4nd"),
             "9.9.9".to_string(),
+            Some(9_009_009),
         ))))
         .unwrap();
         u.poll(&ctx);
@@ -594,6 +630,7 @@ mod tests {
             UpdateState::ReadyToApply {
                 staged: PathBuf::from("/staging/c0pl4nd"),
                 version: "9.9.9".to_string(),
+                release_index: Some(9_009_009),
             }
         );
     }

@@ -61,4 +61,18 @@ ignore = [
   # `itasha-report-transport-tor` crate; compile-time only. No maintained drop-in
   # upstream Arti has migrated to yet. Re-evaluate when `tor-error` drops `paste`.
   "RUSTSEC-2024-0436",
+  # RUSTSEC-2026-0190 — `anyhow` unsoundness in `Error::downcast_mut()`. Kept in
+  # lockstep with deny.toml + audit.toml.
+  #
+  #   Why accepted:
+  #     * The UB is reachable ONLY via `Error::context(X)` followed by
+  #       `downcast_mut::<X>()` on the returned error. C0PL4ND does NOT call
+  #       `downcast_mut` anywhere (`grep -rn downcast_mut crates/` => zero hits),
+  #       so the unsound path is unreachable and exposure is nil.
+  #     * NO PATCHED RELEASE is available: anyhow 1.0.102 is the latest on
+  #       crates.io (`cargo update -p anyhow` locks 0 packages).
+  #
+  #   Re-evaluation trigger:
+  #     Drop this ignore and bump as soon as anyhow ships a fixed release.
+  "RUSTSEC-2026-0190",
 ]

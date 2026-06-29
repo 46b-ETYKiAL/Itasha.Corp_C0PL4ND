@@ -42,11 +42,21 @@ yanked = "deny"
 # Arti, not by C0PL4ND-supplied keys), and the option is OFF by default. There
 # is no available fix to bump to. Re-evaluate and drop this ignore when `rsa`
 # ships a constant-time release and Arti adopts it.
+#
+# RUSTSEC-2026-0190: `anyhow` unsoundness in `Error::downcast_mut()` — UB occurs
+# ONLY for the specific pattern of adding context via `Error::context(X)` and
+# then calling `downcast_mut::<X>()` on the returned error. C0PL4ND does NOT use
+# `downcast_mut` ANYWHERE (`grep -rn downcast_mut crates/` => zero hits), so the
+# unsound code path is never reached and exposure is nil. NO PATCHED RELEASE is
+# available: anyhow 1.0.102 is the latest on crates.io (`cargo update -p anyhow`
+# locks 0 packages). Re-evaluate and drop this ignore when anyhow ships a fixed
+# release and bump to it.
 ignore = [
     "RUSTSEC-2017-0008",
     "RUSTSEC-2026-0173",
     "RUSTSEC-2024-0436",
     "RUSTSEC-2023-0071",
+    "RUSTSEC-2026-0190",
 ]
 
 [licenses]

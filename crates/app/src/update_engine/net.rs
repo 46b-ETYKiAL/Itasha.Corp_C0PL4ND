@@ -1,26 +1,29 @@
 //! Network half of the in-app self-updater.
 //!
 //! Telemetry-free by construction: the only network surfaces are
-//! 1. a single unauthenticated `GET` of the public GitHub Releases API, and
-//! 2. downloads of the release archive + its `.minisig` + `.sha256` siblings.
+//! 1. a single unauthenticated `GET` of the public GitHub Releases API,
+//! 2. download of the SIGNED `latest.json` manifest + its `.minisig`, and
+//! 3. downloads of the release archive + its `.minisig` + `.sha256` siblings.
 //!
 //! No analytics, no identifiers, no payload: every request sends only a generic
-//! `User-Agent` (app name + version), and the asset is verified (SHA-256 THEN
-//! minisign against [`super::verify::EMBEDDED_PUBLIC_KEY`]) before the extracted
-//! binary is ever returned. A verify failure deletes the staging area and the
-//! binary is NEVER returned unverified.
+//! `User-Agent` (app name + version). A Tier-1 client installs ONLY through the
+//! verified signed manifest — the archive is verified (its bytes pinned to the
+//! manifest's SIGNED SHA-256, then minisign against
+//! [`super::verify::EMBEDDED_PUBLIC_KEY`]) before the extracted binary is ever
+//! returned. A verify failure deletes the staging area and the binary is NEVER
+//! returned unverified. There is no install path that skips the manifest.
 //!
-//! Pure decision logic ([`select_update`]) is split out from the I/O so it can
-//! be unit-tested offline against a fixture [`RawRelease`].
+//! Pure decision logic ([`resolve_tier1_update`]) is split out from the I/O so
+//! it can be unit-tested offline against a fixture [`RawRelease`] + manifest.
 //!
 //! ## Asset naming
 //!
 //! C0PL4ND's release workflow publishes, per target, an archive whose name
 //! embeds both the tag and the Rust target triple — `c0pl4nd-<tag>-<target>.zip`
 //! on Windows, `c0pl4nd-<tag>-<target>.tar.gz` on Unix — plus a `.sha256` and a
-//! `.minisig` sidecar. Because the tag is part of the name, [`select_update`]
-//! matches by the **target-triple substring + archive extension** rather than an
-//! exact filename, so it is robust to the tag prefix.
+//! `.minisig` sidecar. [`manifest::Manifest::archive_for`] matches by the
+//! **target-triple substring + archive extension** rather than an exact
+//! filename, so it is robust to the tag prefix.
 
 use std::fs;
 use std::io::Read;
@@ -29,6 +32,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::verify::{verify_artifact_bound, EMBEDDED_PUBLIC_KEY};
+use super::{manifest, update_state};
 
 /// Decompression-bomb guard: hard cap on the TOTAL number of uncompressed bytes
 /// any single archive may expand to during extraction (S-4). A legitimate
@@ -61,6 +65,11 @@ const MAX_SIDECAR_BYTES: u64 = 64 * 1024;
 /// response is a few KiB; 4 MiB is a generous ceiling that still refuses an
 /// unbounded JSON flood (which would also stress the serde parser).
 const MAX_RELEASE_JSON_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Download-DoS guard for the signed `latest.json` manifest. A real manifest is
+/// a few KiB (a handful of asset entries); 1 MiB is a generous ceiling that
+/// still refuses an unbounded flood before the signature/serde work runs.
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 
 /// Redirect cap for the manually-followed, host-confined GET. GitHub asset
 /// downloads redirect 1–2 times (api → codeload/objects CDN); 4 is ample.
@@ -118,8 +127,9 @@ pub struct RawAsset {
 }
 
 /// The subset of the GitHub `releases/latest` JSON the updater reads. Made
-/// public + constructible so [`select_update`] can be unit-tested with a
-/// fixture (no network).
+/// public + constructible so the Tier-1 resolver can be unit-tested with a
+/// fixture (no network). `prerelease`/`draft` are read as a defense-in-depth
+/// channel-pin (the `…/releases/latest` endpoint already excludes prereleases).
 #[derive(Clone, Debug, Deserialize)]
 pub struct RawRelease {
     pub tag_name: String,
@@ -149,15 +159,16 @@ pub struct ReleaseInfo {
     pub sha_url: String,
     /// The release page (for "view all releases" / changelog in a browser).
     pub html_url: String,
-}
-
-/// Parse a release `tag_name` into a [`semver::Version`], tolerating a single
-/// leading `v`. Returns `None` on malformed input (the caller treats that as
-/// "no update", never a crash).
-fn parse_tag(tag: &str) -> Option<semver::Version> {
-    let s = tag.trim();
-    let s = s.strip_prefix('v').unwrap_or(s);
-    semver::Version::parse(s).ok()
+    /// The SIGNED SHA-256 from the verified manifest, pinned as the expected
+    /// digest for the download (binding the bytes to the signed hash). Every
+    /// `ReleaseInfo` carries a pin by construction — a Tier-1 client only ever
+    /// resolves an update through the signed manifest, so there is NO
+    /// unpinned/manifest-absent install path (the type makes the guarantee).
+    pub pinned_sha256: String,
+    /// The manifest `release_index`, persisted as the new monotonic high-water
+    /// mark on a successful apply. `None` only when the index is not carried
+    /// (defensive; the producer always sets it).
+    pub release_index: Option<u64>,
 }
 
 /// The archive file extension this build's release artifact carries: `.zip` on
@@ -193,89 +204,295 @@ pub fn fetch_latest_release(owner: &str, repo: &str) -> Result<RawRelease, Strin
         .map_err(|e| format!("failed to parse release JSON: {e}"))
 }
 
-/// PURE (no network) decision: given the raw release, the current version, this
-/// build's target triple, and the archive extension, return `Some(ReleaseInfo)`
-/// when the release is newer AND a matching archive asset (containing `target`
-/// and ending in `ext`) is present WITH both `.minisig` and `.sha256` siblings;
-/// `None` when up-to-date, malformed, a prerelease/draft, or no matching asset
-/// triple exists. The archive is matched by **substring** (`<target>` +
-/// `<ext>`), so the tag prefix in the filename does not matter.
+/// Convenience: fetch + Tier-1 resolve in one blocking call (the worker thread
+/// calls this). `Ok(None)` means "up to date / no matching asset"; `Err` means
+/// the network fetch failed, the manifest could not be VERIFIED, or a manifest
+/// gate refused the update.
 ///
-/// ## Channel pinning
+/// ## Tier-1 REQUIRES a verified signed manifest — fail-CLOSED, no fallback
 ///
-/// The in-app updater has NO mutable channel selector: it is pinned to the
-/// STABLE channel by construction. [`fetch_latest_release`] reads ONLY the
-/// dedicated `…/releases/latest` endpoint (which GitHub defines as the newest
-/// NON-prerelease release), and this function additionally rejects any
-/// `prerelease` or `draft` release outright — so even a newer prerelease can
-/// never be silently installed as a cross-channel (stable → beta) jump. (The
-/// per-channel `pick_channel_tag` logic lives only in the legacy, browser-
-/// pointing CLI `update` module, which never installs in place.) There is thus
-/// no separate channel-pinning guard to add here — the single-channel
-/// guarantee is enforced by the endpoint choice plus the prerelease/draft
-/// rejection below.
-pub fn select_update(
-    raw: &RawRelease,
-    current: &semver::Version,
-    target: &str,
-    ext: &str,
-) -> Option<ReleaseInfo> {
-    // Channel pinning: a prerelease/draft is a different release CHANNEL than
-    // the pinned stable stream. Reject it even when it is numerically newer, so
-    // the updater can never silently jump the user from stable onto beta.
-    if raw.prerelease || raw.draft {
-        return None;
-    }
-    let latest = parse_tag(&raw.tag_name)?;
-    if latest <= *current {
-        return None;
-    }
-    if target.is_empty() {
-        return None; // no baked target triple -> no asset can match this build
-    }
-
-    // The archive: an asset whose name contains the target triple AND ends in
-    // the platform extension, but is NOT itself a sidecar.
-    let archive = raw.assets.iter().find(|a| {
-        a.name.contains(target)
-            && a.name.ends_with(ext)
-            && !a.name.ends_with(".minisig")
-            && !a.name.ends_with(".sha256")
-    })?;
-
-    let sig_name = format!("{}.minisig", archive.name);
-    let sha_name = format!("{}.sha256", archive.name);
-    let find = |name: &str| -> Option<&str> {
-        raw.assets
-            .iter()
-            .find(|a| a.name == name)
-            .map(|a| a.browser_download_url.as_str())
-    };
-    let sig_url = find(&sig_name)?;
-    let sha_url = find(&sha_name)?;
-
-    Some(ReleaseInfo {
-        version: latest,
-        tag: raw.tag_name.clone(),
-        asset_url: archive.browser_download_url.clone(),
-        asset_name: archive.name.clone(),
-        sig_url: sig_url.to_string(),
-        sha_url: sha_url.to_string(),
-        html_url: raw.html_url.clone(),
-    })
-}
-
-/// Convenience: fetch + select in one blocking call (the worker thread calls
-/// this). `Ok(None)` means "up to date / no matching asset"; `Err` means the
-/// network fetch itself failed.
+/// A Tier-1 client only ever installs an update whose SIGNED `latest.json`
+/// manifest verifies and passes every gate. The manifest is fetched, its
+/// minisign signature is verified over the RAW JSON (BEFORE parse), then its
+/// gates — schema/product identity, freshness (freeze beacon), `version >
+/// current` (downgrade), `release_index > persisted` (rollback), and the
+/// `current >= minimum_version` floor — are enforced, all fail-closed.
+///
+/// There is deliberately NO legacy/per-asset fallback when the manifest is
+/// absent or unverifiable. A fallback would make the freeze-beacon, the
+/// `minimum_version` floor, and the signed-hash binding OPTIONAL — an attacker
+/// who strips `latest.json` (or its `.minisig`) could force the weaker path and
+/// downgrade the protection. The honest path always has a manifest: a Tier-1
+/// binary only sees `/releases/latest >= its own version`, and every such
+/// release carries a manifest. The only actor a fallback serves is that
+/// attacker. (Pre-Tier-1 binaries used their own per-asset selector — removed
+/// from THIS binary, which has no install path that skips the signed manifest.)
 pub fn check_for_update(
     owner: &str,
     repo: &str,
     current: &semver::Version,
     target: &str,
 ) -> Result<Option<ReleaseInfo>, String> {
+    // A single fetch of `/releases/latest` yields BOTH the asset list (for the
+    // per-asset sidecars + prerelease/draft channel-pin) and the REQUIRED signed
+    // manifest. An absent/unverifiable manifest is a hard refusal here.
+    let (raw, json, sig_str) = fetch_manifest(owner, repo)?;
+    let manifest = manifest::parse_and_verify(&json, &sig_str, EMBEDDED_PUBLIC_KEY)?;
+    resolve_tier1_update(
+        &raw,
+        &manifest,
+        current,
+        target,
+        archive_ext(),
+        now_unix_secs(),
+        update_state::applied_index(),
+    )
+}
+
+/// Current wall-clock as a Unix timestamp (seconds). On a clock error (a
+/// before-epoch system time) returns [`i64::MAX`] so freshness checks fail
+/// CLOSED — an unreadable clock must never make a stale manifest look fresh.
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(i64::MAX)
+}
+
+/// Locate the signed-manifest pair (`latest.json` + `latest.json.minisig`) among
+/// the release assets. Returns `Some((json_url, sig_url))` only when BOTH are
+/// present; `None` when EITHER is absent.
+fn find_manifest_assets(raw: &RawRelease) -> Option<(String, String)> {
+    let url_of = |name: &str| -> Option<String> {
+        raw.assets
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.browser_download_url.clone())
+    };
+    let json = url_of("latest.json")?;
+    let sig = url_of("latest.json.minisig")?;
+    Some((json, sig))
+}
+
+/// Require the signed-manifest pair on a release. An ABSENT manifest (or its
+/// signature) is a hard refusal — a Tier-1 client never installs an update it
+/// cannot verify, so a missing manifest fails CLOSED here rather than degrading
+/// to the weaker per-asset path.
+fn require_manifest_assets(raw: &RawRelease) -> Result<(String, String), String> {
+    find_manifest_assets(raw).ok_or_else(|| {
+        "update could not be verified: this release carries no signed manifest \
+         (latest.json + latest.json.minisig) — refusing to install"
+            .to_string()
+    })
+}
+
+/// Download the REQUIRED signed manifest pair for an already-fetched release.
+/// `Err` when the manifest is absent (fail-closed) OR on a network/decoding
+/// failure. The returned `(json_bytes, sig_str)` are UNVERIFIED — the caller
+/// MUST pass them through [`manifest::parse_and_verify`] before trusting them.
+fn fetch_manifest_for(raw: &RawRelease) -> Result<(Vec<u8>, String), String> {
+    let (json_url, sig_url) = require_manifest_assets(raw)?;
+    // Defense-in-depth: both URLs come verbatim from the Releases JSON; assert
+    // https before any byte is fetched (host is re-asserted at every redirect
+    // hop inside `confined_get`).
+    assert_https(&json_url)?;
+    assert_https(&sig_url)?;
+    let json = download_small_capped(&json_url, MAX_MANIFEST_BYTES)?;
+    let sig = download_small(&sig_url)?;
+    let sig_str = String::from_utf8(sig)
+        .map_err(|e| format!("manifest signature is not valid UTF-8: {e}"))?;
+    Ok((json, sig_str))
+}
+
+/// Public entry point: fetch the latest release ONCE and return it alongside its
+/// REQUIRED signed manifest — `(raw_release, latest.json bytes, .minisig string)`.
+/// Returning the `RawRelease` too lets the caller resolve the per-asset sidecars
+/// and the prerelease/draft channel-pin from the SAME fetch (no second round
+/// trip, no check→use drift). `Err` when the manifest is absent (fail-closed; a
+/// Tier-1 client requires a verifiable manifest) or on a network failure. The
+/// bytes are UNVERIFIED — pass them through [`manifest::parse_and_verify`].
+pub fn fetch_manifest(owner: &str, repo: &str) -> Result<(RawRelease, Vec<u8>, String), String> {
     let raw = fetch_latest_release(owner, repo)?;
-    Ok(select_update(&raw, current, target, archive_ext()))
+    let (json, sig_str) = fetch_manifest_for(&raw)?;
+    Ok((raw, json, sig_str))
+}
+
+/// PURE (no network) Tier-1 resolver: given a VERIFIED manifest, decide the
+/// update. Every gate fails CLOSED. `now_unix` and `persisted_index` are passed
+/// in (not read from the clock/disk) so the whole decision is unit-testable.
+///
+/// Returns:
+/// - `Ok(Some(info))` — a fresh, in-policy update with the SIGNED archive url +
+///   the pinned manifest SHA-256 (+ `release_index` to persist on apply).
+/// - `Ok(None)` — genuinely up to date (`version <= current`) OR no archive
+///   asset for this platform.
+/// - `Err(reason)` — a gate REFUSAL (wrong product/schema, stale/frozen,
+///   below the minimum floor, a rollback, an unparseable version, or a malformed
+///   archive entry).
+fn resolve_tier1_update(
+    raw: &RawRelease,
+    manifest: &manifest::Manifest,
+    current: &semver::Version,
+    target: &str,
+    ext: &str,
+    now_unix: i64,
+    persisted_index: u64,
+) -> Result<Option<ReleaseInfo>, String> {
+    // Channel-pin (defense-in-depth): the `…/releases/latest` endpoint already
+    // excludes prereleases/drafts, but if a prerelease/draft ever reaches here it
+    // is a different release CHANNEL than the pinned stable stream — refused so
+    // the updater can never jump the user stable → beta.
+    if raw.prerelease || raw.draft {
+        return Err("refusing a prerelease/draft release on the stable channel".to_string());
+    }
+
+    // Identity binding (the heart of Tier-1): a manifest for a DIFFERENT product
+    // or an unrecognised schema family is refused — never silently honoured.
+    if manifest.product != manifest::MANIFEST_PRODUCT {
+        return Err(format!(
+            "manifest is for a different product {:?} (expected {:?}) — refusing",
+            manifest.product,
+            manifest::MANIFEST_PRODUCT
+        ));
+    }
+    if !manifest
+        .schema
+        .starts_with(manifest::MANIFEST_SCHEMA_PREFIX)
+    {
+        return Err(format!(
+            "unrecognised manifest schema {:?} (expected {:?}*) — refusing",
+            manifest.schema,
+            manifest::MANIFEST_SCHEMA_PREFIX
+        ));
+    }
+
+    // Version first: an unparseable candidate is fail-closed; an equal-or-older
+    // candidate is a normal "up to date" (no scary error, no gate noise).
+    let candidate = manifest.version()?;
+    if candidate <= *current {
+        return Ok(None);
+    }
+
+    // Freshness (freeze beacon): a stale/frozen or unreadable-deadline manifest
+    // for a would-be NEWER release is refused — fail-closed.
+    if !manifest.is_fresh(now_unix) {
+        return Err(format!(
+            "update manifest is stale/frozen (valid_until {:?} has passed) — refusing",
+            manifest.valid_until_utc
+        ));
+    }
+
+    // Floor sanity: refuse an in-place hop when the running install is BELOW the
+    // manifest's declared minimum supported version (too old to update in place
+    // — a fresh install is required). Fail-closed.
+    let minimum = manifest.minimum_version()?;
+    if *current < minimum {
+        return Err(format!(
+            "installed version {current} is below the manifest minimum_version {minimum} — \
+             a fresh install is required (in-place update refused)"
+        ));
+    }
+
+    // Anti-rollback on the manifest ordinal: STRICTLY greater than the highest
+    // index ever applied. Equal or lower is a replay/rollback. Because
+    // release_index is monotonic with version and the candidate is already
+    // strictly newer than `current`, a fresh forward update always satisfies
+    // strict `>`; an equal index means "this exact release was already applied"
+    // and is refused. Fail-closed.
+    if manifest.release_index <= persisted_index {
+        return Err(format!(
+            "rollback blocked: manifest release_index {} is not newer than the last \
+             applied index {persisted_index} (refusing a replayed/superseded release)",
+            manifest.release_index
+        ));
+    }
+
+    // Resolve the in-place ARCHIVE asset from the SIGNED manifest (skips the
+    // setup .exe). No archive for this platform → "no update for this platform".
+    let masset = match manifest.archive_for(target, ext) {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+
+    let info = build_tier1_release_info(raw, masset, &candidate, manifest.release_index)?;
+    Ok(Some(info))
+}
+
+/// Build the download plumbing for a Tier-1 update: the SIGNED archive url from
+/// the manifest, the per-asset `.minisig` + `.sha256` sidecar urls from the
+/// release asset list (kept as defense-in-depth — the manifest does not
+/// enumerate them), and the pinned manifest SHA-256 + `release_index`. A
+/// manifest archive whose sidecars are ABSENT, or whose url/sha256 are empty, is
+/// a malformed release — fail-closed `Err`.
+fn build_tier1_release_info(
+    raw: &RawRelease,
+    masset: &manifest::ManifestAsset,
+    candidate: &semver::Version,
+    release_index: u64,
+) -> Result<ReleaseInfo, String> {
+    let url_of = |name: &str| -> Option<String> {
+        raw.assets
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.browser_download_url.clone())
+    };
+    let sig_name = format!("{}.minisig", masset.asset_name);
+    let sha_name = format!("{}.sha256", masset.asset_name);
+    let sig_url = url_of(&sig_name).ok_or_else(|| {
+        format!(
+            "manifest archive {:?} is missing its .minisig sidecar in the release — refusing",
+            masset.asset_name
+        )
+    })?;
+    let sha_url = url_of(&sha_name).ok_or_else(|| {
+        format!(
+            "manifest archive {:?} is missing its .sha256 sidecar in the release — refusing",
+            masset.asset_name
+        )
+    })?;
+    if masset.sha256.trim().is_empty() {
+        return Err(format!(
+            "manifest archive {:?} has an empty sha256 — refusing",
+            masset.asset_name
+        ));
+    }
+    if masset.url.trim().is_empty() {
+        return Err(format!(
+            "manifest archive {:?} has an empty url — refusing",
+            masset.asset_name
+        ));
+    }
+    Ok(ReleaseInfo {
+        version: candidate.clone(),
+        tag: raw.tag_name.clone(),
+        asset_url: masset.url.clone(),
+        asset_name: masset.asset_name.clone(),
+        sig_url,
+        sha_url,
+        html_url: raw.html_url.clone(),
+        pinned_sha256: masset.sha256.clone(),
+        release_index: Some(release_index),
+    })
+}
+
+/// Resolve the expected SHA-256 the downloaded archive is verified against.
+///
+/// The `pinned` (signed-manifest) digest is AUTHORITATIVE; the `.sha256` sidecar
+/// is kept as defense-in-depth and MUST AGREE with it — a disagreement is a
+/// tampered sidecar or a manifest/asset mismatch and is refused (fail-closed).
+/// Comparison is case-insensitive and whitespace-trimmed (hex digests). The
+/// pinned (manifest) value is returned, so the load-bearing digest is always the
+/// signed one.
+fn resolve_expected_sha<'a>(pinned: &'a str, sidecar: &str) -> Result<&'a str, String> {
+    if pinned.trim().eq_ignore_ascii_case(sidecar.trim()) {
+        Ok(pinned.trim())
+    } else {
+        Err(format!(
+            "manifest/sidecar sha256 disagreement: manifest {:?} != sidecar {:?} — refusing",
+            pinned.trim(),
+            sidecar.trim()
+        ))
+    }
 }
 
 /// Reject any download URL that is not `https://` (audit finding #6, TLS
@@ -372,10 +589,18 @@ fn confined_get(url: &str, headers: &[(&str, &str)]) -> Result<ureq::Response, S
 /// confined and size-capped ([`MAX_SIDECAR_BYTES`]) so a hostile endpoint cannot
 /// stream an unbounded sidecar into memory before verification runs.
 fn download_small(url: &str) -> Result<Vec<u8>, String> {
+    download_small_capped(url, MAX_SIDECAR_BYTES)
+}
+
+/// Blocking GET of a small file with an explicit byte `cap`. Host-confined and
+/// size-capped so a hostile endpoint cannot stream an unbounded body into memory
+/// before verification runs. Used for the sidecars ([`MAX_SIDECAR_BYTES`]) and
+/// the signed manifest ([`MAX_MANIFEST_BYTES`]).
+fn download_small_capped(url: &str, cap: u64) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     confined_get(url, &[])?
         .into_reader()
-        .take(MAX_SIDECAR_BYTES)
+        .take(cap)
         .read_to_end(&mut buf)
         .map_err(|e| format!("read failed for {url}: {e}"))?;
     Ok(buf)
@@ -606,10 +831,15 @@ fn download_verify_extract_inner(
     // `<hex>  <filename>` `sha256sum` form. Take the first whitespace token.
     let sha_str = String::from_utf8(sha_text)
         .map_err(|e| format!("sha256 sidecar is not valid UTF-8: {e}"))?;
-    let expected_sha = sha_str
+    let sidecar_sha = sha_str
         .split_whitespace()
         .next()
         .ok_or_else(|| "sha256 sidecar was empty".to_string())?;
+
+    // The manifest's SIGNED digest is authoritative and the sidecar must AGREE
+    // (defense-in-depth — a disagreement fails closed). Every `ReleaseInfo`
+    // carries a pin, so the download is always bound to the signed hash.
+    let expected_sha = resolve_expected_sha(&info.pinned_sha256, sidecar_sha)?;
 
     let sig_str =
         String::from_utf8(sig_bytes).map_err(|e| format!("minisig is not valid UTF-8: {e}"))?;
@@ -759,6 +989,8 @@ mod tests {
             sig_url: "https://dl/c0pl4nd.zip.minisig".to_string(),
             sha_url: "https://dl/c0pl4nd.zip.sha256".to_string(),
             html_url: "https://github.com/o/r".to_string(),
+            pinned_sha256: "deadbeef".to_string(),
+            release_index: None,
         };
         let err = download_verify_extract(&info, dir.path(), |_, _| {})
             .expect_err("http asset url must be refused");
@@ -779,107 +1011,12 @@ mod tests {
             sig_url: "http://evil.example/c0pl4nd.zip.minisig".to_string(),
             sha_url: "https://dl/c0pl4nd.zip.sha256".to_string(),
             html_url: "https://github.com/o/r".to_string(),
+            pinned_sha256: "deadbeef".to_string(),
+            release_index: None,
         };
         let err = download_verify_extract(&info, dir.path(), |_, _| {})
             .expect_err("http sig url must be refused");
         assert!(err.contains("non-https"), "got: {err}");
-    }
-
-    #[test]
-    fn select_update_returns_some_on_newer_with_matching_triple() {
-        let target = "x86_64-unknown-linux-gnu";
-        let raw = release_with_triple("v0.4.0", target, ".tar.gz");
-        let current = semver::Version::parse("0.3.2").unwrap();
-        let info = select_update(&raw, &current, target, ".tar.gz").expect("expected an update");
-        assert_eq!(info.version, semver::Version::parse("0.4.0").unwrap());
-        assert_eq!(info.tag, "v0.4.0");
-        assert!(info.asset_name.contains(target));
-        assert!(info.asset_name.ends_with(".tar.gz"));
-        assert!(info.sig_url.ends_with(".minisig"));
-        assert!(info.sha_url.ends_with(".sha256"));
-    }
-
-    #[test]
-    fn select_update_matches_zip_on_windows_target() {
-        let target = "x86_64-pc-windows-msvc";
-        let raw = release_with_triple("v1.0.0", target, ".zip");
-        let current = semver::Version::parse("0.9.0").unwrap();
-        let info = select_update(&raw, &current, target, ".zip").expect("zip asset matched");
-        assert!(info.asset_name.ends_with(".zip"));
-    }
-
-    #[test]
-    fn select_update_none_when_not_newer() {
-        let target = "x86_64-unknown-linux-gnu";
-        let raw = release_with_triple("v0.3.0", target, ".tar.gz");
-        let current = semver::Version::parse("0.3.0").unwrap();
-        assert!(select_update(&raw, &current, target, ".tar.gz").is_none());
-        // An older release is also not an update.
-        let older = release_with_triple("v0.2.0", target, ".tar.gz");
-        assert!(select_update(&older, &current, target, ".tar.gz").is_none());
-    }
-
-    #[test]
-    fn select_update_none_for_prerelease_or_draft() {
-        let target = "x86_64-unknown-linux-gnu";
-        let current = semver::Version::parse("0.3.0").unwrap();
-        let mut pre = release_with_triple("v0.4.0", target, ".tar.gz");
-        pre.prerelease = true;
-        assert!(select_update(&pre, &current, target, ".tar.gz").is_none());
-        let mut draft = release_with_triple("v0.4.0", target, ".tar.gz");
-        draft.draft = true;
-        assert!(select_update(&draft, &current, target, ".tar.gz").is_none());
-    }
-
-    #[test]
-    fn select_update_rejects_a_newer_prerelease_channel_pinning() {
-        // Channel-pinning: even a NUMERICALLY-NEWER prerelease must be refused —
-        // the stable-pinned in-app updater never silently jumps stable -> beta.
-        let target = "x86_64-unknown-linux-gnu";
-        let current = semver::Version::parse("0.3.0").unwrap();
-        let mut newer_beta = release_with_triple("v0.9.0-beta.1", target, ".tar.gz");
-        newer_beta.prerelease = true;
-        assert!(
-            select_update(&newer_beta, &current, target, ".tar.gz").is_none(),
-            "a newer prerelease must not be installed (channel pinning)"
-        );
-    }
-
-    #[test]
-    fn select_update_none_when_sidecars_missing() {
-        let target = "x86_64-unknown-linux-gnu";
-        let current = semver::Version::parse("0.3.0").unwrap();
-        // Archive present, but the `.minisig` sibling is absent → cannot verify.
-        let base = format!("c0pl4nd-v0.4.0-{target}.tar.gz");
-        let raw = RawRelease {
-            tag_name: "v0.4.0".to_string(),
-            prerelease: false,
-            draft: false,
-            html_url: String::new(),
-            assets: vec![
-                asset(&base, &format!("https://dl/{base}")),
-                asset(
-                    &format!("{base}.sha256"),
-                    &format!("https://dl/{base}.sha256"),
-                ),
-            ],
-        };
-        assert!(select_update(&raw, &current, target, ".tar.gz").is_none());
-    }
-
-    #[test]
-    fn select_update_none_when_no_matching_target() {
-        let raw = release_with_triple("v0.4.0", "x86_64-pc-windows-msvc", ".zip");
-        let current = semver::Version::parse("0.3.0").unwrap();
-        // We are a linux build → the windows asset must not match.
-        assert!(select_update(&raw, &current, "aarch64-apple-darwin", ".tar.gz").is_none());
-    }
-
-    #[test]
-    fn select_update_empty_target_never_matches() {
-        let raw = release_with_triple("v0.4.0", "x86_64-unknown-linux-gnu", ".tar.gz");
-        let current = semver::Version::parse("0.3.0").unwrap();
-        assert!(select_update(&raw, &current, "", ".tar.gz").is_none());
     }
 
     #[test]
@@ -1116,6 +1253,356 @@ mod tests {
         assert_eq!(
             first, digest,
             "a bare-digest sidecar yields the digest itself"
+        );
+    }
+
+    // --- Tier-1 signed-manifest wiring ---------------------------------------
+
+    /// A release fixture carrying the full per-asset triple AND the signed
+    /// `latest.json` + `latest.json.minisig` manifest pair.
+    fn tier1_raw(target: &str, ext: &str, tag: &str) -> RawRelease {
+        let base = format!("c0pl4nd-{tag}-{target}{ext}");
+        let dl = |n: &str| format!("https://github.com/o/r/releases/download/{tag}/{n}");
+        RawRelease {
+            tag_name: tag.to_string(),
+            prerelease: false,
+            draft: false,
+            html_url: "https://github.com/o/r".to_string(),
+            assets: vec![
+                asset(&base, &dl(&base)),
+                asset(&format!("{base}.minisig"), &dl(&format!("{base}.minisig"))),
+                asset(&format!("{base}.sha256"), &dl(&format!("{base}.sha256"))),
+                asset("latest.json", &dl("latest.json")),
+                asset("latest.json.minisig", &dl("latest.json.minisig")),
+            ],
+        }
+    }
+
+    /// A verified-manifest fixture matching [`tier1_raw`] for one platform.
+    #[allow(clippy::too_many_arguments)]
+    fn tier1_manifest(
+        target: &str,
+        ext: &str,
+        tag: &str,
+        version: &str,
+        idx: u64,
+        minimum: &str,
+        valid_until: &str,
+        sha: &str,
+    ) -> manifest::Manifest {
+        let base = format!("c0pl4nd-{tag}-{target}{ext}");
+        let kind = if ext == ".zip" { "zip" } else { "tar.gz" };
+        manifest::Manifest {
+            schema: "itasha.update.manifest/v1".to_string(),
+            product: "c0pl4nd".to_string(),
+            version: version.to_string(),
+            release_index: idx,
+            minimum_version: minimum.to_string(),
+            published_utc: "2026-06-29T14:17:42Z".to_string(),
+            valid_until_utc: valid_until.to_string(),
+            assets: vec![manifest::ManifestAsset {
+                platform: target.to_string(),
+                kind: kind.to_string(),
+                asset_name: base.clone(),
+                url: format!("https://github.com/o/r/releases/download/{tag}/{base}"),
+                size: 123,
+                sha256: sha.to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn find_manifest_assets_requires_both_json_and_sig() {
+        let target = "x86_64-unknown-linux-gnu";
+        let raw = tier1_raw(target, ".tar.gz", "v0.4.9");
+        assert!(find_manifest_assets(&raw).is_some());
+
+        // Drop the .minisig → None (an absent manifest is then refused upstream).
+        let mut no_sig = raw.clone();
+        no_sig.assets.retain(|a| a.name != "latest.json.minisig");
+        assert!(find_manifest_assets(&no_sig).is_none());
+
+        // Drop the json → None.
+        let mut no_json = raw.clone();
+        no_json.assets.retain(|a| a.name != "latest.json");
+        assert!(find_manifest_assets(&no_json).is_none());
+    }
+
+    #[test]
+    fn manifest_absent_is_refused_fail_closed_no_install() {
+        // Tier-1 REQUIRES a verified manifest. A release with NO manifest assets
+        // is a HARD refusal — `check_for_update` never degrades to the weaker
+        // per-asset path (the protection-downgrade an attacker who strips
+        // latest.json would otherwise force). The decision is made by
+        // `require_manifest_assets`, which fails closed when the manifest is gone.
+        let target = "x86_64-unknown-linux-gnu";
+        let raw = release_with_triple("v0.4.9", target, ".tar.gz"); // no manifest assets
+        let err = require_manifest_assets(&raw)
+            .expect_err("an absent manifest must be refused, not silently fallen back");
+        assert!(
+            err.contains("could not be verified") && err.contains("no signed manifest"),
+            "got: {err}"
+        );
+        // Present → accepted.
+        let raw_ok = tier1_raw(target, ".tar.gz", "v0.4.9");
+        assert!(require_manifest_assets(&raw_ok).is_ok());
+    }
+
+    #[test]
+    fn tier1_resolves_a_fresh_in_policy_update_with_pinned_sha_and_index() {
+        let target = "x86_64-unknown-linux-gnu";
+        let raw = tier1_raw(target, ".tar.gz", "v0.4.9");
+        let m = tier1_manifest(
+            target,
+            ".tar.gz",
+            "v0.4.9",
+            "0.4.9",
+            4009,
+            "0.4.0",
+            "2099-01-01T00:00:00Z",
+            "abc123def",
+        );
+        let current = semver::Version::parse("0.4.5").unwrap();
+        let info = resolve_tier1_update(&raw, &m, &current, target, ".tar.gz", 0, 4000)
+            .expect("a fresh in-policy update resolves")
+            .expect("an update is available");
+        assert_eq!(info.version, semver::Version::parse("0.4.9").unwrap());
+        assert_eq!(
+            info.pinned_sha256, "abc123def",
+            "the SIGNED manifest digest is pinned"
+        );
+        assert_eq!(info.release_index, Some(4009));
+        // The archive url comes from the SIGNED manifest; sidecars from the release.
+        assert!(info
+            .asset_url
+            .contains("c0pl4nd-v0.4.9-x86_64-unknown-linux-gnu.tar.gz"));
+        assert!(info.sig_url.ends_with(".minisig"));
+        assert!(info.sha_url.ends_with(".sha256"));
+    }
+
+    #[test]
+    fn tier1_up_to_date_returns_none() {
+        let target = "x86_64-unknown-linux-gnu";
+        let raw = tier1_raw(target, ".tar.gz", "v0.4.9");
+        let m = tier1_manifest(
+            target,
+            ".tar.gz",
+            "v0.4.9",
+            "0.4.9",
+            4009,
+            "0.4.0",
+            "2099-01-01T00:00:00Z",
+            "abc",
+        );
+        // Running the SAME version → no update (not an error).
+        let current = semver::Version::parse("0.4.9").unwrap();
+        assert!(
+            resolve_tier1_update(&raw, &m, &current, target, ".tar.gz", 0, 0)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn tier1_blocks_stale_manifest_freeze_beacon() {
+        let target = "x86_64-unknown-linux-gnu";
+        let raw = tier1_raw(target, ".tar.gz", "v0.4.9");
+        // valid_until far in the past; `now` well after it → stale.
+        let m = tier1_manifest(
+            target,
+            ".tar.gz",
+            "v0.4.9",
+            "0.4.9",
+            4009,
+            "0.4.0",
+            "2000-01-01T00:00:00Z",
+            "abc",
+        );
+        let current = semver::Version::parse("0.4.5").unwrap();
+        let err = resolve_tier1_update(&raw, &m, &current, target, ".tar.gz", 4_000_000_000, 0)
+            .expect_err("a stale manifest must be refused");
+        assert!(err.contains("stale/frozen"), "got: {err}");
+    }
+
+    #[test]
+    fn tier1_blocks_rollback_on_release_index() {
+        let target = "x86_64-unknown-linux-gnu";
+        let raw = tier1_raw(target, ".tar.gz", "v0.4.9");
+        let m = tier1_manifest(
+            target,
+            ".tar.gz",
+            "v0.4.9",
+            "0.4.9",
+            4009,
+            "0.4.0",
+            "2099-01-01T00:00:00Z",
+            "abc",
+        );
+        let current = semver::Version::parse("0.4.5").unwrap();
+        // The highest index ever applied (5000) is GREATER than the candidate
+        // (4009): a replayed/superseded release → refused even though it is a
+        // signed, version-newer-than-current release.
+        let err = resolve_tier1_update(&raw, &m, &current, target, ".tar.gz", 0, 5000)
+            .expect_err("a release_index regression must be refused");
+        assert!(err.contains("rollback blocked"), "got: {err}");
+        // An EQUAL index is likewise refused (already applied).
+        let err_eq = resolve_tier1_update(&raw, &m, &current, target, ".tar.gz", 0, 4009)
+            .expect_err("an equal release_index must be refused");
+        assert!(err_eq.contains("rollback blocked"), "got: {err_eq}");
+    }
+
+    #[test]
+    fn tier1_blocks_install_below_minimum_floor() {
+        let target = "x86_64-unknown-linux-gnu";
+        let raw = tier1_raw(target, ".tar.gz", "v0.4.9");
+        // minimum_version 0.4.0; running 0.3.0 is below the floor.
+        let m = tier1_manifest(
+            target,
+            ".tar.gz",
+            "v0.4.9",
+            "0.4.9",
+            4009,
+            "0.4.0",
+            "2099-01-01T00:00:00Z",
+            "abc",
+        );
+        let current = semver::Version::parse("0.3.0").unwrap();
+        let err = resolve_tier1_update(&raw, &m, &current, target, ".tar.gz", 0, 0)
+            .expect_err("an install below the minimum floor must be refused");
+        assert!(err.contains("minimum_version"), "got: {err}");
+    }
+
+    #[test]
+    fn tier1_rejects_wrong_product_and_unknown_schema() {
+        let target = "x86_64-unknown-linux-gnu";
+        let raw = tier1_raw(target, ".tar.gz", "v0.4.9");
+        let current = semver::Version::parse("0.4.5").unwrap();
+
+        let mut wrong_product = tier1_manifest(
+            target,
+            ".tar.gz",
+            "v0.4.9",
+            "0.4.9",
+            4009,
+            "0.4.0",
+            "2099-01-01T00:00:00Z",
+            "abc",
+        );
+        wrong_product.product = "scr1b3".to_string();
+        let err = resolve_tier1_update(&raw, &wrong_product, &current, target, ".tar.gz", 0, 0)
+            .expect_err("a wrong-product manifest must be refused");
+        assert!(err.contains("different product"), "got: {err}");
+
+        let mut bad_schema = tier1_manifest(
+            target,
+            ".tar.gz",
+            "v0.4.9",
+            "0.4.9",
+            4009,
+            "0.4.0",
+            "2099-01-01T00:00:00Z",
+            "abc",
+        );
+        bad_schema.schema = "some.other.schema/v1".to_string();
+        let err2 = resolve_tier1_update(&raw, &bad_schema, &current, target, ".tar.gz", 0, 0)
+            .expect_err("an unrecognised schema must be refused");
+        assert!(err2.contains("unrecognised manifest schema"), "got: {err2}");
+    }
+
+    #[test]
+    fn tier1_none_when_no_archive_for_this_platform() {
+        // The manifest only carries a Windows zip; a Linux build finds no archive
+        // → "no update for this platform" (Ok(None), not an error).
+        let raw = tier1_raw("x86_64-pc-windows-msvc", ".zip", "v0.4.9");
+        let m = tier1_manifest(
+            "x86_64-pc-windows-msvc",
+            ".zip",
+            "v0.4.9",
+            "0.4.9",
+            4009,
+            "0.4.0",
+            "2099-01-01T00:00:00Z",
+            "abc",
+        );
+        let current = semver::Version::parse("0.4.5").unwrap();
+        let out = resolve_tier1_update(
+            &raw,
+            &m,
+            &current,
+            "x86_64-unknown-linux-gnu",
+            ".tar.gz",
+            0,
+            0,
+        )
+        .expect("no-archive-for-platform is not an error");
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn tier1_errs_when_manifest_archive_sidecars_absent() {
+        // A manifest-bearing release whose archive lacks its `.minisig`/`.sha256`
+        // sidecars is malformed → fail-closed (we keep the per-asset sidecar
+        // verification as defense-in-depth, so the sidecars MUST exist).
+        let target = "x86_64-unknown-linux-gnu";
+        let mut raw = tier1_raw(target, ".tar.gz", "v0.4.9");
+        raw.assets
+            .retain(|a| !a.name.ends_with(".minisig") || a.name == "latest.json.minisig");
+        let m = tier1_manifest(
+            target,
+            ".tar.gz",
+            "v0.4.9",
+            "0.4.9",
+            4009,
+            "0.4.0",
+            "2099-01-01T00:00:00Z",
+            "abc",
+        );
+        let current = semver::Version::parse("0.4.5").unwrap();
+        let err = resolve_tier1_update(&raw, &m, &current, target, ".tar.gz", 0, 0)
+            .expect_err("a missing archive sidecar must be refused");
+        assert!(err.contains("missing its .minisig"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_expected_sha_pins_agrees_and_detects_mismatch() {
+        // The SIGNED manifest digest is authoritative and returned (case-
+        // insensitive, whitespace-trimmed) when the sidecar agrees.
+        assert_eq!(resolve_expected_sha("ABCDEF", "abcdef").unwrap(), "ABCDEF");
+        assert_eq!(resolve_expected_sha("  abc  ", "abc").unwrap(), "abc");
+        // A disagreement between the manifest pin and the sidecar fails closed.
+        let err = resolve_expected_sha("aaaa", "bbbb")
+            .expect_err("a manifest/sidecar disagreement must fail closed");
+        assert!(err.contains("disagreement"), "got: {err}");
+    }
+
+    #[test]
+    fn pinned_manifest_sha_mismatch_is_rejected_by_the_verify_gate() {
+        // The download path passes the resolved (pinned) digest into
+        // `verify_artifact_bound`. A pinned digest that does NOT match the actual
+        // bytes is rejected with "checksum mismatch" — proving the SIGNED
+        // manifest hash binds the downloaded bytes (asset-substitution defense).
+        let kp = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let pk_box = kp.pk.to_box().unwrap().to_string();
+        let data = b"the real, signed archive bytes";
+        let sig = minisign::sign(
+            Some(&kp.pk),
+            &kp.sk,
+            std::io::Cursor::new(&data[..]),
+            Some("timestamp:1\tfile:c0pl4nd.tar.gz"),
+            Some("c"),
+        )
+        .unwrap()
+        .to_string();
+        let asset = "c0pl4nd.tar.gz";
+        let real_sha = sha256_hex(data);
+
+        // The genuine (manifest-matching) sha → accepted.
+        assert!(verify_artifact_bound(data, &real_sha, &sig, &pk_box, asset).is_ok());
+        // A WRONG pinned sha (attacker swapped the asset under the same key) → rejected.
+        let wrong = "0".repeat(64);
+        assert_eq!(
+            verify_artifact_bound(data, &wrong, &sig, &pk_box, asset).unwrap_err(),
+            "checksum mismatch"
         );
     }
 }

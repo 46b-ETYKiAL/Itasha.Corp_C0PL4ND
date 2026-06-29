@@ -4,11 +4,18 @@
 //! sibling SCR1B3 editor, so the app can download + verify + apply a new
 //! release in place — no browser, no installer hand-off:
 //!
-//! - [`net`] — discover the latest release, download the asset/sig/sha, verify,
-//!   then extract (blocking I/O; the pure [`net::select_update`] decision is
-//!   unit-tested offline).
+//! - [`net`] — discover the latest release, download the signed manifest +
+//!   asset/sig/sha, verify, then extract (blocking I/O; the pure
+//!   [`net::check_for_update`] Tier-1 resolver decision is unit-tested offline).
 //! - [`verify`] — SHA-256 **then** minisign against an EMBEDDED public key;
 //!   fails closed (an unverified binary is NEVER returned).
+//! - [`manifest`] — Tier-1 SIGNED release manifest (`latest.json`): verify the
+//!   minisign signature over the raw JSON FIRST, then parse; binds product /
+//!   schema / version / `release_index` / freshness / per-asset SHA-256 into one
+//!   signed document. Fails closed everywhere.
+//! - [`update_state`] — persisted monotonic `release_index` high-water mark
+//!   (sibling-of-exe, mirroring [`rollback_guard`]); the manifest-native
+//!   anti-rollback floor.
 //! - [`apply`] — keep-one-prior backup + `self-replace` atomic swap + rollback.
 //! - [`rollback_guard`] — anti-rollback (version-downgrade) protection: a
 //!   strictly-monotonic version floor re-checked at APPLY time so a
@@ -24,8 +31,10 @@
 //! egui surfaces), never by the legacy winit `c0pl4nd-legacy` binary.
 
 pub mod apply;
+pub mod manifest;
 pub mod net;
 pub mod rollback_guard;
+pub mod update_state;
 pub mod updater;
 pub mod verify;
 
