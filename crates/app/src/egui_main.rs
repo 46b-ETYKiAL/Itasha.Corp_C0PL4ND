@@ -96,7 +96,8 @@ fn main() -> eframe::Result<()> {
         // `run_update` is offline-graceful and only prints; surface any hard
         // error to stderr but still exit 0 (a failed check is not a crash).
         if let Err(e) = update::run_update(&channel) {
-            eprintln!("c0pl4nd update: {e}");
+            tracing::warn!(target: "c0pl4nd::update", detail = ?e, "update subcommand failed");
+            eprintln!("Couldn't check for updates: an unexpected problem occurred.");
         }
         return Ok(());
     }

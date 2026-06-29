@@ -68,12 +68,14 @@ fn host_allowed(host: &str) -> bool {
 /// caller-specific. Re-checked at every redirect hop by [`confined_api_get`].
 fn assert_confined(url: &str) -> Result<()> {
     if !c0pl4nd_core::net_confine::is_https(url) {
-        anyhow::bail!("refusing non-https update URL: {url}");
+        anyhow::bail!("update check blocked: the update link wasn't a secure (https) link");
     }
     match c0pl4nd_core::net_confine::url_host(url) {
         Some(h) if host_allowed(&h) => Ok(()),
-        Some(h) => anyhow::bail!("refusing update request to non-allowlisted host: {h}"),
-        None => anyhow::bail!("malformed update URL (no host): {url}"),
+        Some(_) => {
+            anyhow::bail!("update check blocked: the update link pointed to an unexpected server")
+        }
+        None => anyhow::bail!("update check blocked: the update link was malformed"),
     }
 }
 
@@ -101,14 +103,20 @@ fn confined_api_get(url: &str) -> Result<String> {
         {
             Ok(r) => r,
             Err(ureq::Error::Status(code, r)) if (300..400).contains(&code) => r,
-            Err(e) => return Err(anyhow::anyhow!("failed to reach GitHub Releases: {e}")),
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(e).context("couldn't reach GitHub to check for updates")
+                )
+            }
         };
         if (300..400).contains(&resp.status()) {
             let loc = resp
                 .header("Location")
-                .with_context(|| format!("redirect {} without Location", resp.status()))?;
-            let next = c0pl4nd_core::net_confine::resolve_redirect(&current, loc)
-                .map_err(|e| anyhow::anyhow!("{e}: {loc}"))?;
+                .context("update check got an invalid redirect from GitHub")?;
+            let next =
+                c0pl4nd_core::net_confine::resolve_redirect(&current, loc).map_err(|_| {
+                    anyhow::anyhow!("update check blocked: a redirect pointed somewhere unexpected")
+                })?;
             assert_confined(&next)?;
             current = next;
             continue;
@@ -120,7 +128,7 @@ fn confined_api_get(url: &str) -> Result<String> {
             .context("failed to read release response")?;
         return Ok(body);
     }
-    anyhow::bail!("too many redirects (> {MAX_REDIRECTS}) fetching {url}")
+    anyhow::bail!("couldn't reach GitHub to check for updates (too many redirects)")
 }
 
 /// The running binary's version.
@@ -199,12 +207,13 @@ pub fn latest_version(channel: &str) -> Result<String> {
         let body = confined_api_get(&format!(
             "https://api.github.com/repos/{REPO}/releases/latest"
         ))?;
-        parse_tag(&body).context("no tag_name in latest release")
+        parse_tag(&body).context("couldn't read the latest version information from GitHub")
     } else {
         let body = confined_api_get(&format!(
             "https://api.github.com/repos/{REPO}/releases?per_page=20"
         ))?;
-        pick_channel_tag(&body, channel).context("no releases found")
+        pick_channel_tag(&body, channel)
+            .context("no releases are available on this update channel yet")
     }
 }
 
@@ -242,9 +251,11 @@ pub fn run_update(channel: &str) -> Result<()> {
             println!("You are up to date ({latest}).");
         }
         Err(e) => {
-            // Offline / API unreachable is not a failure of the command.
-            eprintln!("Could not check for updates ({e}). You are offline or the");
-            eprintln!("GitHub Releases API is unreachable; nothing was changed.");
+            // Offline / API unreachable is not a failure of the command. The
+            // technical detail (full anyhow chain) goes to the log, never stderr.
+            tracing::warn!(target: "c0pl4nd::update", detail = ?e, "update check failed");
+            eprintln!("Couldn't check for updates. You may be offline, or GitHub may be");
+            eprintln!("unreachable. Nothing was changed.");
         }
     }
     Ok(())

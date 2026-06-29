@@ -277,7 +277,12 @@ fn clear_saved_ui_state() -> String {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             "No saved UI state to clear.".to_string()
         }
-        Err(_) => "Could not clear saved UI state.".to_string(),
+        Err(e) => {
+            tracing::warn!(target: "c0pl4nd::settings", detail = %e, "clear saved UI state failed");
+            "Couldn't clear the saved window/UI state. Make sure C0PL4ND has \
+             permission to its settings folder and try again."
+                .to_string()
+        }
     }
 }
 

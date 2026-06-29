@@ -274,7 +274,14 @@ pub fn open_mailto(alias: &str, subject: &str, body: &str) -> IntakeOutcome {
     let url = mailto_url(alias, subject, body);
     match itasha_report_core::intake::launch(&url) {
         Ok(()) => IntakeOutcome::OpenedMailto,
-        Err(e) => IntakeOutcome::Failed(format!("could not open mail client: {e}")),
+        Err(e) => {
+            tracing::warn!(target: "c0pl4nd::issue_intake", detail = %e, "mailto launch failed");
+            IntakeOutcome::Failed(
+                "Couldn't open your mail app. Copy the report to your clipboard and \
+                 paste it into a new GitHub issue instead."
+                    .to_string(),
+            )
+        }
     }
 }
 

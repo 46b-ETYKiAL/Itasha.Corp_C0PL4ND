@@ -17,6 +17,34 @@ fn bootstrap_is_not_fullscreen() {
     assert!(!C0pl4ndApp::bootstrap().fullscreen());
 }
 
+/// Splitting beyond the pane cap is refused with a PLAIN, actionable toast —
+/// not the old terse "max N panes" internal-constant phrasing (inventory
+/// C0-015). Drives the REAL `split` path and observes the real toast.
+#[test]
+fn splitting_past_the_pane_cap_shows_a_plain_toast() {
+    let mut app = C0pl4ndApp::bootstrap();
+    while app.pane_count() < grid::MAX_PANES {
+        app.split(egui_tiles::LinearDir::Horizontal);
+    }
+    assert_eq!(app.pane_count(), grid::MAX_PANES, "filled to the cap");
+    app.toast = None;
+
+    // One split too many: refused, with a user-facing explanation + recovery.
+    app.split(egui_tiles::LinearDir::Horizontal);
+    assert_eq!(app.pane_count(), grid::MAX_PANES, "the cap held");
+    let toast = app.toast.as_deref().expect("a refused split shows a toast");
+    assert!(
+        toast.contains(&format!("maximum of {} panes", grid::MAX_PANES)),
+        "toast: {toast}"
+    );
+    assert!(
+        toast.contains("Close one"),
+        "toast carries a recovery step: {toast}"
+    );
+    // No leaked internal-constant phrasing.
+    assert!(!toast.starts_with("max "), "toast: {toast}");
+}
+
 /// #35: PowerShell uses the call operator `& "<path>"`; cmd / a Windows
 /// "Default shell" uses a plain double-quoted path; POSIX shells use a
 /// single-quoted path with the `'\''` escape. Keyed off the active shell

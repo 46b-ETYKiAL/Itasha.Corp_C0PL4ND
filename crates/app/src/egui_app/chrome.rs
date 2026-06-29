@@ -536,7 +536,7 @@ fn exit_code_indicator(exit: Option<Option<i32>>) -> Option<ExitCodeIndicator> {
         },
         Some(code) => ExitCodeIndicator {
             text: format!("{} {code}", icon::X_CIRCLE),
-            hover: "Last command failed (non-zero exit code).",
+            hover: "The last command exited with an error.",
             is_failure: true,
         },
         None => ExitCodeIndicator {
@@ -650,6 +650,9 @@ mod tests {
             format!("{} 127", icon::X_CIRCLE),
             "failure shows the X glyph plus the exit code"
         );
+        // The hover uses plain language, not the "non-zero exit code" jargon
+        // (inventory C0-044).
+        assert_eq!(ind.hover, "The last command exited with an error.");
     }
 
     #[test]

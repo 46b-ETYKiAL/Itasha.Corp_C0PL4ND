@@ -72,7 +72,13 @@ fn main() -> Result<()> {
         {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("c0pl4nd: failed to load config {p:?}: {e}; using defaults");
+                tracing::warn!(
+                    target: "c0pl4nd::config",
+                    path = ?p,
+                    detail = %e,
+                    "config load failed; using defaults"
+                );
+                eprintln!("C0PL4ND: your settings file couldn't be read; using defaults.");
                 Config::default()
             }
         },
