@@ -121,15 +121,7 @@ fn main() -> Result<()> {
     // console and would otherwise show nothing. Mirrors the egui binary.
     let result = crate::run_gui(&config);
     if let Err(e) = &result {
-        panic_hook::show_startup_error(
-            "C0PL4ND failed to start",
-            &format!(
-                "C0PL4ND could not initialize its window or GPU:\n\n{e:#}\n\nIf this \
-                 looks like a GPU or graphics-driver problem, try relaunching with \
-                 the environment variable WGPU_BACKEND=dx12 (Windows) or \
-                 WGPU_BACKEND=gl (Linux).",
-            ),
-        );
+        panic_hook::show_startup_error("C0PL4ND couldn't start", &user_error::gpu_init_failed(e));
     }
     result
 }
@@ -142,6 +134,7 @@ mod pane_render;
 mod panic_hook;
 mod screenshot;
 mod update;
+mod user_error;
 #[cfg(windows)]
 mod win_snap;
 mod window;

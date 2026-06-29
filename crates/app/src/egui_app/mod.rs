@@ -2422,8 +2422,10 @@ impl C0pl4ndApp {
                     // GUI user never sees stderr, so a visible toast (the same
                     // channel the config-LOAD error uses) is the real surface.
                     if let Err(e) = self.config.save_to(&path) {
-                        tracing::warn!("could not save config: {e}");
-                        self.toast = Some(format!("could not save settings: {e}"));
+                        self.toast = Some(crate::user_error::config_save_failed(
+                            e,
+                            "Your settings change",
+                        ));
                     }
                 }
             }
@@ -2752,7 +2754,10 @@ impl C0pl4ndApp {
             self.config.reporting.streams.crash_reports = mode;
             if let Some(path) = c0pl4nd_core::Config::default_path() {
                 if let Err(e) = self.config.save_to(&path) {
-                    self.toast = Some(format!("Could not save reporting preference: {e}"));
+                    self.toast = Some(crate::user_error::config_save_failed(
+                        e,
+                        "Your reporting choice",
+                    ));
                 }
             }
         }
@@ -4470,8 +4475,10 @@ impl C0pl4ndApp {
                     // GUI user never sees stderr, so a visible toast (the same
                     // channel the config-LOAD error uses) is the real surface.
                     if let Err(e) = self.config.save_to(&path) {
-                        tracing::warn!("could not save config: {e}");
-                        self.toast = Some(format!("could not save view mode: {e}"));
+                        self.toast = Some(crate::user_error::config_save_failed(
+                            e,
+                            "The layout change",
+                        ));
                     }
                 }
             }

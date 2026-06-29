@@ -34,6 +34,7 @@ mod panic_hook;
 mod reporting;
 #[path = "update/mod.rs"]
 mod update;
+mod user_error;
 
 use eframe::egui;
 
@@ -182,15 +183,7 @@ fn main() -> eframe::Result<()> {
     // has no console — would otherwise show nothing at all. Surface it with a
     // diagnostic + a recovery hint before propagating the error.
     if let Err(e) = &result {
-        panic_hook::show_startup_error(
-            "C0PL4ND failed to start",
-            &format!(
-                "C0PL4ND could not initialize its window or GPU:\n\n{e}\n\nIf this \
-                 looks like a GPU or graphics-driver problem, try relaunching with \
-                 the environment variable WGPU_BACKEND=dx12 (Windows) or \
-                 WGPU_BACKEND=gl (Linux).",
-            ),
-        );
+        panic_hook::show_startup_error("C0PL4ND couldn't start", &user_error::gpu_init_failed(e));
     }
     result
 }

@@ -1705,7 +1705,7 @@ fn render_update_status(ui: &mut egui::Ui, updater: &Arc<Mutex<Updater>>) {
         }
         UpdateState::Failed(e) => {
             let err = ui.visuals().error_fg_color;
-            ui.colored_label(err, format!("Update failed: {e}"));
+            ui.colored_label(err, crate::user_error::update_failed_user_copy(e));
             if ui.button("Retry").clicked() {
                 act = Some(Act::Recheck);
             }

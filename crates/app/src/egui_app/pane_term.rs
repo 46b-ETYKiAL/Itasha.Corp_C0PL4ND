@@ -351,7 +351,7 @@ impl PaneTerm {
             },
             Err(e) => Self {
                 session: None,
-                error: Some(format!("shell failed to start: {e}")),
+                error: Some(crate::user_error::shell_spawn_failed(e)),
                 theme,
                 size: (cols, rows),
                 wake_wired: false,
@@ -384,7 +384,7 @@ impl PaneTerm {
             },
             Err(e) => Self {
                 session: None,
-                error: Some(format!("shell failed to start: {e}")),
+                error: Some(crate::user_error::shell_spawn_failed(e)),
                 theme,
                 size: (cols, rows),
                 wake_wired: false,
@@ -423,7 +423,7 @@ impl PaneTerm {
             },
             Err(e) => Self {
                 session: None,
-                error: Some(format!("program failed to start: {e}")),
+                error: Some(crate::user_error::program_spawn_failed(e)),
                 theme,
                 size: (cols, rows),
                 wake_wired: false,
