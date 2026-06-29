@@ -8,6 +8,28 @@ Full per-release artifacts (signed binaries, SBOMs, provenance) are on the
 [GitHub Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases)
 page.
 
+## [0.4.10] - 2026-06-29
+
+### Changed — update-security hardening
+
+- **Signed update manifest (identity binding).** Each release now publishes a
+  signed `latest.json` declaring, per platform, `{asset_name, sha256, size}` plus
+  `{version, release_index, minimum_version, valid_until}`. The in-app updater
+  verifies the manifest against the embedded key and binds every download to the
+  **signed** SHA-256 — so an update's identity is a signed hash, not an unsigned
+  field. The updater **requires** a verified manifest and refuses (rather than
+  installing) if one is absent or unverifiable — there is no weaker path.
+- **Downgrade, freeze, and rollback protection.** The updater refuses an older or
+  equal version, a stale manifest (past its `valid_until`), a replayed
+  `release_index`, and an install below the signed `minimum_version` floor.
+- **Fail-closed release self-verification.** The release workflow verifies every
+  signed artifact against the embedded public key (crypto + bare-filename
+  identity + digest + count-parity + tamper test) before publishing, so a build
+  can never ship an artifact the deployed client cannot verify.
+
+Internal to the updater + release pipeline; no change to how you use C0PL4ND.
+Updating from an earlier version works as it did before.
+
 ## [0.4.9] - 2026-06-25
 
 ### Fixed
