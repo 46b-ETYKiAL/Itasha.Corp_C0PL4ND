@@ -1634,7 +1634,10 @@ fn get_updater(ctx: &egui::Context) -> Arc<Mutex<Updater>> {
 /// browser — they download + verify + apply in place.
 fn render_update_status(ui: &mut egui::Ui, updater: &Arc<Mutex<Updater>>) {
     enum Act {
-        Download(update_engine::net::ReleaseInfo),
+        // Boxed: `ReleaseInfo` is large (it carries the version, several URLs,
+        // and the pinned manifest digest), so boxing keeps the enum small and
+        // satisfies `clippy::large_enum_variant`.
+        Download(Box<update_engine::net::ReleaseInfo>),
         Apply,
         Recheck,
     }
@@ -1672,7 +1675,7 @@ fn render_update_status(ui: &mut egui::Ui, updater: &Arc<Mutex<Updater>>) {
                 )
                 .clicked()
             {
-                act = Some(Act::Download(info.clone()));
+                act = Some(Act::Download(Box::new(info.clone())));
             }
         }
         UpdateState::Downloading { received, total } => {
@@ -1712,7 +1715,7 @@ fn render_update_status(ui: &mut egui::Ui, updater: &Arc<Mutex<Updater>>) {
     if let Some(act) = act {
         if let Ok(mut u) = updater.lock() {
             match act {
-                Act::Download(info) => u.start_download(ui.ctx(), info),
+                Act::Download(info) => u.start_download(ui.ctx(), *info),
                 Act::Apply => u.apply_and_restart(ui.ctx()),
                 Act::Recheck => u.start_check(ui.ctx(), LaunchKind::Manual),
             }

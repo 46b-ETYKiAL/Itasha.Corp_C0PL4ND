@@ -24,8 +24,9 @@
 //!
 //! ## Defense in depth — gate at APPLY time, not just CHECK time
 //!
-//! [`super::net::select_update`] already rejects `latest <= current` at *check*
-//! time. This module re-evaluates the rule at *apply* time, immediately before
+//! [`super::net::check_for_update`]'s Tier-1 resolver already rejects `version
+//! <= current` (and a `release_index` rollback) at *check* time. This module
+//! re-evaluates the version rule at *apply* time, immediately before
 //! the `self-replace` swap, closing the time-of-check/time-of-use window in
 //! which a replayed listing or a stale staged artifact could otherwise install
 //! an older binary. The two checks are deliberately redundant: the check-time
