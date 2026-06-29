@@ -20,9 +20,15 @@
 # UNMAINTAINED build-time proc-macro helpers (compile-time only, not runtime
 # attack surface) entering transitively via the Arti stack / the W1TN3SS SDK's
 # `age` E2E stack. Mirrors the deny.toml ignores.
+# RUSTSEC-2026-0190: `anyhow` unsoundness in `Error::downcast_mut()` — UB only
+# via `Error::context(X)` then `downcast_mut::<X>()`. C0PL4ND never calls
+# `downcast_mut` (zero hits in `crates/`), so exposure is nil; no patched anyhow
+# release exists (1.0.102 is latest). Mirrors the deny.toml ignore. Drop + bump
+# when anyhow ships a fix.
 ignore = [
     "RUSTSEC-2017-0008",
     "RUSTSEC-2023-0071",
     "RUSTSEC-2024-0436",
     "RUSTSEC-2026-0173",
+    "RUSTSEC-2026-0190",
 ]
