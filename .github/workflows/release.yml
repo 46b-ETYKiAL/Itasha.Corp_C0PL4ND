@@ -524,19 +524,70 @@ jobs:
           done < <(find release -type f ! -name '*.minisig')
           shred -u "$keypath" 2>/dev/null || rm -f "$keypath"
           echo "signed $count release artifact(s)"
-          # Guard: every trusted comment MUST be a bare filename — a path in the
-          # `file:` token is the regression that broke v0.4.8 auto-update. Fail the
-          # release loudly if any signature carries a directory prefix.
-          for sig in release/*.minisig; do
-            ft=$(grep -m1 '^trusted comment:' "$sig" | grep -oE 'file:[^[:space:]]+' | head -1)
+          # ── Fail-closed verification gate (Tier 0 hardening) ───────────────
+          # A green build that publishes an artifact the EMBEDDED client key
+          # cannot verify is the Ollama-2026 / electron-updater-2020 fail-OPEN
+          # class of bug. So before publishing we reconstruct the SAME public key
+          # the deployed client embeds and cryptographically self-verify every
+          # signed asset against it — plus identity, coverage, count-parity,
+          # digest cross-check, and a tamper test. ANY miss fails the release.
+          pub=$(grep -oE 'RW[A-Za-z0-9+/=]{40,}' crates/app/src/update_engine/verify.rs | head -1)
+          if [ -z "$pub" ]; then
+            echo "::error::could not extract the embedded public key from verify.rs — cannot self-verify the release. Aborting."
+            exit 1
+          fi
+          printf 'untrusted comment: c0pl4nd minisign public key\n%s\n' "$pub" > rsign.pub
+          assets=0; verified=0
+          for f in release/*; do
+            case "$f" in *.minisig) continue ;; esac
+            [ -f "$f" ] || continue
+            assets=$((assets + 1))
+            base=$(basename "$f")
+            sig="release/${base}.minisig"
+            # (A) Coverage — every published asset MUST be signed.
+            if [ ! -f "$sig" ]; then
+              echo "::error::missing signature for $base — every published asset must be signed. Aborting."; exit 1
+            fi
+            # (C) Crypto-verify against the EMBEDDED client key (fail-closed).
+            if ! rsign verify -p rsign.pub -x "$sig" "$f" >/dev/null 2>&1; then
+              echo "::error::$base does NOT verify against the embedded public key — the deployed client would reject it. Aborting."; exit 1
+            fi
+            # (D) Identity — trusted-comment file: token is the BARE asset name, exact.
+            ft=$(grep -m1 '^trusted comment:' "$sig" | grep -oE 'file:[^[:space:]]+' | head -1 | sed 's/^file://')
             case "$ft" in
               */*|*\\*)
-                echo "::error::$sig trusted comment carries a PATH, not a bare filename ($ft) — the in-app updater would reject it. Aborting."
-                exit 1
-                ;;
+                echo "::error::$sig trusted comment carries a PATH ($ft) — the updater would reject it. Aborting."; exit 1 ;;
             esac
+            if [ -n "$ft" ] && [ "$ft" != "$base" ]; then
+              echo "::error::$sig trusted-comment file:'$ft' != asset '$base' (wrong-artifact binding). Aborting."; exit 1
+            fi
+            # (F) Digest cross-check vs the .sha256 sidecar when present.
+            if [ -f "release/${base}.sha256" ]; then
+              want=$(awk '{print $1; exit}' "release/${base}.sha256")
+              got=$(sha256sum "$f" | awk '{print $1}')
+              if [ "$(printf '%s' "$want" | tr 'A-Z' 'a-z')" != "$(printf '%s' "$got" | tr 'A-Z' 'a-z')" ]; then
+                echo "::error::$base sha256 sidecar mismatch (want $want got $got). Aborting."; exit 1
+              fi
+            fi
+            verified=$((verified + 1))
           done
-          echo "verified all trusted comments are bare filenames (no path prefix)"
+          # (B) Count parity — verified-asset count == signature-file count.
+          nminisig=$(find release -name '*.minisig' | wc -l | tr -d ' ')
+          if [ "$verified" -ne "$nminisig" ]; then
+            echo "::error::signature count parity failed (verified $verified assets, $nminisig .minisig files). Aborting."; exit 1
+          fi
+          # (G) Tamper test — a mutated copy MUST fail verification; if it passes,
+          # the gate itself is broken and we must NOT trust this run.
+          orig=$(find release -type f ! -name '*.minisig' | head -1)
+          if [ -n "$orig" ]; then
+            tf=$(mktemp); cp "$orig" "$tf"; printf '\x00' >> "$tf"
+            if rsign verify -p rsign.pub -x "release/$(basename "$orig").minisig" "$tf" >/dev/null 2>&1; then
+              echo "::error::tamper test PASSED verification — the signing gate is broken. Aborting."; rm -f "$tf"; exit 1
+            fi
+            rm -f "$tf"
+          fi
+          rm -f rsign.pub
+          echo "release gate GREEN: $assets artifact(s) verified against the embedded key (crypto + bare-name identity + digest + count-parity + tamper)."
           ls -la release
 
       - name: Create GitHub Release
