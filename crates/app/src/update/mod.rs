@@ -411,6 +411,27 @@ mod tests {
         assert!(assert_confined("https:///releases").is_err());
     }
 
+    /// The refusal messages are plain user copy — they must NOT echo the
+    /// offending URL or host back to the user (inventory C0-034/035/036).
+    #[test]
+    fn assert_confined_refusal_copy_leaks_no_url_or_host() {
+        for url in [
+            "http://evil.example.com/secret/path",
+            "https://evil.example.com/releases",
+            "https:///releases",
+        ] {
+            let msg = assert_confined(url).unwrap_err().to_string();
+            assert!(
+                !msg.contains("evil.example.com") && !msg.contains("secret/path"),
+                "refusal copy leaked the URL/host for {url:?}: {msg}"
+            );
+            assert!(
+                msg.starts_with("update check blocked"),
+                "refusal copy should be plain user copy: {msg}"
+            );
+        }
+    }
+
     // `url_host` and `resolve_redirect` now live in `crate::net_confine` and are
     // tested there; this module keeps only the allow-list-specific assertion.
 
