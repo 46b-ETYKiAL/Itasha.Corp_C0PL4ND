@@ -445,6 +445,18 @@ jobs:
         with:
           egress-policy: audit
 
+      - name: Checkout source (for the embedded-key self-verify gate)
+        # The release job otherwise only downloads built artifacts — it has no
+        # source tree. The fail-closed verify gate below reconstructs the SAME
+        # public key the deployed client embeds from update_engine/verify.rs, so
+        # the source must be present. Checkout into an isolated `src/` subdir so
+        # it never collides with the `artifacts/` + `release/` asset dirs.
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          path: src
+          persist-credentials: false
+
       - name: Download all artifacts
         # actions/download-artifact@v4.3.0
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -617,7 +629,7 @@ jobs:
           # the deployed client embeds and cryptographically self-verify every
           # signed asset against it — plus identity, coverage, count-parity,
           # digest cross-check, and a tamper test. ANY miss fails the release.
-          pub=$(grep -oE 'RW[A-Za-z0-9+/=]{40,}' crates/app/src/update_engine/verify.rs | head -1)
+          pub=$(grep -oE 'RW[A-Za-z0-9+/=]{40,}' src/crates/app/src/update_engine/verify.rs | head -1)
           if [ -z "$pub" ]; then
             echo "::error::could not extract the embedded public key from verify.rs — cannot self-verify the release. Aborting."
             exit 1
