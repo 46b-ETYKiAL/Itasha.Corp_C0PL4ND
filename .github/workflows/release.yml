@@ -437,6 +437,10 @@ jobs:
     permissions:
       # The only job that needs write to create the release + upload assets.
       contents: write
+      # Tier 2: SLSA build-provenance attestation over the FINAL published asset
+      # set (not just the per-job artifacts) needs OIDC + attestations write.
+      id-token: write
+      attestations: write
     if: always() && needs.build.result == 'success' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Harden the runner (egress audit)
@@ -687,6 +691,27 @@ jobs:
           rm -f rsign.pub
           echo "release gate GREEN: $assets artifact(s) verified against the embedded key (crypto + bare-name identity + digest + count-parity + tamper)."
           ls -la release
+
+      - name: Attest published release assets (SLSA provenance, Tier 2)
+        # Tier 2: attest the FINAL published asset set as it will be uploaded —
+        # archives + installer + the Tier 1 latest.json manifest + SBOMs +
+        # SHA256SUMS — so a verifier can prove every released byte was built by
+        # THIS workflow at THIS tag (gh attestation verify / slsa-verifier). This
+        # complements (does not replace) the per-asset minisign signatures and the
+        # earlier per-job attestations; it is the one attestation over the exact
+        # bytes the GitHub Release publishes. The `.minisig` (signatures) and
+        # `.sha256` (redundant with SHA256SUMS) sidecars are intentionally not
+        # attested.
+        # actions/attest-build-provenance@v4.1.0
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
+        with:
+          subject-path: |
+            release/*.zip
+            release/*.tar.gz
+            release/*.exe
+            release/latest.json
+            release/*.cdx.json
+            release/SHA256SUMS
 
       - name: Create GitHub Release
         # softprops/action-gh-release@v2.6.2
