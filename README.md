@@ -84,6 +84,10 @@ the [Releases](../../releases) page and run it. It installs C0PL4ND under
 Or grab the portable `.zip` from [Releases](../../releases) and run
 `c0pl4nd.exe` directly — no install required (same SmartScreen note applies).
 
+**ARM64 Windows** (Surface Pro X, Snapdragon laptops): download the portable
+`c0pl4nd-<version>-aarch64-pc-windows-msvc.zip` and run `c0pl4nd.exe` — the
+installer is x64-only for now, so ARM64 ships as the portable archive.
+
 #### Verify your download
 
 Every release asset ships a `.sha256` checksum and a minisign `.minisig`
@@ -112,23 +116,42 @@ automatically before applying any update — it refuses anything that fails.)
 
 ### Linux
 
-Download `c0pl4nd-<version>-x86_64-unknown-linux-gnu.tar.gz` from the
-[Releases](../../releases) page, extract it, and run the binary:
+Download the archive for your CPU from the [Releases](../../releases) page —
+`c0pl4nd-<version>-x86_64-unknown-linux-gnu.tar.gz` (Intel/AMD) or
+`c0pl4nd-<version>-aarch64-unknown-linux-gnu.tar.gz` (ARM64, e.g. Raspberry Pi /
+ARM servers) — extract it, and run the binary:
 
 ```bash
-tar -xzf c0pl4nd-*-x86_64-unknown-linux-gnu.tar.gz
-cd c0pl4nd-*-x86_64-unknown-linux-gnu
+tar -xzf c0pl4nd-*-x86_64-unknown-linux-gnu.tar.gz   # or aarch64-…
+cd c0pl4nd-*-unknown-linux-gnu
 ./c0pl4nd
 ```
 
 Each release asset has a `.sha256` and a minisign `.minisig` sibling — verify
-the same way as the [Windows steps above](#verify-your-download).
+the same way as the [Windows steps above](#verify-your-download). A working GPU
+(Vulkan, or OpenGL 3.3+) is required — see
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md) if the window won't open.
 
 ### macOS
 
-macOS binaries are not currently published — build from source (see
-[Building from source](#building-from-source)); the app compiles and runs on
-macOS, it just isn't part of the release matrix yet.
+Download the archive for your Mac from the [Releases](../../releases) page —
+`c0pl4nd-<version>-aarch64-apple-darwin.tar.gz` (Apple Silicon: M1/M2/M3/…) or
+`c0pl4nd-<version>-x86_64-apple-darwin.tar.gz` (Intel) — extract it, and run:
+
+```bash
+tar -xzf c0pl4nd-*-aarch64-apple-darwin.tar.gz   # or x86_64-… on an Intel Mac
+cd c0pl4nd-*-apple-darwin
+./c0pl4nd
+```
+
+> macOS builds are **not yet notarized by Apple** (a Developer ID certificate is
+> pending), so Gatekeeper will warn the app is from an unidentified developer.
+> To run it the first time: **System Settings → Privacy & Security → Open
+> Anyway**, or `xattr -d com.apple.quarantine ./c0pl4nd` after extracting. This
+> does not weaken update security — every asset and the update manifest are
+> minisign-signed (Ed25519) and SLSA-attested, and the in-app updater verifies
+> them before installing. Each asset has `.sha256` + `.minisig` siblings; verify
+> the [same way as above](#verify-your-download).
 
 ---
 
