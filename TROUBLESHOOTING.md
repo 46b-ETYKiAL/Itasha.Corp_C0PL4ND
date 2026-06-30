@@ -99,6 +99,20 @@ Cause and fixes:
 
   Other accepted values include `vulkan` and `gl`. `WGPU_BACKEND` always
   overrides the automatic choice.
+- **A working GPU is required — there is no software-render fallback.** C0PL4ND
+  is GPU-accelerated (wgpu) and needs a graphics adapter exposing one of:
+  **Vulkan** (Linux, Windows), **DirectX 12** (Windows 10+), or **Metal**
+  (macOS); it falls back to **OpenGL 3.3+** only as a best effort. If no usable
+  adapter is found (a headless server, a VM without GPU passthrough, or a broken
+  driver), startup fails cleanly with a **"C0PL4ND couldn't start"** dialog and
+  the app exits — it does **not** silently render on the CPU. To run without a
+  hardware GPU, either enable GPU passthrough for the VM, update/repair the
+  graphics driver, or install a software rasterizer and point wgpu at it — e.g.
+  Mesa **lavapipe** (a software Vulkan device) on Linux, then:
+
+  ```sh
+  WGPU_BACKEND=vulkan c0pl4nd      # picks the lavapipe software adapter
+  ```
 
 ## Animations / the CRT effect cause discomfort (reduced motion)
 
@@ -121,6 +135,24 @@ overlay first (`paste_warn_multiline = true`). This is a deliberate security
 feature: a multi-line paste can run shell commands the instant it lands. Press
 `Enter` to confirm the paste or `Esc` to cancel. To paste multi-line content
 without confirmation, set `paste_warn_multiline = false` under your config.
+
+## Windows warns "Windows protected your PC" / unknown publisher on install
+
+The Windows installer (`c0pl4nd-<version>-x86_64-setup.exe`) is **not
+Authenticode-signed yet** (a code-signing certificate is pending), so Microsoft
+SmartScreen shows a blue *"Windows protected your PC"* warning on first run.
+This is expected for a new, independently-distributed app — it reflects the
+absence of a paid publisher certificate, not a problem with the download.
+
+- To proceed: click **More info → Run anyway**.
+- The lack of Authenticode does **not** weaken update security. Every released
+  binary and the update manifest are **minisign-signed** (Ed25519) and carry a
+  **SLSA build-provenance attestation**, and the in-app updater verifies the
+  signature + checksum against a key embedded in the app *before* installing —
+  so automatic updates are cryptographically verified regardless of Authenticode.
+- To verify a download yourself, check its `.minisig` against the project's
+  public key, or run `gh attestation verify <file> --repo <owner>/<repo>` on the
+  published asset.
 
 ## My config edit didn't take effect / I think it's invalid
 
