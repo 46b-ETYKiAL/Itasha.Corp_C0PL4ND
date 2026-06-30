@@ -138,9 +138,48 @@ pub fn verify_artifact_bound(
     expected_asset: &str,
 ) -> Result<(), String> {
     if !verify_checksum(bytes, expected_sha256) {
+        // SECURITY: a checksum mismatch means the downloaded bytes are NOT the
+        // artifact the signed manifest pinned — corruption or substitution. Log
+        // the integrity refusal (SHA-256 digests are public values, safe to log;
+        // no secret/PII). Naming the gate ("checksum") lets an operator localise
+        // the failure that otherwise only surfaced as `UpdateState::Failed`.
+        tracing::warn!(
+            target: "c0pl4nd::update",
+            event = "verify_refused",
+            gate = "checksum",
+            asset = expected_asset,
+            artifact_bytes = bytes.len(),
+            expected_sha256 = expected_sha256.trim(),
+            actual_sha256 = %sha256_hex(bytes),
+            "update artifact rejected: SHA-256 checksum mismatch"
+        );
         return Err("checksum mismatch".to_string());
     }
-    verify_signature_bound(bytes, sig_str, public_key_box, expected_asset)
+    if let Err(e) = verify_signature_bound(bytes, sig_str, public_key_box, expected_asset) {
+        // SECURITY: a minisign verification failure means the bytes were not
+        // signed by the embedded release key (tampering, a forged sidecar, or a
+        // same-key wrong-artifact substitution caught by the trusted-comment
+        // binding). The WARN message stays clean; the raw verifier error goes to
+        // a DEBUG field (it is a minisign classification string — no key material
+        // or PII — but DEBUG keeps the WARN line free of raw detail).
+        tracing::warn!(
+            target: "c0pl4nd::update",
+            event = "verify_refused",
+            gate = "signature",
+            asset = expected_asset,
+            artifact_bytes = bytes.len(),
+            "update artifact rejected: minisign signature verification failed"
+        );
+        tracing::debug!(
+            target: "c0pl4nd::update",
+            event = "verify_refused_detail",
+            gate = "signature",
+            detail = %e,
+            "minisign verification failure detail"
+        );
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

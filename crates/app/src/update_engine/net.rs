@@ -233,20 +233,60 @@ pub fn check_for_update(
     current: &semver::Version,
     target: &str,
 ) -> Result<Option<ReleaseInfo>, String> {
+    // INFO lifecycle: the check started. `current` is the running build version
+    // (public, no PII); the target triple identifies the asset family.
+    tracing::info!(
+        target: "c0pl4nd::update",
+        event = "update_check_started",
+        current_version = %current,
+        target = target,
+        "update check started"
+    );
     // A single fetch of `/releases/latest` yields BOTH the asset list (for the
     // per-asset sidecars + prerelease/draft channel-pin) and the REQUIRED signed
     // manifest. An absent/unverifiable manifest is a hard refusal here.
-    let (raw, json, sig_str) = fetch_manifest(owner, repo)?;
-    let manifest = manifest::parse_and_verify(&json, &sig_str, EMBEDDED_PUBLIC_KEY)?;
-    resolve_tier1_update(
-        &raw,
-        &manifest,
-        current,
-        target,
-        archive_ext(),
-        now_unix_secs(),
-        update_state::applied_index(),
-    )
+    let outcome = (|| {
+        let (raw, json, sig_str) = fetch_manifest(owner, repo)?;
+        let manifest = manifest::parse_and_verify(&json, &sig_str, EMBEDDED_PUBLIC_KEY)?;
+        resolve_tier1_update(
+            &raw,
+            &manifest,
+            current,
+            target,
+            archive_ext(),
+            now_unix_secs(),
+            update_state::applied_index(),
+        )
+    })();
+    match &outcome {
+        Ok(Some(info)) => tracing::info!(
+            target: "c0pl4nd::update",
+            event = "update_available",
+            version = %info.version,
+            "a newer verified release is available"
+        ),
+        Ok(None) => tracing::debug!(
+            target: "c0pl4nd::update",
+            event = "update_up_to_date",
+            "no newer release (up to date / no platform asset)"
+        ),
+        Err(e) => {
+            // Network / manifest-verify / gate refusal. The reason is an app
+            // string (no secret/PII); kept in a DEBUG field, with a clean WARN.
+            tracing::warn!(
+                target: "c0pl4nd::update",
+                event = "update_check_failed",
+                "update check failed (network, manifest verification, or a gate refusal)"
+            );
+            tracing::debug!(
+                target: "c0pl4nd::update",
+                event = "update_check_failed_detail",
+                detail = %e,
+                "update check failure detail"
+            );
+        }
+    }
+    outcome
 }
 
 /// Current wall-clock as a Unix timestamp (seconds). On a clock error (a
@@ -343,6 +383,15 @@ fn resolve_tier1_update(
     // is a different release CHANNEL than the pinned stable stream — refused so
     // the updater can never jump the user stable → beta.
     if raw.prerelease || raw.draft {
+        // SECURITY (channel-pin): refuse a beta/draft jumping the stable stream.
+        tracing::warn!(
+            target: "c0pl4nd::update",
+            event = "update_refused",
+            gate = "channel_prerelease",
+            prerelease = raw.prerelease,
+            draft = raw.draft,
+            "refusing a prerelease/draft release on the stable channel"
+        );
         return Err("refusing a prerelease/draft release on the stable channel".to_string());
     }
 
@@ -505,6 +554,17 @@ fn assert_https(url: &str) -> Result<(), String> {
     if c0pl4nd_core::net_confine::is_https(url) {
         Ok(())
     } else {
+        // SECURITY: a non-https URL is a TLS-downgrade-to-cleartext attempt (a
+        // MITM'd/hostile Releases JSON serving an `http://` asset). Log the host
+        // ONLY — never the full URL (it may carry a query) — so a downgrade
+        // rejection that was previously silent now leaves a trace.
+        tracing::warn!(
+            target: "c0pl4nd::update",
+            event = "download_refused",
+            gate = "https",
+            host = c0pl4nd_core::net_confine::url_host(url).as_deref().unwrap_or("<none>"),
+            "refusing non-https update download URL (TLS-downgrade defense)"
+        );
         Err(format!("refusing non-https download URL: {url}"))
     }
 }
@@ -532,8 +592,30 @@ fn host_allowed(host: &str) -> bool {
 fn assert_allowed_host(url: &str) -> Result<(), String> {
     match c0pl4nd_core::net_confine::url_host(url) {
         Some(h) if host_allowed(&h) => Ok(()),
-        Some(h) => Err(format!("refusing download from non-allowlisted host: {h}")),
-        None => Err(format!("malformed download URL (no host): {url}")),
+        Some(h) => {
+            // SECURITY: a host outside the GitHub allow-list is an SSRF / MITM-
+            // redirect attempt (a hostile Releases JSON or a `302 → attacker`).
+            // The host is the diagnostic field and is safe to log; the full URL
+            // (path/query) is NOT logged.
+            tracing::warn!(
+                target: "c0pl4nd::update",
+                event = "download_refused",
+                gate = "host_allowlist",
+                host = %h,
+                "refusing update download from non-allowlisted host (SSRF/MITM defense)"
+            );
+            Err(format!("refusing download from non-allowlisted host: {h}"))
+        }
+        None => {
+            tracing::warn!(
+                target: "c0pl4nd::update",
+                event = "download_refused",
+                gate = "host_allowlist",
+                host = "<malformed>",
+                "refusing update download: malformed URL with no host"
+            );
+            Err(format!("malformed download URL (no host): {url}"))
+        }
     }
 }
 
@@ -565,7 +647,28 @@ fn confined_get(url: &str, headers: &[(&str, &str)]) -> Result<ureq::Response, S
         let resp = match req.call() {
             Ok(r) => r,
             Err(ureq::Error::Status(code, r)) if (300..400).contains(&code) => r,
-            Err(e) => return Err(format!("download failed for {current}: {e}")),
+            Err(e) => {
+                // Network/HTTP failure on an update fetch. The operator was
+                // previously blind (the error surfaced only as
+                // `UpdateState::Failed`). Log the host + transport detail (no
+                // full URL / query). The transport string can carry an endpoint
+                // host but no secret, so it lives in a DEBUG field.
+                tracing::error!(
+                    target: "c0pl4nd::update",
+                    event = "download_failed",
+                    host = c0pl4nd_core::net_confine::url_host(&current)
+                        .as_deref()
+                        .unwrap_or("<none>"),
+                    "update download request failed"
+                );
+                tracing::debug!(
+                    target: "c0pl4nd::update",
+                    event = "download_failed_detail",
+                    detail = %e,
+                    "update download transport error detail"
+                );
+                return Err(format!("download failed for {current}: {e}"));
+            }
         };
         if (300..400).contains(&resp.status()) {
             let loc = resp

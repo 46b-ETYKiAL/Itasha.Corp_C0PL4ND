@@ -154,6 +154,38 @@ impl ReportOutcome {
             ReportOutcome::Failed(_) => "failed",
         }
     }
+
+    /// A COARSE, privacy-safe classification of a `Failed` reason — a stable
+    /// enum-like token an operator can act on, WITHOUT inlining the raw reason
+    /// string (which can embed a configured endpoint host / onion). Substring
+    /// classification only; the raw reason is never logged. `None` for the
+    /// non-failure variants. This is the diagnostic the audit (LOG-C0-038) asked
+    /// for: previously a `Failed` send collapsed to the single token "failed".
+    fn failure_kind(&self) -> Option<&'static str> {
+        let ReportOutcome::Failed(reason) = self else {
+            return None;
+        };
+        let r = reason.to_ascii_lowercase();
+        let kind = if r.contains("spool-open") || r.contains("spool") {
+            "spool"
+        } else if r.contains("timeout") || r.contains("timed out") {
+            "timeout"
+        } else if r.contains("tls") || r.contains("certificate") || r.contains("handshake") {
+            "tls"
+        } else if r.contains("status") || r.contains("http") {
+            "http-status"
+        } else if r.contains("connect")
+            || r.contains("offline")
+            || r.contains("dns")
+            || r.contains("resolve")
+            || r.contains("unreachable")
+        {
+            "connect"
+        } else {
+            "transport"
+        };
+        Some(kind)
+    }
 }
 
 /// Log a report outcome counts/enums only (no PII — the `Failed` reason is
@@ -163,7 +195,19 @@ fn log_outcome(outcome: &ReportOutcome) {
     if std::env::var_os("S4F3_DISABLE_TELEMETRY").is_some() {
         return;
     }
-    tracing::info!(target: "c0pl4nd::report", detail = outcome.log_detail());
+    // A transport FAILURE escalates to WARN and carries a coarse, privacy-safe
+    // `reason_kind` (LOG-C0-037 level / LOG-C0-038 dropped-reason): the operator
+    // can now tell a TLS failure from a connect failure WITHOUT the raw reason
+    // (which can embed the configured endpoint/onion) ever being logged. Every
+    // other outcome stays at INFO with the counts-only `detail`.
+    match outcome.failure_kind() {
+        Some(reason_kind) => tracing::warn!(
+            target: "c0pl4nd::report",
+            detail = outcome.log_detail(),
+            reason_kind = reason_kind,
+        ),
+        None => tracing::info!(target: "c0pl4nd::report", detail = outcome.log_detail()),
+    }
 }
 
 /// Build a sanitized Tier-1 crash report from the panic's STATIC message + our

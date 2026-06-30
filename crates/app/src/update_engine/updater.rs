@@ -145,6 +145,12 @@ impl Updater {
         if self.is_busy() {
             return;
         }
+        tracing::info!(
+            target: "c0pl4nd::update",
+            event = "update_check_requested",
+            launch_kind = ?kind,
+            "update check requested",
+        );
         self.state = UpdateState::Checking;
         self.launch_kind = kind;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -175,6 +181,13 @@ impl Updater {
         if self.is_busy() {
             return;
         }
+        tracing::info!(
+            target: "c0pl4nd::update",
+            event = "update_download_started",
+            version = %info.version,
+            asset = %info.asset_name,
+            "downloading + verifying update asset",
+        );
         // Clean up any staging dir left over from a prior download attempt.
         self.cleanup_staging_dir();
 
@@ -191,6 +204,17 @@ impl Updater {
                 persist_tempdir(dir)
             }
             Err(e) => {
+                tracing::error!(
+                    target: "c0pl4nd::update",
+                    event = "staging_dir_failed",
+                    "failed to create the per-run update staging directory"
+                );
+                tracing::debug!(
+                    target: "c0pl4nd::update",
+                    event = "staging_dir_failed_detail",
+                    detail = %e,
+                    "staging-dir creation error detail"
+                );
                 self.state = UpdateState::Failed(format!("cannot create staging dir: {e}"));
                 return;
             }
@@ -271,6 +295,19 @@ impl Updater {
             let reason = decision
                 .reason()
                 .unwrap_or_else(|| "update refused by anti-rollback gate".to_string());
+            // SECURITY: a validly-signed but OLDER (or unparseable) version is a
+            // downgrade/replay attempt that passed integrity but fails freshness.
+            // Log the security refusal naming the candidate + the gate's reason
+            // (both app-controlled strings, no secret/PII) — previously this set
+            // `Failed` with no log, leaving a BlackLotus-class downgrade silent.
+            tracing::warn!(
+                target: "c0pl4nd::update",
+                event = "update_refused",
+                gate = "anti_rollback",
+                candidate_version = %version,
+                reason = %reason,
+                "refusing update: anti-rollback (downgrade) gate, before any swap"
+            );
             // The staged artifact is no longer needed — drop the per-run dir.
             self.cleanup_staging_dir();
             self.state = UpdateState::Failed(reason);
@@ -329,16 +366,48 @@ impl Updater {
                             if let Some(bak) = backup.as_ref() {
                                 let _ = super::apply::rollback(bak, exe);
                             }
+                            tracing::error!(
+                                target: "c0pl4nd::update",
+                                event = "relaunch_failed_rolled_back",
+                                version = %version,
+                                "relaunch of the updated binary failed; rolled back to the prior binary"
+                            );
+                            tracing::debug!(
+                                target: "c0pl4nd::update",
+                                event = "relaunch_failed_detail",
+                                detail = %e,
+                                "relaunch failure detail"
+                            );
                             self.state =
                                 UpdateState::Failed(format!("relaunch failed, rolled back: {e}"));
                             return;
                         }
                     }
                 }
+                tracing::info!(
+                    target: "c0pl4nd::update",
+                    event = "update_applied",
+                    version = %version,
+                    "update applied: verified binary swapped in; relaunching"
+                );
                 self.state = UpdateState::Applied { version };
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-            Err(e) => self.state = UpdateState::Failed(format!("install failed: {e}")),
+            Err(e) => {
+                tracing::error!(
+                    target: "c0pl4nd::update",
+                    event = "apply_failed",
+                    version = %version,
+                    "update install/swap failed; running binary untouched"
+                );
+                tracing::debug!(
+                    target: "c0pl4nd::update",
+                    event = "apply_failed_detail",
+                    detail = %e,
+                    "install/swap failure detail"
+                );
+                self.state = UpdateState::Failed(format!("install failed: {e}"));
+            }
         }
     }
 
