@@ -36,6 +36,9 @@ mod window_effects;
 pub(crate) use window_effects::*;
 mod font_setup;
 pub(crate) use font_setup::*;
+mod app_config;
+mod app_report_ui;
+mod app_search;
 
 use std::collections::{HashMap, HashSet};
 
@@ -44,6 +47,9 @@ use eframe::egui;
 use c0pl4nd_core::term::ColorSet;
 use grid::{count_panes, GridBehavior, Pane, PaneId, PaneIdAllocator};
 use pane_term::{CellMetrics, ColorRun, PaneTerm};
+
+mod glyph_cache;
+pub(crate) use glyph_cache::*;
 
 /// How many placeholder panes the shell opens with on first launch.
 const INITIAL_PANES: usize = 1;
@@ -63,188 +69,20 @@ pub enum WindowCmd {
     Close,
 }
 
-/// Which of a grid row's up-to-three painted galleys this cache entry holds: the
-/// crisp main pass in the runs' real colours, or one of the two pure-channel
-/// chromatic-aberration ghost passes. Each pass for a row is keyed separately so
-/// the ghost galleys (drawn in a single override colour) never collide with the
-/// crisp galley (drawn in the runs' real per-cell colours).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum RowPass {
-    /// The crisp main pass — each run keeps its real SGR colour.
-    Main,
-    /// The pure-red ghost (chromatic aberration), shifted left.
-    GhostRed,
-    /// The pure-blue ghost (chromatic aberration), shifted right.
-    GhostBlue,
-}
-
-/// Content-keyed single-glyph galley cache for [`paint_grid_native`]. The grid
-/// is painted one glyph per CELL, each positioned at its computed `col * cw`
-/// origin — so layout is FONT-ADVANCE-INDEPENDENT: a wide or fallback glyph can
-/// never shift another cell, and there is no "scattered text under a proportional
-/// font" failure mode (the reason the per-run approach was reverted). The cache
-/// is keyed purely by glyph CONTENT (char + colour + pass + style), so the same
-/// glyph reused across many cells shares ONE laid-out galley (the galley is
-/// position-independent — painted at each cell's origin). Pruned to the glyphs
-/// seen this frame so the map stays bounded by distinct on-screen glyph+colour
-/// combinations (small). Cleared wholesale on a font re-install (the cached
-/// galleys reference the old font atlas).
-#[derive(Default)]
-struct GalleyCache {
-    /// content key -> laid-out single-glyph galley.
-    glyphs: HashMap<u64, std::sync::Arc<egui::Galley>>,
-    /// Content keys drawn THIS frame, for the end-of-frame prune.
-    seen_this_frame: HashSet<u64>,
-}
-
-impl GalleyCache {
-    /// Lay out a single glyph (content `key`), reusing the cached galley when the
-    /// glyph+colour+style is unchanged. `build` constructs the
-    /// [`egui::text::LayoutJob`] on a miss. Records the key as seen this frame.
-    fn glyph(
-        &mut self,
-        painter: &egui::Painter,
-        key: u64,
-        build: impl FnOnce() -> egui::text::LayoutJob,
-    ) -> std::sync::Arc<egui::Galley> {
-        self.seen_this_frame.insert(key);
-        if let Some(galley) = self.glyphs.get(&key) {
-            return galley.clone();
-        }
-        let galley = painter.layout_job(build());
-        self.glyphs.insert(key, galley.clone());
-        galley
-    }
-
-    /// Drop glyph galleys NOT drawn this frame (glyphs that scrolled off / a
-    /// closed pane) and reset the per-frame seen set. Called once at the end of
-    /// [`C0pl4ndApp::grid_ui`].
-    fn prune_unseen(&mut self) {
-        if self.seen_this_frame.is_empty() {
-            // Nothing painted this frame (e.g. every pane errored): keep entries
-            // so a transient empty frame does not evict the whole cache.
-            return;
-        }
-        self.glyphs.retain(|k, _| self.seen_this_frame.contains(k));
-        self.seen_this_frame.clear();
-    }
-
-    /// Drop every entry — used when the font stack is re-installed (the cached
-    /// galleys reference the previous font atlas and must be relaid).
-    fn clear(&mut self) {
-        self.glyphs.clear();
-        self.seen_this_frame.clear();
-    }
-}
-
-/// Content cache key for one painted glyph: the char, its RGB colour, the pass
-/// (crisp / chromatic-ghost), and the shared per-frame style bits (font size +
-/// fallback fg). Two cells with the same glyph+colour+style share one galley.
-///
-/// INVARIANT: the key must capture EVERY input that changes the laid-out galley
-/// produced by [`build_glyph_job`]. Today that function renders only `char` +
-/// `font` (size via `style_key`) + `color` — SGR attributes (bold / italic /
-/// underline) are intentionally NOT rendered, so they are correctly absent here.
-/// If [`build_glyph_job`] is ever extended to honour `CellFlags`, those flag bits
-/// MUST be added to this key, or two visually-different cells (e.g. bold vs
-/// regular `a`) would collide on one cached galley.
-fn glyph_cache_key(c: char, rgb: (u8, u8, u8), pass: RowPass, style_key: u64) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    style_key.hash(&mut h);
-    c.hash(&mut h);
-    rgb.hash(&mut h);
-    (pass as u8).hash(&mut h);
-    h.finish()
-}
-
-/// Build the [`egui::text::LayoutJob`] for a SINGLE glyph in `color`. Used on a
-/// glyph-cache miss; the resulting galley is painted at the cell's `col * cw`
-/// origin.
-fn build_glyph_job(c: char, font: &egui::FontId, color: egui::Color32) -> egui::text::LayoutJob {
-    let mut job = egui::text::LayoutJob::default();
-    job.wrap.max_width = f32::INFINITY;
-    let mut buf = [0u8; 4];
-    job.append(
-        c.encode_utf8(&mut buf),
-        0.0,
-        egui::text::TextFormat {
-            font_id: font.clone(),
-            color,
-            ..Default::default()
-        },
-    );
-    job
-}
-
-/// Texture-cache key for an inline image: `(pane, abs line, col, width, height)`.
-/// Stable across a scrollback-view scroll (so a visible image uploads once), and
-/// distinct per pane so two panes' images never collide.
-type ImageKey = (PaneId, usize, usize, usize, usize);
-
-/// GPU-texture cache for inline images (Sixel / Kitty graphics), mirroring
-/// [`GalleyCache`]'s seen-set + end-of-frame prune so textures for images that
-/// scrolled off (or a closed pane) are dropped and GPU memory cannot grow
-/// without bound. An `egui::TextureHandle` frees its GPU texture on drop, so
-/// pruning an entry releases the texture.
-#[derive(Default)]
-struct ImageTextureCache {
-    map: HashMap<ImageKey, egui::TextureHandle>,
-    seen_this_frame: HashSet<ImageKey>,
-}
-
-impl ImageTextureCache {
-    /// Return the texture id for `key`, marking it seen this frame. On a cache
-    /// HIT the cached id is returned and `fetch` is NOT called. On a MISS `fetch`
-    /// is invoked to produce `(width, height, rgba)`, the texture is uploaded
-    /// once, and its id returned — so pixel bytes are copied at most once per
-    /// uploaded texture (never on a hit). `None` when `fetch` yields nothing
-    /// (e.g. the image was evicted between the metadata sweep and the fetch).
-    fn get_or_upload(
-        &mut self,
-        ctx: &egui::Context,
-        key: ImageKey,
-        fetch: impl FnOnce() -> Option<(usize, usize, Vec<u8>)>,
-    ) -> Option<egui::TextureId> {
-        self.seen_this_frame.insert(key);
-        if let Some(tex) = self.map.get(&key) {
-            return Some(tex.id());
-        }
-        let (w, h, rgba) = fetch()?;
-        // NEAREST keeps pixel art (sixel) crisp; the source is already RGBA.
-        let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
-        let tex = ctx.load_texture(
-            format!("c0pl4nd-img-{}-{}-{}", key.0 .0, key.1, key.2),
-            image,
-            egui::TextureOptions::NEAREST,
-        );
-        let id = tex.id();
-        self.map.insert(key, tex);
-        Some(id)
-    }
-
-    /// Drop textures not touched this frame (images scrolled off / closed pane)
-    /// and reset the seen set. Called once at the end of `grid_ui`.
-    fn prune_unseen(&mut self) {
-        self.map.retain(|k, _| self.seen_this_frame.contains(k));
-        self.seen_this_frame.clear();
-    }
-}
-
 /// The modern egui chrome application. Holds the tiling grid, the focused pane,
 /// a settings-window toggle, and a transient status-bar toast.
 pub struct C0pl4ndApp {
     /// Core config (loaded best-effort; defaults when absent). Kept so Milestone
     /// 2 can read font/cursor/keybinding settings without re-plumbing.
-    config: c0pl4nd_core::Config,
+    pub(crate) config: c0pl4nd_core::Config,
     /// The active colour theme — glyph colours for the terminal grid come from
     /// here (NOT egui Visuals, which only style the chrome).
-    theme: c0pl4nd_core::Theme,
+    pub(crate) theme: c0pl4nd_core::Theme,
     /// The tiling pane grid.
-    grid_tree: egui_tiles::Tree<Pane>,
+    pub(crate) grid_tree: egui_tiles::Tree<Pane>,
     /// Per-pane live terminal state (PTY + grid), keyed by pane id. A pane with
     /// no entry (or a failed spawn) renders an error/placeholder body.
-    terms: HashMap<PaneId, PaneTerm>,
+    pub(crate) terms: HashMap<PaneId, PaneTerm>,
     /// Panes whose PTY is DEFERRED until their real pixel rect is known. The
     /// initial pane(s) are registered here at construction WITHOUT a PTY: if we
     /// spawned them at the 80×24 placeholder (the cmd-banner cursor-home bug
@@ -254,139 +92,139 @@ pub struct C0pl4ndApp {
     /// pane at the MEASURED `(cols, rows)` on the first frame its rect is known —
     /// exactly how a manually-opened terminal (`spawn_term`) already behaves —
     /// after which the debounced resize is a no-op and the cursor stays put.
-    pending_spawn: HashSet<PaneId>,
+    pub(crate) pending_spawn: HashSet<PaneId>,
     /// Working directories captured from a previous run's persisted layout
     /// snapshot, keyed by the restored pane id. Consumed (removed) by the
     /// deferred first-spawn in [`render_pane_body`]: a pane with an entry spawns
     /// its shell in that dir, a pane without one spawns in the default dir. Empty
     /// on a fresh launch and after every entry is consumed — so a pane the user
     /// later splits never inherits a stale restored cwd.
-    restored_cwds: HashMap<PaneId, String>,
+    pub(crate) restored_cwds: HashMap<PaneId, String>,
     /// Monotonic pane-id allocator.
-    pane_alloc: PaneIdAllocator,
+    pub(crate) pane_alloc: PaneIdAllocator,
     /// The currently-focused pane (drives tab highlight + input routing).
-    focused_pane: PaneId,
+    pub(crate) focused_pane: PaneId,
     /// Panes the user pinned: their tabs sort first and can't be closed via the
     /// tab × (must unpin first).
-    pinned: HashSet<PaneId>,
+    pub(crate) pinned: HashSet<PaneId>,
     /// The focused pane's last-rendered size `(w, h)` in points. Drives the
     /// "+" button's split direction (split the longer axis to stay balanced).
-    last_focused_size: Option<(f32, f32)>,
+    pub(crate) last_focused_size: Option<(f32, f32)>,
     /// Shells offered by the top-bar switcher, platform default first. Detected
     /// once at construction (`shells::detect_profiles`).
-    shell_profiles: Vec<shells::ShellProfile>,
+    pub(crate) shell_profiles: Vec<shells::ShellProfile>,
     /// Index into `shell_profiles` that the plain "+" button and new terminals
     /// use. Set when the user picks a shell from the top-bar ▾ menu.
-    active_shell: usize,
+    pub(crate) active_shell: usize,
     /// Whether the chrome fonts (incl. the `phosphor-fill` family used for a
     /// pinned tab's solid pin) have been installed on the egui context. Set in
     /// `new`; the first `frame_tick` installs them otherwise (e.g. headless
     /// tests built via `bootstrap()`), so referencing the `phosphor-fill` family
     /// can never hit an unregistered-family panic.
-    fonts_installed: bool,
+    pub(crate) fonts_installed: bool,
     /// The font-stack key (family + fallbacks folded into one string by
     /// [`font_apply_key`]) that was LAST installed into egui. Compared each frame
     /// against the live config so a Family/Fallback change in settings triggers a
     /// single live re-install of the font stack — and the (expensive) system-font
     /// load runs ONLY on an actual change, never per frame.
-    applied_font_family: String,
+    pub(crate) applied_font_family: String,
     /// The UI scale (F2-3) currently applied to the egui context, tracked so
     /// `frame_tick` re-applies `set_zoom_factor` ONLY when the configured
     /// `ui_scale` actually changes (not every frame, and without fighting the
     /// transient Ctrl+/- keyboard zoom, which never writes `config.ui_scale`).
     /// Initialised to a sentinel `NaN` so the first frame always applies.
-    applied_ui_scale: f32,
+    pub(crate) applied_ui_scale: f32,
     /// Whether the settings window is open.
-    settings_open: bool,
+    pub(crate) settings_open: bool,
     /// Recently-run commands, surfaced by the command palette for quick
     /// find/run. Captured best-effort from typed input (committed on Enter).
-    cmd_history: c0pl4nd_core::command_history::CommandHistory,
+    pub(crate) cmd_history: c0pl4nd_core::command_history::CommandHistory,
     /// Accumulator for the line currently being typed in the focused pane.
     /// Committed to `cmd_history` on Enter, reset on focus change. Best-effort:
     /// it models printable text + Backspace, not full shell line-editing.
-    input_line: String,
+    pub(crate) input_line: String,
     /// A multi-line paste deferred for confirmation (paste-safety). When
     /// `config.paste_warn_multiline` is on and a paste contains a newline, it is
     /// parked here and a confirm overlay is shown instead of executing it
     /// immediately (the embedded newline would otherwise run a command on land).
     /// Enter in the overlay sends it (through the paste-injection guard); Esc
     /// discards it.
-    pending_paste: Option<String>,
+    pub(crate) pending_paste: Option<String>,
     /// Incognito session: when `true`, NO typed commands are recorded into
     /// command history (regardless of `config.history_capture_enabled`). Runtime
     /// only — never persisted, so it always starts off and resets each launch.
-    incognito: bool,
+    pub(crate) incognito: bool,
     /// Whether the command palette overlay is open.
-    palette_open: bool,
+    pub(crate) palette_open: bool,
     /// Whether the command-history quick-run sidebar (`#21`) is open. A docked
     /// `egui::SidePanel` (side from `config.history_sidebar_side`) that lists the
     /// history newest-first with a filter box; clicking a row re-runs it in the
     /// focused pane via the SAME path as the command palette.
-    history_open: bool,
+    pub(crate) history_open: bool,
     /// The history sidebar's filter query (substring/fuzzy over the history).
-    history_filter: String,
+    pub(crate) history_filter: String,
     /// The palette's fuzzy-search query.
-    palette_query: String,
+    pub(crate) palette_query: String,
     /// The palette's selected row (index into the filtered results).
-    palette_sel: usize,
+    pub(crate) palette_sel: usize,
     /// The command most recently run FROM the palette (Enter or click). Set in
     /// [`Self::run_palette_selection`] so an interaction test can assert that
     /// driving the real palette ran the real command — the same observation
     /// pattern as [`Self::last_window_cmd`] (the PTY write itself is not
     /// observable in the headless harness).
-    last_palette_run: Option<String>,
+    pub(crate) last_palette_run: Option<String>,
     /// The most recent URL a Ctrl-click opened (most-recent-wins), or `None` if
     /// none this session. Observable so an interaction test can assert that a
     /// Ctrl-click on a URL in the grid opened it — the OS-opener side effect
     /// (`ctx.open_url`) itself is not observable in the headless harness.
-    last_opened_url: Option<String>,
+    pub(crate) last_opened_url: Option<String>,
     /// Whether the in-terminal find overlay is open.
-    search_open: bool,
+    pub(crate) search_open: bool,
     /// The find overlay's search query.
-    search_query: String,
+    pub(crate) search_query: String,
     /// Whether the find query is treated as a regular expression.
-    search_regex: bool,
+    pub(crate) search_regex: bool,
     /// Whether find matching is case-SENSITIVE (the core option speaks
     /// `case_insensitive`, so this is its inverse — the UI label is "Case").
-    search_case_sensitive: bool,
+    pub(crate) search_case_sensitive: bool,
     /// The matches found this frame for `search_query` over the focused pane's
     /// grid text, recomputed by [`Self::recompute_search`] whenever the query or
     /// a toggle changes (and once on open). Kept on `self` so the cycle keys
     /// (Enter / F3 / Shift+F3) and the highlight pass both read the same set.
-    search_matches: Vec<c0pl4nd_core::search::SearchMatch>,
+    pub(crate) search_matches: Vec<c0pl4nd_core::search::SearchMatch>,
     /// Index of the currently-selected match in `search_matches` (0-based).
     /// Meaningful only when `search_matches` is non-empty.
-    search_sel: usize,
+    pub(crate) search_sel: usize,
     /// TEST-ONLY corpus override for the find overlay. When `Some`, the matcher
     /// searches these lines instead of the live PTY grid. The live PTY's
     /// `grid_text()` is async + platform-dependent (a CI box may have no usable
     /// shell), so the headless find tests seed a KNOWN corpus here to assert the
     /// search wiring deterministically. `None` in the shipping binary — the real
     /// focused-pane grid text is searched. Set via `test_seed_focused_grid`.
-    search_test_corpus: Option<String>,
+    pub(crate) search_test_corpus: Option<String>,
     /// A transient status-bar message (e.g. "max 6 panes").
-    toast: Option<String>,
+    pub(crate) toast: Option<String>,
     /// Receiver for an opt-in launch update check spawned by the binary entry
     /// point (`egui_main`). The background thread sends a one-line "newer
     /// version available" notice exactly once; `frame_tick` polls this and
     /// surfaces it as a toast. `None` in the headless harness (tests never attach
     /// a check), so no network ever runs under test.
-    update_rx: Option<std::sync::mpsc::Receiver<String>>,
+    pub(crate) update_rx: Option<std::sync::mpsc::Receiver<String>>,
     /// The most recent update notice surfaced (most-recent-wins), observable so
     /// an interaction test can assert the launch-check → toast wiring without a
     /// network call.
-    last_update_notice: Option<String>,
+    pub(crate) last_update_notice: Option<String>,
     /// The most recent caption command issued (minimize/maximize/close). Set in
     /// [`Self::frame_tick`] alongside the real `ViewportCommand`, so interaction
     /// tests can assert that clicking a caption button had its real effect (the
     /// OS command itself is not observable in a headless harness).
-    last_window_cmd: Option<WindowCmd>,
+    pub(crate) last_window_cmd: Option<WindowCmd>,
     /// True when running in a real eframe window (a wgpu render state exists),
     /// false in the headless `egui_kittest` harness. Drives the per-frame
     /// `request_repaint` pump so live PTY output animates without an input
     /// event — but NOT in headless tests, where an unconditional repaint would
     /// make `Harness::run` loop until `max_steps`.
-    live_window: bool,
+    pub(crate) live_window: bool,
     /// Frameless terminal-only fullscreen (#36), toggled by F11 (and exited by
     /// F11 or Esc). TRANSIENT — never persisted to `Config`: F11 is a per-session
     /// view toggle, not a saved preference, so a relaunch is always windowed.
@@ -395,43 +233,43 @@ pub struct C0pl4ndApp {
     /// the source of truth the panels read THIS frame (the OS-reported
     /// `i.viewport().fullscreen` lags a frame, which would flash the titlebar);
     /// it is reconciled from the OS value each frame to stay honest.
-    fullscreen: bool,
+    pub(crate) fullscreen: bool,
     /// Whether the OS window held focus on the previous frame. Drives DEC
     /// `?1004` focus reporting: on a focus-in/out EDGE the focused pane's
     /// terminal is told (so vim/tmux see FocusGained/FocusLost). Initialised
     /// `true` so a window that starts focused does not emit a spurious report.
-    was_focused: bool,
+    pub(crate) was_focused: bool,
     /// The active mouse text selection over a pane's grid (None when nothing is
     /// selected). Drag selects; release copies (when `copy_on_select`); a plain
     /// click clears it. Ctrl/Cmd+Shift+C copies the live selection on demand.
-    selection: Option<Selection>,
+    pub(crate) selection: Option<Selection>,
     /// When `Some`, render ONLY this pane full-size (siblings hidden) — the
     /// zoom-pane toggle (Ctrl/Cmd+Shift+Z). The grid tree is NOT mutated, so
     /// un-zooming restores the exact prior layout. Runtime-only (not persisted);
     /// cleared if the zoomed pane is closed.
-    zoomed_pane: Option<PaneId>,
+    pub(crate) zoomed_pane: Option<PaneId>,
     /// Each pane's screen-space body rect, captured every frame during the grid
     /// render. Consumed by directional pane focus (Ctrl/Cmd+Shift+Arrow) to find
     /// the geometric neighbour in a direction. Rebuilt each frame, so it tracks
     /// the live layout (empty before the first render).
-    pane_rects: HashMap<PaneId, egui::Rect>,
+    pub(crate) pane_rects: HashMap<PaneId, egui::Rect>,
     /// The bytes `forward_input_to_focused` sent to the focused PTY on the most
     /// recent no-overlay frame. Kept so a test can assert that a consumed chord
     /// (e.g. Ctrl+Shift+D) leaked NOTHING to the shell — a regression where a
     /// chord's `events.retain` keeps the event would fire the action AND forward
     /// the control byte, which no action-only assertion would catch.
     #[allow(dead_code)]
-    last_forwarded: Vec<u8>,
+    pub(crate) last_forwarded: Vec<u8>,
     /// Per-(pane,row) laid-out galley cache for [`paint_grid_native`] (audit #2).
     /// A row's galley is re-laid-out only when its content/style key changes, so
     /// an idle or partially-changed grid does not re-run text layout for every
     /// row every frame. Invalidated implicitly by the key (which folds font size,
     /// default fg, and the chromatic ghost params); cleared wholesale on a font
     /// re-install (family/fallback change). Bounded by per-pane row pruning.
-    galley_cache: GalleyCache,
+    pub(crate) galley_cache: GalleyCache,
     /// GPU-texture cache for inline images (Sixel / Kitty graphics), pruned each
     /// frame so textures for off-screen images are released.
-    image_textures: ImageTextureCache,
+    pub(crate) image_textures: ImageTextureCache,
     /// Receiver for the off-thread system-font load (audit #3). When the default
     /// (or any custom) font config names a non-built-in family,
     /// `load_system_fonts()` (100s of ms) would block first paint; instead the
@@ -441,7 +279,7 @@ pub struct C0pl4ndApp {
     /// (or when no system load is needed). Skipped entirely in the headless
     /// harness (no `live_window`), which keeps the synchronous path for
     /// deterministic tests.
-    pending_fonts: Option<std::sync::mpsc::Receiver<egui::FontDefinitions>>,
+    pub(crate) pending_fonts: Option<std::sync::mpsc::Receiver<egui::FontDefinitions>>,
     /// The in-progress IME pre-edit (composition) string for the focused pane,
     /// or `None` when no composition is active (F3-1). egui routes composed CJK /
     /// complex-script input through `Event::Ime` — the not-yet-committed
@@ -450,17 +288,17 @@ pub struct C0pl4ndApp {
     /// reaches the shell). Painted underlined at the cursor by
     /// [`Self::render_pane_body`] so the user sees what they are composing before
     /// commit. Cleared on `ImeEvent::Enabled` / `Disabled` and on commit.
-    ime_preedit: Option<String>,
+    pub(crate) ime_preedit: Option<String>,
     /// W1TN3SS per-launch crash-consent dialog state (opt-in, default-OFF). On
     /// launch [`Self::drain_crash_spool`] loads any spooled crash reports here
     /// when the crash stream's mode is `AskEachTime`; the dialog presents them
     /// one at a time with an editable preview + equal-weight Send / Don't-send.
     /// Empty (and touches no real config dir) when the user has not opted in.
-    crash_consent: crate::reporting::CrashConsentState,
+    pub(crate) crash_consent: crate::reporting::CrashConsentState,
     /// W1TN3SS manual "Report an issue" dialog state (user-initiated, default
     /// CLOSED, diagnostics OFF). Opened from the titlebar script menu; builds a
     /// prefilled GitHub Issue-Form deep link (or clipboard / mailto fallback).
-    issue_intake: crate::issue_intake::IssueIntakeState,
+    pub(crate) issue_intake: crate::issue_intake::IssueIntakeState,
 }
 
 /// The PTY grid size used to spawn a pane before its real pixel rect is known.
@@ -2458,103 +2296,6 @@ impl C0pl4ndApp {
     // exact production path (the same observation-accessor discipline the other
     // public accessors above follow).
 
-    /// The current font size (pt) from the live config. Used by the settings
-    /// slider interaction test.
-    #[allow(dead_code)]
-    pub fn config_font_size(&self) -> f32 {
-        self.config.font.size
-    }
-
-    /// The current primary font family from the live config. Observation accessor
-    /// for the Font-family dropdown interaction test.
-    #[allow(dead_code)]
-    pub fn config_font_family(&self) -> String {
-        self.config.font.family.clone()
-    }
-
-    /// The current ordered fallback font families from the live config.
-    /// Observation accessor for the Fallback dropdown interaction test.
-    #[allow(dead_code)]
-    pub fn config_font_fallback(&self) -> Vec<String> {
-        self.config.font.fallback.clone()
-    }
-
-    /// The font-stack key (family + fallbacks) most recently INSTALLED into egui.
-    /// Observation accessor for the live-apply interaction test: after a family
-    /// change is driven through the real frame loop, this MUST reflect the new
-    /// family (proving the font was actually re-installed, not just stored in
-    /// config). Mirrors [`font_apply_key`].
-    #[allow(dead_code)]
-    pub fn applied_font_key(&self) -> String {
-        self.applied_font_family.clone()
-    }
-
-    /// The current cursor blink flag from the live config.
-    #[allow(dead_code)]
-    pub fn config_cursor_blink(&self) -> bool {
-        self.config.cursor.blink
-    }
-
-    /// The master transparency toggle from the live config. Observation
-    /// accessor for the transparency interaction tests.
-    #[allow(dead_code)]
-    pub fn config_transparency_enabled(&self) -> bool {
-        self.config.transparency_enabled
-    }
-
-    /// The current window translucency mode from the live config.
-    #[allow(dead_code)]
-    pub fn config_window_mode(&self) -> c0pl4nd_core::config::WindowMode {
-        self.config.window_mode
-    }
-
-    /// The current window opacity (0.30..=1.0) from the live config.
-    #[allow(dead_code)]
-    pub fn config_opacity(&self) -> f32 {
-        self.config.opacity
-    }
-
-    /// The current window tint strength (0.0..=1.0) from the live config.
-    #[allow(dead_code)]
-    pub fn config_tint_strength(&self) -> f32 {
-        self.config.tint_strength
-    }
-
-    /// Whether the window is effectively translucent for the live config
-    /// (master toggle on AND a non-opaque mode).
-    #[allow(dead_code)]
-    pub fn config_effective_translucent(&self) -> bool {
-        self.config.effective_translucent()
-    }
-
-    /// The current terminal color theme stem from the live config.
-    #[allow(dead_code)]
-    pub fn config_theme(&self) -> &str {
-        &self.config.theme
-    }
-
-    /// Whether the egui Visuals DERIVED from the active terminal theme read as
-    /// LIGHT (window-fill luminance > 0.5). Observation accessor for the
-    /// whole-app-theming interaction test: it asserts the chrome flips light
-    /// after picking a light theme (ghost-paper) and dark after a dark one,
-    /// exercising the same `visuals_from_theme` derivation the live app applies.
-    #[allow(dead_code)]
-    pub fn visuals_are_light(&self) -> bool {
-        theme::is_light(theme::visuals_from_theme(&self.theme).window_fill)
-    }
-
-    /// The current scrollback line count from the live config.
-    #[allow(dead_code)]
-    pub fn config_scrollback_lines(&self) -> usize {
-        self.config.scrollback_lines
-    }
-
-    /// The current multi-line-paste-warning flag from the live config.
-    #[allow(dead_code)]
-    pub fn config_paste_warn_multiline(&self) -> bool {
-        self.config.paste_warn_multiline
-    }
-
     /// Whether a multi-line paste is currently awaiting confirmation. (Test /
     /// observation API for the paste-safety overlay.)
     #[allow(dead_code)]
@@ -2680,235 +2421,6 @@ impl C0pl4ndApp {
             self.confirm_pending_paste();
         } else if do_cancel {
             self.cancel_pending_paste();
-        }
-    }
-
-    /// Render the W1TN3SS per-launch crash-consent dialog, if a spooled crash
-    /// report is pending (drained by [`Self::drain_crash_spool`] on launch when
-    /// the crash stream is `AskEachTime`). Presents ONE report at a time with an
-    /// EDITABLE preview + equal-weight Send / Don't-send; persists a remembered
-    /// "Always"/"Never" choice into the config. A no-op when nothing is pending
-    /// (the opted-out / opted-in-but-empty case) — so the default experience is
-    /// untouched. Nothing transmits until the user clicks Send (which mints the
-    /// consent token inside the SDK-gated `consent_and_send`).
-    fn render_crash_consent(&mut self, ctx: &egui::Context) {
-        if !self.crash_consent.has_pending() {
-            return;
-        }
-        let mut do_send = false;
-        let mut do_decline = false;
-        egui::Window::new("Send this crash report?")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                ui.label(
-                    "C0PL4ND captured a crash. You can review and edit the report \
-                     below before deciding — nothing is sent unless you choose Send.",
-                );
-                ui.add_space(6.0);
-                egui::ScrollArea::vertical()
-                    .max_height(220.0)
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(self.crash_consent.edited_text_mut())
-                                .desired_rows(8)
-                                .desired_width(f32::INFINITY)
-                                .font(egui::TextStyle::Monospace),
-                        );
-                    });
-                ui.add_space(8.0);
-                ui.label("Remember my choice for future crashes:");
-                let remember = self.crash_consent.remember_mut();
-                ui.horizontal(|ui| {
-                    ui.radio_value(
-                        remember,
-                        Some(crate::reporting::RememberChoice::JustThisTime),
-                        "Just this time",
-                    );
-                    ui.radio_value(
-                        remember,
-                        Some(crate::reporting::RememberChoice::Always),
-                        "Always send",
-                    );
-                    ui.radio_value(
-                        remember,
-                        Some(crate::reporting::RememberChoice::Never),
-                        "Never",
-                    );
-                });
-                ui.add_space(8.0);
-                // Equal-weight Send / Don't-send — no dark-pattern asymmetry.
-                ui.horizontal(|ui| {
-                    if ui.button("Send report").clicked() {
-                        do_send = true;
-                    }
-                    if ui.button("Don't send").clicked() {
-                        do_decline = true;
-                    }
-                });
-            });
-        // Persist a remembered Always/Never BEFORE advancing (so the choice
-        // applies from the next launch). JustThisTime persists nothing.
-        let remembered = *self.crash_consent.remember_mut();
-        if do_send {
-            if let Some(choice) = remembered {
-                self.apply_remember_choice(choice);
-            }
-            let _ = self.crash_consent.consent_and_send();
-        } else if do_decline {
-            if let Some(choice) = remembered {
-                self.apply_remember_choice(choice);
-            }
-            self.crash_consent.decline_and_discard();
-        }
-    }
-
-    /// Persist a remembered crash-consent choice into the config (graduating the
-    /// crash stream to `Always` or `Off`), then save the config so the next
-    /// launch honours it. `JustThisTime` persists nothing. Best-effort save.
-    fn apply_remember_choice(&mut self, choice: crate::reporting::RememberChoice) {
-        if let Some(mode) = choice.persisted_mode() {
-            self.config.reporting.streams.crash_reports = mode;
-            if let Some(path) = c0pl4nd_core::Config::default_path() {
-                if let Err(e) = self.config.save_to(&path) {
-                    self.toast = Some(crate::user_error::config_save_failed(
-                        e,
-                        "Your reporting choice",
-                    ));
-                }
-            }
-        }
-    }
-
-    /// Render the W1TN3SS manual "Report an issue" dialog, opened from the
-    /// titlebar script menu ([`crate::issue_intake::IssueIntakeState::open_fresh`]
-    /// sets `open`). User-initiated only: renders only when `issue_intake.open`.
-    /// Builds a prefilled GitHub Issue-Form deep link (or a clipboard / mailto
-    /// fallback); diagnostics are OFF unless the user ticks them; the body is
-    /// previewable + editable before anything leaves. Nothing transmits — it
-    /// hands a URL to the browser / a body to the clipboard on an explicit click.
-    fn render_report_issue(&mut self, ctx: &egui::Context) {
-        if !self.issue_intake.open {
-            return;
-        }
-        let repo = self.config.reporting.issue_intake.repo.clone();
-        let alias = self.config.reporting.issue_intake.mailto_alias.clone();
-        let renderer = crate::issue_intake::RENDERER;
-
-        // Decisions deferred past the closure borrow (like paste_confirm_window).
-        let mut do_open = false;
-        let mut do_mailto = false;
-        let mut do_close = false;
-        egui::Window::new("Report an issue")
-            .collapsible(false)
-            .resizable(true)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                ui.label(
-                    "Open a prefilled GitHub issue. Nothing is sent automatically — \
-                     your browser opens the issue form for you to review and submit.",
-                );
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label("Kind:");
-                    for kind in crate::issue_intake::IssueKind::ALL {
-                        ui.radio_value(&mut self.issue_intake.kind, kind, kind.display());
-                    }
-                });
-                ui.add_space(6.0);
-                ui.label("Describe the issue:");
-                egui::ScrollArea::vertical()
-                    .max_height(160.0)
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.issue_intake.description)
-                                .desired_rows(5)
-                                .desired_width(f32::INFINITY),
-                        );
-                    });
-                ui.add_space(6.0);
-                ui.checkbox(
-                    &mut self.issue_intake.include_diagnostics,
-                    "Include non-identifying diagnostics (app version, OS, renderer)",
-                );
-                ui.add_space(6.0);
-                // Faithful preview of EXACTLY what will be sent.
-                let preview = self.issue_intake.preview_body(renderer);
-                ui.label("Preview:");
-                egui::ScrollArea::vertical()
-                    .id_salt("issue_preview")
-                    .max_height(120.0)
-                    .show(ui, |ui| {
-                        ui.add(egui::Label::new(egui::RichText::new(&preview).monospace()).wrap());
-                    });
-                ui.add_space(8.0);
-                if !self.issue_intake.fits_url_length(&repo, renderer) {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(
-                                "This report is long — \"Open on GitHub\" will copy it \
-                                 to your clipboard to paste into a blank issue instead.",
-                            )
-                            .weak()
-                            .small(),
-                        )
-                        .wrap(),
-                    );
-                    ui.add_space(4.0);
-                }
-                // Show the last outcome (status line).
-                if let Some(outcome) = &self.issue_intake.last_outcome {
-                    let msg = match outcome {
-                        crate::issue_intake::IntakeOutcome::OpenedDeepLink => {
-                            "Opened the issue form in your browser."
-                        }
-                        crate::issue_intake::IntakeOutcome::CopiedToClipboard => {
-                            "Copied the report to your clipboard — paste it into a new issue."
-                        }
-                        crate::issue_intake::IntakeOutcome::OpenedMailto => {
-                            "Opened your mail client."
-                        }
-                        crate::issue_intake::IntakeOutcome::Failed(_) => {
-                            "That didn't work. You can copy the report to your clipboard and \
-                             paste it into a new GitHub issue instead."
-                        }
-                    };
-                    ui.add(egui::Label::new(egui::RichText::new(msg).small()).wrap());
-                    ui.add_space(4.0);
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("Open on GitHub").clicked() {
-                        do_open = true;
-                    }
-                    if ui.button("Email instead").clicked() {
-                        do_mailto = true;
-                    }
-                    if ui.button("Close").clicked() {
-                        do_close = true;
-                    }
-                });
-            });
-
-        if do_open {
-            let req = self.issue_intake.request(&repo, renderer);
-            let outcome = match crate::issue_intake::open_or_copy(&req) {
-                crate::issue_intake::IntakeAction::Opened(o) => o,
-                crate::issue_intake::IntakeAction::CopyToClipboard(body) => {
-                    // C0PL4ND has no `arboard`: copy via egui's clipboard here.
-                    ctx.copy_text(body);
-                    crate::issue_intake::IntakeOutcome::CopiedToClipboard
-                }
-            };
-            crate::issue_intake::log_outcome(&outcome);
-            self.issue_intake.last_outcome = Some(outcome);
-        } else if do_mailto {
-            let req = self.issue_intake.request(&repo, renderer);
-            let outcome = crate::issue_intake::open_mailto(&alias, &req.title, &req.body);
-            crate::issue_intake::log_outcome(&outcome);
-            self.issue_intake.last_outcome = Some(outcome);
-        } else if do_close {
-            self.issue_intake.open = false;
         }
     }
 
@@ -3376,263 +2888,6 @@ impl C0pl4ndApp {
         if let Some(i) = clicked {
             self.palette_sel = i;
             self.run_palette_selection();
-        }
-    }
-
-    // ---- in-terminal find overlay (Ctrl+Shift+F) -------------------------
-    //
-    // The overlay searches the FOCUSED pane's visible/scrollback grid text via
-    // the shared core matcher (`c0pl4nd_core::search::find`). It is opened with
-    // Ctrl+Shift+F (handled in `frame_tick`), filters as you type, shows a live match
-    // count, cycles matches with Enter / F3 / Shift+F3, and closes with Esc. The
-    // Regex + Case toggles map onto `search::SearchOptions`. These methods are the
-    // production logic `frame_tick` calls — the interaction tests drive them
-    // THROUGH the real frame loop, not as a test-only mirror.
-
-    /// The lines of the focused pane's grid text, one `String` per visual row —
-    /// the slice handed to [`c0pl4nd_core::search::find`]. Empty when the focused
-    /// pane has no live terminal (the matcher then yields no matches).
-    fn focused_search_lines(&self) -> Vec<String> {
-        // A seeded test corpus (headless find tests) takes precedence so the
-        // search wiring can be asserted without a live PTY; otherwise the real
-        // focused-pane grid text is searched.
-        if let Some(corpus) = &self.search_test_corpus {
-            return corpus.lines().map(str::to_string).collect();
-        }
-        self.focused_grid_text()
-            .map(|t| t.lines().map(str::to_string).collect())
-            .unwrap_or_default()
-    }
-
-    /// The current [`SearchOptions`](c0pl4nd_core::search::SearchOptions) derived
-    /// from the two UI toggles. `case_sensitive` is the inverse of the core's
-    /// `case_insensitive` field.
-    fn search_options(&self) -> c0pl4nd_core::search::SearchOptions {
-        c0pl4nd_core::search::SearchOptions {
-            regex: self.search_regex,
-            case_insensitive: !self.search_case_sensitive,
-        }
-    }
-
-    /// Recompute `search_matches` for the current query + options over the
-    /// focused pane's grid text, and clamp `search_sel` into range. Called on
-    /// open, on every query/toggle change, and each frame the overlay is open
-    /// (the live PTY grid scrolls, so the match set is not static). An invalid
-    /// regex yields an empty set — surfaced calmly as "no matches", never a
-    /// panic (the core matcher swallows the regex-compile error).
-    fn recompute_search(&mut self) {
-        let lines = self.focused_search_lines();
-        self.search_matches =
-            c0pl4nd_core::search::find(&lines, &self.search_query, self.search_options());
-        if self.search_matches.is_empty() {
-            self.search_sel = 0;
-        } else if self.search_sel >= self.search_matches.len() {
-            self.search_sel = self.search_matches.len() - 1;
-        }
-    }
-
-    /// Toggle the find overlay. Opening it resets the selection to the first
-    /// match and recomputes the match set for whatever is already on screen;
-    /// closing it leaves the query intact (so reopening resumes the last search).
-    fn toggle_search(&mut self) {
-        self.search_open = !self.search_open;
-        if self.search_open {
-            self.search_sel = 0;
-            self.recompute_search();
-        }
-    }
-
-    /// Advance the selected match by `delta` (wrapping), a no-op when there are
-    /// no matches. Enter / F3 step +1; Shift+F3 steps −1. Wrapping mirrors every
-    /// real editor's find-next behaviour (the last match's "next" is the first).
-    fn search_cycle(&mut self, delta: i64) {
-        let n = self.search_matches.len();
-        if n == 0 {
-            self.search_sel = 0;
-            return;
-        }
-        let n_i = n as i64;
-        let cur = self.search_sel as i64;
-        self.search_sel = (((cur + delta) % n_i + n_i) % n_i) as usize;
-    }
-
-    /// Whether the find overlay is currently open. Observation accessor for the
-    /// interaction tests (asserts Ctrl+Shift+F toggled it through the real frame loop).
-    #[allow(dead_code)]
-    pub fn search_is_open(&self) -> bool {
-        self.search_open
-    }
-
-    /// The number of matches the find overlay found this frame. Observation
-    /// accessor for the interaction tests (asserts typing filters the grid).
-    #[allow(dead_code)]
-    pub fn search_match_count(&self) -> usize {
-        self.search_matches.len()
-    }
-
-    /// The 0-based index of the currently-selected match. Observation accessor
-    /// for the cycle tests (asserts F3 / Shift+F3 / Enter move the selection).
-    #[allow(dead_code)]
-    pub fn search_selected(&self) -> usize {
-        self.search_sel
-    }
-
-    /// Whether the find query is currently treated as a regex. Observation
-    /// accessor for the regex-toggle test.
-    #[allow(dead_code)]
-    pub fn search_regex_enabled(&self) -> bool {
-        self.search_regex
-    }
-
-    /// Whether find matching is currently case-SENSITIVE. Observation accessor
-    /// for the case-toggle test.
-    #[allow(dead_code)]
-    pub fn search_case_sensitive_enabled(&self) -> bool {
-        self.search_case_sensitive
-    }
-
-    // ---- find-overlay test-support surface --------------------------------
-    //
-    // These let the headless interaction tests drive the find overlay against a
-    // KNOWN corpus and flip the option toggles deterministically — the live PTY
-    // grid is async + platform-dependent, so a CI box with no usable shell could
-    // not otherwise exercise the matcher. They are `pub` (consumed by the
-    // `#[path]`-included test binary) but operate ONLY on the test-corpus
-    // override / option flags; they never touch the live PTY, so they are inert
-    // in the shipping binary (which never calls them).
-
-    /// Seed the find overlay's search corpus with a known multi-line string, so
-    /// the headless tests can assert the matcher wiring without a live PTY. The
-    /// shipping binary never calls this (`search_test_corpus` stays `None`).
-    /// Recomputes the match set immediately if the overlay is already open.
-    #[allow(dead_code)]
-    pub fn test_seed_focused_grid(&mut self, corpus: &str) {
-        self.search_test_corpus = Some(corpus.to_string());
-        if self.search_open {
-            self.recompute_search();
-        }
-    }
-
-    /// Flip the regex option and recompute matches — the production effect of
-    /// clicking the Regex toggle, exposed for the headless test (which cannot
-    /// reliably click the overlay's flow buttons).
-    #[allow(dead_code)]
-    pub fn test_set_regex(&mut self, on: bool) {
-        self.search_regex = on;
-        if self.search_open {
-            self.recompute_search();
-        }
-    }
-
-    /// Flip the case-sensitivity option and recompute matches — the production
-    /// effect of clicking the Case toggle, exposed for the headless test.
-    #[allow(dead_code)]
-    pub fn test_set_case_sensitive(&mut self, on: bool) {
-        self.search_case_sensitive = on;
-        if self.search_open {
-            self.recompute_search();
-        }
-    }
-
-    /// Feed raw bytes straight into the FOCUSED pane's terminal emulator,
-    /// bypassing the PTY — so a headless test can build deterministic scrollback
-    /// (e.g. many `\r\n`-terminated lines) without depending on a live shell.
-    /// The shipping binary never calls this; production output always arrives via
-    /// the PTY pump.
-    #[allow(dead_code)]
-    pub fn test_feed_focused(&mut self, bytes: &[u8]) {
-        if let Some(term) = self.terms.get_mut(&self.focused_pane) {
-            term.test_advance(bytes);
-        }
-    }
-
-    /// The FOCUSED pane's current scroll-up offset (0 = following live output).
-    /// Exposed so the scroll-to-edge chord test can assert the observable scroll
-    /// position the keybinding produced.
-    #[allow(dead_code)]
-    pub fn test_focused_view_offset(&self) -> Option<usize> {
-        self.terms.get(&self.focused_pane).map(|t| t.view_offset())
-    }
-
-    /// The FOCUSED pane's scrollback history length. Exposed so the scroll-edge
-    /// chord test can confirm a non-empty history was built before asserting the
-    /// chord scrolled into it.
-    #[allow(dead_code)]
-    pub fn test_focused_scrollback_len(&self) -> Option<usize> {
-        self.terms
-            .get(&self.focused_pane)
-            .map(|t| t.scrollback_len())
-    }
-
-    /// The current match set converted to CELL spans over the focused pane's
-    /// grid text, ready for the highlight painter. Converts each match's BYTE
-    /// span to character columns via [`byte_to_col`] against the matched line, so
-    /// a multi-byte glyph before the match never offsets the highlight. A match
-    /// whose `line` exceeds the visible rows (the grid scrolled since the set was
-    /// computed) is dropped.
-    fn cell_spans_for_search(&self, lines: &[String]) -> Vec<CellSpan> {
-        if self.search_matches.is_empty() {
-            return Vec::new();
-        }
-        self.search_matches
-            .iter()
-            .filter_map(|m| {
-                let line = lines.get(m.line)?;
-                Some(CellSpan {
-                    line: m.line,
-                    col_start: byte_to_col(line, m.start),
-                    col_end: byte_to_col(line, m.end),
-                })
-            })
-            .collect()
-    }
-
-    /// Every `http(s)://` URL in the FOCUSED pane's grid text, as `(CellSpan,
-    /// url)` pairs ready for the Ctrl-hover underline and the Ctrl-click hit
-    /// test. Built from [`Self::focused_search_lines`] (which honours the test
-    /// corpus) via [`hyperlink::find_urls`], converting each URL's BYTE span to
-    /// character columns with [`byte_to_col`] so a multi-byte glyph before the
-    /// URL never offsets the underline. Computed once per frame before the
-    /// disjoint-borrow render block (mirrors [`Self::cell_spans_for_search`]).
-    fn cell_spans_for_hyperlinks(&self, lines: &[String]) -> Vec<(CellSpan, String)> {
-        let mut out = Vec::new();
-        for (row, line) in lines.iter().enumerate() {
-            for span in hyperlink::find_urls(line) {
-                out.push((
-                    CellSpan {
-                        line: row,
-                        col_start: byte_to_col(line, span.start),
-                        col_end: byte_to_col(line, span.end),
-                    },
-                    span.url,
-                ));
-            }
-        }
-        out
-    }
-
-    /// Render the find overlay (delegating to the [`search_ui`] free function so
-    /// it never fights `self`'s borrow), then recompute the match set when the
-    /// query or a toggle changed this frame. The `current` readout is the 1-based
-    /// selection index when on a match, else 0.
-    fn search_window(&mut self, ctx: &egui::Context) {
-        let colors = theme::ChromeColors::from_theme(&self.theme);
-        let match_count = self.search_matches.len();
-        let current = if match_count == 0 {
-            0
-        } else {
-            self.search_sel + 1
-        };
-        let outcome = {
-            let state = search_ui::SearchState {
-                query: &mut self.search_query,
-                regex: &mut self.search_regex,
-                case_sensitive: &mut self.search_case_sensitive,
-            };
-            search_ui::show(ctx, state, match_count, current, colors)
-        };
-        if outcome.changed {
-            self.recompute_search();
         }
     }
 }
