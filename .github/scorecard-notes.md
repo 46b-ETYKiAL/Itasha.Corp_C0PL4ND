@@ -41,9 +41,20 @@ action.
   ignore" path. **Re-evaluate when `portable-pty > 0.9.0` ships with the
   wezterm#6783 ConPTY fix** — at that point bump the dependency and remove the
   ignore.
-- **Verification**: `cargo audit` reports the advisory as the single *allowed
-  warning* (the ignore is honoured); `cargo deny check` passes. No
+- **Verification**: `cargo audit` reports this advisory among the *allowed
+  warnings* (the ignore is honoured); `cargo deny check` passes. No
   memory-safety or exploitable advisory is present.
+- **Full ignore list (`deny.toml` `[advisories] ignore`)**: six justified
+  *informational, no-usable-fix* advisories are suppressed — `serial`
+  (RUSTSEC-2017-0008), `proc-macro-error2` (RUSTSEC-2026-0173), `paste`
+  (RUSTSEC-2024-0436), `rsa` (RUSTSEC-2023-0071, no upstream patch yet),
+  `ttf-parser` (RUSTSEC-2026-0192), and `bincode` (RUSTSEC-2025-0141). Each is
+  either a build-time-only proc-macro, a transitively-pulled unmaintained crate
+  with no maintained drop-in, or (for `bincode`) feature-gated out of the build
+  graph entirely. The previously-suppressed `anyhow` (RUSTSEC-2026-0190) and
+  `memmap2` (RUSTSEC-2026-0186) advisories were **removed** from the ignore list
+  once both were bumped to patched versions — they are resolved in the locked
+  graph, not suppressed.
 
 ### `Fuzzing`
 

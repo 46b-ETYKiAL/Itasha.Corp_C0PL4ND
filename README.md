@@ -9,7 +9,7 @@
 <p align="center">
   <a href="#"><img alt="CI" src="https://img.shields.io/badge/CI-passing-22d3c7?style=flat-square" /></a>
   <a href="#license"><img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-ff2d78?style=flat-square" /></a>
-  <a href="../../releases/latest"><img alt="Latest release" src="https://img.shields.io/badge/release-v0.4.6-0b0b0f?style=flat-square" /></a>
+  <a href="../../releases/latest"><img alt="Latest release" src="https://img.shields.io/badge/release-v0.4.13-0b0b0f?style=flat-square" /></a>
   <a href="#"><img alt="Platforms" src="https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-22d3c7?style=flat-square" /></a>
 </p>
 
@@ -48,7 +48,7 @@ Most modern terminals make you choose. The fastest ones skip Windows or ship wit
 - **Search** — fast in-buffer search across scrollback.
 - **Command palette** — discover and run actions without memorizing keybindings.
 - **Startup panel** — a neofetch-style splash on launch: a brand ASCII logo beside live local stats (OS, kernel, host, uptime, shell, CPU, memory, GPU). Reads only local facts — never the network. Toggle with `startup_panel` in config.
-- **Retro-future default theme** — the *Retro-Future Anime OS* aesthetic ships as the default: **VOID BLACK + SIGNAL TEAL + NEON PINK**, with an optional CRT/scanline effect (off by default).
+- **Retro-future default theme** — the *Retro-Future Anime OS* aesthetic ships as the default (`itasha-corp`): a **void-black** background with **Itasha Purple `#7700FF`** structure and **Corp Green `#00FF90`** live/cursor accents, with an optional CRT/scanline effect (off by default).
 - **Readable TOML config** — simple key-value configuration with live reload; sensible defaults mean most users never touch it.
 
 ---
@@ -56,13 +56,16 @@ Most modern terminals make you choose. The fastest ones skip Windows or ship wit
 ## Screenshots
 
 > Media lives in [`assets/media/`](assets/media/). Screenshots are generated
-> headlessly (no display needed) with `c0pl4nd --screenshot <path.png>`.
+> headlessly (no display needed) with the legacy/dev binary:
+> `c0pl4nd-legacy --screenshot <path.png>`. (The canonical `c0pl4nd` binary
+> opens a window; `--screenshot` is a legacy-only flag — see `man c0pl4nd`.)
 
-![C0PL4ND — default theme (itasha-void)](assets/media/screenshot-default.png)
+![C0PL4ND — default theme (itasha-corp)](assets/media/screenshot-default.png)
 
-The default `itasha-void` theme: VOID BLACK background, SIGNAL TEAL accents,
-brand-coloured output, blinking cursor, and an inline Sixel image (the
-teal/pink band — rendered via the GPU textured-quad image pipeline).
+The default `itasha-corp` theme: void-black background, Itasha Purple `#7700FF`
+structure and Corp Green `#00FF90` live/cursor accents, brand-coloured output,
+blinking cursor, and an inline Sixel image (rendered via the GPU textured-quad
+image pipeline).
 
 ---
 

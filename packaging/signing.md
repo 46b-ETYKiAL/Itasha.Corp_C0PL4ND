@@ -34,13 +34,24 @@ verbatim):
 |---|---|---|
 | `MINISIGN_SECRET_KEY` | secret | The **passwordless** ed25519 secret key (`rsign generate -W` / `minisign -G -W`). Present → the release job installs rsign2 and signs every asset (`*.minisig`). Absent → the job logs a `::warning::` and ships checksummed-but-**unsigned** artifacts (the in-app updater then rejects them — fail-closed). The CI signs with rsign2; the app verifies with the `minisign-verify` crate (interoperable). |
 
-For each release asset the job runs:
+For each release asset the job runs (signing with the **bare basename from
+inside the asset directory** — see the critical note below):
 
 ```sh
 printf '%s\n' "$MINISIGN_SECRET_KEY" > sk.key
-rsign sign -W -s sk.key -x "<asset>.minisig" "<asset>"
-sha256sum "<asset>" > "<asset>.sha256"   # produced in the build job
+# Sign from INSIDE release/ with the bare filename, NOT a path-prefixed arg.
+( cd release && rsign sign -W -s "$PWD/../sk.key" -x "<asset>.minisig" "<asset>" )
+sha256sum "release/<asset>" > "release/<asset>.sha256"   # produced in the build job
 ```
+
+> **CRITICAL — sign the bare basename.** minisign records the *exact path
+> argument* it was given as the trusted comment (`file:<arg>`). The in-app
+> updater binds that token to the **bare downloaded asset name**, so you must
+> `cd` into `release/` and pass just `<asset>` — signing `release/<asset>`
+> writes `file:release/<asset>` into the trusted comment, and the fail-closed
+> updater rejects the artifact ("trusted-comment file mismatch"), breaking
+> auto-update for every deployed client. The release workflow enforces this via
+> `( cd "$(dirname "$f")" && rsign sign … "$(basename "$f")" )`.
 
 `<asset>`, `<asset>.minisig`, and `<asset>.sha256` are all uploaded to the GitHub
 Release. The updater downloads all three, verifies checksum + signature

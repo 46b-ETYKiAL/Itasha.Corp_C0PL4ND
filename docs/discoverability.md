@@ -23,8 +23,9 @@ Settings → Social preview. This is the card shown when the repo is shared.
 
 ## README hero
 
-`README.md` references `assets/svg/banner.svg` as the hero image and links the
-per-OS install one-liners high above the fold.
+`README.md` references `.github/assets/header.svg` as the hero image (with
+`.github/assets/footer.svg` as the closing banner) and links the per-OS install
+one-liners high above the fold.
 
 ## Release artifacts
 
