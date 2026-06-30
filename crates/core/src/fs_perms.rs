@@ -33,6 +33,17 @@ pub fn restrict_to_owner(path: &Path) {
         // already deny other standard users; as defense-in-depth we additionally
         // remove inheritance and grant only the current user, best-effort via
         // `icacls`. Output is discarded and any failure is ignored.
+        //
+        // PERF: `icacls` is a blocking subprocess spawn (process creation +
+        // Defender scan + NTFS ACL rewrite) costing tens-to-hundreds of ms. The
+        // ACL is a stable property of the FILE, not the write — once tightened it
+        // stays tightened, so re-running it on every save (e.g. a view-mode
+        // toggle, which persists config on the UI frame) added that latency to
+        // each save for no benefit. Tighten each path at most ONCE per process;
+        // subsequent saves of the same file skip the spawn entirely.
+        if already_tightened_this_process(path) {
+            return;
+        }
         if let Ok(user) = std::env::var("USERNAME") {
             if !user.is_empty() {
                 let _ = std::process::Command::new("icacls")
@@ -49,6 +60,31 @@ pub fn restrict_to_owner(path: &Path) {
     #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
+    }
+}
+
+/// Whether `path`'s owner-only ACL has already been applied in this process.
+/// Returns `true` (and records nothing new) if the path was tightened before;
+/// returns `false` the first time, recording it so the costly `icacls` spawn
+/// runs at most once per file per process. Best-effort: a poisoned lock falls
+/// through to running the tighten (correctness over the perf optimisation).
+///
+/// Cross-platform (not `#[cfg(windows)]`) ON PURPOSE: the cache DECISION is pure
+/// logic and is unit-tested on every OS, so a regression in it is caught by the
+/// mutation/coverage gates. Only the `icacls` spawn it guards is Windows-specific
+/// — that lives in [`restrict_to_owner`]'s `#[cfg(windows)]` block, which is the
+/// sole caller, so the fn is dead code on non-Windows builds (allowed below).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn already_tightened_this_process(path: &Path) -> bool {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    let cell = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    match cell.lock() {
+        // `insert` returns false when the value was already present.
+        Ok(mut seen) => !seen.insert(path.to_path_buf()),
+        Err(_) => false,
     }
 }
 
@@ -114,6 +150,48 @@ mod tests {
             "restrict_to_owner must leave the file content unchanged"
         );
         let _ = std::fs::remove_file(&p);
+    }
+
+    /// The per-process tighten cache must return `false` the FIRST time it sees a
+    /// path (so the caller runs the costly `icacls` spawn once) and `true` on
+    /// every subsequent call for the SAME path (so the spawn is skipped). A
+    /// distinct path is independent. Kills the mutation-gate survivors that
+    /// replace the body with a constant `true`/`false` or drop the `!`.
+    #[test]
+    fn already_tightened_this_process_is_false_first_then_true_per_path() {
+        // Unique per test run so the process-global cache can't be pre-seeded by
+        // another test (the set is never cleared within a process).
+        let a = std::env::temp_dir().join(format!(
+            "c0pl4nd-tighten-cache-{}-{}-A.bin",
+            std::process::id(),
+            line!()
+        ));
+        let b = std::env::temp_dir().join(format!(
+            "c0pl4nd-tighten-cache-{}-{}-B.bin",
+            std::process::id(),
+            line!()
+        ));
+
+        // First sighting of `a`: not yet tightened → caller SHOULD run the op.
+        assert!(
+            !already_tightened_this_process(&a),
+            "first call for a path must report NOT-yet-tightened (false)"
+        );
+        // Second sighting of the SAME path: already recorded → caller SKIPS the op.
+        assert!(
+            already_tightened_this_process(&a),
+            "second call for the same path must report already-tightened (true)"
+        );
+        // A DIFFERENT path is tracked independently → first sighting is false.
+        assert!(
+            !already_tightened_this_process(&b),
+            "a distinct path must be independent (first call false)"
+        );
+        // …and it too flips to true once recorded.
+        assert!(
+            already_tightened_this_process(&b),
+            "the distinct path must also report true on its second call"
+        );
     }
 
     /// A directory target is also handled best-effort without panic (the
