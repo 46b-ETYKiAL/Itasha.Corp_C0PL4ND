@@ -52,13 +52,17 @@ fn emit_windows_exploit_mitigations() {
     }
     // `rustc-link-arg-bins=<arg>` passes `<arg>` straight to the linker for
     // binary targets only — exactly the MSVC `link.exe` switches we want.
-    for flag in [
-        "/GUARD:CF",
-        "/CETCOMPAT",
-        "/HIGHENTROPYVA",
-        "/DYNAMICBASE",
-        "/NXCOMPAT",
-    ] {
+    // These four are valid on every MSVC architecture (x86 and ARM64).
+    let mut flags = vec!["/GUARD:CF", "/HIGHENTROPYVA", "/DYNAMICBASE", "/NXCOMPAT"];
+    // `/CETCOMPAT` (Intel CET shadow-stack) is an x86-ONLY feature; the ARM64
+    // linker rejects it with `LNK1246: '/CETCOMPAT' not compatible with 'ARM64'
+    // target machine`. ARM64 Windows has its own ROP defense (pointer
+    // authentication / the platform's hardware CFI), so emit `/CETCOMPAT` only
+    // for the x86 MSVC targets and skip it on `aarch64-pc-windows-msvc`.
+    if target.starts_with("x86_64") || target.starts_with("i686") {
+        flags.push("/CETCOMPAT");
+    }
+    for flag in flags {
         println!("cargo:rustc-link-arg-bins={flag}");
     }
 }
