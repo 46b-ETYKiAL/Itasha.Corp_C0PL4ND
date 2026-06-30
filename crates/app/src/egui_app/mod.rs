@@ -3944,6 +3944,20 @@ impl C0pl4ndApp {
         }
     }
 
+    /// The current [`FramePolicy`](c0pl4nd_renderer::FramePolicy): `Continuous`
+    /// (redraw every vsync) only while the CRT scanline animation is enabled AND
+    /// reduced-motion is off; otherwise `OnDamage` (redraw on PTY output / input /
+    /// the bounded idle cadence). This is the typed expression of the shell's
+    /// frame-scheduling contract — the single biggest perceived-latency / battery
+    /// lever — shared with the renderer crate.
+    fn frame_policy(&self) -> c0pl4nd_renderer::FramePolicy {
+        if self.config.effects.crt_scanlines && !c0pl4nd_core::reduced_motion::reduced_motion() {
+            c0pl4nd_renderer::FramePolicy::Continuous
+        } else {
+            c0pl4nd_renderer::FramePolicy::OnDamage
+        }
+    }
+
     /// The longest the live UI may wait before an *unforced* repaint. PTY output
     /// and user input repaint immediately; this only bounds idle staleness so an
     /// otherwise-quiescent terminal stops redrawing at the monitor refresh rate.
@@ -3954,7 +3968,7 @@ impl C0pl4ndApp {
         // self-requests a repaint, so this just matches that cadence). F2-2: under
         // reduced-motion the roll band is frozen and does not self-request, so do
         // NOT pump the animation here either — fall through to the idle cadence.
-        if self.config.effects.crt_scanlines && !c0pl4nd_core::reduced_motion::reduced_motion() {
+        if self.frame_policy() == c0pl4nd_renderer::FramePolicy::Continuous {
             return Duration::ZERO; // == request_repaint(): animate at display rate
         }
         // A blink-enabled cursor must keep blinking on an otherwise-idle screen;

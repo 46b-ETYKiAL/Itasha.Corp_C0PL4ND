@@ -41,6 +41,10 @@ workspace = true
 
 [dependencies]
 c0pl4nd-core = { path = "../core" }
+# Rendering contracts shared with a future native GPU backend. The egui shell is
+# itself a renderer and consumes the `FramePolicy` frame-scheduling contract
+# (render-on-damage vs continuous) so the policy has a single typed home.
+c0pl4nd-renderer = { path = "../renderer" }
 # W1TN3SS opt-in reporting SDK (pinned git rev; default-OFF, consent-gated). The
 # app is a pure consumer — capture/sanitize/spool/preview/transport/intake all
 # live in the SDK and are CALLED from `reporting.rs` + `issue_intake.rs`.
