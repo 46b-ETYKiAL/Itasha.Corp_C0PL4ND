@@ -133,7 +133,12 @@ pub(crate) fn byte_to_col(line: &str, byte: usize) -> usize {
 /// or left of the grid (a negative cell index). Pure so the Ctrl-click hit test
 /// is unit-testable without an egui frame. Out-of-range high indices are NOT
 /// clamped here — the caller's span list simply won't contain a matching span.
-pub(crate) fn cell_at_pos(pos: egui::Pos2, origin: egui::Pos2, cw: f32, ch: f32) -> Option<(usize, usize)> {
+pub(crate) fn cell_at_pos(
+    pos: egui::Pos2,
+    origin: egui::Pos2,
+    cw: f32,
+    ch: f32,
+) -> Option<(usize, usize)> {
     if pos.x < origin.x || pos.y < origin.y || cw <= 0.0 || ch <= 0.0 {
         return None;
     }
@@ -283,7 +288,11 @@ pub(crate) fn scrub_display_text(s: &str) -> String {
 /// precomputed `(CellSpan, url)` links (built by
 /// [`super::C0pl4ndApp::cell_spans_for_hyperlinks`]); the column test is half-open
 /// `[col_start, col_end)`, matching how the spans were built.
-pub(crate) fn link_url_at_cell(links: &[(CellSpan, String)], row: usize, col: usize) -> Option<&str> {
+pub(crate) fn link_url_at_cell(
+    links: &[(CellSpan, String)],
+    row: usize,
+    col: usize,
+) -> Option<&str> {
     links
         .iter()
         .find(|(s, _)| s.line == row && col >= s.col_start && col < s.col_end)
@@ -293,7 +302,11 @@ pub(crate) fn link_url_at_cell(links: &[(CellSpan, String)], row: usize, col: us
 /// The URL SPAN whose cells cover `(row, col)`, if any — the geometry the
 /// hover-underline affordance paints (the sibling of [`link_url_at_cell`], which
 /// returns the URL string).
-pub(crate) fn link_span_at_cell(links: &[(CellSpan, String)], row: usize, col: usize) -> Option<&CellSpan> {
+pub(crate) fn link_span_at_cell(
+    links: &[(CellSpan, String)],
+    row: usize,
+    col: usize,
+) -> Option<&CellSpan> {
     links
         .iter()
         .find(|(s, _)| s.line == row && col >= s.col_start && col < s.col_end)

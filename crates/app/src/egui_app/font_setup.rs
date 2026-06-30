@@ -89,7 +89,9 @@ pub(crate) fn install_base_fonts(ctx: &egui::Context) {
 /// `FontFamily::Monospace`. This is the heavy (100s-of-ms) call — invoked off the
 /// startup critical path on a worker thread by [`spawn_system_font_load`], and
 /// synchronously by [`install_chrome_fonts`] on a settings change.
-pub(crate) fn build_system_font_definitions(font: &c0pl4nd_core::config::FontConfig) -> egui::FontDefinitions {
+pub(crate) fn build_system_font_definitions(
+    font: &c0pl4nd_core::config::FontConfig,
+) -> egui::FontDefinitions {
     let base = base_font_definitions();
     let mut db = fontdb::Database::new();
     db.load_system_fonts();

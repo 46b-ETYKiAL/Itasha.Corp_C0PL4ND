@@ -22,7 +22,9 @@ pub(crate) fn load_config_with_status() -> (c0pl4nd_core::Config, Option<String>
 /// (the real entry resolves `Config::default_path()`). An absent path → defaults
 /// with no error; a present-but-invalid file → defaults WITH an error message
 /// (the F5-2 surfacing contract).
-pub(crate) fn load_config_from(path: Option<std::path::PathBuf>) -> (c0pl4nd_core::Config, Option<String>) {
+pub(crate) fn load_config_from(
+    path: Option<std::path::PathBuf>,
+) -> (c0pl4nd_core::Config, Option<String>) {
     match path {
         Some(p) => match std::fs::read_to_string(&p)
             .map_err(|e| e.to_string())
@@ -81,7 +83,9 @@ pub(crate) fn theme_candidate_paths(
 /// by the caller — previously such a failure was swallowed by `if let Ok` and
 /// the user silently got the wrong (fallback) colors with no explanation. An
 /// ABSENT file is the normal case and stays silent.
-pub(crate) fn load_terminal_theme(config: &c0pl4nd_core::Config) -> (c0pl4nd_core::Theme, Option<String>) {
+pub(crate) fn load_terminal_theme(
+    config: &c0pl4nd_core::Config,
+) -> (c0pl4nd_core::Theme, Option<String>) {
     let config_path = c0pl4nd_core::Config::default_path();
     let config_dir = config_path.as_deref().and_then(|p| p.parent());
     let exe = std::env::current_exe().ok();

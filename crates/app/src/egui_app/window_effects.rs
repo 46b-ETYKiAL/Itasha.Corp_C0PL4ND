@@ -53,7 +53,10 @@ pub(crate) fn pane_bg_alpha(config: &c0pl4nd_core::Config) -> u8 {
 ///
 /// Free function (takes `&Config`, `&Theme`) so the headless tests can assert
 /// the clear color for a given config without an eframe window.
-pub(crate) fn window_clear_color(config: &c0pl4nd_core::Config, theme: &c0pl4nd_core::Theme) -> [f32; 4] {
+pub(crate) fn window_clear_color(
+    config: &c0pl4nd_core::Config,
+    theme: &c0pl4nd_core::Theme,
+) -> [f32; 4] {
     if !config.effective_translucent() {
         // Opaque: solid theme background, full alpha.
         let (r, g, b) =
@@ -188,4 +191,3 @@ pub(crate) fn apply_window_effect(
         | c0pl4nd_core::config::WindowMode::Opaque => {}
     }
 }
-

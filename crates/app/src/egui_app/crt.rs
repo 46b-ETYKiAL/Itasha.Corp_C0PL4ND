@@ -163,7 +163,13 @@ pub(crate) fn scanline_roll_top(top: f32, height: f32, roll_h: f32, t: f32) -> f
 /// `darkness` (0..=1) tunes the trough darkness. GPU-free (filled rects). The
 /// caller's `painter_at(rect)` clip keeps every band inside the pane; the caller
 /// also requests a repaint each frame so the roll keeps moving.
-pub(crate) fn paint_crt_scanlines(painter: &egui::Painter, rect: egui::Rect, ppp: f32, t: f32, darkness: f32) {
+pub(crate) fn paint_crt_scanlines(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ppp: f32,
+    t: f32,
+    darkness: f32,
+) {
     let period = scanline_period_pts(ppp);
     let band_h = period * CRT_SCANLINE_DUTY;
     let dark = egui::Color32::from_black_alpha(scanline_dark_alpha(darkness));

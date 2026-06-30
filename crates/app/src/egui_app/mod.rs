@@ -17,6 +17,7 @@
 
 pub mod bidi;
 pub mod chrome;
+mod crt;
 pub mod fonts;
 pub mod grid;
 pub mod hyperlink;
@@ -26,7 +27,6 @@ mod search_ui;
 mod settings;
 pub mod shells;
 mod theme;
-mod crt;
 pub(crate) use crt::*;
 mod grid_interaction;
 pub(crate) use grid_interaction::*;
