@@ -20,17 +20,16 @@
 # UNMAINTAINED build-time proc-macro helpers (compile-time only, not runtime
 # attack surface) entering transitively via the Arti stack / the W1TN3SS SDK's
 # `age` E2E stack. Mirrors the deny.toml ignores.
-# RUSTSEC-2026-0190: `anyhow` unsoundness in `Error::downcast_mut()` — UB only
-# via `Error::context(X)` then `downcast_mut::<X>()`. C0PL4ND never calls
-# `downcast_mut` (zero hits in `crates/`), so exposure is nil; no patched anyhow
-# release exists (1.0.102 is latest). Mirrors the deny.toml ignore. Drop + bump
-# when anyhow ships a fix.
+#
+# RUSTSEC-2026-0190 (`anyhow`) and RUSTSEC-2026-0186 (`memmap2`) were REMOVED
+# (2026-06-30): anyhow is at the patched 1.0.103 and memmap2 was bumped to the
+# patched 0.9.11, so both advisories are RESOLVED in the locked graph rather
+# than suppressed (rustsec.org: fixed in >=1.0.103 / >=0.9.11). Mirrors deny.toml.
 ignore = [
     "RUSTSEC-2017-0008",
     "RUSTSEC-2023-0071",
     "RUSTSEC-2024-0436",
     "RUSTSEC-2026-0173",
-    "RUSTSEC-2026-0190",
     # RUSTSEC-2026-0192: `ttf-parser` UNMAINTAINED (informational). Transitive
     # font parser via the egui text stack (fontdb / cosmic-text / glyphon).
     # Mirrors the deny.toml ignore (lockstep SC-1).
@@ -39,8 +38,4 @@ ignore = [
     # an OPTIONAL, feature-gated dep of `typed-index-collections` that this build
     # never enables (not in the compiled graph). Mirrors the deny.toml ignore.
     "RUSTSEC-2025-0141",
-    # RUSTSEC-2026-0186: `memmap2` UNSOUND (unchecked pointer offset). Transitive
-    # read-only mmap via fontdb / winit (sctk-adwaita) / Arti tor-dirmgr; never
-    # called directly. No patched 0.9.x yet. Mirrors the deny.toml ignore.
-    "RUSTSEC-2026-0186",
 ]
