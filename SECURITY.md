@@ -198,6 +198,30 @@ without the `MINISIGN_SECRET_KEY` secret set, the release workflow ships
 checksummed but **unsigned** artifacts, which the in-app updater rejects by
 design.)
 
+### Signed update manifest (Tier-1)
+
+On top of the per-asset SHA-256 + minisign checks above, every release ships a
+single **signed manifest** — `latest.json` plus a `latest.json.minisig`
+signature produced by the **same** embedded key
+(`crates/app/src/update_engine/manifest.rs`). The manifest is verified
+**signature-first**: the minisign signature is checked over the raw JSON bytes
+**before** the document is parsed, so a tampered or forged `latest.json` never
+reaches the deserializer (`parse_and_verify`). It binds the release's identity —
+product, schema, version, a strictly-monotonic `release_index`, and the expected
+SHA-256 of every platform asset — into one signed document, catching attacks the
+per-asset gates cannot (a MITM/compromised CDN that swaps in an older-but-genuine
+asset, or replays a stale listing). It adds two further fail-closed gates:
+
+1. **Anti-rollback floor (`minimum_version` + `release_index`).** An in-place
+   update is refused when the running version is below the manifest's
+   `minimum_version`, and the persisted high-water `release_index`
+   (`update_state`) refuses any manifest that is not strictly newer — so a
+   downgrade to an older signed release is rejected.
+2. **Freshness window (`valid_until_utc`).** Each manifest carries a freshness
+   deadline; after that instant it is treated as a frozen/stale beacon and
+   refused — the anti-freeze defense against an attacker pinning a client on a
+   vulnerable version. An unparseable date is never "fresh."
+
 ### Key-rotation runbook (minisign)
 
 The signing public key is **embedded in the binary** at build time

@@ -1,7 +1,7 @@
 .\" Manpage for c0pl4nd.
 .\" Generated to match the real CLI surface in crates/app/src/egui_main.rs
 .\" (canonical binary) and crates/app/src/main.rs (legacy binary).
-.TH C0PL4ND 1 "2026-06-10" "c0pl4nd 0.3.0" "User Commands"
+.TH C0PL4ND 1 "2026-06-30" "c0pl4nd 0.4.13" "User Commands"
 .SH NAME
 c0pl4nd \- fast, GPU-accelerated, local-first terminal emulator
 .SH SYNOPSIS
@@ -9,8 +9,6 @@ c0pl4nd \- fast, GPU-accelerated, local-first terminal emulator
 .RB [ \-\-version ]
 .RB [ \-\-diagnostics ]
 .RB [ update ]
-.RB [ \-\-screenshot
-.IR PATH ]
 .SH DESCRIPTION
 .B c0pl4nd
 is a cross-platform terminal emulator written in Rust, with a
@@ -27,15 +25,6 @@ subcommand below run a one-shot action and exit without opening a window.
 .TP
 .BR \-\-version ", " \-V
 Print the product name and version, then exit.
-.TP
-.BI \-\-screenshot " PATH"
-Render the terminal to a PNG at
-.I PATH
-without opening a window (headless render, used for documentation and CI
-media). If
-.I PATH
-is omitted, the image is written to
-.IR c0pl4nd.png .
 .TP
 .BR \-\-diagnostics ", " \-\-doctor
 Print a one-shot environment and configuration report \(em product version,
@@ -62,11 +51,21 @@ accepts:
 Run a headless demo: spawn the shell, run a deterministic command, and print
 the rendered grid to standard output. Verifies the core engine (PTY + VT +
 grid) end to end without a GPU or display.
+.TP
+.BI \-\-screenshot " PATH"
+Render the terminal to a PNG at
+.I PATH
+without opening a window (headless render, used for documentation and CI
+media). If
+.I PATH
+is omitted, the image is written to
+.IR c0pl4nd.png .
+This is a legacy/dev-only flag for generating documentation media.
 .PP
 The canonical
 .B c0pl4nd
 binary does not accept
-.BR \-\-demo .
+.BR \-\-demo " or " \-\-screenshot .
 .SH CONFIGURATION
 .B c0pl4nd
 works with no configuration. To customize it, edit a single TOML file:

@@ -1,6 +1,6 @@
 # C0PL4ND Prioritized Gap List (audit + best-in-class research)
 
-Synthesized from `RESEARCH_TERMINAL_SPEC.md` (80+ features, 7-terminal matrix), `RESEARCH_WINDOW_UX.md` (window/UX + winit/wgpu patterns), and `AUDIT_FINDINGS.md` (current-state structural audit, twice-verified). Comparison set: Ghostty, WezTerm, kitty, Alacritty, iTerm2, Windows Terminal, Konsole.
+Synthesized from `RESEARCH_TERMINAL_SPEC.md` (80+ features, 7-terminal matrix), `RESEARCH_WINDOW_UX.md` (window/UX + winit/wgpu patterns), and a twice-verified current-state structural audit. Comparison set: Ghostty, WezTerm, kitty, Alacritty, iTerm2, Windows Terminal, Konsole.
 
 Legend: **P0** = expected-everywhere / correctness or breaks real apps · **P1** = strongly wanted · **P2** = power-user · **P3** = niche. Status: ✅ built · ⚠️ partial · ❌ absent.
 

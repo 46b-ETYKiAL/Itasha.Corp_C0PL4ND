@@ -19,10 +19,14 @@ installable artifact — not just that a manifest file exists in the repo.
 
 - [ ] The GitHub Release for the tag exists and is **not** a draft.
 - [ ] `gh release view <tag> --json assets -q '.assets[].name'` lists the
-      expected assets: `*-x86_64-unknown-linux-gnu.tar.gz`,
-      `*-x86_64-pc-windows-msvc.zip`, `c0pl4nd-<tag>-x86_64-setup.exe`,
-      `*.cdx.json` (SBOM), `BUILD-PROVENANCE.txt`, `*.sha256`, `SHA256SUMS`,
-      and (when signing is provisioned) `*.minisig` siblings.
+      expected assets — all six build targets:
+      `*-x86_64-unknown-linux-gnu.tar.gz`, `*-aarch64-unknown-linux-gnu.tar.gz`,
+      `*-x86_64-pc-windows-msvc.zip`, `*-aarch64-pc-windows-msvc.zip`,
+      `*-x86_64-apple-darwin.tar.gz`, `*-aarch64-apple-darwin.tar.gz`, plus
+      `c0pl4nd-<tag>-x86_64-setup.exe` (Windows installer), the signed Tier-1
+      update manifest `latest.json` (+ `latest.json.minisig`), `*.cdx.json`
+      (SBOM), `BUILD-PROVENANCE.txt`, `*.sha256`, `SHA256SUMS`, and (when signing
+      is provisioned) `*.minisig` siblings.
 - [ ] `gh attestation verify <asset> --repo 46b-ETYKiAL/Itasha.Corp_C0PL4ND`
       passes for at least one binary + the installer (SLSA build provenance).
 - [ ] `BUILD-PROVENANCE.txt` records the `rustc -vV` identity and the
@@ -85,11 +89,14 @@ values (`0000…` / `1111…`) and points at a `version "0.1.0"` with
 c0pl4nd` only resolves if the cask is published to **homebrew-cask** OR a tap
 (the cask's own header says distribute via `itasha-corp/homebrew-tap` →
 `brew install --cask itasha-corp/tap/c0pl4nd`). No tap repo is confirmed
-present. Additionally, the macOS DMG this cask points at is **not built by the
-current `release.yml`** (the release matrix ships Linux + Windows only;
-`packaging/macos/build-dmg.sh` exists but is not wired into CI) — so the cask's
-download URLs would 404. Create-before-advertising: build + publish the DMG and
-the tap, and fill the real `version` + per-arch `sha256`, before advertising.
+present. Note: the release matrix **does** build both macOS arches
+(`*-aarch64-apple-darwin.tar.gz` + `*-x86_64-apple-darwin.tar.gz` portable
+archives), so Mac users have a working download today. What is **not** built by
+the current `release.yml` is the `.dmg` this cask points at
+(`packaging/macos/build-dmg.sh` exists but is not wired into CI) — so the cask's
+DMG download URLs would 404. Create-before-advertising: build + publish the DMG
+and the tap, and fill the real `version` + per-arch `sha256`, before advertising
+the Homebrew cask channel.
 
 Smoke tests once the cask + DMG are live:
 
@@ -161,13 +168,18 @@ Smoke tests:
 
 ## 6. Portable archives (zip / tar.gz — no installer)
 
-These are produced directly by the `build` job and are the most reliable
-channel.
+These are produced directly by the `build` job for all six targets and are the
+most reliable channel.
 
-- [ ] Download `c0pl4nd-<tag>-x86_64-pc-windows-msvc.zip` (Windows) /
-      `c0pl4nd-<tag>-x86_64-unknown-linux-gnu.tar.gz` (Linux).
-- [ ] Verify against `SHA256SUMS`.
-- [ ] Extract, run `c0pl4nd --version` (Linux: `./c0pl4nd`; Windows:
+- [ ] Download the archive for each target:
+      `c0pl4nd-<tag>-x86_64-pc-windows-msvc.zip` /
+      `c0pl4nd-<tag>-aarch64-pc-windows-msvc.zip` (Windows x64 / ARM64),
+      `c0pl4nd-<tag>-x86_64-unknown-linux-gnu.tar.gz` /
+      `c0pl4nd-<tag>-aarch64-unknown-linux-gnu.tar.gz` (Linux x64 / ARM64),
+      `c0pl4nd-<tag>-x86_64-apple-darwin.tar.gz` /
+      `c0pl4nd-<tag>-aarch64-apple-darwin.tar.gz` (Intel / Apple-Silicon Mac).
+- [ ] Verify each against `SHA256SUMS`.
+- [ ] Extract, run `c0pl4nd --version` (Unix: `./c0pl4nd`; Windows:
       `c0pl4nd.exe`).
 
 ---

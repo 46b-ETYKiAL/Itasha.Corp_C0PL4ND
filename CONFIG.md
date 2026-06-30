@@ -6,7 +6,7 @@ C0PL4ND is designed to be **great out of the box with zero configuration**. You 
 
 | Platform | Path |
 | --- | --- |
-| Linux | `~/.config/c0pl4nd/config.toml` |
+| Linux | `~/.config/c0pl4nd/config.toml` (or `$XDG_CONFIG_HOME/c0pl4nd/config.toml`) |
 | macOS | `~/.config/c0pl4nd/config.toml` |
 | Windows | `%APPDATA%\c0pl4nd\config.toml` |
 
@@ -14,104 +14,146 @@ If the file doesn't exist, C0PL4ND runs entirely on its defaults. Create the fil
 
 ## Live reload
 
-Changes are applied **live the moment you save** — no restart required. If your edit contains a syntax error or an invalid value, C0PL4ND reports the problem and continues running with your last valid configuration, so a bad edit never leaves you locked out of your terminal.
+Changes are applied **live the moment you save** — no restart required. If your edit contains a syntax error or an invalid value, C0PL4ND reports the problem and continues running with your last valid configuration, so a bad edit never leaves you locked out of your terminal. (A few fields — window opacity, acrylic/transparency, and font fallbacks — take full effect on the next launch.)
 
 ---
 
-## Sections at a glance
+## Keys at a glance
 
-| Section | What it controls |
-| --- | --- |
-| `[font]` | Font family and size |
-| `[theme]` | Active color theme (default: `itasha-void`) |
-| `[window]` | Background opacity |
-| `[cursor]` | Cursor shape and blink |
-| `[scrollback]` | Scrollback buffer size |
-| `[tabs]` | Tab bar behavior |
-| `[splits]` | Split/pane behavior |
-| `[session]` | Close-confirmation and session safety |
-| `[effects]` | The optional CRT/scanline effect (off by default) |
-| `[keybindings]` | Keyboard shortcut overrides |
-| `startup_panel` | The neofetch-style launch splash (on by default) |
+Most settings are **top-level keys**; a handful are grouped into tables. This reflects the real config schema in `crates/core/src/config/mod.rs`.
+
+| Key / table | Kind | What it controls |
+| --- | --- | --- |
+| `theme` | top-level string | Active color theme (default: `itasha-corp`) |
+| `scrollback_lines` | top-level | Scrollback buffer size (lines per pane) |
+| `opacity` | top-level | Window opacity, `0.0`..=`1.0` |
+| `transparency_enabled` / `window_mode` / `tint` / `tint_strength` / `acrylic` | top-level | Window translucency system |
+| `ui_scale` | top-level | Whole-UI accessibility zoom (`0.5`..=`3.0`) |
+| `startup_panel` | top-level | The neofetch-style launch splash (on by default) |
+| `shell` / `term` | top-level | Override the child shell program / its `TERM` value |
+| `ligatures` / `copy_on_select` / `paste_warn_multiline` / `history_capture_enabled` | top-level | Editor/selection/clipboard/history behaviour |
+| `history_sidebar_side` / `view_mode` | top-level | Command-history sidebar side; pane shell layout |
+| `[font]` | table | Font family, size, line height, fallback chain |
+| `[cursor]` | table | Cursor shape and blink |
+| `[window]` | table | Initial size (cols/rows), padding, persisted geometry |
+| `[effects]` | table | The optional CRT/scanline + chromatic-aberration effects (off by default) |
+| `[keybindings]` | table | Keybinding **reference** (not yet rebindable — see note below) |
+| `[update]` | table | The optional update check |
+| `[reporting]` | table | Opt-in W1TN3SS crash/issue reporting (off by default) |
 
 ---
+
+## Theme
+
+The **default theme is `itasha-corp`** — the Itasha.Corp house brand: a **void-black** background with **Itasha Purple `#7700FF`** structure and **Corp Green `#00FF90`** as the live/cursor voice. `theme` is a **top-level string** that names a theme file stem in the themes directory:
+
+```toml
+theme = "itasha-corp"   # the default; other built-in themes can be selected by name
+```
+
+There is no `[theme]` table — just the single top-level `theme` key.
 
 ## Font
 
 ```toml
 [font]
-family = "JetBrains Mono"   # any installed monospace font family
-size = 13.0                  # points
+family = "Monaspace Neon"   # any installed monospace font family
+size = 14.0                  # points
+line_height = 20.0           # cell vertical advance, in pixels
+fallback = ["Noto Sans JP", "monospace"]   # glyphs the primary font lacks (CJK, etc.)
 ```
 
-If the requested family isn't installed, C0PL4ND falls back to a bundled monospace default.
-
-## Theme
-
-The **default theme is `itasha-void`** — the Retro-Future Anime OS aesthetic: **VOID BLACK** background, **SIGNAL TEAL** accents, and **NEON PINK** highlights.
-
-```toml
-[theme]
-name = "itasha-void"   # the default; other built-in themes can be selected by name
-```
+If the requested family isn't installed, C0PL4ND falls back through the `fallback` chain to a bundled monospace default.
 
 ## Window / opacity
 
+`opacity` is a **top-level** key (not under `[window]`). The `[window]` table holds the initial grid size, inner padding, and the persisted geometry restored on the next launch.
+
 ```toml
+opacity = 1.0   # top-level: 0.0 (fully transparent) .. 1.0 (fully opaque)
+
 [window]
-opacity = 1.0   # 0.0 (fully transparent) .. 1.0 (fully opaque)
+cols = 80       # initial terminal width in columns
+rows = 24       # initial terminal height in rows
+padding = 8     # inner padding between the window edge and the grid, in pixels
+# pos_x / pos_y / size_w / size_h / maximized / monitor are written automatically
+# to remember your window geometry; you normally don't set these by hand.
 ```
+
+## Transparency (translucency modes)
+
+Translucency is **opt-in** and **off by default** (a solid window). The master switch is `transparency_enabled`; `window_mode` picks how the window blends:
+
+```toml
+transparency_enabled = false   # master on/off for the whole transparency system
+window_mode = "opaque"         # opaque | transparent | glass | mica | vibrancy
+tint = "#121212"               # #RRGGBB overlay painted when a translucent mode is active
+tint_strength = 0.0            # 0.0 (no tint) .. 1.0 (strong)
+```
+
+- `transparent` — the portable, cross-platform reduced-alpha surface.
+- `glass` / `mica` / `vibrancy` — request an OS blur backdrop (acrylic/mica on Windows, vibrancy on macOS), degrading to the portable transparent surface where the API is absent.
+- `acrylic` — a **legacy** top-level bool, retained so older configs still load; `acrylic = true` migrates to `transparency_enabled = true, window_mode = "glass"` on load.
+
+These apply on the next launch.
 
 ## Cursor
 
 ```toml
 [cursor]
-style = "block"   # "block" | "beam" | "underline"
+style = "block"   # "block" | "bar" | "underline"
 blink = true
 ```
 
 ## Scrollback
 
-```toml
-[scrollback]
-lines = 10000   # number of lines retained per pane
-```
-
-## Tabs
+`scrollback_lines` is a **top-level** key (there is no `[scrollback]` table):
 
 ```toml
-[tabs]
-enabled = true
-position = "top"          # "top" | "bottom"
-show_when_single = false  # hide the tab bar when only one tab is open
+scrollback_lines = 10000   # number of lines retained per pane
 ```
 
-## Splits
+## UI scale (accessibility zoom)
 
 ```toml
-[splits]
-# New splits inherit the working directory of the focused pane (via OSC 7).
-inherit_cwd = true
+ui_scale = 1.0   # whole-interface zoom multiplier, clamped to 0.5 .. 3.0 (1.0 = 100%)
 ```
 
-## Session safety
+This is the persisted zoom for the entire UI (chrome + grid), distinct from the transient `Ctrl/Cmd +`/`-` keyboard zoom.
 
-C0PL4ND never closes a window full of running work without asking.
+## Shell & TERM
 
 ```toml
-[session]
-confirm_close_with_processes = true   # warn before closing a window with running child processes
+# shell = "/bin/zsh"     # override the child shell; omit to use the platform default
+term = "xterm-256color"  # the TERM advertised to the child shell (default: xterm-256color)
 ```
 
-## CRT / scanline effect
+`COLORTERM` is always `truecolor` and is not configurable.
 
-A retro CRT/scanline overlay is available for the full *into the wired* aesthetic. It is **off by default** for clarity and performance.
+## Editor, selection & history behaviour
+
+```toml
+ligatures = false            # enable programming ligatures / complex text shaping
+copy_on_select = false       # X11-style: copy a mouse selection the moment the drag ends
+paste_warn_multiline = true  # confirm before pasting clipboard text containing a newline (a safety feature)
+history_capture_enabled = true   # record echoed commands for the palette + history sidebar
+history_sidebar_side = "right"   # which side the command-history sidebar docks to: "left" | "right"
+view_mode = "grid"               # pane shell layout: "grid" (tiling) | "tabs" (single full-size pane)
+```
+
+## CRT / scanline & chromatic-aberration effects
+
+Retro post-effects are available for the full *into the wired* aesthetic. They are **off by default** for clarity and performance.
 
 ```toml
 [effects]
-crt = false        # master toggle for the CRT/scanline effect
-scanline = 0.0     # 0.0 (none) .. 1.0 (strong) — scanline intensity, applies when crt = true
+crt_scanlines = false              # master toggle for the CRT/scanline overlay
+scanline_darkness = 0.4            # 0.0 (none) .. 1.0 (strong) — scanline trough darkness
+chromatic_aberration_enabled = false   # explicit ON/OFF for chromatic aberration
+chromatic_aberration = 0.0         # intensity; only applied when chromatic_aberration_enabled = true
 ```
+
+`scanline_darkness` defaults to `0.4` (so enabling scanlines reads as distinct lines, not a flat grey film). Chromatic aberration is a checkbox plus an enabled-gated intensity — the intensity does nothing until `chromatic_aberration_enabled = true`.
 
 ## Startup panel
 
@@ -129,9 +171,10 @@ network feature; the check is **read-only and sends zero identifiers** (see
 
 ```toml
 [update]
-mode = "notify"          # off | notify | manual | auto
-check_interval_hours = 24 # min hours between on-launch checks (notify/auto)
-channel = "stable"        # release channel to track
+mode = "notify"            # off | notify | manual | auto
+check_interval_hours = 24  # hours between on-launch checks (notify/auto); 1..=168
+check_on_launch = false    # legacy on-launch toggle, retained so older configs keep loading
+channel = "stable"         # release channel to track
 ```
 
 - **`notify`** *(default)* — once per launch (at most once per
@@ -141,93 +184,130 @@ channel = "stable"        # release channel to track
   "Check for updates" in Settings (or run `c0pl4nd update`).
 - **`off`** — never check, never touch the network for updates.
 - **`auto`** — like `notify`, but also downloads and applies a
-  cryptographically verified (SHA-256 + minisign) update when one is found.
+  cryptographically verified (SHA-256 + minisign, against a signed `latest.json`
+  manifest) update when one is found.
+
+`check_on_launch` is a legacy compatibility flag; `mode` is the canonical
+control. A network-on-launch `mode` (`notify`/`auto`) **or** `check_on_launch =
+true` performs an on-launch check.
+
+## Reporting (opt-in W1TN3SS)
+
+Crash/error/issue reporting is **opt-in** and **both streams default OFF** — nothing is captured-for-send or transmitted until you explicitly opt in from Settings → Privacy. An older config with no `[reporting]` table loads with reporting fully off.
+
+```toml
+[reporting.streams]
+crash_reports = "off"   # off | ask_each_time | … (default: off)
+manual_issues = "off"   # off | ask_each_time | … (default: off)
+
+[reporting.issue_intake]
+repo = "46b-ETYKiAL/Itasha.Corp_C0PL4ND"      # the GitHub owner/repo the "Report an issue" deep link targets
+mailto_alias = "46b.AbandonSomething@proton.me"   # the mailto: fallback address
+```
 
 ## Keybindings
 
-C0PL4ND ships with sensible default keybindings (open the **command palette** to discover available actions and their current shortcuts). For a scannable table of every default binding, see **[docs/KEYBINDINGS.md](docs/KEYBINDINGS.md)**. You can override any binding here. Bindings are simple `key = action` entries; defaults you don't override stay active.
+C0PL4ND ships with sensible default keybindings (open the **command palette** with `Ctrl/Cmd+Shift+P` to discover available actions and their current shortcuts). For a scannable, code-verified table of every default binding, see **[docs/KEYBINDINGS.md](docs/KEYBINDINGS.md)** — that page is canonical.
+
+> **Not yet rebindable.** In the current shell the keybindings are **fixed**. The `[keybindings]` table below (and its read-only mirror in the Settings window) is reserved for a future rebinding dispatcher; **editing it does not yet change the live shortcuts**. It is shown here so you can see the action names that will become rebindable.
+
+The schema is `action = chord` (an action name on the left, a chord string on the right) — not `chord = action`. The `mod` modifier maps to **Ctrl** on Windows/Linux and **Cmd** (⌘) on macOS:
 
 ```toml
 [keybindings]
-# Examples — adjust to taste:
-"ctrl+shift+t"     = "tab.new"
-"ctrl+shift+w"     = "tab.close"
-"ctrl+shift+d"     = "split.right"
-"ctrl+shift+e"     = "split.down"
-"ctrl+shift+f"     = "search.open"
-"ctrl+shift+p"     = "palette.open"
-"ctrl+tab"         = "tab.next"
-"ctrl+shift+tab"   = "tab.previous"
-```
-
-To remove a default binding, set it to `"none"`:
-
-```toml
-[keybindings]
-"ctrl+shift+w" = "none"
+copy             = "mod+shift+c"
+paste            = "mod+shift+v"
+new_tab          = "mod+shift+t"
+close_tab        = "mod+shift+w"
+next_tab         = "mod+shift+]"
+split_right      = "mod+shift+d"
+split_down       = "mod+shift+e"
+search           = "mod+shift+f"
+command_palette  = "mod+shift+p"
+history_sidebar  = "mod+shift+h"
+increase_font    = "mod+plus"
+decrease_font    = "mod+minus"
 ```
 
 ---
 
 ## Full example `config.toml`
 
-A complete configuration with every section populated at its default value. Copy this to your config path and edit freely.
+A configuration with the common keys shown at their default values. Copy this to your config path and edit freely — every key is optional, and C0PL4ND works fine with an empty file.
 
 ```toml
 # ~/.config/c0pl4nd/config.toml
 # (Windows: %APPDATA%\c0pl4nd\config.toml)
 #
 # Every setting here is shown at its default value.
-# Delete any line to fall back to the default — C0PL4ND works fine with an empty file.
+# Delete any line to fall back to the default.
 
+theme = "itasha-corp"         # void-black + Itasha Purple #7700FF + Corp Green #00FF90
+scrollback_lines = 10000
+opacity = 1.0                 # 0.0 .. 1.0
+ui_scale = 1.0                # 0.5 .. 3.0
 startup_panel = true          # neofetch-style splash on launch
 
+# Window translucency (opt-in; off by default)
+transparency_enabled = false
+window_mode = "opaque"        # opaque | transparent | glass | mica | vibrancy
+tint = "#121212"
+tint_strength = 0.0
+
+# Shell / behaviour
+term = "xterm-256color"
+ligatures = false
+copy_on_select = false
+paste_warn_multiline = true
+history_capture_enabled = true
+history_sidebar_side = "right"  # "left" | "right"
+view_mode = "grid"              # "grid" | "tabs"
+
 [font]
-family = "JetBrains Mono"
-size = 13.0
-
-[theme]
-name = "itasha-void"          # VOID BLACK + SIGNAL TEAL + NEON PINK
-
-[window]
-opacity = 1.0                 # 0.0 .. 1.0
+family = "Monaspace Neon"
+size = 14.0
+line_height = 20.0
+fallback = ["Noto Sans JP", "monospace"]
 
 [cursor]
-style = "block"               # "block" | "beam" | "underline"
+style = "block"               # "block" | "bar" | "underline"
 blink = true
 
-[scrollback]
-lines = 10000
-
-[tabs]
-enabled = true
-position = "top"              # "top" | "bottom"
-show_when_single = false
-
-[splits]
-inherit_cwd = true            # new panes open in the focused pane's directory
-
-[session]
-confirm_close_with_processes = true
+[window]
+cols = 80
+rows = 24
+padding = 8
 
 [effects]
-crt = false                   # CRT/scanline overlay — OFF by default
-scanline = 0.0                # 0.0 .. 1.0, used when crt = true
+crt_scanlines = false             # CRT/scanline overlay — OFF by default
+scanline_darkness = 0.4           # 0.0 .. 1.0
+chromatic_aberration_enabled = false
+chromatic_aberration = 0.0
 
 [update]
 mode = "notify"               # off | notify | manual | auto (read-only check)
-check_interval_hours = 24     # min hours between on-launch checks
+check_interval_hours = 24     # 1 .. 168
+check_on_launch = false       # legacy compatibility flag
 channel = "stable"
 
+[reporting.streams]
+crash_reports = "off"         # opt-in; OFF by default
+manual_issues = "off"         # opt-in; OFF by default
+
+# [keybindings] is a read-only reference until rebinding is wired (see note above).
 [keybindings]
-"ctrl+shift+t"   = "tab.new"
-"ctrl+shift+w"   = "tab.close"
-"ctrl+shift+d"   = "split.right"
-"ctrl+shift+e"   = "split.down"
-"ctrl+shift+f"   = "search.open"
-"ctrl+shift+p"   = "palette.open"
-"ctrl+tab"       = "tab.next"
-"ctrl+shift+tab" = "tab.previous"
+copy            = "mod+shift+c"
+paste           = "mod+shift+v"
+new_tab         = "mod+shift+t"
+close_tab       = "mod+shift+w"
+next_tab        = "mod+shift+]"
+split_right     = "mod+shift+d"
+split_down      = "mod+shift+e"
+search          = "mod+shift+f"
+command_palette = "mod+shift+p"
+history_sidebar = "mod+shift+h"
+increase_font   = "mod+plus"
+decrease_font   = "mod+minus"
 ```
 
 ---
@@ -236,4 +316,4 @@ channel = "stable"
 
 - **Defaults are the product.** The single most-praised property of a great terminal is being usable instantly. Treat config as optional polish, not a requirement.
 - **No programming language.** Configuration is declarative TOML by design. There is no scripting runtime to learn, and no way for a config file to make the terminal unusable.
-- **Privacy.** Nothing in your config — and nothing about your shell session — is transmitted anywhere. See [SECURITY.md](SECURITY.md).
+- **Privacy.** Nothing in your config — and nothing about your shell session — is transmitted anywhere unless you explicitly opt into update checks or reporting. See [SECURITY.md](SECURITY.md) and [PRIVACY.md](PRIVACY.md).

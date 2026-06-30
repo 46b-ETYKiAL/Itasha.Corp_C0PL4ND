@@ -23,6 +23,9 @@ cargo install cargo-fuzz
 | `fuzz_sixel` | `c0pl4nd_core::image::decode_sixel` | Sixel inline-image bytes — a hand-written DCS-payload byte state-machine, arriving over the PTY from **any** program. |
 | `fuzz_kitty` | `c0pl4nd_core::image::{parse_kitty, decode_kitty}` (f=24 / f=32 / f=100) | Kitty graphics protocol control-string + per-format pixel decoder (incl. the PNG path), arriving over the PTY from **any** program. |
 | `fuzz_archive` | self-contained extraction **shim** over `zip` / `tar` / `flate2` (see below) | Update-engine archive bytes — `.zip` / `.tar.gz` decompression SHAPE (zip-bomb, malformed headers, path-traversal entry names, truncated streams). |
+| `config_toml` | `c0pl4nd_core::Config::from_toml` (+ derived accessors + `to_toml` round-trip) | The user `config.toml` — untrusted **at rest** (hand-edited, crash-truncated, or tampered). Drives serde-default backfill, validation, clamping, and the serialise round-trip. |
+| `itermcolors` | `c0pl4nd_core::Theme::from_itermcolors` | iTerm2 `.itermcolors` XML-plist theme import — untrusted theme files (malformed plist, out-of-range/multibyte color components). |
+| `osc` | `c0pl4nd_core::term::osc::{base64_decode, base64_encode, parse_color_spec, format_color_reply}` + `Terminal::advance` OSC dispatch | OSC control strings arriving over the PTY from **any** program — the OSC 52 base64 codec and X-style color-spec parser (the multibyte-codepoint slice class). |
 
 ### `vt_parser`
 

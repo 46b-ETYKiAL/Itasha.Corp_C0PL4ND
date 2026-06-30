@@ -29,35 +29,27 @@ WINDOW
 
 ## Default keybindings
 
-All keybindings are user-overridable in **[CONFIG.md](../CONFIG.md)**; the defaults below are the ones the app ships with.
+These are the keybindings the app ships with. In the current shell they are **fixed** — not yet user-rebindable (the `[keybindings]` config section is a read-only reference until the rebinding dispatcher lands). See **[docs/KEYBINDINGS.md](KEYBINDINGS.md)** for the canonical, code-verified list.
+
+The `mod` modifier is **Ctrl** on Windows/Linux and **Cmd** (⌘) on macOS.
 
 ### Window-level tabs
 | Action | Key |
 |---|---|
 | New tab | `Ctrl+Shift+T` |
 | Close focused tab or pane | `Ctrl+Shift+W` |
-| Next / previous tab | `Ctrl+Shift+]` / `Ctrl+Shift+[` |
-| Cycle tabs | `Ctrl+Shift+Tab` |
+| Next tab | `Ctrl+Shift+]` |
 
 ### Splits & panes
 | Action | Key |
 |---|---|
 | Split right (vertical) | `Ctrl+Shift+D` |
 | Split down (horizontal) | `Ctrl+Shift+E` |
-| Close other panes | `Ctrl+Shift+O` |
-| Focus pane by direction | `Alt + Arrow` |
+| Focus pane by direction | `Ctrl/Cmd+Shift + Arrow` |
 | Drag-to-rearrange (mouse) | hold `Ctrl+Shift` and drag from a pane |
-| Keyboard swap (rearrange) | `Alt+Shift + Arrow` |
 | Pane zoom (toggle) | `Ctrl+Shift+Z` |
-| Equalize cells | `Ctrl+Shift+=` |
 
-### Nested tabs (within a cell)
-| Action | Key |
-|---|---|
-| Next nested tab | `Ctrl+PageDown` |
-| Previous nested tab | `Ctrl+PageUp` |
-
-The window-level and cell-level tab keys are deliberately distinct so they never overlap.
+`Equalize Cells`, `Reset Layout`, the quick-layout presets, and named-workspace save/restore are run from the **command palette** (`Ctrl+Shift+P`), not from a dedicated chord — see the tables below.
 
 ### Search & palette
 | Action | Key |
@@ -87,7 +79,7 @@ Each target pane is divided into **five drop zones**:
 └────────────────────┘
 ```
 
-The keyboard-only equivalent is `Alt+Shift + Arrow` — swap the focused pane with its neighbor in that direction.
+To move keyboard focus between panes without the mouse, use `Ctrl/Cmd+Shift + Arrow` (focus the adjacent pane in that direction).
 
 ---
 

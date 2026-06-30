@@ -9,8 +9,9 @@ the `c0pl4nd` egui shell is exercised headed via `egui_kittest`.
 
 | Type | Where | What it guards | Run |
 |---|---|---|---|
-| **Unit** | `#[cfg(test)]` in every `src` module (core ≈ 450, app ≈ 235) | per-function logic, with access to private internals | `cargo test --lib` |
-| **Integration** | `crates/core/tests/*.rs` | cross-module behaviour against real deps (real PTY in `e2e_terminal.rs`) | `cargo test --test '*'` |
+| **Unit** | `#[cfg(test)]` in every `src` module (core ≈ 793, app ≈ 453; ~1495 tests total across the workspace) | per-function logic, with access to private internals | `cargo test --lib` |
+| **Integration** | `crates/core/tests/*.rs` (incl. `vt_conformance.rs`) | cross-module behaviour against real deps (real PTY in `e2e_terminal.rs`; VT100/VT220/xterm conformance in `vt_conformance.rs`) | `cargo test --test '*'` |
+| **Miri (UB / aliasing)** | `.github/workflows/miri.yml` | undefined behaviour, aliasing, and memory-model violations in the `unsafe`-touching core paths under the Miri interpreter | `cargo +nightly miri test` |
 | **End-to-end / UI** | `crates/app/tests/egui_*.rs` (egui_kittest) | the real frame loop driven by simulated input; the "typing reaches the PTY and the grid updates" class | `cargo test -p c0pl4nd` |
 | **Accessibility** | egui_kittest `query_by_label*` + the AccessKit grid node | screen-reader exposure of chrome + terminal grid | part of the egui_* suites |
 | **Property-based** | `crates/core/tests/property_tests.rs` (proptest) | parser invariants for *arbitrary* input: no panic, grid geometry preserved, cursor in bounds, **chunk-invariance** of valid VT streams across read boundaries, SGR-reset isolation | `cargo test --test property_tests` |
@@ -33,9 +34,10 @@ reference standards these tests are written against.
 
 ## Coverage gate
 
-`coverage.yml` runs `cargo llvm-cov -p c0pl4nd-core --fail-under-lines 88`.
-Core line coverage was ~91% when the gate was introduced; the 88% floor leaves a
-small ratchet of headroom while failing on a real regression. The egui shell is
+`coverage.yml` runs `cargo llvm-cov -p c0pl4nd-core --fail-under-lines 93`.
+A coverage initiative ratcheted core line coverage to ~96.9%; the 93% floor
+leaves a small ratchet of headroom while failing on a real regression. The egui
+shell is
 not in the coverage number (it needs a GPU/display); it is covered by the headed
 egui_kittest suites in the Build & Test matrix instead.
 

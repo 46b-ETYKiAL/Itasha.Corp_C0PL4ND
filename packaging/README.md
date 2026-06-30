@@ -33,7 +33,7 @@ packaging/
 ### Linux / macOS — one-liner
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/itasha-corp/c0pl4nd/main/packaging/linux/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/main/packaging/linux/install.sh | sh
 ```
 
 This detects your OS/arch, downloads the latest release tarball, verifies its
@@ -44,7 +44,7 @@ location with `C0PL4ND_BIN_DIR=/usr/local/bin`.
 ### macOS — Homebrew
 
 ```sh
-brew install --cask itasha-corp/tap/c0pl4nd
+brew install --cask 46b-ETYKiAL/tap/c0pl4nd
 ```
 
 ### Windows — winget
@@ -56,14 +56,14 @@ winget install Itasha.C0PL4ND
 ### Manual
 
 Download the archive for your platform from the
-[Releases page](https://github.com/itasha-corp/c0pl4nd/releases), verify the
+[Releases page](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases), verify the
 SHA256 against `SHA256SUMS`, extract, and put the binary on your `PATH`.
 
 ## Building installers (maintainers)
 
-All commands run from the crate root (`apps/c0pl4nd`). Build the release
-binary first (`cargo build --release --bin c0pl4nd`) unless the tool builds it
-for you.
+All commands run from the workspace root; the app crate lives at `crates/app`.
+Build the release binary first (`cargo build --release --bin c0pl4nd`) unless
+the tool builds it for you.
 
 ### Icons (do this first)
 
@@ -112,12 +112,19 @@ DOWNLOAD_LINUXDEPLOY=1 ./packaging/linux/build-appimage.sh
 `.github/workflows/release.yml` is triggered by pushing a `v*` tag (or via
 manual dispatch). It:
 
-1. **build** — compiles release binaries for Linux (x86_64 + aarch64), macOS
-   (x86_64 + aarch64), and Windows (x86_64); packages each as `.tar.gz`/`.zip`
-   and emits a per-archive `.sha256`.
-2. **installers** — builds the MSI, DMG, AppImage, and DEB from the above.
-3. **release** — flattens all artifacts, aggregates checksums into
-   `SHA256SUMS`, and publishes a GitHub Release with auto-generated notes.
+1. **build** — compiles release binaries on native runners for all six targets:
+   Linux (x86_64 + aarch64), macOS (x86_64 + aarch64), and Windows
+   (x86_64 + aarch64); packages each as `.tar.gz` (Linux/macOS) or `.zip`
+   (Windows) and emits a per-archive `.sha256`.
+2. **windows-installer** — builds the native Itasha.Corp CRT installer
+   (`c0pl4nd-<tag>-x86_64-setup.exe`), Authenticode-signed via SignPath when the
+   signing org is provisioned. This is the **only** installer CI produces — the
+   MSI/DMG/AppImage/DEB scripts under `packaging/` are maintainer-local and are
+   NOT built or attached by `release.yml`.
+3. **release** — flattens all artifacts, aggregates checksums into `SHA256SUMS`,
+   emits and minisign-signs the Tier-1 update manifest (`latest.json` +
+   `latest.json.minisig`), and publishes a GitHub Release with auto-generated
+   notes. Every asset is signed with minisign (`.minisig` siblings).
 
 Continuous integration (`.github/workflows/ci.yml`) runs on every push/PR:
 matrix build + test across the three OSes plus `cargo fmt --check` and
