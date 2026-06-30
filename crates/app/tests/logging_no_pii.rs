@@ -85,7 +85,8 @@ impl Visit for FieldVisitor {
         if field.name() == "message" {
             self.message = value.to_string();
         } else {
-            self.fields.insert(field.name().to_string(), value.to_string());
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
         }
     }
 
@@ -133,11 +134,7 @@ fn capture<F: FnOnce()>(f: F) -> Vec<Captured> {
 }
 
 /// Find the first event with `event=<event_kind>` AND `gate=<gate>`.
-fn find_refusal<'a>(
-    logs: &'a [Captured],
-    event_kind: &str,
-    gate: &str,
-) -> Option<&'a Captured> {
+fn find_refusal<'a>(logs: &'a [Captured], event_kind: &str, gate: &str) -> Option<&'a Captured> {
     logs.iter().find(|c| {
         c.target == "c0pl4nd::update"
             && c.field("event") == Some(event_kind)
@@ -205,7 +202,10 @@ fn checksum_mismatch_emits_warn_with_checksum_gate() {
     );
     // The actual digest is logged (a public integrity value), letting an operator
     // compare it against the expected pinned hash.
-    assert_eq!(ev.field("actual_sha256"), Some(sha256_hex(b"the downloaded bytes").as_str()));
+    assert_eq!(
+        ev.field("actual_sha256"),
+        Some(sha256_hex(b"the downloaded bytes").as_str())
+    );
 }
 
 #[test]
