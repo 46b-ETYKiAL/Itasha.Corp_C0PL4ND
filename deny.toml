@@ -51,12 +51,46 @@ yanked = "deny"
 # available: anyhow 1.0.102 is the latest on crates.io (`cargo update -p anyhow`
 # locks 0 packages). Re-evaluate and drop this ignore when anyhow ships a fixed
 # release and bump to it.
+#
+# RUSTSEC-2026-0192: `ttf-parser` is UNMAINTAINED (informational advisory, NOT
+# an exploitable vulnerability). The author has stated the crate will receive no
+# further fixes. It is a pure-Rust font-glyph parser pulled transitively by the
+# egui text-rendering stack (`ttf-parser` <- `fontdb` <- `cosmic-text` <-
+# `glyphon`, and `fontdb` directly), used to lay out the terminal's own glyphs.
+# It is the de-facto font parser the entire egui/cosmic-text ecosystem depends
+# on; there is no maintained drop-in the upstream stack has migrated to. Re-
+# evaluate and drop this ignore when fontdb/cosmic-text migrate to a maintained
+# font parser.
+#
+# RUSTSEC-2025-0141: `bincode` is UNMAINTAINED (informational advisory, NOT an
+# exploitable vulnerability). `bincode` 2.0.1 enters the lock file ONLY as an
+# OPTIONAL, feature-gated dependency of `typed-index-collections` that this
+# build never enables — it is NOT compiled into either binary (`cargo tree -i
+# bincode` prints "nothing to print"; cargo-deny scans the full lock file
+# regardless of feature activation). With zero presence in the actual build
+# graph, runtime exposure is nil. Re-evaluate and drop this ignore if a future
+# feature pulls `bincode` into the build, or when the upstream crate drops it.
+#
+# RUSTSEC-2026-0186: `memmap2` UNSOUND — an unchecked pointer offset. This is an
+# unsoundness advisory (a soundness hole in the crate's API), NOT a known
+# exploitable vulnerability against C0PL4ND's usage. `memmap2` enters the tree
+# transitively for read-only memory-mapping: font-file loading via
+# `fontdb`/`cosmic-text`, Linux client-side window decorations via
+# `sctk-adwaita` <- `winit`, and the Arti `tor-dirmgr` directory cache (the
+# last only via the opt-in `itasha-report-transport-tor` transport). C0PL4ND
+# never calls memmap2 directly nor passes attacker-controlled offsets through
+# these parents. No patched 0.9.x release is yet available for these consumers.
+# Re-evaluate and drop this ignore when memmap2 ships a fixed release and the
+# parent crates adopt it.
 ignore = [
     "RUSTSEC-2017-0008",
     "RUSTSEC-2026-0173",
     "RUSTSEC-2024-0436",
     "RUSTSEC-2023-0071",
     "RUSTSEC-2026-0190",
+    "RUSTSEC-2026-0192",
+    "RUSTSEC-2025-0141",
+    "RUSTSEC-2026-0186",
 ]
 
 [licenses]

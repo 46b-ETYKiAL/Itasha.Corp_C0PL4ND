@@ -31,4 +31,16 @@ ignore = [
     "RUSTSEC-2024-0436",
     "RUSTSEC-2026-0173",
     "RUSTSEC-2026-0190",
+    # RUSTSEC-2026-0192: `ttf-parser` UNMAINTAINED (informational). Transitive
+    # font parser via the egui text stack (fontdb / cosmic-text / glyphon).
+    # Mirrors the deny.toml ignore (lockstep SC-1).
+    "RUSTSEC-2026-0192",
+    # RUSTSEC-2025-0141: `bincode` UNMAINTAINED (informational). Present only as
+    # an OPTIONAL, feature-gated dep of `typed-index-collections` that this build
+    # never enables (not in the compiled graph). Mirrors the deny.toml ignore.
+    "RUSTSEC-2025-0141",
+    # RUSTSEC-2026-0186: `memmap2` UNSOUND (unchecked pointer offset). Transitive
+    # read-only mmap via fontdb / winit (sctk-adwaita) / Arti tor-dirmgr; never
+    # called directly. No patched 0.9.x yet. Mirrors the deny.toml ignore.
+    "RUSTSEC-2026-0186",
 ]
