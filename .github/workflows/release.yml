@@ -67,7 +67,11 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: tar.gz
-          - os: macos-13
+          # x86_64 mac is cross-built on the Apple-Silicon runner via the
+          # universal Apple toolchain (rustup adds the target; clang emits a
+          # native x86_64 Mach-O). This avoids the scarce/queue-starved macos-13
+          # Intel runner — the arm64 leg above already proves the macOS build.
+          - os: macos-latest
             target: x86_64-apple-darwin
             archive: tar.gz
     steps:
