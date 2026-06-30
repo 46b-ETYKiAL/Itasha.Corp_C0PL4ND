@@ -45,15 +45,31 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Release matrix trimmed to the two shipped desktop targets:
-        # Windows x64 + Linux x64. (macOS and ARM64 targets were dropped.)
+        # The full Windows + Linux + macOS desktop matrix, x64 and ARM64, each
+        # built on a NATIVE GitHub-hosted runner (no cross-linkers) — except the
+        # Intel-mac target, which the universal Apple toolchain cross-builds on
+        # the Apple-Silicon runner. Free arm64 public-repo runners
+        # (ubuntu-24.04-arm / windows-11-arm) went GA 2025-08-07. These six
+        # triples match the update-manifest's platform classifier.
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
     steps:
       - name: Harden the runner (egress audit)
         # step-security/harden-runner@v2.19.4
