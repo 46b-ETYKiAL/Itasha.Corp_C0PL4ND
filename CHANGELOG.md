@@ -8,6 +8,25 @@ Full per-release artifacts (signed binaries, SBOMs, provenance) are on the
 [GitHub Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases)
 page.
 
+## [0.4.11] - 2026-06-30
+
+### Changed — clearer error messages
+
+- **User-visible error messages rewritten** to be plain-language and actionable,
+  and to never expose internal details. Errors across the terminal, settings,
+  updater, config/theme loading, and the `update` CLI now say what happened and
+  what you can do about it, with the technical detail kept in local diagnostic
+  logs instead of the message. No raw error chains, file paths, hostnames, or
+  internal identifiers appear in any error you see.
+
+### Added — release-pipeline hardening (Tier 2)
+
+- Build-provenance (SLSA) attestation now covers **every** published asset,
+  including the signed update manifest. An independent post-release verification
+  job re-downloads the published assets and re-checks every signature, checksum,
+  and the manifest binding against the embedded key — so a release can never
+  publish an artifact the deployed app cannot verify.
+
 ## [0.4.10] - 2026-06-29
 
 ### Changed — update-security hardening
