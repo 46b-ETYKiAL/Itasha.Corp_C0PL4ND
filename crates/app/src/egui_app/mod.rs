@@ -3015,6 +3015,18 @@ impl C0pl4ndApp {
     /// top-level path (same compromise the reference app documents).
     #[allow(deprecated)]
     pub fn frame_tick(&mut self, ctx: &egui::Context) {
+        // Fast close for an OS-initiated window-close (Alt+F4, taskbar → Close,
+        // the system menu). The in-app caption-× already takes the fast path
+        // (`WindowCmd::Close` → `prepare_shutdown` + `process::exit(0)`); without
+        // this, an OS close falls through to eframe/wgpu's slow graceful
+        // GPU-device + swapchain + winit-window teardown — the real source of the
+        // slow-to-close latency (the PTY teardown is ~2ms). Mirror the fast path.
+        // Gated on `live_window` so the headless egui_kittest harness, which has
+        // no real viewport, never calls `process::exit` mid-test.
+        if self.live_window && ctx.input(|i| i.viewport().close_requested()) {
+            self.prepare_shutdown();
+            std::process::exit(0);
+        }
         // Ensure the chrome fonts (incl. the `phosphor-fill` family) are
         // installed before any widget references them — `new()` does this for
         // the real app; headless tests built via `bootstrap()` install here on
