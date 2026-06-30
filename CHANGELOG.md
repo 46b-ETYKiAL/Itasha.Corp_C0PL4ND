@@ -8,6 +8,31 @@ Full per-release artifacts (signed binaries, SBOMs, provenance) are on the
 [GitHub Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases)
 page.
 
+## [0.4.12] - 2026-06-30
+
+### Added — update diagnostics
+
+- **Structured local diagnostics on the updater's security path.** The in-app
+  updater now records, to the local diagnostic log only, what happened when an
+  update is checked, downloaded, verified, and applied — including the specific
+  reason an update was refused (checksum mismatch, signature failure, an
+  insecure transport, or a downgrade attempt). These records carry only
+  non-identifying detail (no URLs, tokens, or payload contents) and are never
+  sent anywhere — C0PL4ND remains telemetry-free.
+
+### Fixed — release verification
+
+- The independent post-release verification job now runs automatically on every
+  published release (previously it had to be started by hand). Each release's
+  signed manifest, per-asset signatures, and checksum bindings are re-checked
+  against the embedded key as soon as the release publishes.
+
+### Changed — dependencies
+
+- `anyhow` updated to 1.0.103; pinned GitHub Actions kept current. `egui` 0.35 /
+  `egui_tiles` 0.16 are intentionally held until the icon-font dependency
+  supports egui 0.35.
+
 ## [0.4.11] - 2026-06-30
 
 ### Changed — clearer error messages
