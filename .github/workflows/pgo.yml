@@ -69,7 +69,7 @@ jobs:
       - name: Install cargo-pgo
         # taiki-e/install-action provides reproducible prebuilt-tool installs.
         # taiki-e/install-action@v2.79.10
-        uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3
+        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6
         with:
           tool: cargo-pgo
 
