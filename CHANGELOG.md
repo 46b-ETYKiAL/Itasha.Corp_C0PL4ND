@@ -8,6 +8,30 @@ Full per-release artifacts (signed binaries, SBOMs, provenance) are on the
 [GitHub Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases)
 page.
 
+## [0.4.13] - 2026-06-30
+
+### Added — macOS and ARM64 builds
+
+- **Releases now ship for all six desktop targets**: Windows, Linux, and macOS,
+  each in x64 and ARM64. macOS builds are not yet Apple-notarized (a certificate
+  is pending) — see the README/TROUBLESHOOTING for the one-time Gatekeeper step.
+  Update security is unchanged: every asset and the update manifest are
+  minisign-signed and SLSA-attested, and verified before installing.
+
+### Changed — supply-chain hygiene
+
+- Resolved two dependency advisories at the source instead of suppressing them:
+  `anyhow` is on the patched 1.0.103 (RUSTSEC-2026-0190) and `memmap2` was
+  bumped to the patched 0.9.11 (RUSTSEC-2026-0186); both ignore entries dropped.
+
+### Fixed — docs + internals
+
+- Documented the GPU requirement (no software-render fallback) and the
+  unsigned-installer/SmartScreen and macOS-Gatekeeper steps.
+- Internal: the frame-scheduling policy (render-on-damage vs continuous) is now
+  the typed `FramePolicy` contract shared with the renderer crate. No
+  user-visible change.
+
 ## [0.4.12] - 2026-06-30
 
 ### Added — update diagnostics
