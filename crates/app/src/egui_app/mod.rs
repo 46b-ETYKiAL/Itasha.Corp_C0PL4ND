@@ -953,7 +953,10 @@ impl C0pl4ndApp {
     /// a toast) at the 6-pane cap.
     fn split(&mut self, dir: egui_tiles::LinearDir) {
         if count_panes(&self.grid_tree) >= grid::MAX_PANES {
-            self.toast = Some(format!("max {} panes", grid::MAX_PANES));
+            self.toast = Some(format!(
+                "You've reached the maximum of {} panes. Close one to open another.",
+                grid::MAX_PANES
+            ));
             return;
         }
         let new_pane = self.pane_alloc.next();
@@ -1257,7 +1260,9 @@ impl C0pl4ndApp {
                 painter.text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    term.error().unwrap_or("terminal unavailable"),
+                    term.error().unwrap_or(
+                        "This pane couldn't open a terminal. Close it and open a new pane.",
+                    ),
                     egui::FontId::monospace(14.0),
                     pane_colors.fg,
                 );
@@ -1266,7 +1271,7 @@ impl C0pl4ndApp {
                 painter.text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    format!("pane {} (no terminal)", pane_id.raw()),
+                    "This pane is empty. Open a new pane to start a terminal.",
                     egui::FontId::monospace(14.0),
                     pane_colors.fg,
                 );
@@ -2231,7 +2236,10 @@ impl C0pl4ndApp {
         // Enforce the cap: a drag-to-split that pushed us over 6 reverts.
         if count_panes(&self.grid_tree) > grid::MAX_PANES {
             self.grid_tree = pre;
-            self.toast = Some(format!("max {} panes", grid::MAX_PANES));
+            self.toast = Some(format!(
+                "You've reached the maximum of {} panes. Close one to open another.",
+                grid::MAX_PANES
+            ));
         }
 
         if let Some(pid) = clicked {
@@ -2422,8 +2430,10 @@ impl C0pl4ndApp {
                     // GUI user never sees stderr, so a visible toast (the same
                     // channel the config-LOAD error uses) is the real surface.
                     if let Err(e) = self.config.save_to(&path) {
-                        tracing::warn!("could not save config: {e}");
-                        self.toast = Some(format!("could not save settings: {e}"));
+                        self.toast = Some(crate::user_error::config_save_failed(
+                            e,
+                            "Your settings change",
+                        ));
                     }
                 }
             }
@@ -2752,7 +2762,10 @@ impl C0pl4ndApp {
             self.config.reporting.streams.crash_reports = mode;
             if let Some(path) = c0pl4nd_core::Config::default_path() {
                 if let Err(e) = self.config.save_to(&path) {
-                    self.toast = Some(format!("Could not save reporting preference: {e}"));
+                    self.toast = Some(crate::user_error::config_save_failed(
+                        e,
+                        "Your reporting choice",
+                    ));
                 }
             }
         }
@@ -2847,7 +2860,8 @@ impl C0pl4ndApp {
                             "Opened your mail client."
                         }
                         crate::issue_intake::IntakeOutcome::Failed(_) => {
-                            "Could not complete that action."
+                            "That didn't work. You can copy the report to your clipboard and \
+                             paste it into a new GitHub issue instead."
                         }
                     };
                     ui.add(egui::Label::new(egui::RichText::new(msg).small()).wrap());
@@ -4470,8 +4484,10 @@ impl C0pl4ndApp {
                     // GUI user never sees stderr, so a visible toast (the same
                     // channel the config-LOAD error uses) is the real surface.
                     if let Err(e) = self.config.save_to(&path) {
-                        tracing::warn!("could not save config: {e}");
-                        self.toast = Some(format!("could not save view mode: {e}"));
+                        self.toast = Some(crate::user_error::config_save_failed(
+                            e,
+                            "The layout change",
+                        ));
                     }
                 }
             }
@@ -5835,10 +5851,14 @@ fn load_config_from(path: Option<std::path::PathBuf>) -> (c0pl4nd_core::Config, 
         {
             Ok(cfg) => (cfg, None),
             Err(e) => {
-                eprintln!("c0pl4nd: failed to load config {p:?}: {e}; using defaults");
+                tracing::warn!(
+                    target: "c0pl4nd::config",
+                    path = ?p,
+                    "config load failed; using defaults"
+                );
                 (
                     c0pl4nd_core::Config::default(),
-                    Some(format!("config error — using defaults: {e}")),
+                    Some(crate::user_error::config_load_failed(e)),
                 )
             }
         },
@@ -5897,10 +5917,7 @@ fn load_terminal_theme(config: &c0pl4nd_core::Config) -> (c0pl4nd_core::Theme, O
                 // skip). Capture the first such error and keep falling through to
                 // a valid theme so the app never wedges on a bad override.
                 if notice.is_none() && c.exists() {
-                    notice = Some(format!(
-                        "theme '{}' failed to load ({e}); using fallback",
-                        config.theme
-                    ));
+                    notice = Some(crate::user_error::theme_load_failed(e, &config.theme));
                 }
             }
         }
@@ -6338,7 +6355,12 @@ mod config_load_tests {
             err.is_some(),
             "a present-but-invalid config MUST surface an error for the toast"
         );
-        assert!(err.unwrap().to_lowercase().contains("config"));
+        let msg = err.unwrap();
+        // Plain user copy referencing the settings file, with no leaked parser
+        // detail (no raw toml jargon like "[[[" or "expected").
+        assert!(msg.to_lowercase().contains("settings"), "{msg}");
+        assert!(!msg.contains("[[["), "{msg}");
+        assert!(!msg.to_lowercase().contains("expected"), "{msg}");
     }
 
     #[test]

@@ -2313,8 +2313,8 @@ impl App {
     /// existing splash so the notice is the first thing the user reads; if no
     /// splash is armed (e.g. `startup_panel` disabled), the notice stands alone.
     fn arm_restore_failed_notice(&mut self) {
-        const NOTICE: &str = "  ⚠  session restore failed — started fresh\n  \
-             (your saved layout could not be read; a copy was kept for debugging)\n";
+        const NOTICE: &str = "  ⚠  Couldn't restore your saved layout — started fresh\n  \
+             (your previous layout was kept in case it can be recovered)\n";
         match self.splash.take() {
             Some(existing) => self.splash = Some(format!("{NOTICE}\n{existing}")),
             None => self.splash = Some(NOTICE.to_string()),

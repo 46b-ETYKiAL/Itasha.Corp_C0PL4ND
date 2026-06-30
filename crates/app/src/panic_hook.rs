@@ -214,13 +214,14 @@ mod windows_msgbox {
     /// Show a modal "C0PL4ND crashed" dialog naming the crash-log path. Runs
     /// inside the panic hook (before abort), so it must not itself panic; any
     /// failure is swallowed.
-    pub fn show_crash_dialog(log_path: &Path) {
+    pub fn show_crash_dialog(_log_path: &Path) {
+        // The crash report is written to `_log_path` by the caller; the dialog
+        // deliberately does NOT show the path (it can contain the username).
         show_dialog(
             "C0PL4ND crashed",
-            &format!(
-                "C0PL4ND crashed unexpectedly.\n\nA crash log was written to:\n{}",
-                log_path.display()
-            ),
+            "C0PL4ND closed unexpectedly. A crash report was saved on your \
+             computer. If this keeps happening, please report it from Settings, \
+             Privacy, Report a crash or issue.",
         );
     }
 

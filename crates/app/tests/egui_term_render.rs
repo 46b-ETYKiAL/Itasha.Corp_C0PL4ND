@@ -27,6 +27,8 @@ mod egui_app;
 mod issue_intake;
 #[path = "../src/reporting.rs"]
 mod reporting;
+#[path = "../src/user_error.rs"]
+mod user_error;
 
 use std::time::{Duration, Instant};
 

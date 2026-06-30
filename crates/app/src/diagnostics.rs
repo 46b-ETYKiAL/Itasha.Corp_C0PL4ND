@@ -138,7 +138,9 @@ pub fn build_report(d: &Diagnostics) -> String {
         ConfigStatus::NoPath => "no path resolved".to_string(),
         ConfigStatus::Absent => "absent (using built-in defaults)".to_string(),
         ConfigStatus::Loaded => "loaded + validated OK".to_string(),
-        ConfigStatus::Invalid(e) => format!("INVALID — {e}"),
+        ConfigStatus::Invalid(_) => {
+            "INVALID — settings file could not be parsed (see logs for details)".to_string()
+        }
     };
 
     format!(
@@ -242,7 +244,13 @@ mod tests {
         let mut d = sample();
         d.config_status = ConfigStatus::Invalid("bad opacity 2.0".to_string());
         let report = build_report(&d);
-        assert!(report.contains("INVALID — bad opacity 2.0"), "{report}");
+        assert!(
+            report.contains("INVALID — settings file could not be parsed"),
+            "{report}"
+        );
+        // The raw parse detail must NOT leak into the doctor output (it can carry
+        // a path); it stays in the logs only.
+        assert!(!report.contains("bad opacity 2.0"), "{report}");
     }
 
     #[test]

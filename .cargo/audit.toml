@@ -75,4 +75,49 @@ ignore = [
   #   Re-evaluation trigger:
   #     Drop this ignore and bump as soon as anyhow ships a fixed release.
   "RUSTSEC-2026-0190",
+  # RUSTSEC-2026-0192 — `ttf-parser` is UNMAINTAINED (informational advisory,
+  # NOT exploitable). Kept in lockstep with deny.toml + audit.toml.
+  #
+  #   Why accepted:
+  #     * Pure-Rust font-glyph parser entering the tree TRANSITIVELY via the
+  #       egui text-rendering stack (`ttf-parser` <- `fontdb` <- `cosmic-text`
+  #       <- `glyphon`, and `fontdb` directly), used to lay out the terminal's
+  #       own glyphs. It is the de-facto parser the entire egui/cosmic-text
+  #       ecosystem depends on; there is no maintained drop-in the upstream
+  #       stack has migrated to.
+  #
+  #   Re-evaluation trigger:
+  #     Drop when fontdb / cosmic-text migrate to a maintained font parser.
+  "RUSTSEC-2026-0192",
+  # RUSTSEC-2025-0141 — `bincode` is UNMAINTAINED (informational advisory, NOT
+  # exploitable). Kept in lockstep with deny.toml + audit.toml.
+  #
+  #   Why accepted:
+  #     * `bincode` 2.0.1 enters the lock file ONLY as an OPTIONAL, feature-
+  #       gated dependency of `typed-index-collections` that this build never
+  #       enables. It is NOT compiled into either binary (`cargo tree -i
+  #       bincode` => "nothing to print"); cargo-deny/cargo-audit scan the full
+  #       lock file regardless of feature activation. Build-graph presence is
+  #       zero, so runtime exposure is nil.
+  #
+  #   Re-evaluation trigger:
+  #     Drop if a future feature pulls `bincode` into the build, or when the
+  #     upstream crate drops the dependency.
+  "RUSTSEC-2025-0141",
+  # RUSTSEC-2026-0186 — `memmap2` UNSOUND (unchecked pointer offset). Kept in
+  # lockstep with deny.toml + audit.toml.
+  #
+  #   Why accepted:
+  #     * An unsoundness hole in the crate's API, NOT a known exploit against
+  #       C0PL4ND's usage. `memmap2` enters TRANSITIVELY for read-only memory-
+  #       mapping: font-file loading via `fontdb`/`cosmic-text`, Linux client-
+  #       side window decorations via `sctk-adwaita` <- `winit`, and the Arti
+  #       `tor-dirmgr` directory cache (the last only via the opt-in
+  #       `itasha-report-transport-tor` transport). C0PL4ND never calls memmap2
+  #       directly nor passes attacker-controlled offsets through these parents.
+  #     * No patched 0.9.x release is yet available for these consumers.
+  #
+  #   Re-evaluation trigger:
+  #     Drop when memmap2 ships a fixed release and the parent crates adopt it.
+  "RUSTSEC-2026-0186",
 ]
