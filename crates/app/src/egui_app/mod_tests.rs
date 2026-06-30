@@ -1378,3 +1378,30 @@ fn neighbor_in_rects_picks_the_correct_directional_neighbour() {
     // A focus id with no rect has no neighbour (defensive, never panics).
     assert_eq!(neighbor_in_rects(&rects, PaneId(99), Direction::Left), None);
 }
+
+/// The shell's [`FramePolicy`](c0pl4nd_renderer::FramePolicy) is `Continuous`
+/// ONLY for the CRT scanline animation (and only when reduced-motion is off);
+/// every other state is `OnDamage` (render-on-input). Locks the typed
+/// frame-scheduling contract the renderer crate exposes against the shell's
+/// actual repaint decision.
+#[test]
+fn frame_policy_is_continuous_only_for_crt_animation() {
+    use c0pl4nd_renderer::FramePolicy;
+    let mut app = C0pl4ndApp::bootstrap();
+
+    // CRT off => always render-on-damage, regardless of the motion setting.
+    app.config.effects.crt_scanlines = false;
+    assert_eq!(app.frame_policy(), FramePolicy::OnDamage);
+
+    // CRT on => Continuous iff reduced-motion is off (the animation pumps the
+    // frame clock); under reduced-motion the roll band freezes and the policy
+    // stays OnDamage. Compare against the same predicate the policy uses so the
+    // assertion is deterministic on any host.
+    app.config.effects.crt_scanlines = true;
+    let expected = if c0pl4nd_core::reduced_motion::reduced_motion() {
+        FramePolicy::OnDamage
+    } else {
+        FramePolicy::Continuous
+    };
+    assert_eq!(app.frame_policy(), expected);
+}
