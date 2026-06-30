@@ -61,20 +61,6 @@ ignore = [
   # `itasha-report-transport-tor` crate; compile-time only. No maintained drop-in
   # upstream Arti has migrated to yet. Re-evaluate when `tor-error` drops `paste`.
   "RUSTSEC-2024-0436",
-  # RUSTSEC-2026-0190 — `anyhow` unsoundness in `Error::downcast_mut()`. Kept in
-  # lockstep with deny.toml + audit.toml.
-  #
-  #   Why accepted:
-  #     * The UB is reachable ONLY via `Error::context(X)` followed by
-  #       `downcast_mut::<X>()` on the returned error. C0PL4ND does NOT call
-  #       `downcast_mut` anywhere (`grep -rn downcast_mut crates/` => zero hits),
-  #       so the unsound path is unreachable and exposure is nil.
-  #     * NO PATCHED RELEASE is available: anyhow 1.0.102 is the latest on
-  #       crates.io (`cargo update -p anyhow` locks 0 packages).
-  #
-  #   Re-evaluation trigger:
-  #     Drop this ignore and bump as soon as anyhow ships a fixed release.
-  "RUSTSEC-2026-0190",
   # RUSTSEC-2026-0192 — `ttf-parser` is UNMAINTAINED (informational advisory,
   # NOT exploitable). Kept in lockstep with deny.toml + audit.toml.
   #
@@ -104,20 +90,9 @@ ignore = [
   #     Drop if a future feature pulls `bincode` into the build, or when the
   #     upstream crate drops the dependency.
   "RUSTSEC-2025-0141",
-  # RUSTSEC-2026-0186 — `memmap2` UNSOUND (unchecked pointer offset). Kept in
-  # lockstep with deny.toml + audit.toml.
   #
-  #   Why accepted:
-  #     * An unsoundness hole in the crate's API, NOT a known exploit against
-  #       C0PL4ND's usage. `memmap2` enters TRANSITIVELY for read-only memory-
-  #       mapping: font-file loading via `fontdb`/`cosmic-text`, Linux client-
-  #       side window decorations via `sctk-adwaita` <- `winit`, and the Arti
-  #       `tor-dirmgr` directory cache (the last only via the opt-in
-  #       `itasha-report-transport-tor` transport). C0PL4ND never calls memmap2
-  #       directly nor passes attacker-controlled offsets through these parents.
-  #     * No patched 0.9.x release is yet available for these consumers.
-  #
-  #   Re-evaluation trigger:
-  #     Drop when memmap2 ships a fixed release and the parent crates adopt it.
-  "RUSTSEC-2026-0186",
+  # RUSTSEC-2026-0190 (`anyhow`) and RUSTSEC-2026-0186 (`memmap2`) were REMOVED
+  # (2026-06-30): anyhow is at the patched 1.0.103 and memmap2 was bumped to the
+  # patched 0.9.11, so both advisories are now RESOLVED in the locked graph
+  # rather than suppressed (rustsec.org: fixed in >=1.0.103 / >=0.9.11).
 ]
