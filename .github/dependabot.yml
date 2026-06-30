@@ -19,6 +19,16 @@ updates:
       cargo-minor-patch:
         update-types: [minor, patch]
     labels: [dependencies, rust]
+    ignore:
+      # egui 0.35 requires an egui-phosphor release built against egui 0.35; the
+      # app pins egui-phosphor 0.12 (egui 0.34), so 0.35 cannot be taken until
+      # egui-phosphor catches up. egui_tiles 0.16 in turn requires egui 0.35, so
+      # it is blocked transitively. Re-enable both together when egui-phosphor
+      # ships egui-0.35 support (tracked manually; PRs #233/#234 closed for this).
+      - dependency-name: "egui"
+        versions: [">= 0.35.0"]
+      - dependency-name: "egui_tiles"
+        versions: [">= 0.16.0"]
 
   # Keep pinned GitHub Actions SHAs current. Dependabot updates the SHA AND the
   # version comment, so the pin-by-SHA discipline is preserved automatically.
