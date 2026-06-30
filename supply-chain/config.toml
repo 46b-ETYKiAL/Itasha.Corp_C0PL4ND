@@ -112,6 +112,10 @@ criteria = "safe-to-deploy"
 version = "0.2.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.anyhow]]
+version = "1.0.103"
+criteria = "safe-to-deploy"
+
 [[exemptions.arboard]]
 version = "3.6.1"
 criteria = "safe-to-deploy"
