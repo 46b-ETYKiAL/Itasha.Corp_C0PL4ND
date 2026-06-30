@@ -45,7 +45,7 @@ use egui_kittest::Harness;
 use egui_app::C0pl4ndApp;
 
 /// Build a headless harness driving the REAL `frame_tick` for a shared app, with
-/// a generous screen so the fixed-size settings window (720×560) fits fully.
+/// a generous screen so the fixed-size settings window (760×560) fits fully.
 fn harness(app: &RefCell<C0pl4ndApp>) -> Harness<'_> {
     #[allow(deprecated)]
     let mut h = Harness::new(move |ctx| app.borrow_mut().frame_tick(ctx));

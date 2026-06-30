@@ -61,6 +61,31 @@ const CATEGORIES: &[&str] = &[
 /// `c0pl4nd update` checker understands; a free choice list, not invented.
 const UPDATE_CHANNELS: &[&str] = &["stable", "beta", "nightly"];
 
+// ---- Fixed width budget (the runaway-width root-cause fix, #26) ----
+// The settings window is content-sized by egui. WITHOUT a hard cap, any child
+// that reports `available_width()` / `f32::INFINITY` as its desired size (a
+// filling slider, the search box) makes the window grow each frame until it hits
+// the screen edge — leaving the controls spread out with a wide blank gutter on
+// the right (the reported "much too wide + blank space" bug). The fix is a FIXED
+// content-width budget: clamp the content `Ui` to these consts (NOT to
+// `available_width()`, which is the already-inflated post-balloon width and so
+// clamps nothing). No page can then demand more than the budget, so the window
+// holds a snug, stable width identical on every page. Sized to fit the 170px
+// left nav + a comfortable control pane (label + control + ↺ columns).
+
+/// Snug default window WIDTH (px), before the screen-fit clamp. Matches the
+/// sibling SCR1B3 editor's settings width for cross-app cohesion.
+const SETTINGS_DEFAULT_W: f32 = 760.0;
+/// Default window HEIGHT (px), before the screen-fit clamp.
+const SETTINGS_DEFAULT_H: f32 = 560.0;
+/// Hard cap on the inner CONTENT width (nav + pane). Slightly under the window
+/// inner width so the content fills it without ever driving it wider.
+const SETTINGS_CONTENT_W: f32 = 740.0;
+/// Hard cap on the right-hand content PANE width (after the nav + separator).
+const SETTINGS_PANE_W: f32 = 556.0;
+/// Fixed width of the left category nav column.
+const SETTINGS_NAV_W: f32 = 170.0;
+
 /// The terminal color themes that ship in `assets/themes/` (file stems). The
 /// theme combo offers these built-ins; a free text field below it accepts any
 /// user theme name (a TOML under the config dir's themes folder). This list is
@@ -349,15 +374,23 @@ pub fn show(
     // cause of the "settings can't be dragged" report. `.default_pos` places it
     // once, then the title bar drags freely.
     //
-    // The window is now edge/corner RESIZABLE (#25): `.resizable(true)` +
-    // `.default_size` (first-open size) + `.min_size` (a floor so it can't be
-    // shrunk to uselessness). The stable Id is still derived from the "settings"
-    // name (unchanged), so once eframe `persistence` lands the size will be
-    // remembered automatically — that is a SEPARATE PR; we only make it
-    // resizable here.
-    let default_size = egui::vec2(720.0, 560.0);
-    let min_size = egui::vec2(560.0, 420.0);
-    let default_pos = ctx.content_rect().center() - default_size * 0.5;
+    // #26 root-cause: an `egui::Window` is AUTO/content-sized by default, and its
+    // Area grows to the widest child's desired size. A filling `Slider` / the
+    // search box reports `available_width()` / `f32::INFINITY` every frame, so the
+    // window ballooned to the screen edge ("much too wide + blank right gutter").
+    // The cure is a snug, screen-clamped EXPLICIT size PLUS a hard Area bound:
+    // `.fixed_size(default_size)` fixes the inner content, and `.constrain_to(rect)`
+    // bounds the floating Area itself (fixed_size alone does NOT — the Area still
+    // auto-expands to the viewport, painting the frame full-width behind a snug
+    // content column, which IS the reported blank gutter). Together they hold a
+    // stable, centred ~760px window on every page; a long page scrolls INTERNALLY
+    // via the content `ScrollArea` (height is fixed; the scroll-area fills it).
+    // Screen-clamped so a small display never spawns an off-screen window.
+    let screen = ctx.content_rect();
+    let def_w = SETTINGS_DEFAULT_W.min(screen.width() - 24.0);
+    let def_h = SETTINGS_DEFAULT_H.min(screen.height() - 24.0);
+    let default_size = egui::vec2(def_w, def_h);
+    let default_pos = screen.center() - default_size * 0.5;
 
     // Esc dismisses settings (in addition to the title-bar ✕ and the in-content
     // Close button) — the conventional overlay-dismiss key.
@@ -381,33 +414,39 @@ pub fn show(
         // single titlebar; dragging still works via egui's window-frame drag.
         .title_bar(false)
         .collapsible(false)
-        // Edge/corner resizable (#25). `default_size` is the first-open size;
-        // `min_size` is a sensible floor. The window keeps its stable Id (from
-        // the "settings" name) so a future `persistence` PR remembers the size.
-        .resizable(true)
-        .default_size(default_size)
-        .min_size(min_size)
+        // FIXED size (#26 root-cause fix). A `resizable` egui `Window` auto-GROWS
+        // its width to the widest child's desired size, and a fill-width child
+        // (the header's `right_to_left` close row, a filling `Slider`, the search
+        // box) reports `available_width`/`INFINITY` — so the window balloons to the
+        // screen edge ("much too wide + blank right gutter"). Clamping the inner
+        // content `Ui` (`set_max_width`) does NOT stop this, because the Resize
+        // widget measures the child's UNCLAMPED desired width. A FIXED window size
+        // is the robust cure: the window holds a snug, stable width on every page,
+        // and a long page scrolls INTERNALLY via the content `ScrollArea` (height
+        // is fixed and the scroll-area fills it). `min`'d to the live screen so a
+        // tiny display never spawns an off-screen window.
+        .fixed_size(default_size)
+        .constrain_to(egui::Rect::from_center_size(screen.center(), default_size))
         .movable(true)
         .default_pos(default_pos)
         .frame(egui::Frame::window(&ctx.global_style()).fill(colors.panel))
         .show(ctx, |ui| {
-            // ---- Width discipline (#26) ----
-            // egui's window auto-sizing measures content DESIRED width with an
-            // effectively unbounded available width (~f32::MAX). Any child that
-            // returns `available_width()` (e.g. a `horizontal` row) or
-            // `f32::INFINITY` (the search box below) as its desired size would
-            // therefore demand a near-infinite width and push the whole window
-            // WIDER on the page that has it — and by a DIFFERENT amount per page
-            // (the reported "every page is a different width + content runs past
-            // the ✕" bug). The robust fix (proven on the sibling SCR1B3 editor)
-            // is to clamp the content `Ui` to the window's current inner width up
-            // front: no page can then demand more than that, so EVERY page
-            // renders at the same width and content can never exceed the window
-            // (so it can't draw past the ✕). When the user widens the window,
-            // `available_width()` grows and every page uses the extra width
-            // equally; overflow always goes to the vertical ScrollArea, never to
-            // horizontal growth.
-            let content_w = ui.available_width();
+            // ---- Width discipline (#26 root-cause fix) ----
+            // egui sizes this window to its content. Any child that returns
+            // `available_width()` (a `horizontal` row) or `f32::INFINITY` (a
+            // filling slider / the search box) as its desired size would demand a
+            // near-infinite width and balloon the whole window to the screen edge
+            // — the reported "much too wide + blank gutter on the right" bug, and
+            // a DIFFERENT amount per page. Clamping to `available_width()` does
+            // NOT fix it, because once the window has ballooned `available_width()`
+            // IS that inflated width. The robust fix (proven on the sibling SCR1B3
+            // editor) is a FIXED content-width budget: clamp the content `Ui` to a
+            // const cap so no page can demand more than the budget. The window
+            // then holds a snug, stable width identical on every page, and any
+            // overflow goes to the vertical ScrollArea, never to horizontal
+            // growth. `.min(available_width())` lets a deliberately-shrunk window
+            // still track its smaller inner width without overflowing.
+            let content_w = ui.available_width().min(SETTINGS_CONTENT_W);
             ui.set_max_width(content_w);
             // In-content header: title + an unmissable Close ✕. The egui
             // title-bar ✕ can read as low-contrast against the dark custom
@@ -437,7 +476,7 @@ pub fn show(
             ui.horizontal_top(|ui| {
                 // ---- Left category nav ----
                 ui.vertical(|ui| {
-                    ui.set_width(168.0);
+                    ui.set_width(SETTINGS_NAV_W);
                     ui.add_space(4.0);
                     for cat in CATEGORIES {
                         ui.selectable_value(&mut category, (*cat).to_string(), *cat);
@@ -448,14 +487,16 @@ pub fn show(
 
                 // ---- Searchable, internally-scrolling content pane ----
                 ui.vertical(|ui| {
-                    // Clamp the content pane to the width left after the fixed
-                    // 168px nav + separator. This makes the pane width identical
-                    // on every page (the grids below size to THIS width, not to
-                    // their own desired width), and gives the search box a finite
-                    // width to fill. Without this clamp the pane would size to the
-                    // widest page's content and the `f32::INFINITY` search box
-                    // would demand near-infinite width during measurement.
-                    let pane_w = ui.available_width();
+                    // Clamp the content pane to a fixed budget (capped by the
+                    // width left after the nav + separator). This makes the pane
+                    // width identical on every page (the grids below size to THIS
+                    // width, not to their own desired width), and gives the search
+                    // box a finite width to fill. A const cap (NOT raw
+                    // `available_width()`) is what stops a filling slider / the
+                    // search box from demanding near-infinite width and ballooning
+                    // the window — the same root-cause fix as the content clamp
+                    // above, one level down.
+                    let pane_w = ui.available_width().min(SETTINGS_PANE_W);
                     ui.set_max_width(pane_w);
                     ui.horizontal(|ui| {
                         ui.label(egui_phosphor::thin::MAGNIFYING_GLASS);
@@ -546,7 +587,7 @@ fn render_sections(
         egui::Grid::new(id)
             .num_columns(3) // label | control | ↺
             .spacing([24.0, 10.0])
-            .min_col_width(150.0)
+            .min_col_width(140.0) // SCR1B3-parity column floor
     };
 
     // ---------------------------------------------------------------- Appearance
@@ -808,35 +849,45 @@ fn render_sections(
 
             if row_visible(q, "chromatic aberration") {
                 ui.label("Chromatic aberration");
-                // Explicit ON/OFF checkbox (issue #28): the intensity slider alone
-                // read as "broken" when it sat at 0. On first enable, default the
-                // intensity to a visible value so the effect shows immediately.
-                let was_enabled = config.effects.chromatic_aberration_enabled;
-                if ui
-                    .checkbox(
-                        &mut config.effects.chromatic_aberration_enabled,
-                        "RGB split",
-                    )
-                    .on_hover_text("Pure-channel red/blue fringing behind the text.")
-                    .changed()
-                {
-                    changed = true;
-                    if config.effects.chromatic_aberration_enabled
-                        && !was_enabled
-                        && config.effects.chromatic_aberration <= 0.0
+                // The checkbox + the intensity slider share ONE grid cell (col 2),
+                // stacked vertically. Keeping them in a single column is what makes
+                // this a 3-column row like every other one: a filling `Slider` in
+                // its OWN (4th) column has no width budget to fill against, so it
+                // ballooned the grid -- and with it the whole window -- past the
+                // close button (the residual "still too wide" overflow). Inside a
+                // bounded col-2 cell the slider fills only the column, exactly like
+                // the Opacity / UI-scale rows.
+                ui.vertical(|ui| {
+                    // Explicit ON/OFF checkbox (issue #28): the intensity slider
+                    // alone read as "broken" when it sat at 0. On first enable,
+                    // default the intensity to a visible value so the effect shows.
+                    let was_enabled = config.effects.chromatic_aberration_enabled;
+                    if ui
+                        .checkbox(
+                            &mut config.effects.chromatic_aberration_enabled,
+                            "RGB split",
+                        )
+                        .on_hover_text("Pure-channel red/blue fringing behind the text.")
+                        .changed()
                     {
-                        config.effects.chromatic_aberration =
-                            c0pl4nd_core::config::DEFAULT_CHROMATIC_INTENSITY;
+                        changed = true;
+                        if config.effects.chromatic_aberration_enabled
+                            && !was_enabled
+                            && config.effects.chromatic_aberration <= 0.0
+                        {
+                            config.effects.chromatic_aberration =
+                                c0pl4nd_core::config::DEFAULT_CHROMATIC_INTENSITY;
+                        }
                     }
-                }
-                let on = config.effects.chromatic_aberration_enabled;
-                changed |= ui
-                    .add_enabled(
-                        on,
-                        egui::Slider::new(&mut config.effects.chromatic_aberration, 0.1..=1.5)
-                            .text("intensity"),
-                    )
-                    .changed();
+                    let on = config.effects.chromatic_aberration_enabled;
+                    changed |= ui
+                        .add_enabled(
+                            on,
+                            egui::Slider::new(&mut config.effects.chromatic_aberration, 0.1..=1.5)
+                                .text("intensity"),
+                        )
+                        .changed();
+                });
                 changed |= reset_to_default(
                     ui,
                     &mut config.effects.chromatic_aberration,
