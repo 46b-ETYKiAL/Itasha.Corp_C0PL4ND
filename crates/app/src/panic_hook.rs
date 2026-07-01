@@ -260,6 +260,24 @@ mod windows_msgbox {
 mod tests {
     use super::*;
 
+    /// Serialises the tests that install a process-GLOBAL panic hook
+    /// (`std::panic::set_hook`). Without this, two such tests running in parallel
+    /// (the default) race: one test's `set_hook` clobbers the other's before its
+    /// `catch_unwind` fires, so the clobbered test's sink is never written and it
+    /// spuriously fails. The race widens under the coverage gate's slower
+    /// instrumented timing. A shared guard makes the hook-mutating tests mutually
+    /// exclusive. Poison-tolerant: a panic inside a guarded section (the tests
+    /// panic on purpose, but under `catch_unwind`) must not wedge the rest.
+    static PANIC_HOOK_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire [`PANIC_HOOK_TEST_GUARD`], recovering from poisoning so one failed
+    /// guarded test does not cascade into the others.
+    fn lock_panic_hook_tests() -> std::sync::MutexGuard<'static, ()> {
+        PANIC_HOOK_TEST_GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Build a synthetic `PanicHookInfo` is not constructible outside std, so the
     /// writer + formatter are tested via their public, info-free seams: the pure
     /// report shape is exercised by writing a known report string and reading it
@@ -334,6 +352,7 @@ mod tests {
         // the hook receives a genuine info. We assert the report names version,
         // os/arch, the panic message, and a backtrace section — without aborting
         // the test process.
+        let _guard = lock_panic_hook_tests();
         let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let sink = captured.clone();
         // Install a temporary hook that formats into the sink, then restore.

@@ -195,6 +195,26 @@ impl super::C0pl4ndApp {
             .map(|t| t.scrollback_len())
     }
 
+    /// The FOCUSED pane's whole-buffer copy text (the payload Ctrl+Shift+A / the
+    /// "Copy all" menu item place on the clipboard). Exposed so the copy-all
+    /// interaction test can assert the extracted content matches what was fed.
+    #[allow(dead_code)]
+    pub fn test_focused_buffer_text(&self) -> Option<String> {
+        self.terms
+            .get(&self.focused_pane)
+            .and_then(|t| t.buffer_text())
+    }
+
+    /// Whether the FOCUSED pane's emulator has spawned and is live. Exposed so an
+    /// interaction test can wait out the deferred first-frame PTY spawn before
+    /// feeding it (an early `test_feed_focused` on a not-yet-spawned pane no-ops).
+    #[allow(dead_code)]
+    pub fn test_focused_alive(&self) -> bool {
+        self.terms
+            .get(&self.focused_pane)
+            .is_some_and(|t| t.is_alive())
+    }
+
     /// The current match set converted to CELL spans over the focused pane's
     /// grid text, ready for the highlight painter. Converts each match's BYTE
     /// span to character columns via [`byte_to_col`] against the matched line, so

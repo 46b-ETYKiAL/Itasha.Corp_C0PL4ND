@@ -38,6 +38,7 @@ mod user_error;
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
+use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
 use egui_app::C0pl4ndApp;
@@ -675,4 +676,168 @@ fn primary_drag_selects_text_in_the_pane() {
     // (the rectangular extraction). It is not driven here because egui's kittest
     // synthetic drag detection does not register a drag when a modifier is held
     // on the pointer events (a harness limitation, not a real-app behaviour).
+}
+
+// ---- clear-scrollback + copy-all conveniences -------------------------------
+
+/// Wait out the focused pane's deferred first-frame PTY spawn, so a subsequent
+/// `test_feed_focused` is not silently dropped (the initial pane's emulator is
+/// created lazily during the first body render). Runs frames until the pane
+/// reports alive; panics if it never spawns (a real regression, not a flake).
+fn ensure_focused_spawned(h: &mut Harness<'_>, app: &RefCell<C0pl4ndApp>) {
+    for _ in 0..120 {
+        if app.borrow().test_focused_alive() {
+            return;
+        }
+        h.run();
+    }
+    panic!("the focused pane never spawned its emulator");
+}
+
+/// The `OutputCommand::CopyText` payload emitted on the last frame, if any — how
+/// a test observes what a copy chord actually placed on the clipboard. Reads the
+/// harness's captured `FullOutput` (kittest applies but also retains it), so the
+/// assertion is on the REAL platform-output the frame produced.
+fn last_copied_text(h: &Harness<'_>) -> Option<String> {
+    h.output()
+        .platform_output
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            egui::OutputCommand::CopyText(t) => Some(t.clone()),
+            _ => None,
+        })
+}
+
+#[test]
+fn ctrl_shift_k_clears_the_focused_scrollback() {
+    // Ctrl+Shift+K (WezTerm's clear-scrollback chord) drops the focused pane's
+    // scrollback history while keeping the live screen. Build deterministic
+    // scrollback by feeding lines into the focused emulator, confirm it is
+    // non-empty, then assert the chord empties it — driven through the REAL
+    // frame_tick chord handler.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+    ensure_focused_spawned(&mut h, &app);
+    {
+        let mut a = app.borrow_mut();
+        for i in 0..200 {
+            a.test_feed_focused(format!("line {i}\r\n").as_bytes());
+        }
+    }
+    h.step();
+
+    let sb = app
+        .borrow()
+        .test_focused_scrollback_len()
+        .expect("focused pane exists");
+    assert!(sb > 0, "feeding 200 lines must build scrollback (got {sb})");
+
+    press_ctrl_shift(&mut h, egui::Key::K);
+    assert_eq!(
+        app.borrow().test_focused_scrollback_len(),
+        Some(0),
+        "Ctrl+Shift+K must clear the focused pane's scrollback"
+    );
+}
+
+#[test]
+fn ctrl_shift_a_copies_the_whole_buffer_to_the_clipboard() {
+    // Ctrl+Shift+A (the "Select all" → copy convention of Windows Terminal /
+    // Ghostty) copies the focused pane's ENTIRE buffer (scrollback + screen) to
+    // the clipboard — the no-selection companion to Ctrl+Shift+C. We feed known
+    // lines, drive the chord through the REAL frame_tick handler, and assert the
+    // clipboard payload the chord actually emitted contains them.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+    ensure_focused_spawned(&mut h, &app);
+    {
+        let mut a = app.borrow_mut();
+        for i in 0..50 {
+            a.test_feed_focused(format!("row{i}\r\n").as_bytes());
+        }
+    }
+    h.step();
+
+    // The extracted payload spans scrollback + screen (an early row scrolled off
+    // into history AND a late row on-screen must both be present).
+    let payload = app
+        .borrow()
+        .test_focused_buffer_text()
+        .expect("a non-empty buffer yields copy-all text");
+    assert!(
+        payload.contains("row0"),
+        "the oldest fed row is in the buffer"
+    );
+    assert!(
+        payload.contains("row49"),
+        "the newest fed row is in the buffer"
+    );
+
+    press_ctrl_shift(&mut h, egui::Key::A);
+    let copied = last_copied_text(&h).expect("Ctrl+Shift+A must place the buffer on the clipboard");
+    assert!(
+        copied.contains("row0") && copied.contains("row49"),
+        "the clipboard payload must be the whole buffer (got {} bytes)",
+        copied.len()
+    );
+}
+
+/// Open the pane's right-click context menu: move the pointer over the pane
+/// centre, then press+release the SECONDARY button there (egui opens a
+/// `context_menu` on secondary-click release over the response).
+fn open_pane_context_menu(h: &mut Harness<'_>) {
+    let p = egui::pos2(600.0, 400.0);
+    h.event(egui::Event::PointerMoved(p));
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+    }
+    h.step();
+}
+
+#[test]
+fn context_menu_clear_scrollback_empties_the_scrollback() {
+    // The right-click "Clear scrollback" menu item drops the focused pane's
+    // scrollback. This drives the REAL popup: open the context menu with a
+    // secondary click, then click the item by its accessible label and assert the
+    // observable scrollback goes empty. The menu can need a re-open between frames
+    // (the popup is a transient Area), so retry until the item's effect lands.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+    ensure_focused_spawned(&mut h, &app);
+    {
+        let mut a = app.borrow_mut();
+        for i in 0..200 {
+            a.test_feed_focused(format!("line {i}\r\n").as_bytes());
+        }
+    }
+    h.run();
+    assert!(
+        app.borrow().test_focused_scrollback_len().unwrap_or(0) > 0,
+        "feeding must build scrollback before the menu clears it"
+    );
+
+    let mut cleared = false;
+    for _ in 0..80 {
+        if app.borrow().test_focused_scrollback_len() == Some(0) {
+            cleared = true;
+            break;
+        }
+        if let Some(item) = h.query_by_label("Clear scrollback") {
+            item.click();
+            h.run();
+        } else {
+            open_pane_context_menu(&mut h);
+        }
+    }
+    assert!(
+        cleared,
+        "the context-menu 'Clear scrollback' item must empty the scrollback"
+    );
 }

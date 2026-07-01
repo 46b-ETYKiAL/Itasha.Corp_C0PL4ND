@@ -2007,15 +2007,12 @@ impl Perform for Screen {
                         self.col = 0;
                     }
                     3 => {
-                        // Erase scrollback (the `clear` command's second half).
-                        // The live grid stays, so re-base the anchored metadata
-                        // by the erased history length and drop anchors that
-                        // pointed into the now-gone scrollback (audit #4).
-                        let erased = self.history.len();
-                        self.history.clear();
-                        self.history_wrapped.clear();
-                        self.view_offset = 0;
-                        self.reanchor_after_scrollback_clear(erased);
+                        // Erase scrollback (the `clear` command's second half) —
+                        // the SHARED path the right-click "Clear scrollback" menu
+                        // item and the Ctrl+Shift+K chord also take. The live grid
+                        // stays; anchored metadata is re-based / dropped inside
+                        // `clear_scrollback` (audit #4).
+                        self.clear_scrollback();
                     }
                     _ => {}
                 }
@@ -2567,6 +2564,20 @@ impl Screen {
         for m in self.command_marks.iter_mut() {
             m.line -= erased;
         }
+    }
+
+    /// Erase the scrollback history, keeping the live grid. Drops `history` /
+    /// `history_wrapped`, snaps the view back to live output, and re-bases the
+    /// anchored metadata by the erased length (dropping anchors that pointed into
+    /// the now-gone scrollback) via [`reanchor_after_scrollback_clear`]. This is
+    /// the single implementation the `ESC [ 3 J` (ED-3) handler, the right-click
+    /// "Clear scrollback" menu item, and the Ctrl+Shift+K chord all share.
+    fn clear_scrollback(&mut self) {
+        let erased = self.history.len();
+        self.history.clear();
+        self.history_wrapped.clear();
+        self.view_offset = 0;
+        self.reanchor_after_scrollback_clear(erased);
     }
 }
 
@@ -3533,6 +3544,68 @@ impl Terminal {
             .collect();
         lines.extend(self.screen.grid.to_text().lines().map(|s| s.to_string()));
         lines
+    }
+
+    /// Erase the scrollback history while keeping the live screen, snapping the
+    /// view back to live output. The direct analogue of feeding `ESC [ 3 J`
+    /// (ED-3) — the target of the right-click "Clear scrollback" menu item and
+    /// the Ctrl+Shift+K chord. Anchored metadata (images / prompt marks / command
+    /// marks) is re-based; anchors that pointed into the now-gone scrollback are
+    /// dropped.
+    pub fn clear_scrollback(&mut self) {
+        self.screen.clear_scrollback();
+    }
+
+    /// The ENTIRE buffer (scrollback history + live grid) as copy-ready text, or
+    /// `None` when it holds no non-blank text. This is the whole-buffer analogue
+    /// of the display-window-bound mouse-selection copy: it is the payload the
+    /// right-click "Copy all" menu item and the Ctrl+Shift+A chord place on the
+    /// clipboard.
+    ///
+    /// Uses the terminal copy convention so the result matches drawn text: the
+    /// blank continuation spacer written after a wide (width-2) glyph is skipped
+    /// (a pure char-width lookback, mirroring the app layer's `copy_row_text`),
+    /// each row's trailing whitespace is trimmed, and trailing blank rows (the
+    /// empty bottom of the live grid) are dropped. Rows are joined with `\n` with
+    /// no trailing newline.
+    pub fn buffer_text(&self) -> Option<String> {
+        use unicode_width::UnicodeWidthChar;
+        let row_text = |cells: &[Cell]| -> String {
+            let mut s = String::new();
+            for (i, cell) in cells.iter().enumerate() {
+                // Skip the wide-glyph continuation spacer: a cell whose PREVIOUS
+                // cell is a width-2 glyph (the core writes the glyph then one
+                // blank cell), so no stray space is emitted around a CJK / emoji.
+                if i > 0 {
+                    if let Some(prev) = cells.get(i - 1) {
+                        if UnicodeWidthChar::width(prev.c).unwrap_or(1) >= 2 {
+                            continue;
+                        }
+                    }
+                }
+                s.push(cell.c);
+            }
+            s.trim_end().to_string()
+        };
+        let rows = self.screen.grid.rows();
+        let mut lines: Vec<String> = Vec::with_capacity(self.screen.history.len() + rows);
+        for row in self.screen.history.iter() {
+            lines.push(row_text(row));
+        }
+        for r in 0..rows {
+            lines.push(row_text(self.screen.grid.row(r)));
+        }
+        // Drop trailing blank lines (the empty bottom of the live grid) so a copy
+        // of an otherwise-empty screen yields no text and a normal buffer has no
+        // long blank tail.
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        if lines.is_empty() {
+            None
+        } else {
+            Some(lines.join("\n"))
+        }
     }
 
     /// Resize the terminal to `rows` × `cols` (each clamped to a minimum of 1),

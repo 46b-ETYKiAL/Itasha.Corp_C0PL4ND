@@ -955,12 +955,23 @@ impl C0pl4ndApp {
                 }
                 ui.close_kind(egui::UiKind::Menu);
             }
+            // Copy the WHOLE buffer (scrollback + screen) — the no-selection
+            // companion to Copy, always available. The mouse-selection Copy above
+            // is display-window-bound; this copies the entire retained buffer.
+            if ui.button("Copy all").clicked() {
+                if let Some(t) = terms.get(&pane_id) {
+                    if let Some(text) = t.buffer_text() {
+                        ui.ctx().copy_text(text);
+                    }
+                }
+                ui.close_kind(egui::UiKind::Menu);
+            }
             ui.add_enabled(false, egui::Button::new("Paste"))
                 .on_hover_text("Paste with the keyboard shortcut (Ctrl/Cmd+Shift+V)");
             ui.separator();
             if ui.button("Clear scrollback").clicked() {
                 if let Some(t) = terms.get_mut(&pane_id) {
-                    t.write_bytes(b"\x1b[3J");
+                    t.clear_scrollback();
                 }
                 ui.close_kind(egui::UiKind::Menu);
             }
@@ -3494,6 +3505,8 @@ impl C0pl4ndApp {
         let mut act_split_v = false;
         let mut act_zoom = false;
         let mut act_settings = false;
+        let mut act_clear_scrollback = false;
+        let mut act_copy_all = false;
         ctx.input_mut(|i| {
             i.events.retain(|ev| {
                 if let egui::Event::Key {
@@ -3526,6 +3539,17 @@ impl C0pl4ndApp {
                                 act_zoom = true;
                                 return false;
                             }
+                            egui::Key::K => {
+                                // Clear scrollback (WezTerm's Ctrl+Shift+K).
+                                act_clear_scrollback = true;
+                                return false;
+                            }
+                            egui::Key::A => {
+                                // Copy the whole buffer (Windows Terminal / Ghostty
+                                // "Select all" → copy).
+                                act_copy_all = true;
+                                return false;
+                            }
                             _ => {}
                         }
                     }
@@ -3554,6 +3578,25 @@ impl C0pl4ndApp {
         }
         if act_settings {
             self.settings_open = !self.settings_open;
+        }
+        if act_clear_scrollback {
+            // Ctrl/Cmd+Shift+K: clear the focused pane's scrollback (same effect
+            // as the right-click "Clear scrollback" item), then repaint so the
+            // now-shorter scrollbar reflects it this frame.
+            if let Some(term) = self.terms.get_mut(&self.focused_pane) {
+                term.clear_scrollback();
+            }
+            ctx.request_repaint();
+        }
+        if act_copy_all {
+            // Ctrl/Cmd+Shift+A: copy the focused pane's WHOLE buffer (scrollback +
+            // screen) to the clipboard — the no-selection companion to
+            // Ctrl/Cmd+Shift+C. An empty buffer copies nothing.
+            if let Some(term) = self.terms.get(&self.focused_pane) {
+                if let Some(text) = term.buffer_text() {
+                    ctx.copy_text(text);
+                }
+            }
         }
 
         // 0a''''''''') Ctrl/Cmd+Shift+C copies the live mouse selection to the
