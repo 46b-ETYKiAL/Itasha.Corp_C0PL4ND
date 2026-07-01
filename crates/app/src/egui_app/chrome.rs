@@ -72,6 +72,50 @@ pub struct ChromeActions {
     pub report_issue: bool,
 }
 
+/// Extract the script-file path from a history entry that is a SINGLE quoted
+/// path invocation — the exact shapes [`super::quote_path_for_shell`] emits for a
+/// file picked via the script-menu "Open…" item:
+///   * PowerShell — `& "PATH"` (`"` un-escaped from `` `" ``)
+///   * cmd / Windows default — `"PATH"`
+///   * POSIX — `'PATH'` (`'` un-escaped from `'\''`)
+///
+/// Returns `None` for anything else (a plain typed command), so ordinary history
+/// rows are never mis-parsed.
+fn script_path_of(cmd: &str) -> Option<String> {
+    let s = cmd.trim();
+    if let Some(rest) = s.strip_prefix("& \"") {
+        return rest.strip_suffix('"').map(|inner| inner.replace("`\"", "\""));
+    }
+    if let Some(inner) = s.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+        // cmd paths cannot contain `"`, so a lone wrapped token is the whole path.
+        if !inner.contains('"') {
+            return Some(inner.to_string());
+        }
+    }
+    if let Some(inner) = s.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
+        return Some(inner.replace("'\\''", "'"));
+    }
+    None
+}
+
+/// The label to show for a script-menu history row: the FILE NAME when the entry
+/// is a quoted script-file invocation with a directory component (so the menu is
+/// not dominated by long absolute paths — the full command stays in the hover
+/// tooltip), else the command verbatim. Only shortens when there is a real parent
+/// directory to hide, so a quoted plain-string arg is left untouched.
+fn script_menu_label(cmd: &str) -> String {
+    if let Some(path) = script_path_of(cmd) {
+        let p = std::path::Path::new(&path);
+        let has_dir = p.parent().is_some_and(|par| !par.as_os_str().is_empty());
+        if has_dir {
+            if let Some(name) = p.file_name() {
+                return name.to_string_lossy().into_owned();
+            }
+        }
+    }
+    cmd.to_string()
+}
+
 impl C0pl4ndApp {
     /// Paint the titlebar (wordmark + tab strip + caption controls). Returns the
     /// actions the host should apply this frame. `colors` carries the
@@ -357,7 +401,12 @@ impl C0pl4ndApp {
                             .max_height(320.0)
                             .show(ui, |ui| {
                                 for cmd in &entries {
-                                    let item = ui.button(cmd);
+                                    // Show the script's file NAME (not the long
+                                    // absolute path) for a picked-file run; the
+                                    // full command stays in the hover tooltip and
+                                    // is what actually re-runs.
+                                    let label = script_menu_label(cmd);
+                                    let item = ui.button(&label).on_hover_text(cmd);
                                     item.widget_info(|| {
                                         egui::WidgetInfo::labeled(
                                             egui::WidgetType::Button,
@@ -605,6 +654,53 @@ mod tests {
     #[test]
     fn mouse_mode_badge_hidden_when_off() {
         assert_eq!(mouse_mode_badge_label(MouseMode::Off), None);
+    }
+
+    #[test]
+    fn script_menu_label_shows_filename_for_each_quoting_shape() {
+        // The three shapes `quote_path_for_shell` emits for a picked file — the
+        // label is the basename, never the long absolute path.
+        assert_eq!(
+            script_menu_label("& \"C:\\scripts\\deploy.ps1\""),
+            "deploy.ps1",
+            "PowerShell `& \"PATH\"` → basename"
+        );
+        assert_eq!(
+            script_menu_label("\"C:\\scripts\\build.bat\""),
+            "build.bat",
+            "cmd/Windows `\"PATH\"` → basename"
+        );
+        assert_eq!(
+            script_menu_label("'/home/user/run.sh'"),
+            "run.sh",
+            "POSIX `'PATH'` → basename"
+        );
+    }
+
+    #[test]
+    fn script_menu_label_leaves_plain_commands_untouched() {
+        // A typed command is not a quoted single-path invocation → verbatim.
+        assert_eq!(script_menu_label("ls -la"), "ls -la");
+        assert_eq!(script_menu_label("git status"), "git status");
+        // A quoted token with NO directory component has no long path to hide,
+        // so it is left as-is (only shortens when there is a real parent dir).
+        assert_eq!(script_menu_label("\"hello\""), "\"hello\"");
+    }
+
+    #[test]
+    fn script_path_of_unescapes_and_rejects_non_paths() {
+        // PowerShell un-escapes the doubled `` `" `` back to a literal quote.
+        assert_eq!(
+            script_path_of("& \"C:\\a`\"b\\x.ps1\"").as_deref(),
+            Some("C:\\a\"b\\x.ps1")
+        );
+        // POSIX un-escapes `'\''` back to a literal apostrophe.
+        assert_eq!(
+            script_path_of("'/tmp/it'\\''s.sh'").as_deref(),
+            Some("/tmp/it's.sh")
+        );
+        // A plain command is not a single quoted path.
+        assert_eq!(script_path_of("echo hi"), None);
     }
 
     #[test]

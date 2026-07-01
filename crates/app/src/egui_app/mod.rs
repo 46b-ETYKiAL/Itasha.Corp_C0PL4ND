@@ -3683,8 +3683,10 @@ impl C0pl4ndApp {
                 .inner
         };
 
-        // 2) status bar (hidden in fullscreen — see the titlebar gate above).
-        if !self.fullscreen {
+        // 2) status bar (hidden in fullscreen — see the titlebar gate above — and
+        //    hidden when the user turns it off in Settings, reclaiming the row for
+        //    the terminal grid).
+        if !self.fullscreen && self.config.show_status_bar {
             egui::TopBottomPanel::bottom("status")
                 .frame(egui::Frame::new().fill(colors.panel).inner_margin(4.0))
                 .show(ctx, |ui| self.status_bar(ui, colors));

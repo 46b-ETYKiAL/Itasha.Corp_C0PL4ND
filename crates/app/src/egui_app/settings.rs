@@ -1190,6 +1190,7 @@ fn render_sections(
             "dividers",
             "linked",
             "symmetrical",
+            "status bar",
         ],
     ) {
         ui.heading("Window");
@@ -1226,6 +1227,19 @@ fn render_sections(
                     .changed();
                 changed |=
                     reset_to_default(ui, &mut config.link_pane_dividers, &def.link_pane_dividers);
+                ui.end_row();
+            }
+
+            if row_visible(q, "status bar bottom hide show") {
+                ui.label("Status bar");
+                changed |= ui
+                    .toggle_value(&mut config.show_status_bar, "Show bottom status bar")
+                    .on_hover_text(
+                        "The bottom bar (pane count + hints). Turn off to reclaim the \
+                         row for the terminal grid.",
+                    )
+                    .changed();
+                changed |= reset_to_default(ui, &mut config.show_status_bar, &def.show_status_bar);
                 ui.end_row();
             }
 

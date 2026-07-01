@@ -614,6 +614,10 @@ pub struct Config {
     pub view_mode: ViewMode,
     /// Show the neofetch-style startup panel (logo + system info) on launch.
     pub startup_panel: bool,
+    /// Show the bottom status bar (pane count + hints). `true` (default) shows it;
+    /// set `false` to hide it and reclaim the row for the terminal grid.
+    #[serde(default = "default_true")]
+    pub show_status_bar: bool,
     /// Override shell program; `None` = use the platform default shell.
     pub shell: Option<String>,
     /// The `TERM` value advertised to the spawned child shell (and every TUI it
@@ -704,6 +708,7 @@ impl Default for Config {
             view_mode: ViewMode::default(),
             startup_panel: true,
             link_pane_dividers: false,
+            show_status_bar: true,
             shell: None,
             term: default_term(),
             ligatures: false,
