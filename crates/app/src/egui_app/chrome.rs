@@ -84,7 +84,9 @@ pub struct ChromeActions {
 fn script_path_of(cmd: &str) -> Option<String> {
     let s = cmd.trim();
     if let Some(rest) = s.strip_prefix("& \"") {
-        return rest.strip_suffix('"').map(|inner| inner.replace("`\"", "\""));
+        return rest
+            .strip_suffix('"')
+            .map(|inner| inner.replace("`\"", "\""));
     }
     if let Some(inner) = s.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
         // cmd paths cannot contain `"`, so a lone wrapped token is the whole path.
@@ -105,12 +107,16 @@ fn script_path_of(cmd: &str) -> Option<String> {
 /// directory to hide, so a quoted plain-string arg is left untouched.
 fn script_menu_label(cmd: &str) -> String {
     if let Some(path) = script_path_of(cmd) {
-        let p = std::path::Path::new(&path);
-        let has_dir = p.parent().is_some_and(|par| !par.as_os_str().is_empty());
-        if has_dir {
-            if let Some(name) = p.file_name() {
-                return name.to_string_lossy().into_owned();
-            }
+        // Split on BOTH separators so a Windows-style path (`\`) is shortened even
+        // on a POSIX host and a POSIX path (`/`) on Windows — `std::path::Path` is
+        // host-specific (it does not treat `\` as a separator on Linux/macOS), and
+        // C0PL4ND ships on all three OSes.
+        let name = path.rsplit(['/', '\\']).next().unwrap_or(path.as_str());
+        // Only shorten when there is a real parent directory to hide (a separator
+        // was present, so the basename differs from the whole path); a bare token
+        // is left untouched.
+        if !name.is_empty() && name != path {
+            return name.to_string();
         }
     }
     cmd.to_string()
