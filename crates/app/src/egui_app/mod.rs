@@ -1837,6 +1837,14 @@ impl C0pl4ndApp {
     /// [`Self::render_pane_body`] so the closure can borrow `self.terms`/`theme`
     /// disjointly from `self.grid_tree` (which `tree.ui` borrows mutably).
     fn grid_ui(&mut self, ui: &mut egui::Ui) {
+        // Linked dividers (opt-in): hold every split at equal shares so the panes
+        // stay the same size ("move together"). Applied BEFORE the tree renders,
+        // so a divider drag from the previous frame is reset before it is shown —
+        // the panes never visibly drift from equal while the toggle is on. A no-op
+        // (and no repaint) when there is no split to equalise.
+        if self.config.link_pane_dividers {
+            grid::equalize_pane_shares(&mut self.grid_tree);
+        }
         let titles = self.pane_titles();
         let mut closes: Vec<PaneId> = Vec::new();
         let focused = self.focused_pane;
@@ -3768,6 +3776,13 @@ impl C0pl4ndApp {
                     }
                 }
             }
+        }
+        // One-shot "make panes symmetrical": equalise every split so all panes are
+        // the same size. Independent of the `link_pane_dividers` setting (works
+        // even when dividers are freely draggable). No-op / no repaint when there
+        // is no split to equalise.
+        if actions.equalize_panes && grid::equalize_pane_shares(&mut self.grid_tree) {
+            ctx.request_repaint();
         }
         // Caption command: issue the REAL OS viewport command AND record it so an
         // interaction test can assert the click had its effect.

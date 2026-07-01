@@ -642,6 +642,13 @@ pub struct Config {
     /// such a paste shows a confirm overlay first. A security feature — set
     /// `false` to paste multi-line content without confirmation.
     pub paste_warn_multiline: bool,
+    /// Keep split-pane dividers LINKED so every sibling pane stays the same size.
+    /// When `true`, the dividers are held at equal positions each frame — drag one
+    /// and they hold equal ("move together"). Defaults to `false` so panes are
+    /// freely resizable; the top-bar "make symmetrical" button equalises once
+    /// regardless of this setting.
+    #[serde(default)]
+    pub link_pane_dividers: bool,
     /// Capture typed commands into the (in-memory) command history that feeds the
     /// Ctrl+Shift+P palette + the history sidebar. `true` (default) records
     /// echoed commands (passwords + inline secrets are excluded/redacted
@@ -696,6 +703,7 @@ impl Default for Config {
             history_sidebar_side: PanelSide::Right,
             view_mode: ViewMode::default(),
             startup_panel: true,
+            link_pane_dividers: false,
             shell: None,
             term: default_term(),
             ligatures: false,

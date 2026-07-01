@@ -159,6 +159,95 @@ fn clicking_new_terminal_adds_a_pane() {
     );
 }
 
+/// Skew the first Linear split's child shares to very unequal values so a later
+/// equalise has something real to fix.
+fn skew_first_split(app: &RefCell<C0pl4ndApp>) {
+    let mut a = app.borrow_mut();
+    for tile in a.grid_tree.tiles.tiles_mut() {
+        if let egui_tiles::Tile::Container(egui_tiles::Container::Linear(lin)) = tile {
+            for (i, id) in lin.children.clone().iter().enumerate() {
+                lin.shares.set_share(*id, 1.0 + i as f32 * 4.0); // 1, 5, 9, …
+            }
+        }
+    }
+}
+
+/// Every Linear split's child shares, flattened — used to assert equality.
+fn all_split_shares(app: &RefCell<C0pl4ndApp>) -> Vec<f32> {
+    let a = app.borrow();
+    let mut out = Vec::new();
+    for tile in a.grid_tree.tiles.tiles() {
+        if let egui_tiles::Tile::Container(egui_tiles::Container::Linear(lin)) = tile {
+            out.extend(lin.shares.iter().map(|(_, s)| *s));
+        }
+    }
+    out
+}
+
+fn shares_all_equal(shares: &[f32]) -> bool {
+    // Adjacent-pair check: avoids both `map_or(true, …)` (clippy `unnecessary_map_or`)
+    // and its suggested `is_none_or` (Rust 1.82 > our 1.80 MSRV). Empty/single → true.
+    shares
+        .windows(2)
+        .all(|w| (w[0] - w[1]).abs() < f32::EPSILON)
+}
+
+#[test]
+fn linked_dividers_toggle_holds_panes_equal_each_frame() {
+    // Two panes (a real split), skewed unequal, with the linked-dividers setting
+    // ON. One real frame through `grid_ui` must snap the dividers back to equal —
+    // the "move together / stay the same size" behaviour.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+    click_new_terminal(&mut h, &app); // now 2 panes, grid view
+    assert_eq!(app.borrow().pane_count(), 2);
+
+    skew_first_split(&app);
+    let skewed = all_split_shares(&app);
+    assert!(
+        !shares_all_equal(&skewed),
+        "precondition: the split must be skewed unequal, got {skewed:?}"
+    );
+
+    app.borrow_mut().config.link_pane_dividers = true;
+    h.run(); // one real frame — grid_ui equalises at the top when the flag is on
+
+    let after = all_split_shares(&app);
+    assert!(
+        shares_all_equal(&after),
+        "linked dividers ON must hold every split at equal shares, got {after:?}"
+    );
+}
+
+#[test]
+fn make_symmetrical_button_equalizes_skewed_panes() {
+    // With the linked setting OFF, a skewed split stays skewed until the top-bar
+    // "make panes symmetrical" button is clicked — a one-shot equalise.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+    click_new_terminal(&mut h, &app); // 2 panes, grid view — the button now shows
+    assert!(
+        !app.borrow().config.link_pane_dividers,
+        "setting stays OFF here"
+    );
+
+    skew_first_split(&app);
+    h.run();
+    assert!(
+        !shares_all_equal(&all_split_shares(&app)),
+        "with the setting OFF, a skewed split must stay skewed until the button"
+    );
+
+    h.get_by_label("make panes symmetrical").click();
+    h.run();
+
+    let after = all_split_shares(&app);
+    assert!(
+        shares_all_equal(&after),
+        "clicking 'make panes symmetrical' must equalise every split, got {after:?}"
+    );
+}
+
 #[test]
 fn clicking_a_tab_changes_the_focused_pane() {
     // Bootstrap opens one pane (id 0, focused). Add a second, then click back.

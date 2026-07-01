@@ -86,6 +86,38 @@ pub fn count_panes(tree: &egui_tiles::Tree<Pane>) -> usize {
         .count()
 }
 
+/// Reset every Linear split container's shares to EQUAL, so all sibling panes in
+/// each row/column become the same size. Every child share is set to 1.0; egui_tiles
+/// normalises shares proportionally, so all-equal == equal sizes. Returns `true`
+/// when at least one Linear container was touched (i.e. a real split existed) so
+/// the caller can request a repaint only when something changed.
+///
+/// Only Linear containers are handled — that is the only split kind C0PL4ND ever
+/// creates (`build_default_grid` / `split_focused` use horizontal/vertical Linear
+/// tiles); Tabs and Grid containers (never constructed here) are left untouched.
+///
+/// Used by the top-bar "make symmetrical" button (one-shot) and, when the
+/// `link_pane_dividers` setting is on, every frame so the dividers stay locked
+/// at equal positions (drag one and they all hold equal — "move together").
+pub fn equalize_pane_shares(tree: &mut egui_tiles::Tree<Pane>) -> bool {
+    let mut changed = false;
+    for tile in tree.tiles.tiles_mut() {
+        if let egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear)) = tile {
+            // Only a real split (2+ siblings) has dividers to equalise; a lone
+            // child is not a split, so touching it would be a no-op that wrongly
+            // reports a change.
+            if linear.children.len() < 2 {
+                continue;
+            }
+            for child in linear.children.clone() {
+                linear.shares.set_share(child, 1.0);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 /// Build a default grid from a list of pane ids — every pane becomes a leaf
 /// inside a single horizontal container (visible side-by-side from the start).
 /// The fixed id-stack key keeps any future persistence stable across versions.
@@ -337,6 +369,57 @@ mod tests {
     fn build_default_grid_empty_is_empty_tree() {
         let tree = build_default_grid(&[]);
         assert_eq!(count_panes(&tree), 0);
+    }
+
+    /// Skewing a split's shares then equalising must restore all children to the
+    /// SAME share (equal pane sizes) and report that it changed something.
+    #[test]
+    fn equalize_pane_shares_makes_all_siblings_equal() {
+        let mut tree = build_default_grid(&[PaneId(0), PaneId(1), PaneId(2)]);
+        // Find the root Linear container and skew its children to very unequal shares.
+        let mut skewed_any = false;
+        for tile in tree.tiles.tiles_mut() {
+            if let egui_tiles::Tile::Container(egui_tiles::Container::Linear(lin)) = tile {
+                let kids: Vec<TileId> = lin.children.clone();
+                for (i, id) in kids.iter().enumerate() {
+                    lin.shares.set_share(*id, 1.0 + i as f32 * 5.0); // 1, 6, 11
+                    skewed_any = true;
+                }
+            }
+        }
+        assert!(
+            skewed_any,
+            "the 3-pane grid must contain a Linear split to skew"
+        );
+
+        assert!(
+            equalize_pane_shares(&mut tree),
+            "equalising a real split must report a change"
+        );
+
+        // Every Linear container's child shares must now be identical.
+        for tile in tree.tiles.tiles_mut() {
+            if let egui_tiles::Tile::Container(egui_tiles::Container::Linear(lin)) = tile {
+                let shares: Vec<f32> = lin.shares.iter().map(|(_, s)| *s).collect();
+                if let Some(first) = shares.first() {
+                    assert!(
+                        shares.iter().all(|s| (s - first).abs() < f32::EPSILON),
+                        "all sibling shares must be equal after equalise, got {shares:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Equalising a single-pane tree (no split container) touches nothing and
+    /// reports no change — the caller must not request a needless repaint.
+    #[test]
+    fn equalize_pane_shares_is_noop_without_a_split() {
+        let mut tree = build_default_grid(&[PaneId(0)]);
+        assert!(
+            !equalize_pane_shares(&mut tree),
+            "a single-pane tree has no Linear split to equalise"
+        );
     }
 
     #[test]
