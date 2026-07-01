@@ -404,6 +404,29 @@ impl WindowMode {
     }
 }
 
+/// GPU backend the renderer requests at startup. `Auto` (default) keeps the
+/// platform-smart choice; the explicit variants force a specific wgpu backend to
+/// work around a driver-specific rendering glitch (the canonical case: corrupted
+/// terminal-grid glyphs under a bad Windows DX12 driver, fixed by switching to
+/// Vulkan). Serialized lowercase (`auto` / `dx12` / `vulkan` / `gl`). The choice
+/// applies on restart (the backend is chosen once, before the GPU device is
+/// created); the `WGPU_BACKEND` env var still overrides it for one-off debugging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GraphicsBackend {
+    /// Platform-smart default: DX12 on Windows (Vulkan when window transparency
+    /// is enabled), wgpu's platform default elsewhere.
+    #[default]
+    Auto,
+    /// Direct3D 12 (Windows).
+    Dx12,
+    /// Vulkan (Windows / Linux). Required for real window transparency on Windows.
+    Vulkan,
+    /// OpenGL — a last-resort fallback when neither DX12 nor Vulkan renders
+    /// correctly.
+    Gl,
+}
+
 /// How the pane shell lays out terminals: the multi-pane `egui_tiles` grid, or
 /// a single full-size pane with the existing tab strip switching between them.
 /// One shell layout is active at a time; the titlebar view-toggle button flips
@@ -624,6 +647,14 @@ pub struct Config {
     /// set `false` to hide it and reclaim the row for the terminal grid.
     #[serde(default = "default_true")]
     pub show_status_bar: bool,
+    /// GPU backend the renderer requests at startup. [`GraphicsBackend::Auto`]
+    /// (default) keeps the platform-smart choice (DX12 on Windows, Vulkan when
+    /// window transparency is on; wgpu default elsewhere). Set an explicit
+    /// backend to work around a driver-specific rendering glitch (e.g. corrupted
+    /// glyphs under a bad DX12 driver → switch to Vulkan). Applied on restart;
+    /// the `WGPU_BACKEND` env var still overrides this.
+    #[serde(default)]
+    pub graphics_backend: GraphicsBackend,
     /// Override shell program; `None` = use the platform default shell.
     pub shell: Option<String>,
     /// The `TERM` value advertised to the spawned child shell (and every TUI it
@@ -715,6 +746,7 @@ impl Default for Config {
             startup_panel: true,
             link_pane_dividers: false,
             show_status_bar: true,
+            graphics_backend: GraphicsBackend::default(),
             shell: None,
             term: default_term(),
             ligatures: false,
@@ -1006,6 +1038,28 @@ mod tests {
         assert_eq!(c.theme, "itasha-corp");
         assert_eq!(c.scrollback_lines, 10_000);
         assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn graphics_backend_defaults_to_auto_and_round_trips() {
+        let p = std::path::Path::new("config.toml");
+        // Default is Auto (the platform-smart choice), and a missing key parses
+        // to Auto (serde default) so older configs keep working.
+        assert_eq!(Config::default().graphics_backend, GraphicsBackend::Auto);
+        assert_eq!(
+            Config::from_toml("", p).unwrap().graphics_backend,
+            GraphicsBackend::Auto,
+            "absent key → Auto (backward compatible)"
+        );
+        // An explicit lowercase value parses, and the round-trip preserves it.
+        let c = Config::from_toml("graphics_backend = \"vulkan\"\n", p).unwrap();
+        assert_eq!(c.graphics_backend, GraphicsBackend::Vulkan);
+        let toml = c.to_toml().unwrap();
+        assert_eq!(
+            Config::from_toml(&toml, p).unwrap().graphics_backend,
+            GraphicsBackend::Vulkan,
+            "graphics_backend survives a serialize→parse round-trip"
+        );
     }
 
     /// `config_dir()` (the per-user data dir the W1TN3SS report spool lives under)
