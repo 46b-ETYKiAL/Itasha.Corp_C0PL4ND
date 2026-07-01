@@ -134,16 +134,16 @@ fn toggling_paste_warn_flips_the_live_config() {
 
 #[test]
 fn clicking_the_font_size_slider_changes_the_live_config() {
-    // The Font-size slider must move the live config off its 14.0 default.
+    // The Font-size slider must move the live config off its 13.0 default.
     // Clicking the slider track sets the value to the click position (egui's
     // click-to-set behaviour); a center click on an 8..32 pt range lands well
-    // above 14, so we assert the live value CHANGED — not just re-asserting
-    // 14.0. (Arrow-key driving is intentionally NOT used: the terminal input
+    // above 13, so we assert the live value CHANGED — not just re-asserting
+    // 13.0. (Arrow-key driving is intentionally NOT used: the terminal input
     // forwarder consumes arrow keys for the PTY, so a real click on the widget
     // is the robust, production-faithful path.)
     let app = RefCell::new(C0pl4ndApp::bootstrap());
     let before = app.borrow().config_font_size();
-    assert_eq!(before, 14.0, "precondition: font size defaults to 14pt");
+    assert_eq!(before, 13.0, "precondition: font size defaults to 13pt");
     let mut h = harness(&app);
 
     open_settings(&mut h);
