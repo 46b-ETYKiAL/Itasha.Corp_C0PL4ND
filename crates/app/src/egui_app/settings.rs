@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
-use c0pl4nd_core::config::{CursorStyle, UpdateMode, WindowMode};
+use c0pl4nd_core::config::{CursorStyle, GraphicsBackend, UpdateMode, WindowMode};
 use c0pl4nd_core::Config;
 
 use super::theme::ChromeColors;
@@ -1191,6 +1191,10 @@ fn render_sections(
             "linked",
             "symmetrical",
             "status bar",
+            "graphics",
+            "backend",
+            "gpu",
+            "renderer",
         ],
     ) {
         ui.heading("Window");
@@ -1240,6 +1244,41 @@ fn render_sections(
                     )
                     .changed();
                 changed |= reset_to_default(ui, &mut config.show_status_bar, &def.show_status_bar);
+                ui.end_row();
+            }
+
+            if row_visible(q, "graphics backend gpu renderer dx12 vulkan gl") {
+                ui.label("Graphics backend");
+                let backends = [
+                    (GraphicsBackend::Auto, "auto (recommended)"),
+                    (GraphicsBackend::Dx12, "DX12"),
+                    (GraphicsBackend::Vulkan, "Vulkan"),
+                    (GraphicsBackend::Gl, "OpenGL"),
+                ];
+                egui::ComboBox::from_id_salt("c0pl4nd-graphics-backend")
+                    .selected_text(
+                        backends
+                            .iter()
+                            .find(|(b, _)| *b == config.graphics_backend)
+                            .map(|(_, s)| *s)
+                            .unwrap_or("auto (recommended)"),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (b, label) in backends {
+                            changed |= ui
+                                .selectable_value(&mut config.graphics_backend, b, label)
+                                .changed();
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "The GPU backend the renderer uses (Windows). Leave on Auto \
+                         unless the terminal grid renders corrupted/garbled glyphs — \
+                         then try Vulkan (or OpenGL) to route around a bad DX12 \
+                         driver. Applies on restart.",
+                    );
+                changed |=
+                    reset_to_default(ui, &mut config.graphics_backend, &def.graphics_backend);
                 ui.end_row();
             }
 

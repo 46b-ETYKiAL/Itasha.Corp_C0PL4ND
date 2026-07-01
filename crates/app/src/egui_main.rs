@@ -135,7 +135,11 @@ fn main() -> eframe::Result<()> {
         // glow — glyphon (Milestone 2) shares egui's wgpu device.
         ..Default::default()
     };
-    prefer_backend_on_windows(&mut options, launch_transparency_enabled());
+    prefer_backend_on_windows(
+        &mut options,
+        launch_transparency_enabled(),
+        launch_backend_override(),
+    );
 
     // Lower the wgpu present queue to ONE frame of latency (eframe's default is
     // 2): a terminal is latency-sensitive (keystroke → glyph), and one in-flight
@@ -231,6 +235,23 @@ fn launch_transparency_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// The persisted `graphics_backend` override, read from the on-disk config at
+/// startup (BEFORE the GPU device is created). Mirrors
+/// [`launch_transparency_enabled`]: a missing / unreadable config yields the
+/// default [`GraphicsBackend::Auto`] (platform-smart choice), never a crash.
+/// Fed into [`prefer_backend_on_windows`], where `WGPU_BACKEND` still wins.
+fn launch_backend_override() -> c0pl4nd_core::config::GraphicsBackend {
+    c0pl4nd_core::Config::default_path()
+        .filter(|p| p.exists())
+        .and_then(|p| {
+            std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|s| c0pl4nd_core::Config::from_toml(&s, &p).ok())
+        })
+        .map(|c| c.graphics_backend)
+        .unwrap_or_default()
+}
+
 /// Choose the wgpu backend on Windows.
 ///
 /// **Real window transparency requires the Vulkan backend.** A wgpu swapchain
@@ -249,25 +270,42 @@ fn launch_transparency_enabled() -> bool {
 /// enabled window transparency we select Vulkan; otherwise DX12. `WGPU_BACKEND`
 /// always overrides (a user hitting a Vulkan-overlay crash can force `dx12`,
 /// trading transparency for stability). No-op on non-Windows platforms.
-fn prefer_backend_on_windows(options: &mut eframe::NativeOptions, want_transparency: bool) {
+///
+/// `backend_override` is the persisted [`GraphicsBackend`](c0pl4nd_core::config::GraphicsBackend)
+/// setting: `Auto` keeps the transparency-smart default above, while an explicit
+/// variant forces that backend — the in-app escape hatch for a driver-specific
+/// rendering glitch (e.g. corrupted grid glyphs under a bad DX12 driver → pick
+/// Vulkan). Precedence: `WGPU_BACKEND` env (one-off debug) > config override >
+/// platform default. Effective on Windows; inert elsewhere (the glitch it exists
+/// to work around is the Windows DX12 present path).
+fn prefer_backend_on_windows(
+    options: &mut eframe::NativeOptions,
+    want_transparency: bool,
+    backend_override: c0pl4nd_core::config::GraphicsBackend,
+) {
     #[cfg(target_os = "windows")]
     {
         use eframe::wgpu::Backends;
         if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
         {
-            let default = if want_transparency {
+            // Platform-smart default: Vulkan when the user wants a see-through
+            // window, else the more overlay-robust DX12.
+            let platform_default = if want_transparency {
                 Backends::VULKAN
             } else {
                 Backends::DX12
             };
-            let resolved = Backends::from_env().unwrap_or(default);
+            // The persisted setting maps to an explicit backend; `Auto` defers to
+            // the platform default. The `WGPU_BACKEND` env still wins over both.
+            let configured = resolve_configured_backends(backend_override, platform_default);
+            let resolved = Backends::from_env().unwrap_or(configured);
             setup.instance_descriptor.backends = resolved;
             // F4-3: if transparency was requested but the resolved backend is not
-            // Vulkan (e.g. the user forced `WGPU_BACKEND=dx12` to dodge a
-            // Vulkan-overlay crash), the window will be opaque. Tell them why and
-            // how to recover, instead of leaving them to wonder why "transparency
-            // does nothing". Pairs with the F4-1 crash hook: a Vulkan-overlay
-            // panic now also self-diagnoses via the crash log.
+            // Vulkan (e.g. the user forced `WGPU_BACKEND=dx12` or the config
+            // override to dodge a Vulkan-overlay crash), the window will be
+            // opaque. Tell them why and how to recover, instead of leaving them to
+            // wonder why "transparency does nothing". Pairs with the F4-1 crash
+            // hook: a Vulkan-overlay panic now also self-diagnoses via the crash log.
             if let Some(msg) = transparency_fallback_warning(
                 want_transparency,
                 resolved.contains(Backends::VULKAN),
@@ -279,6 +317,7 @@ fn prefer_backend_on_windows(options: &mut eframe::NativeOptions, want_transpare
     #[cfg(not(target_os = "windows"))]
     {
         let _ = want_transparency;
+        let _ = backend_override;
         let _ = options; // used on every platform; backend default is correct off Windows
     }
 }
@@ -310,6 +349,28 @@ fn transparency_fallback_warning(
     }
 }
 
+/// Map the persisted [`GraphicsBackend`](c0pl4nd_core::config::GraphicsBackend)
+/// override + the platform default to the concrete wgpu `Backends` mask, BEFORE
+/// the `WGPU_BACKEND` env override is applied. `Auto` defers to `platform_default`;
+/// each explicit variant forces that backend. Pure + cross-platform (wgpu's
+/// `Backends` flags exist on every OS) so it is unit-testable everywhere; only
+/// CALLED inside the Windows backend-selection block, hence `allow(dead_code)`
+/// off Windows where there is no caller.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn resolve_configured_backends(
+    backend_override: c0pl4nd_core::config::GraphicsBackend,
+    platform_default: eframe::wgpu::Backends,
+) -> eframe::wgpu::Backends {
+    use c0pl4nd_core::config::GraphicsBackend;
+    use eframe::wgpu::Backends;
+    match backend_override {
+        GraphicsBackend::Auto => platform_default,
+        GraphicsBackend::Dx12 => Backends::DX12,
+        GraphicsBackend::Vulkan => Backends::VULKAN,
+        GraphicsBackend::Gl => Backends::GL,
+    }
+}
+
 /// Decode the embedded sigil PNG into an eframe window icon. Returns `None` on a
 /// decode failure (the caller falls back to the platform default).
 fn load_app_icon() -> Option<egui::IconData> {
@@ -327,7 +388,41 @@ fn load_app_icon() -> Option<egui::IconData> {
 
 #[cfg(test)]
 mod tests {
-    use super::transparency_fallback_warning;
+    use super::{resolve_configured_backends, transparency_fallback_warning};
+    use c0pl4nd_core::config::GraphicsBackend;
+    use eframe::wgpu::Backends;
+
+    #[test]
+    fn auto_backend_defers_to_the_platform_default() {
+        // `Auto` must NOT force a backend — it passes the platform default through
+        // unchanged (DX12 for opaque, Vulkan for transparency on Windows).
+        assert_eq!(
+            resolve_configured_backends(GraphicsBackend::Auto, Backends::DX12),
+            Backends::DX12,
+        );
+        assert_eq!(
+            resolve_configured_backends(GraphicsBackend::Auto, Backends::VULKAN),
+            Backends::VULKAN,
+        );
+    }
+
+    #[test]
+    fn explicit_backend_overrides_the_platform_default() {
+        // Each explicit choice forces THAT backend regardless of the default —
+        // the garble escape hatch (e.g. Vulkan over a bad DX12 default).
+        assert_eq!(
+            resolve_configured_backends(GraphicsBackend::Vulkan, Backends::DX12),
+            Backends::VULKAN,
+        );
+        assert_eq!(
+            resolve_configured_backends(GraphicsBackend::Dx12, Backends::VULKAN),
+            Backends::DX12,
+        );
+        assert_eq!(
+            resolve_configured_backends(GraphicsBackend::Gl, Backends::DX12),
+            Backends::GL,
+        );
+    }
 
     #[test]
     fn warns_only_when_transparency_wanted_but_backend_not_vulkan() {
