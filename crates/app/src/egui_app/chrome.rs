@@ -44,6 +44,10 @@ pub struct ChromeActions {
     /// action struct (like [`new_terminal`](Self::new_terminal)) so the host
     /// applies the `config.view_mode` flip after the panel closure returns.
     pub toggle_view_mode: bool,
+    /// User clicked the "make panes symmetrical" button; equalise every split so
+    /// all panes are the same size (a one-shot, independent of the
+    /// `link_pane_dividers` setting). Only offered in grid view with 2+ panes.
+    pub equalize_panes: bool,
     /// User clicked a caption button (minimize / maximize / close). Routed
     /// through the action struct (instead of sending the `ViewportCommand`
     /// inline) so `frame_tick` is the single place that issues the real OS
@@ -260,6 +264,27 @@ impl C0pl4ndApp {
             });
             if view_btn.clicked() {
                 actions.toggle_view_mode = true;
+            }
+
+            // "Make panes symmetrical" — a one-click equalise of every split so all
+            // panes are the same size. Only meaningful in GRID view with a real
+            // split (2+ panes), so it appears only then (it would be a dead button
+            // in tabs view or with a single pane). Independent of the
+            // `link_pane_dividers` setting — a one-shot even when dividers are free.
+            if !in_tabs && self.pane_count() >= 2 {
+                let sym = ui
+                    .button(RichText::new(icon::COLUMNS).size(16.0).color(colors.muted))
+                    .on_hover_text("make panes symmetrical (equal sizes)");
+                sym.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        "make panes symmetrical",
+                    )
+                });
+                if sym.clicked() {
+                    actions.equalize_panes = true;
+                }
             }
 
             // Shell switcher (▾): lists the shells detected on this machine.

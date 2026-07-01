@@ -1178,7 +1178,20 @@ fn render_sections(
     }
 
     // -------------------------------------------------------------------- Window
-    if section_visible(sel, q, "Window", &["padding", "columns", "rows"]) {
+    if section_visible(
+        sel,
+        q,
+        "Window",
+        &[
+            "padding",
+            "columns",
+            "rows",
+            "panes",
+            "dividers",
+            "linked",
+            "symmetrical",
+        ],
+    ) {
         ui.heading("Window");
         help(
             ui,
@@ -1198,6 +1211,21 @@ fn render_sections(
                     .on_hover_text("Applies live — the grid re-insets without a restart.")
                     .changed();
                 changed |= reset_to_default(ui, &mut config.window.padding, &def.window.padding);
+                ui.end_row();
+            }
+
+            if row_visible(q, "panes dividers linked symmetrical equal split") {
+                ui.label("Linked dividers");
+                changed |= ui
+                    .toggle_value(&mut config.link_pane_dividers, "Keep panes equal")
+                    .on_hover_text(
+                        "Hold split-pane dividers at equal positions so every pane \
+                         stays the same size. The top-bar symmetrical button equalises \
+                         once regardless of this setting.",
+                    )
+                    .changed();
+                changed |=
+                    reset_to_default(ui, &mut config.link_pane_dividers, &def.link_pane_dividers);
                 ui.end_row();
             }
 
