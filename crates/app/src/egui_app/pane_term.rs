@@ -715,6 +715,30 @@ impl PaneTerm {
         }
     }
 
+    /// Clear this pane's scrollback history (everything scrolled off the top)
+    /// while keeping the live screen, snapping the view back to live output. The
+    /// direct analogue of feeding `ESC [ 3 J`; used by the right-click "Clear
+    /// scrollback" menu item and the Ctrl+Shift+K chord. No-op for a dead pane /
+    /// poisoned lock.
+    pub fn clear_scrollback(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if let Ok(mut term) = session.terminal().lock() {
+            term.clear_scrollback();
+        }
+    }
+
+    /// This pane's entire buffer (scrollback + live screen) as copy-ready text,
+    /// or `None` when it holds no non-blank text. Placed on the clipboard by the
+    /// right-click "Copy all" menu item and the Ctrl+Shift+A chord — the
+    /// whole-buffer analogue of the display-window-bound mouse-selection copy.
+    /// `None` for a dead pane / poisoned lock.
+    pub fn buffer_text(&self) -> Option<String> {
+        let session = self.session.as_ref()?;
+        session.terminal().lock().ok()?.buffer_text()
+    }
+
     /// Feed raw bytes straight into the emulator (bypassing the PTY) so a
     /// headless test can build deterministic scrollback. Test-only — the
     /// shipping binary feeds the emulator exclusively via the PTY pump, so this

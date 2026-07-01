@@ -1621,6 +1621,89 @@ fn ed_mode3_clears_scrollback() {
 }
 
 #[test]
+fn clear_scrollback_matches_ed3_and_keeps_live_grid() {
+    // The `clear_scrollback()` API must be byte-for-byte equivalent to feeding
+    // `ESC [ 3 J` (ED-3): scrollback dropped, view snapped to live output, and
+    // the live grid content preserved. Drive two identical terminals down each
+    // path and assert they agree.
+    let mut a = Terminal::with_scrollback(2, 4, 100);
+    let mut b = Terminal::with_scrollback(2, 4, 100);
+    a.advance(b"L0\r\nL1\r\nL2\r\nL3");
+    b.advance(b"L0\r\nL1\r\nL2\r\nL3");
+    assert!(a.scrollback_len() > 0 && b.scrollback_len() > 0);
+
+    // Scroll `a` up into the scrollback so we also prove the view re-snaps.
+    a.set_view_offset(a.scrollback_len());
+    assert!(a.view_offset() > 0, "scrolled up before clearing");
+
+    a.clear_scrollback(); // the new API
+    b.advance(b"\x1b[3J"); // the pre-existing ED-3 path
+
+    assert_eq!(a.scrollback_len(), 0, "clear_scrollback drops scrollback");
+    assert_eq!(a.view_offset(), 0, "view snaps back to live output");
+    assert_eq!(
+        a.scrollback_len(),
+        b.scrollback_len(),
+        "clear_scrollback matches ED-3 scrollback state"
+    );
+    // The live grid survives (both keep the last two lines).
+    assert_eq!(
+        a.grid().to_text(),
+        b.grid().to_text(),
+        "live grid preserved"
+    );
+    assert_eq!(a.grid().cell(1, 0).unwrap().c, 'L', "L3 still on screen");
+    assert_eq!(a.grid().cell(1, 1).unwrap().c, '3');
+}
+
+#[test]
+fn buffer_text_returns_whole_buffer_trimmed() {
+    // Copy-all payload: the ENTIRE buffer (scrollback history + live grid), rows
+    // joined with `\n`, trailing whitespace + trailing blank rows dropped.
+    let mut t = Terminal::with_scrollback(2, 8, 100);
+    t.advance(b"L0\r\nL1\r\nL2\r\nL3");
+    // L0/L1 are in scrollback (2-row grid), L2/L3 on screen: all four must show.
+    let text = t.buffer_text().expect("non-empty buffer yields text");
+    assert_eq!(
+        text.lines().collect::<Vec<_>>(),
+        vec!["L0", "L1", "L2", "L3"],
+        "buffer_text spans scrollback + live grid in order, no blank tail"
+    );
+    assert!(
+        !text.ends_with('\n'),
+        "no trailing newline (rows are joined, not terminated)"
+    );
+}
+
+#[test]
+fn buffer_text_is_none_for_a_blank_screen() {
+    // An untouched terminal holds only blank cells → no copy-all payload.
+    let t = Terminal::new(4, 10);
+    assert!(t.buffer_text().is_none(), "blank buffer copies nothing");
+}
+
+#[test]
+fn buffer_text_skips_the_wide_glyph_continuation_spacer() {
+    // A width-2 glyph (東亜 wide) occupies two cells: the glyph then a blank
+    // continuation spacer. Copy-all must emit the glyph exactly ONCE with no
+    // stray spacer, so the payload matches drawn text (mirrors copy_row_text).
+    let mut t = Terminal::new(2, 8);
+    t.advance("世X".as_bytes()); // 世 = cols 0-1 (glyph + spacer), X = col 2
+    let text = t.buffer_text().expect("non-empty buffer yields text");
+    assert_eq!(
+        text.lines().next(),
+        Some("世X"),
+        "the continuation spacer after a wide glyph is skipped (no `世 X`)"
+    );
+    // Belt-and-suspenders: exactly one glyph, no interior spacer.
+    assert!(
+        !text.contains("世 "),
+        "no stray spacer emitted after the wide glyph"
+    );
+    assert_eq!(text.matches('世').count(), 1, "the wide glyph appears once");
+}
+
+#[test]
 fn el_mode1_erases_bol_to_cursor() {
     let mut t = Terminal::new(2, 5);
     t.advance(b"abcde");
