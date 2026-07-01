@@ -878,6 +878,63 @@ fn ctrl_plus_minus_zero_zooms_the_grid_font() {
     );
 }
 
+/// Ctrl/Cmd + mouse-wheel live-zooms the grid font (VS Code / WezTerm / Windows
+/// Terminal convention). egui reroutes a zoom-modifier wheel into `zoom_delta`
+/// (and ZEROES `smooth_scroll_delta`), so this exercises the REAL `zoom_delta`
+/// path in `frame_tick`, NOT a scroll-delta read (which never fired under a held
+/// Ctrl/Cmd). A synthetic ctrl-only wheel matches egui's `COMMAND` zoom-modifier
+/// (`matches_any`), so the test is host-independent (no macOS ⌘ needed).
+#[test]
+fn ctrl_wheel_zooms_the_grid_font() {
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    let mut h = harness(&app);
+
+    let wheel = |h: &mut Harness<'_>, dy: f32| {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, dy),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        });
+        h.step();
+    };
+
+    let base = app.borrow().config_font_size();
+    // Positive wheel delta = zoom IN = larger font. Several notches to clear
+    // egui's scroll/zoom smoothing (the delta is released over a few frames).
+    for _ in 0..8 {
+        wheel(&mut h, 50.0);
+    }
+    let bigger = app.borrow().config_font_size();
+    assert!(
+        bigger > base,
+        "Ctrl+wheel-up increases the grid font size ({base} -> {bigger})"
+    );
+
+    // Negative wheel delta = zoom OUT = smaller font.
+    for _ in 0..12 {
+        wheel(&mut h, -50.0);
+    }
+    let smaller = app.borrow().config_font_size();
+    assert!(
+        smaller < bigger,
+        "Ctrl+wheel-down decreases the grid font size ({bigger} -> {smaller})"
+    );
+
+    // The live zoom stays inside the sane clamp band [6, 48] however far it is
+    // pushed — a runaway wheel can never render the grid unusably small.
+    for _ in 0..300 {
+        wheel(&mut h, -50.0);
+    }
+    assert!(
+        app.borrow().config_font_size() >= 6.0,
+        "Ctrl+wheel zoom is clamped to the 6pt floor"
+    );
+}
+
 /// Ctrl/Cmd+Shift+T opens a new pane via the keyboard (F-parity: the egui shell
 /// offered new-pane only as the chrome `+` button). Drives the REAL frame_tick.
 #[test]

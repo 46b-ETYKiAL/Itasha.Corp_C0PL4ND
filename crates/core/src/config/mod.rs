@@ -55,7 +55,13 @@ impl Default for FontConfig {
         // Monaspace Neon is the brand mono voice; fall back to any monospace.
         FontConfig {
             family: "Monaspace Neon".to_string(),
-            size: 14.0,
+            // 13 logical points — the industry-standard terminal grid size
+            // (Windows Terminal / WezTerm sit at 12, VS Code's terminal at 14).
+            // egui interprets a `FontId` size as LOGICAL points scaled by the
+            // display's `pixels_per_point`, so this is the on-screen size at 100%
+            // scaling and scales up cleanly on HiDPI (e.g. 26 physical px at 2×).
+            // The previous 14.0 read a touch large, especially on HiDPI panels.
+            size: 13.0,
             line_height: 20.0,
             fallback: vec!["Noto Sans JP".to_string(), "monospace".to_string()],
         }
@@ -1052,11 +1058,20 @@ mod tests {
     }
 
     #[test]
+    fn font_default_is_the_sane_industry_size() {
+        // Regression guard for the "grid text renders too large" report: the
+        // default terminal font size is a calm, industry-standard 13 logical
+        // points — NOT the previous 14.0 (which read large, especially on HiDPI).
+        // A user-saved size is untouched; only the default is pinned here.
+        assert_eq!(FontConfig::default().size, 13.0);
+    }
+
+    #[test]
     fn partial_toml_fills_defaults() {
         let p = PathBuf::from("test.toml");
         let c = Config::from_toml("theme = \"ghost-paper\"\n", &p).unwrap();
         assert_eq!(c.theme, "ghost-paper");
-        assert_eq!(c.font.size, 14.0); // default preserved
+        assert_eq!(c.font.size, 13.0); // default preserved
     }
 
     #[test]
@@ -1718,7 +1733,7 @@ mod tests {
         let c = Config::load_from(&path).expect("valid file loads");
         assert_eq!(c.theme, "ghost-paper");
         assert!(c.ligatures);
-        assert_eq!(c.font.size, 14.0, "unset fields keep their defaults");
+        assert_eq!(c.font.size, 13.0, "unset fields keep their defaults");
         let _ = std::fs::remove_file(&path);
     }
 

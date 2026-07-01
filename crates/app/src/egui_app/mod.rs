@@ -1394,7 +1394,10 @@ impl C0pl4ndApp {
                     }
                 }
                 // Local scrollback: wheel up (positive y) goes BACK into history.
-                // A Ctrl/Cmd-held wheel is reserved for font zoom (frame_tick).
+                // A Ctrl/Cmd-held wheel is reserved for font zoom (frame_tick):
+                // egui reroutes it into `zoom_delta` and zeroes `smooth_scroll_delta`
+                // (so `scroll_y` is already 0 here during a zoom), and this `command`
+                // guard is a belt-and-suspenders skip regardless.
                 if scroll_y.abs() > f32::EPSILON && resp.hovered() && !m.command {
                     if let Some(term) = terms.get_mut(&pane_id) {
                         let lines = (scroll_y / ch.max(1.0)).round() as i32;
@@ -2997,6 +3000,26 @@ impl C0pl4ndApp {
     ///
     /// Kept separate from the `process::exit(0)` call so tests can exercise the
     /// cleanup (save + child reaping) WITHOUT terminating the test runner.
+    /// Persist the live config to the platform config file, best-effort and
+    /// real-window-only. Shared by the runtime config mutations that happen
+    /// OUTSIDE the settings window (e.g. the Ctrl+wheel / Ctrl+/- font zoom) so
+    /// they survive a relaunch exactly like a settings-page change. The headless
+    /// `egui_kittest` harness has `live_window == false`, so a test never writes
+    /// the user's real `%APPDATA%\c0pl4nd\config.toml` (test pollution). A write
+    /// failure surfaces as a toast (the same channel the settings save uses) and
+    /// never blocks the live in-memory apply. `what` names the change for the
+    /// toast (e.g. "The font size").
+    fn persist_config_change(&mut self, what: &str) {
+        if !self.live_window {
+            return;
+        }
+        if let Some(path) = c0pl4nd_core::Config::default_path() {
+            if let Err(e) = self.config.save_to(&path) {
+                self.toast = Some(crate::user_error::config_save_failed(e, what));
+            }
+        }
+    }
+
     pub fn prepare_shutdown(&mut self) {
         // 1) Persist config — real-window-only, best-effort (a write failure must
         //    never wedge the close path). Mirrors the settings-handler save.
@@ -3275,7 +3298,13 @@ impl C0pl4ndApp {
                         ..
                     } = ev
                     {
-                        if modifiers.command && !modifiers.alt {
+                        // Accept either `command` (macOS ⌘, and egui-winit maps
+                        // this to Ctrl on Windows/Linux) OR the raw `ctrl` bit, so
+                        // the chord fires on every platform AND under synthetic
+                        // test events (which set `ctrl` but not `command`) — the
+                        // same `ctrl || command` discipline the palette/find chords
+                        // above use.
+                        if (modifiers.command || modifiers.ctrl) && !modifiers.alt {
                             match key {
                                 egui::Key::Plus | egui::Key::Equals => {
                                     dz += 1.0;
@@ -3296,22 +3325,35 @@ impl C0pl4ndApp {
                     true
                 });
             });
-            let wheel = ctx.input(|i| {
-                if i.modifiers.command {
-                    i.smooth_scroll_delta.y
-                } else {
-                    0.0
-                }
-            });
-            if wheel.abs() > f32::EPSILON {
-                dz += (wheel / 40.0).clamp(-2.0, 2.0);
+            // Ctrl/Cmd + wheel (and trackpad pinch) live font zoom. egui reroutes
+            // a zoom-modifier wheel into `zoom_delta()` (a MULTIPLICATIVE factor)
+            // and ZEROES `smooth_scroll_delta` for that frame, so the zoom MUST be
+            // read from `zoom_delta` — a scroll-delta read never fires under a held
+            // Ctrl/Cmd. `zoom_delta` is 1.0 when there is no zoom, > 1.0 zooming in
+            // (wheel up), < 1.0 out. Map that onto an ADDITIVE point step so it
+            // feeds the same clamp as the keyboard zoom: ~one wheel notch ≈ ±1pt
+            // (matching Ctrl+=/-), clamped so a fast pinch can't jump size in one
+            // frame. This also covers `matches_any(COMMAND)`, so a synthetic
+            // ctrl-only wheel event (tests) triggers it just like real winit.
+            let zoom = ctx.input(|i| i.zoom_delta());
+            if (zoom - 1.0).abs() > f32::EPSILON {
+                dz += ((zoom - 1.0) * 4.0).clamp(-3.0, 3.0);
             }
+            let before = self.config.font.size;
             if reset {
                 self.config.font.size = c0pl4nd_core::Config::default().font.size;
-                ctx.request_repaint();
             } else if dz != 0.0 {
                 self.config.font.size = (self.config.font.size + dz).clamp(6.0, 48.0);
+            }
+            if self.config.font.size != before {
+                // The renderer reads `config.font.size` every frame, so the new
+                // size applies live. Persist it so the zoom survives a relaunch,
+                // mirroring the settings-change + view-mode saves (real-window-
+                // only, best-effort — a write failure surfaces as a toast and
+                // never blocks the live apply; the headless harness has
+                // `live_window == false`, so a test never writes the real config).
                 ctx.request_repaint();
+                self.persist_config_change("The font size");
             }
         }
 
