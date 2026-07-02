@@ -95,7 +95,7 @@ pub fn is_builtin_family(family: &str) -> bool {
 /// family name. Returns `None` when no installed face matches (caller skips it
 /// gracefully). Prefers a non-italic, ~regular-weight face so the grid renders
 /// upright text; falls back to the first match if no plain face exists.
-pub fn face_bytes_for_family(db: &fontdb::Database, family: &str) -> Option<Vec<u8>> {
+pub fn face_bytes_for_family(db: &fontdb::Database, family: &str) -> Option<(Vec<u8>, u32)> {
     let want = family.trim().to_lowercase();
     if want.is_empty() {
         return None;
@@ -118,7 +118,15 @@ pub fn face_bytes_for_family(db: &fontdb::Database, family: &str) -> Option<Vec<
         }
     }
     let id = best?.0.id;
-    db.with_face_data(id, |data, _index| data.to_vec())
+    // Return the raw file bytes AND the face's index WITHIN that file. Many
+    // Windows system fonts (MS Gothic, Malgun Gothic, …) are TrueType Collections
+    // (.ttc) holding multiple faces; `with_face_data` yields the whole-file bytes
+    // plus the wanted face's collection index. Dropping that index and handing the
+    // bytes to egui makes it read face 0 — the WRONG font — so ASCII codepoints
+    // render as whatever glyph sits at that slot in the wrong face (the terminal-
+    // grid "garble": Latin text drawn as CJK / math glyphs). The caller MUST set
+    // `FontData.index` to this value.
+    db.with_face_data(id, |data, index| (data.to_vec(), index))
 }
 
 /// The egui `font_data` key under which a loaded custom family's bytes are
@@ -191,12 +199,15 @@ pub fn build_font_definitions(
     // priority order (primary, then fallbacks).
     let mut prepend_keys: Vec<String> = Vec::new();
     for name in &wanted {
-        if let Some(bytes) = face_bytes_for_family(db, name) {
+        if let Some((bytes, index)) = face_bytes_for_family(db, name) {
             let key = font_data_key(name);
-            base.font_data
-                .insert(key.clone(), egui::FontData::from_owned(bytes).into());
+            // Preserve the .ttc face index — a collection face at a non-zero index
+            // loaded as index 0 renders the WRONG font (the grid garble).
+            let mut face = egui::FontData::from_owned(bytes);
+            face.index = index;
+            base.font_data.insert(key.clone(), face.into());
             prepend_keys.push(key);
-            tracing::debug!(font = %name, "loaded configured monospace font face");
+            tracing::debug!(font = %name, index, "loaded configured monospace font face");
         } else {
             // Observability breadcrumb: a configured family/fallback that does
             // not resolve degrades silently to the built-in font, which reads as
@@ -221,12 +232,15 @@ pub fn build_font_definitions(
         if wanted.iter().any(|w| w.eq_ignore_ascii_case(cand)) {
             continue; // already attempted as a user-configured fallback
         }
-        if let Some(bytes) = face_bytes_for_family(db, cand) {
+        if let Some((bytes, index)) = face_bytes_for_family(db, cand) {
             let key = font_data_key(cand);
-            base.font_data
-                .insert(key.clone(), egui::FontData::from_owned(bytes).into());
+            // Preserve the .ttc face index — MS Gothic / Malgun Gothic are
+            // collections; face 0 is the wrong font.
+            let mut face = egui::FontData::from_owned(bytes);
+            face.index = index;
+            base.font_data.insert(key.clone(), face.into());
             prepend_keys.push(key);
-            tracing::debug!(font = %cand, "loaded OS CJK fallback font for grid coverage");
+            tracing::debug!(font = %cand, index, "loaded OS CJK fallback font for grid coverage");
             break;
         }
     }

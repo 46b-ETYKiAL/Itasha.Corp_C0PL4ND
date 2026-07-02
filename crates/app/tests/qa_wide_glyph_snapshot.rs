@@ -122,6 +122,27 @@ fn qa_launch_frame() {
 
 #[test]
 #[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
+fn qa_launch_frame_hidpi() {
+    // Reproduce a 1.5x HiDPI display (the reported garble machine) — the default
+    // qa harness renders at ppp 1.0, which never reproduced it.
+    if !gpu_available() {
+        eprintln!("QA-SNAPSHOT: no GPU adapter on this host; skipping (not a failure).");
+        return;
+    }
+    let mut h: Harness<'static, egui_app::C0pl4ndApp> = Harness::builder()
+        .with_size(egui::vec2(1100.0, 720.0))
+        .with_pixels_per_point(1.5)
+        .wgpu()
+        .build_eframe(|cc| egui_app::C0pl4ndApp::new(cc));
+    for _ in 0..30 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    snapshot(&mut h, "launch-hidpi");
+}
+
+#[test]
+#[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
 fn qa_wide_glyph_frame() {
     let Some(mut h) = build() else { return };
     type_line(&mut h, "echo ASCII | 日本語 | ＡＢＣ | 😀 | end", "end");

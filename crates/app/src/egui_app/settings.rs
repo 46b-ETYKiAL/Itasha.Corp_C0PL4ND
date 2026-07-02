@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
-use c0pl4nd_core::config::{CursorStyle, GraphicsBackend, UpdateMode, WindowMode};
+use c0pl4nd_core::config::{CursorStyle, GpuPreference, GraphicsBackend, UpdateMode, WindowMode};
 use c0pl4nd_core::Config;
 
 use super::theme::ChromeColors;
@@ -1279,6 +1279,41 @@ fn render_sections(
                     );
                 changed |=
                     reset_to_default(ui, &mut config.graphics_backend, &def.graphics_backend);
+                ui.end_row();
+            }
+
+            if row_visible(
+                q,
+                "graphics gpu preference integrated discrete optimus hybrid",
+            ) {
+                ui.label("GPU preference");
+                let gpus = [
+                    (GpuPreference::Auto, "auto (recommended)"),
+                    (GpuPreference::Integrated, "integrated (low power)"),
+                    (GpuPreference::Discrete, "discrete (high performance)"),
+                ];
+                egui::ComboBox::from_id_salt("c0pl4nd-gpu-preference")
+                    .selected_text(
+                        gpus.iter()
+                            .find(|(g, _)| *g == config.graphics_gpu)
+                            .map(|(_, s)| *s)
+                            .unwrap_or("auto (recommended)"),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (g, label) in gpus {
+                            changed |= ui
+                                .selectable_value(&mut config.graphics_gpu, g, label)
+                                .changed();
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "Which GPU to render on, on a laptop with two GPUs (Intel + \
+                         NVIDIA/AMD). Leave on Auto unless the terminal grid renders \
+                         corrupted/garbled glyphs on the discrete GPU — then pick \
+                         Integrated to render on the built-in GPU. Applies on restart.",
+                    );
+                changed |= reset_to_default(ui, &mut config.graphics_gpu, &def.graphics_gpu);
                 ui.end_row();
             }
 
