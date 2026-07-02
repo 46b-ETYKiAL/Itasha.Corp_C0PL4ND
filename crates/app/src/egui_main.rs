@@ -140,16 +140,22 @@ fn main() -> eframe::Result<()> {
         launch_transparency_enabled(),
         launch_backend_override(),
     );
+    apply_gpu_preference(&mut options, launch_gpu_preference());
 
-    // Lower the wgpu present queue to ONE frame of latency (eframe's default is
-    // 2): a terminal is latency-sensitive (keystroke → glyph), and one in-flight
-    // frame shaves a frame off input-to-display lag. We deliberately do NOT force
-    // a Mailbox/AutoNoVsync present mode (the dead legacy-winit path at
-    // window.rs did): the egui app is event-driven (the damage-tracked redraw
-    // makes an idle terminal repaint ~0 fps), and Mailbox would force continuous
-    // high-FPS rendering, undoing that power win. The default vsync present mode
-    // is correct for an on-demand repainter.
-    options.wgpu_options.desired_maximum_frame_latency = Some(1);
+    // We KEEP eframe's default present latency (2). A previous
+    // `desired_maximum_frame_latency = Some(1)` "optimization" (shave one frame
+    // off keystroke→glyph lag) turned out to CORRUPT the terminal grid on real
+    // hardware: at latency 1 the swapchain draw could race egui's font-atlas
+    // texture upload, so glyphs rendered from a not-yet-complete atlas — badly
+    // garbled on a fast discrete GPU (NVIDIA), mildly on an integrated one, and
+    // NEVER in an offscreen/synchronous render (every headless snapshot was
+    // pixel-perfect, which is what made it so hard to pin down). One extra frame
+    // of latency is imperceptible for a terminal; a garbled grid is not. Do NOT
+    // re-add the latency-1 override without proving the atlas upload is
+    // synchronised first. We also deliberately keep the default vsync present
+    // mode (NOT Mailbox/AutoNoVsync): the app is event-driven, so an idle
+    // terminal repaints ~0 fps and Mailbox would force wasteful continuous
+    // high-FPS rendering.
 
     let result = eframe::run_native(
         "C0PL4ND",
@@ -233,6 +239,22 @@ fn launch_transparency_enabled() -> bool {
         })
         .map(|c| c.effective_translucent())
         .unwrap_or(false)
+}
+
+/// The persisted `graphics_gpu` preference, read from the on-disk config at
+/// startup. Mirrors [`launch_transparency_enabled`]: a missing / unreadable config
+/// yields the default [`GpuPreference::Auto`], never a crash. Fed into
+/// [`apply_gpu_preference`], where `WGPU_POWER_PREF` still wins.
+fn launch_gpu_preference() -> c0pl4nd_core::config::GpuPreference {
+    c0pl4nd_core::Config::default_path()
+        .filter(|p| p.exists())
+        .and_then(|p| {
+            std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|s| c0pl4nd_core::Config::from_toml(&s, &p).ok())
+        })
+        .map(|c| c.graphics_gpu)
+        .unwrap_or_default()
 }
 
 /// The persisted `graphics_backend` override, read from the on-disk config at
@@ -371,6 +393,48 @@ fn resolve_configured_backends(
     }
 }
 
+/// Resolve the wgpu `PowerPreference` from the persisted GPU preference, the
+/// `WGPU_POWER_PREF` env override, and the platform default. Precedence:
+/// `env_override` (one-off debug) > the explicit config choice > `default`. `Auto`
+/// defers to `default`. Pure + cross-platform so it is unit-testable everywhere.
+fn resolve_power_preference(
+    gpu: c0pl4nd_core::config::GpuPreference,
+    env_override: Option<eframe::wgpu::PowerPreference>,
+    default: eframe::wgpu::PowerPreference,
+) -> eframe::wgpu::PowerPreference {
+    use c0pl4nd_core::config::GpuPreference;
+    use eframe::wgpu::PowerPreference;
+    if let Some(env) = env_override {
+        return env; // WGPU_POWER_PREF wins over the persisted setting
+    }
+    match gpu {
+        GpuPreference::Auto => default,
+        GpuPreference::Integrated => PowerPreference::LowPower,
+        GpuPreference::Discrete => PowerPreference::HighPerformance,
+    }
+}
+
+/// Apply the persisted GPU preference to the wgpu setup by setting the adapter
+/// `power_preference` — the in-app fix for a multi-GPU (Optimus) machine whose
+/// discrete-GPU driver corrupts rendering: `Integrated` routes to the low-power
+/// iGPU. Cross-platform (hybrid graphics exist on Windows + Linux). `Auto` +
+/// `WGPU_POWER_PREF` are honoured via [`resolve_power_preference`]. No-op unless
+/// the setup is `CreateNew` (eframe is creating its own device).
+fn apply_gpu_preference(
+    options: &mut eframe::NativeOptions,
+    gpu: c0pl4nd_core::config::GpuPreference,
+) {
+    use eframe::wgpu::PowerPreference;
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        // eframe's default already folds in `WGPU_POWER_PREF` (its base is
+        // `from_env().unwrap_or(HighPerformance)`); re-derive so the env keeps
+        // priority over the persisted config choice.
+        let env_override = PowerPreference::from_env();
+        setup.power_preference =
+            resolve_power_preference(gpu, env_override, PowerPreference::HighPerformance);
+    }
+}
+
 /// Decode the embedded sigil PNG into an eframe window icon. Returns `None` on a
 /// decode failure (the caller falls back to the platform default).
 fn load_app_icon() -> Option<egui::IconData> {
@@ -388,9 +452,45 @@ fn load_app_icon() -> Option<egui::IconData> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_configured_backends, transparency_fallback_warning};
+    use super::{
+        resolve_configured_backends, resolve_power_preference, transparency_fallback_warning,
+    };
     use c0pl4nd_core::config::GraphicsBackend;
     use eframe::wgpu::Backends;
+
+    #[test]
+    fn gpu_preference_maps_and_env_wins() {
+        use c0pl4nd_core::config::GpuPreference;
+        use eframe::wgpu::PowerPreference;
+        // Auto defers to the platform default.
+        assert_eq!(
+            resolve_power_preference(GpuPreference::Auto, None, PowerPreference::HighPerformance),
+            PowerPreference::HighPerformance,
+        );
+        // Integrated → low-power (the iGPU escape hatch); Discrete → high-perf.
+        assert_eq!(
+            resolve_power_preference(
+                GpuPreference::Integrated,
+                None,
+                PowerPreference::HighPerformance
+            ),
+            PowerPreference::LowPower,
+        );
+        assert_eq!(
+            resolve_power_preference(GpuPreference::Discrete, None, PowerPreference::LowPower),
+            PowerPreference::HighPerformance,
+        );
+        // WGPU_POWER_PREF env overrides even an explicit config choice.
+        assert_eq!(
+            resolve_power_preference(
+                GpuPreference::Discrete,
+                Some(PowerPreference::LowPower),
+                PowerPreference::HighPerformance,
+            ),
+            PowerPreference::LowPower,
+            "env override wins over the persisted setting",
+        );
+    }
 
     #[test]
     fn auto_backend_defers_to_the_platform_default() {

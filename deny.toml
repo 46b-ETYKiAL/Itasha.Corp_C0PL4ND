@@ -67,6 +67,17 @@ yanked = "deny"
 # memmap2 was bumped to the patched 0.9.11, so both advisories are now RESOLVED
 # in the locked graph rather than suppressed. Verified against rustsec.org:
 # anyhow fixed in >=1.0.103, memmap2 fixed in >=0.9.11.
+#
+# RUSTSEC-2026-0194 + RUSTSEC-2026-0195 (2026-07-02): `quick-xml` <0.41 XML-parser
+# DoS advisories (quadratic duplicate-attribute check; unbounded namespace-decl
+# allocation). `quick-xml` 0.39.4 enters the lock file ONLY via `wayland-scanner`
+# (`cargo tree -i quick-xml`: wayland-scanner → smithay-client-toolkit → winit),
+# a LINUX-ONLY, BUILD-TIME proc-macro that parses the TRUSTED, local Wayland
+# protocol XML files shipped with the toolchain — never untrusted runtime input,
+# and not compiled at all on Windows/macOS. Runtime DoS exposure is nil. No fix is
+# reachable without a breaking `wayland-scanner`/`winit` bump (it pins
+# `quick-xml = "^0.39"`). Re-evaluate and drop when the winit/wayland stack
+# migrates to `quick-xml >= 0.41`.
 ignore = [
     "RUSTSEC-2017-0008",
     "RUSTSEC-2026-0173",
@@ -74,6 +85,8 @@ ignore = [
     "RUSTSEC-2023-0071",
     "RUSTSEC-2026-0192",
     "RUSTSEC-2025-0141",
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 [licenses]

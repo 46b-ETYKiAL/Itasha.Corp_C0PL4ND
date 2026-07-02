@@ -404,6 +404,26 @@ impl WindowMode {
     }
 }
 
+/// Which physical GPU the renderer prefers at startup, on a multi-GPU (hybrid /
+/// Optimus) machine. `Auto` (default) keeps the platform/eframe default
+/// (high-performance / discrete). `Integrated` forces the low-power integrated
+/// GPU and `Discrete` forces the high-performance one — the escape hatch when one
+/// GPU's driver corrupts rendering (the canonical case: a laptop discrete-GPU
+/// driver garbles the terminal-grid glyph atlas while the integrated GPU renders
+/// it perfectly). Maps to eframe's wgpu `PowerPreference`. Applies on restart; the
+/// `WGPU_POWER_PREF` env var still overrides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuPreference {
+    /// Platform/eframe default (high-performance / discrete GPU).
+    #[default]
+    Auto,
+    /// Force the low-power integrated GPU (e.g. Intel iGPU on an Optimus laptop).
+    Integrated,
+    /// Force the high-performance discrete GPU.
+    Discrete,
+}
+
 /// GPU backend the renderer requests at startup. `Auto` (default) keeps the
 /// platform-smart choice; the explicit variants force a specific wgpu backend to
 /// work around a driver-specific rendering glitch (the canonical case: corrupted
@@ -655,6 +675,13 @@ pub struct Config {
     /// the `WGPU_BACKEND` env var still overrides this.
     #[serde(default)]
     pub graphics_backend: GraphicsBackend,
+    /// Which physical GPU to prefer on a multi-GPU (hybrid / Optimus) machine.
+    /// [`GpuPreference::Auto`] (default) uses the platform default; set
+    /// `Integrated` to force the low-power iGPU when the discrete GPU's driver
+    /// corrupts rendering (the terminal-grid glyph garble). Applied on restart;
+    /// the `WGPU_POWER_PREF` env var still overrides this.
+    #[serde(default)]
+    pub graphics_gpu: GpuPreference,
     /// Override shell program; `None` = use the platform default shell.
     pub shell: Option<String>,
     /// The `TERM` value advertised to the spawned child shell (and every TUI it
@@ -747,6 +774,7 @@ impl Default for Config {
             link_pane_dividers: false,
             show_status_bar: true,
             graphics_backend: GraphicsBackend::default(),
+            graphics_gpu: GpuPreference::default(),
             shell: None,
             term: default_term(),
             ligatures: false,

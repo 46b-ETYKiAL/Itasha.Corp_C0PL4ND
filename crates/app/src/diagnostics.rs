@@ -59,6 +59,12 @@ pub struct Diagnostics {
     pub ime_compiled_in: bool,
     /// Directory crash logs are written to (the panic hook target).
     pub crash_log_dir: Option<PathBuf>,
+    /// The GPU adapters wgpu can see on this host, one line each: name, device
+    /// type (Discrete/Integrated/…), backend, and driver. The app renders through
+    /// ONE of these; a garbled grid that only reproduces in the real window (not
+    /// an offscreen render) is a driver/adapter issue this list helps pinpoint —
+    /// e.g. a bad discrete-GPU driver while the integrated GPU is fine.
+    pub gpu_adapters: Vec<String>,
 }
 
 /// Collect diagnostics from the live process. Reads env + persisted config; no
@@ -80,7 +86,45 @@ pub fn collect(ime_compiled_in: bool, crash_log_dir: Option<PathBuf>) -> Diagnos
         reduced_motion: reduced_motion_enabled(),
         ime_compiled_in,
         crash_log_dir,
+        gpu_adapters: enumerate_gpu_adapters(),
     }
+}
+
+/// Enumerate the GPU adapters wgpu can see (native only), one human-readable line
+/// per adapter: `name [DeviceType] backend=<Backend> driver=<driver> <info>`. This
+/// creates a wgpu *instance* and queries adapter INFO — it does NOT create a
+/// device or a surface/window, so it is cheap and side-effect-free. Used to
+/// diagnose adapter/driver-specific rendering faults (the terminal-grid garble
+/// that reproduces only in the real window). Returns a single explanatory entry
+/// when no adapter is visible rather than an empty list.
+fn enumerate_gpu_adapters() -> Vec<String> {
+    use eframe::wgpu;
+    let instance = wgpu::Instance::default();
+    // `enumerate_adapters` is async in this wgpu build; block on it (no device is
+    // created — this only queries adapter info). `pollster` is already a dep.
+    let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+    let mut lines: Vec<String> = adapters
+        .iter()
+        .map(|a| {
+            let info = a.get_info();
+            let driver = if info.driver_info.is_empty() {
+                info.driver.clone()
+            } else {
+                format!("{} {}", info.driver, info.driver_info)
+            };
+            format!(
+                "{name} [{dtype:?}] backend={backend:?} driver={driver}",
+                name = info.name,
+                dtype = info.device_type,
+                backend = info.backend,
+                driver = driver.trim(),
+            )
+        })
+        .collect();
+    if lines.is_empty() {
+        lines.push("(no GPU adapter visible to wgpu)".to_string());
+    }
+    lines
 }
 
 /// Determine the config load/validate status for a (maybe) path.
@@ -155,7 +199,8 @@ pub fn build_report(d: &Diagnostics) -> String {
          config status:  {config_status}\n\
          reduced motion: {reduced_motion} (C0PL4ND_REDUCED_MOTION)\n\
          IME handling:   {ime}\n\
-         crash log dir:  {crash_dir}\n",
+         crash log dir:  {crash_dir}\n\
+         GPU adapters:   {adapters}\n",
         product = c0pl4nd_core::PRODUCT_NAME,
         version = d.version,
         os = d.os,
@@ -173,6 +218,15 @@ pub fn build_report(d: &Diagnostics) -> String {
             "not compiled in"
         },
         crash_dir = path(&d.crash_log_dir),
+        adapters = if d.gpu_adapters.is_empty() {
+            "(none enumerated)".to_string()
+        } else {
+            // One adapter per line, indented under the "GPU adapters:" label.
+            d.gpu_adapters
+                .iter()
+                .map(|a| format!("\n                  - {a}"))
+                .collect::<String>()
+        },
     )
 }
 
@@ -203,7 +257,22 @@ mod tests {
             reduced_motion: true,
             ime_compiled_in: true,
             crash_log_dir: Some(PathBuf::from("/home/u/.config/c0pl4nd/crashes")),
+            gpu_adapters: vec![
+                "Test GPU 0 [IntegratedGpu] backend=Vulkan driver=mesa".to_string(),
+                "Test GPU 1 [DiscreteGpu] backend=Dx12 driver=nvidia".to_string(),
+            ],
         }
+    }
+
+    #[test]
+    fn report_lists_each_gpu_adapter() {
+        let report = build_report(&sample());
+        assert!(report.contains("GPU adapters:"), "{report}");
+        assert!(report.contains("Test GPU 0 [IntegratedGpu]"), "{report}");
+        assert!(
+            report.contains("Test GPU 1 [DiscreteGpu]"),
+            "each adapter is listed on its own line: {report}"
+        );
     }
 
     #[test]

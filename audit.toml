@@ -38,4 +38,11 @@ ignore = [
     # an OPTIONAL, feature-gated dep of `typed-index-collections` that this build
     # never enables (not in the compiled graph). Mirrors the deny.toml ignore.
     "RUSTSEC-2025-0141",
+    # RUSTSEC-2026-0194 / RUSTSEC-2026-0195 (2026-07-02): `quick-xml` <0.41 XML
+    # parser DoS. Enters the lock ONLY via `wayland-scanner` (Linux-only, BUILD
+    # -time proc-macro parsing TRUSTED local Wayland protocol XML) → nil runtime
+    # exposure; not compiled on Windows/macOS. No fix without a breaking winit/
+    # wayland bump (pins ^0.39). Mirrors the deny.toml ignore.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]

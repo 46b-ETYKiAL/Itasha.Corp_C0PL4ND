@@ -90,6 +90,24 @@ ignore = [
   #     Drop if a future feature pulls `bincode` into the build, or when the
   #     upstream crate drops the dependency.
   "RUSTSEC-2025-0141",
+  # RUSTSEC-2026-0194 / RUSTSEC-2026-0195 — `quick-xml` <0.41 XML-parser DoS
+  # (quadratic duplicate-attribute check; unbounded namespace-declaration
+  # allocation). Published 2026-07-02. Kept in lockstep with deny.toml + audit.toml.
+  #
+  #   Why accepted:
+  #     * `quick-xml` 0.39.4 enters the lock file ONLY via `wayland-scanner`
+  #       (`wayland-scanner` <- `smithay-client-toolkit` <- `winit`), a LINUX-ONLY
+  #       BUILD-TIME proc-macro that parses the TRUSTED, local Wayland-protocol
+  #       XML shipped with the toolchain — never untrusted runtime input, and not
+  #       compiled at all on Windows/macOS (the shipped targets). Runtime DoS
+  #       exposure is nil.
+  #     * No fix is reachable: `wayland-scanner` pins `quick-xml = "^0.39"`, so
+  #       0.41 needs a breaking `wayland-scanner`/`winit` bump.
+  #
+  #   Re-evaluation trigger:
+  #     Drop when the winit/wayland stack migrates to `quick-xml >= 0.41`.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
   #
   # RUSTSEC-2026-0190 (`anyhow`) and RUSTSEC-2026-0186 (`memmap2`) were REMOVED
   # (2026-06-30): anyhow is at the patched 1.0.103 and memmap2 was bumped to the
