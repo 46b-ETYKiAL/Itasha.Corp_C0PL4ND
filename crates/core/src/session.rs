@@ -65,6 +65,14 @@ pub struct Session {
 /// missing "end" is imperceptible.
 const SYNC_OUTPUT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// Whether a synchronized-output (`?2026`) hold that began `elapsed` ago is still
+/// within the safety-timeout window — `true` = keep holding the repaint, `false`
+/// = force a repaint (the update ran past the timeout, so we render anyway rather
+/// than risk a frozen screen). Pure so the boundary is unit-testable exactly.
+fn sync_hold_active(elapsed: std::time::Duration) -> bool {
+    elapsed < SYNC_OUTPUT_TIMEOUT
+}
+
 /// Spawn the PTY-reader thread: drain `reader` in ≤64 KiB chunks, parse each
 /// chunk into `terminal`, fire the UI-wake callback once per chunk, and clear
 /// `alive` on EOF (child exited) or a read error.
@@ -136,7 +144,7 @@ fn spawn_reader_thread<R: Read + Send + 'static>(
                         if sync {
                             let now = std::time::Instant::now();
                             let since = *sync_since.get_or_insert(now);
-                            if now.duration_since(since) < SYNC_OUTPUT_TIMEOUT {
+                            if sync_hold_active(now.duration_since(since)) {
                                 continue; // still within the update — hold this repaint
                             }
                             sync_since = Some(now); // timed out: repaint + re-arm
@@ -304,6 +312,15 @@ impl Session {
     /// backstop for the non-fast-exit paths.
     pub fn kill_child(&mut self) {
         self.pty.kill();
+    }
+
+    /// Non-blocking check of whether the child shell has exited (`true`) or is
+    /// still running (`false`). Polls the child PROCESS directly, so it reflects a
+    /// [`kill_child`](Self::kill_child) promptly — the reliable "was the shell
+    /// reaped?" signal (the reader-thread `is_alive` flag lags because a ConPTY
+    /// output pipe does not EOF promptly on a killed client).
+    pub fn child_exited(&mut self) -> bool {
+        self.pty.try_wait().is_some()
     }
 
     /// Render the current grid to text (used by the headless smoke test).
@@ -551,6 +568,70 @@ mod tests {
         assert!(
             text.contains("line one") && text.contains("line two"),
             "held content still reaches the grid: {text:?}"
+        );
+    }
+
+    /// The synchronized-output hold window boundary is exact: still holding just
+    /// under the timeout, released AT the timeout and beyond (a `<`, not `<=`, so
+    /// a run-past-timeout update repaints rather than freezing).
+    #[test]
+    fn sync_hold_active_boundary_is_exact() {
+        assert!(
+            sync_hold_active(Duration::ZERO),
+            "a just-begun hold is active (repaint suppressed)"
+        );
+        assert!(
+            sync_hold_active(SYNC_OUTPUT_TIMEOUT - Duration::from_millis(1)),
+            "just under the timeout still holds"
+        );
+        assert!(
+            !sync_hold_active(SYNC_OUTPUT_TIMEOUT),
+            "at EXACTLY the timeout the hold releases → force a repaint"
+        );
+        assert!(
+            !sync_hold_active(SYNC_OUTPUT_TIMEOUT + Duration::from_millis(1)),
+            "past the timeout releases → force a repaint"
+        );
+    }
+
+    /// A live session reports a real child PID (never None / 0 / 1), and
+    /// `kill_child` actually reaps the shell — the fast-close no-orphan guarantee.
+    /// Real-PTY, serialized via the shared lock. Termination is observed via
+    /// `child_exited` (a direct child-PROCESS `try_wait`), NOT the reader
+    /// `is_alive` flag: a ConPTY output pipe does not EOF promptly on a killed
+    /// client, so `is_alive` lags, whereas `try_wait` reflects the kill at once.
+    #[test]
+    fn session_child_pid_is_real_and_kill_child_reaps_the_shell() {
+        let _lock = REAL_PTY_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        #[cfg(windows)]
+        let mut session = Session::spawn_program("cmd.exe", &[], 24, 80).expect("spawn");
+        #[cfg(not(windows))]
+        let mut session = Session::spawn_program("/bin/sh", &["-i"], 24, 80).expect("spawn");
+
+        // child_pid: a live session reports a real OS pid (never None/0/1).
+        let pid = session.child_pid().expect("a live session has a child pid");
+        assert!(
+            pid > 1,
+            "a real shell pid is a normal OS pid, not 0/1: {pid}"
+        );
+
+        // The shell is running BEFORE the kill (catches a `child_exited -> true`).
+        assert!(
+            !session.child_exited(),
+            "the interactive shell is running before kill_child"
+        );
+
+        // kill_child must terminate it (catches the no-op mutant): the child
+        // process exits within a bounded poll. `try_wait` polls the process, so
+        // this is deterministic despite the lagging ConPTY output pipe.
+        session.kill_child();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !session.child_exited() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            session.child_exited(),
+            "kill_child must terminate the shell so no orphan survives"
         );
     }
 
