@@ -224,6 +224,10 @@ pub struct C0pl4ndApp {
     /// count whenever the atlas is re-warmed. Startup/rare-only; zero steady-state
     /// cost (the grid content — the shell banner — has not arrived yet anyway).
     pub(crate) warmup_frames_left: u8,
+    /// Frames elapsed while waiting for the off-thread custom font to swap in. Caps
+    /// the font-load warmup gate (see `FONT_WAIT_GATE_CAP`) so a failed/slow font
+    /// load can never hide the grid indefinitely.
+    pub(crate) font_wait_frames: u32,
     /// Debounced font-size persistence deadline (egui `input.time`, seconds).
     /// Live Ctrl+wheel / Ctrl+/- zoom changes `config.font.size` every notch and
     /// applies it in-memory immediately, but writing the whole config file per
@@ -556,6 +560,7 @@ impl C0pl4ndApp {
             toast: theme_notice,
             warmed_atlas: None,
             warmup_frames_left: 0,
+            font_wait_frames: 0,
             pending_font_save_at: None,
             update_rx: None,
             last_update_notice: None,
@@ -3190,6 +3195,22 @@ impl C0pl4ndApp {
                 ctx.request_repaint(); // drive the warmup frames without waiting on input
             }
         }
+        // Hold the grid gated (and `ui` GPU-fencing) until the OFF-THREAD custom
+        // font has actually swapped in. The system-font stack loads on a worker;
+        // until it arrives the grid would draw with the built-in mono, then the
+        // swap RESETS the atlas — and that reset↔redraw transition is a prime
+        // window for the DX12 upload↔sample race that garbles the grid. Keeping
+        // the grid hidden (glyphs off) through the whole font-load period means
+        // its FIRST real draw happens once the final font is warmed + resident.
+        // Capped by `FONT_WAIT_GATE_CAP` so a font-load failure can never hide the
+        // grid forever. Live-window only (headless never races and has no worker).
+        if self.live_window && self.pending_fonts.is_some() {
+            self.font_wait_frames = self.font_wait_frames.saturating_add(1);
+            if self.font_wait_frames < FONT_WAIT_GATE_CAP {
+                self.warmup_frames_left = self.warmup_frames_left.max(1);
+                ctx.request_repaint();
+            }
+        }
         // Flush a DEBOUNCED font-zoom save once its deadline has passed with no
         // further change (see `FONT_SAVE_DEBOUNCE_SECS`): coalesces a fast
         // Ctrl+wheel zoom into a SINGLE config write instead of one per notch.
@@ -3996,12 +4017,16 @@ impl C0pl4ndApp {
                 }
             }
         }
-        // One-shot "make panes symmetrical": equalise every split so all panes are
-        // the same size. Independent of the `link_pane_dividers` setting (works
-        // even when dividers are freely draggable). No-op / no repaint when there
-        // is no split to equalise.
-        if actions.equalize_panes && grid::equalize_pane_shares(&mut self.grid_tree) {
-            ctx.request_repaint();
+        // One-shot "make panes symmetrical": rebuild the layout as a UNIFORM grid
+        // so all panes are equal-sized regardless of the prior (possibly nested /
+        // asymmetric) split structure — the fix for "clicked symmetrical but the
+        // panes stayed uneven". Preserves pane order + every attached terminal
+        // (panes carry only their id). No-op for a 0/1-pane tree.
+        if actions.equalize_panes {
+            if let Some(grid) = grid::rebuild_as_uniform_grid(&self.grid_tree) {
+                self.grid_tree = grid;
+                ctx.request_repaint();
+            }
         }
         // Caption command: issue the REAL OS viewport command AND record it so an
         // interaction test can assert the click had its effect.
@@ -4243,6 +4268,11 @@ const CURSOR_BLINK_HALF_PERIOD_MS: u64 = 530;
 /// `poll(Wait)` guarantees it resident before the grid first draws. Invisible —
 /// the shell banner has not arrived this early anyway.
 const ATLAS_WARMUP_GATE_FRAMES: u8 = 2;
+
+/// Max frames the grid stays gated waiting for the off-thread custom font to swap
+/// in (~4 s at 60 fps). A safety cap: past it the grid renders regardless, so a
+/// failed/hung font load can never hide the terminal forever.
+const FONT_WAIT_GATE_CAP: u32 = 240;
 
 /// Pre-warm the monospace glyph atlas: rasterise every glyph the terminal grid
 /// commonly draws — printable ASCII plus the Unicode box-drawing block — at the
