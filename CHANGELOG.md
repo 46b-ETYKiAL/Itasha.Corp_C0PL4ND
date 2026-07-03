@@ -8,6 +8,41 @@ Full per-release artifacts (signed binaries, SBOMs, provenance) are on the
 [GitHub Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases)
 page.
 
+## [0.4.14] - 2026-07-03
+
+### Fixed — rendering
+
+- **Terminal-grid glyph garble eliminated.** Intermittently on some NVIDIA DX12
+  drivers the grid text rendered as garbled or blank glyphs — a DX12 font-atlas
+  `write_texture`→sample hazard (wgpu#1306 / #6829, DX12-only). Two-part fix: an
+  atlas-warmup GPU fence that guarantees the font atlas is uploaded and resident
+  before the grid draws (including across the off-thread system-font swap), and —
+  the definitive fix — **Vulkan is now the default GPU backend on Windows**, which
+  is immune to the hazard. DX12 remains one setting away (Settings → Window →
+  Graphics backend, or `WGPU_BACKEND=dx12`) for anyone who hits a Vulkan
+  overlay-layer issue.
+- **"Make panes symmetrical" now produces an even grid.** It rebuilds the layout
+  into a uniform grid for any pane count, instead of only rebalancing shares
+  within existing splits (which left a nested/asymmetric layout uneven).
+
+### Added — customizable toolbar
+
+- **Settings → Toolbar.** The top-bar quick-action buttons (view-toggle,
+  equalize, shell-switcher, script-launcher) are now fully customizable: place
+  each on the LEFT (after the +), on the RIGHT (next to the settings gear), or in
+  an overflow "…" menu — or hide it — and reorder within a zone. The script
+  launcher now sits on the right by the gear by default.
+
+### Changed — performance
+
+- **Instant multi-pane close.** Closing the window no longer stalls while shells
+  tear down: every pane's shell is killed in one pass and the blocking
+  `ClosePseudoConsole` teardown is skipped on exit, with a Windows Job Object
+  (`KILL_ON_JOB_CLOSE`) guaranteeing no orphaned `conhost`/`cmd` processes.
+- Font-zoom (Ctrl+scroll) config writes are now debounced into a single write,
+  and terminal synchronized-output (DEC `?2026`) is honored so full-screen TUIs
+  repaint without tearing.
+
 ## [0.4.13] - 2026-06-30
 
 ### Added — macOS and ARM64 builds
