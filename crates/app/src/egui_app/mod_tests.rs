@@ -553,13 +553,14 @@ fn close_then_new_terminal_keeps_every_pane_reachable() {
 /// (no test pollution) — it asserts the no-orphan child-reaping side effect,
 /// which is the load-bearing correctness guarantee of the fast exit.
 #[test]
-fn prepare_shutdown_reaps_all_terminals_without_exit() {
+fn prepare_shutdown_kills_shells_without_dropping_panes_or_exiting() {
     let mut app = C0pl4ndApp::bootstrap();
-    // Open a couple more panes so there are several live PaneTerms to reap.
+    // Open a couple more panes so there are several live shells to kill.
     app.new_terminal();
     app.new_terminal();
+    let n = app.term_count();
     assert!(
-        app.term_count() > 0,
+        n > 0,
         "precondition: at least one live terminal before shutdown"
     );
     assert!(
@@ -567,17 +568,27 @@ fn prepare_shutdown_reaps_all_terminals_without_exit() {
         "bootstrap() is headless: the config save is skipped (no test pollution)"
     );
 
-    // The cleanup the real Close handler runs before process::exit(0).
+    // The cleanup the real Close handler runs before process::exit(0). It kills
+    // every pane's shell (`PaneTerm::kill_child` → `Session::kill_child` →
+    // `PtyProcess::kill`; that the kill actually terminates the child is proven
+    // deterministically by `pty::tests::kill_terminates_interactive_child`).
     app.prepare_shutdown();
 
+    // The load-bearing FAST-CLOSE contract: prepare_shutdown must NOT drop the
+    // panes. Dropping runs the per-pane `ClosePseudoConsole` that BLOCKS until
+    // each child exits, sequentially — the slow-to-close latency this change
+    // removes. `process::exit(0)` (which the real Close handler calls right after)
+    // runs no destructors, so the blocking drop never fires; the shells are still
+    // reaped because they were killed above, and the OS reclaims the pseudoconsole
+    // handles on process exit.
     assert_eq!(
         app.term_count(),
-        0,
-        "every PaneTerm must be dropped (Session::Drop kills its PTY child) \
-             so no shell is orphaned after the window closes"
+        n,
+        "prepare_shutdown must NOT drop the panes (the blocking per-pane \
+             ClosePseudoConsole is skipped on the fast-exit path)"
     );
     // Reaching here proves prepare_shutdown returned normally — it did NOT
-    // call process::exit (which would abort the test runner).
+    // call process::exit (which would abort the test runner) and did NOT block.
 }
 
 // ---- Transparency clear-color (SCR1B3-parity model) ----

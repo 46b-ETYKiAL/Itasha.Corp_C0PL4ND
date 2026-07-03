@@ -341,14 +341,19 @@ impl PaneTerm {
     /// configuration.
     pub fn spawn_with_term(theme: Theme, cols: u16, rows: u16, term: Option<&str>) -> Self {
         match Session::spawn_shell_with_term(None, rows, cols, term) {
-            Ok(session) => Self {
-                session: Some(session),
-                error: None,
-                theme,
-                size: (cols, rows),
-                wake_wired: false,
-                span_cache: RefCell::new(RowSpanCache::default()),
-            },
+            Ok(session) => {
+                // P0.3: enroll the shell in the kill-on-close job so it (and its
+                // descendants) cannot outlive the app, even on a hard exit/crash.
+                Self::assign_child_to_job(&session);
+                Self {
+                    session: Some(session),
+                    error: None,
+                    theme,
+                    size: (cols, rows),
+                    wake_wired: false,
+                    span_cache: RefCell::new(RowSpanCache::default()),
+                }
+            }
             Err(e) => Self {
                 session: None,
                 error: Some(crate::user_error::shell_spawn_failed(e)),
@@ -374,14 +379,19 @@ impl PaneTerm {
         cwd: Option<&str>,
     ) -> Self {
         match Session::spawn_shell_in_with_term(None, rows, cols, cwd, term) {
-            Ok(session) => Self {
-                session: Some(session),
-                error: None,
-                theme,
-                size: (cols, rows),
-                wake_wired: false,
-                span_cache: RefCell::new(RowSpanCache::default()),
-            },
+            Ok(session) => {
+                // P0.3: enroll the shell in the kill-on-close job so it (and its
+                // descendants) cannot outlive the app, even on a hard exit/crash.
+                Self::assign_child_to_job(&session);
+                Self {
+                    session: Some(session),
+                    error: None,
+                    theme,
+                    size: (cols, rows),
+                    wake_wired: false,
+                    span_cache: RefCell::new(RowSpanCache::default()),
+                }
+            }
             Err(e) => Self {
                 session: None,
                 error: Some(crate::user_error::shell_spawn_failed(e)),
@@ -413,14 +423,19 @@ impl PaneTerm {
     #[allow(dead_code)]
     pub fn spawn_program(theme: Theme, program: &str, args: &[&str], cols: u16, rows: u16) -> Self {
         match Session::spawn_program(program, args, rows, cols) {
-            Ok(session) => Self {
-                session: Some(session),
-                error: None,
-                theme,
-                size: (cols, rows),
-                wake_wired: false,
-                span_cache: RefCell::new(RowSpanCache::default()),
-            },
+            Ok(session) => {
+                // P0.3: enroll the shell in the kill-on-close job so it (and its
+                // descendants) cannot outlive the app, even on a hard exit/crash.
+                Self::assign_child_to_job(&session);
+                Self {
+                    session: Some(session),
+                    error: None,
+                    theme,
+                    size: (cols, rows),
+                    wake_wired: false,
+                    span_cache: RefCell::new(RowSpanCache::default()),
+                }
+            }
             Err(e) => Self {
                 session: None,
                 error: Some(crate::user_error::program_spawn_failed(e)),
@@ -443,6 +458,27 @@ impl PaneTerm {
     #[allow(dead_code)]
     pub fn is_alive(&self) -> bool {
         self.session.as_ref().is_some_and(Session::is_alive)
+    }
+
+    /// Assign a freshly-spawned session's shell to the process-wide
+    /// `KILL_ON_JOB_CLOSE` job object (P0.3 no-orphan guarantee). Best-effort +
+    /// a no-op until `job_object::init()` has run (so headless tests, which never
+    /// init the job, do nothing). Called from every spawn path.
+    fn assign_child_to_job(session: &Session) {
+        if let Some(pid) = session.child_pid() {
+            super::job_object::assign(pid);
+        }
+    }
+
+    /// Kill this pane's shell WITHOUT dropping the session — a fast, non-blocking
+    /// `TerminateProcess`. The app's fast-close path calls this on EVERY pane
+    /// before `std::process::exit(0)` so all shells terminate in parallel and the
+    /// per-pane blocking `ClosePseudoConsole` (the sequential close latency) is
+    /// skipped entirely. No-op for a failed-spawn pane.
+    pub fn kill_child(&mut self) {
+        if let Some(session) = self.session.as_mut() {
+            session.kill_child();
+        }
     }
 
     /// The current PTY grid size `(cols, rows)`. (Test/observation API.)

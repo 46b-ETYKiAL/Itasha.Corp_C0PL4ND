@@ -52,6 +52,12 @@ fn main() -> eframe::Result<()> {
     // then chains to the default hook — it runs before the abort fires.
     panic_hook::install();
 
+    // Create the process-wide KILL_ON_JOB_CLOSE job object (Windows) so no PTY
+    // child shell — or anything it spawns — can outlive this process, even on a
+    // hard `std::process::exit(0)` or a crash. Best-effort; the fast-close
+    // `kill_child` path is the primary no-orphan guarantee, this is the backstop.
+    egui_app::job_object::init();
+
     // Best-effort tracing. Mirror the legacy binary EXACTLY (F9-2): read the
     // `C0PL4ND_LOG` env var (NOT the default `RUST_LOG`) and default to `warn`.
     // The two binaries previously diverged — this one read `RUST_LOG` and

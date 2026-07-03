@@ -21,6 +21,7 @@ mod crt;
 pub mod fonts;
 pub mod grid;
 pub mod hyperlink;
+pub mod job_object;
 mod layout_state;
 pub mod pane_term;
 mod search_ui;
@@ -204,6 +205,14 @@ pub struct C0pl4ndApp {
     pub(crate) search_test_corpus: Option<String>,
     /// A transient status-bar message (e.g. "max 6 panes").
     pub(crate) toast: Option<String>,
+    /// Debounced font-size persistence deadline (egui `input.time`, seconds).
+    /// Live Ctrl+wheel / Ctrl+/- zoom changes `config.font.size` every notch and
+    /// applies it in-memory immediately, but writing the whole config file per
+    /// notch (atomic temp-write + rename + perms) is wasteful under a fast scroll.
+    /// Instead each zoom sets this to `now + debounce`; `frame_tick` flushes ONE
+    /// save once the deadline passes with no further change. `None` == nothing
+    /// pending. Shutdown also saves, so a pending zoom is never lost on close.
+    pub(crate) pending_font_save_at: Option<f64>,
     /// Receiver for an opt-in launch update check spawned by the binary entry
     /// point (`egui_main`). The background thread sends a one-line "newer
     /// version available" notice exactly once; `frame_tick` polls this and
@@ -526,6 +535,7 @@ impl C0pl4ndApp {
             search_sel: 0,
             search_test_corpus: None,
             toast: theme_notice,
+            pending_font_save_at: None,
             update_rx: None,
             last_update_notice: None,
             last_window_cmd: None,
@@ -1915,6 +1925,10 @@ impl C0pl4ndApp {
             .filter(|z| grid::tile_of_pane(&self.grid_tree, *z).is_some());
 
         // Snapshot BEFORE the frame so we can revert a drag that exceeds the cap.
+        // (Kept unconditional: the Tabs-view path below reads it as a non-`self`
+        // view of the tree while `terms` is mutably borrowed, so it cannot be
+        // replaced by a `self.grid_tree` borrow; the clone is a small ~pane-count
+        // structure and this runs only on an on-demand repaint.)
         let pre = self.grid_tree.clone();
         {
             // Disjoint borrows: the closure touches these fields, NOT grid_tree.
@@ -3002,12 +3016,15 @@ impl C0pl4ndApp {
     ///    headless test never writes the user's real `%APPDATA%\c0pl4nd\config.toml`
     ///    (test pollution). This is the save-on-close that MUST still happen before
     ///    a fast exit.
-    /// 2. **Drop every live terminal** — `self.terms.clear()` drops each
-    ///    [`PaneTerm`], and dropping a `PaneTerm` runs its `Session::Drop`, which
-    ///    kills the PTY child. This is the no-orphan guarantee: after this call no
-    ///    `cmd.exe` (or other shell) is left running. It is ~2ms for the canonical
-    ///    six-pane layout and is done BEFORE the process exits so the children are
-    ///    reaped, not orphaned, even though `process::exit` runs no destructors.
+    /// 2. **Kill every live shell** — one pass of `PaneTerm::kill_child` over
+    ///    every pane (`TerminateProcess`, non-blocking) so all N children
+    ///    terminate in parallel. This is the no-orphan guarantee: after this call
+    ///    no `cmd.exe` (or other shell) is left running. It deliberately does NOT
+    ///    drop the panes (`self.terms.clear()`) — dropping runs the per-pane
+    ///    `ClosePseudoConsole` that BLOCKS until each child exits, sequentially,
+    ///    which was the slow-to-close latency. `process::exit(0)` runs no
+    ///    destructors, so skipping the drop skips that block entirely while the
+    ///    kill above still reaps every child.
     ///
     /// Kept separate from the `process::exit(0)` call so tests can exercise the
     /// cleanup (save + child reaping) WITHOUT terminating the test runner.
@@ -3043,9 +3060,24 @@ impl C0pl4ndApp {
                 }
             }
         }
-        // 2) Drop every PaneTerm → each Session::Drop kills its PTY child. No
-        //    orphaned shells survive the close.
-        self.terms.clear();
+        // 2) Kill every pane's shell FIRST, in one pass, so all N children
+        //    terminate in PARALLEL. This replaces the old `self.terms.clear()`,
+        //    which dropped each PaneTerm inline → per-pane `ClosePseudoConsole`
+        //    that BLOCKS until that child exits, run SEQUENTIALLY for all N panes
+        //    (the "takes a while to close" latency: N × block). Killing every
+        //    child up-front means:
+        //      * the fast-exit callers (`WindowCmd::Close`, OS close-requested)
+        //        then `std::process::exit(0)`, which runs NO destructors — so the
+        //        blocking `ClosePseudoConsole` never fires at all, yet no shell is
+        //        orphaned because it was just killed here; and
+        //      * the graceful `on_exit` path (eframe then drops the app, dropping
+        //        `self.terms`) finds every child already gone, so each
+        //        `ClosePseudoConsole` returns promptly instead of blocking.
+        //    `TerminateProcess` is effectively non-blocking (it requests
+        //    termination and returns), so this whole pass is fast regardless of N.
+        for term in self.terms.values_mut() {
+            term.kill_child();
+        }
     }
 
     /// One per-frame tick of the chrome + grid. Separated from `eframe::App::ui`
@@ -3078,6 +3110,15 @@ impl C0pl4ndApp {
             install_chrome_fonts(ctx, &self.config.font);
             self.applied_font_family = font_apply_key(&self.config.font);
             self.fonts_installed = true;
+        }
+        // Flush a DEBOUNCED font-zoom save once its deadline has passed with no
+        // further change (see `FONT_SAVE_DEBOUNCE_SECS`): coalesces a fast
+        // Ctrl+wheel zoom into a SINGLE config write instead of one per notch.
+        if let Some(deadline) = self.pending_font_save_at {
+            if ctx.input(|i| i.time) >= deadline {
+                self.pending_font_save_at = None;
+                self.persist_config_change("The font size");
+            }
         }
         // Zoom↔focus reconcile: a zoom (Ctrl+Shift+Z) renders ONLY the zoomed
         // pane, but focus can move to a DIFFERENT pane while zoomed (switching
@@ -3358,13 +3399,18 @@ impl C0pl4ndApp {
             }
             if self.config.font.size != before {
                 // The renderer reads `config.font.size` every frame, so the new
-                // size applies live. Persist it so the zoom survives a relaunch,
-                // mirroring the settings-change + view-mode saves (real-window-
-                // only, best-effort — a write failure surfaces as a toast and
-                // never blocks the live apply; the headless harness has
-                // `live_window == false`, so a test never writes the real config).
+                // size applies live immediately. The PERSIST is DEBOUNCED: writing
+                // the whole config file (atomic temp-write + rename + perms) on
+                // every wheel notch is wasteful under a fast zoom, so we schedule a
+                // single save `FONT_SAVE_DEBOUNCE` after the LAST change instead.
+                // `frame_tick` flushes it; a repaint is scheduled for the deadline
+                // so an otherwise-idle app still wakes to write it.
                 ctx.request_repaint();
-                self.persist_config_change("The font size");
+                let now = ctx.input(|i| i.time);
+                self.pending_font_save_at = Some(now + FONT_SAVE_DEBOUNCE_SECS);
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                    FONT_SAVE_DEBOUNCE_SECS,
+                ));
             }
         }
 
@@ -4104,6 +4150,12 @@ impl C0pl4ndApp {
 /// otherwise-quiescent screen. Matches the 530 ms cadence the cursor painter and
 /// the legacy winit shell use.
 const CURSOR_BLINK_HALF_PERIOD_MS: u64 = 530;
+
+/// Debounce window (seconds) for persisting a live font-zoom change. A fast
+/// Ctrl+wheel emits many notches; coalescing to ONE config write this long after
+/// the last change avoids a temp-write + rename + perms per notch. Short enough
+/// that the size is durably saved almost immediately once the user stops zooming.
+const FONT_SAVE_DEBOUNCE_SECS: f64 = 0.6;
 
 /// Width of the 4 edge resize zones, in logical px. Slim so they only intercept
 /// pointer events right at the window border (#24).
