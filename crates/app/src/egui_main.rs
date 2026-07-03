@@ -293,20 +293,22 @@ fn launch_backend_override() -> c0pl4nd_core::config::GraphicsBackend {
 /// window only works on Vulkan — empirically verified on Win11 (and the reason the
 /// sibling SCR1B3, which uses the default Vulkan-first backend, is see-through).
 ///
-/// The trade-off: some third-party Vulkan *overlay layers* (e.g.
-/// `GalaxyOverlayVkLayer`) corrupt the Vulkan instance and panic egui-wgpu, which
-/// is why the OPAQUE path keeps the more robust DX12. So: when the user has
-/// enabled window transparency we select Vulkan; otherwise DX12. `WGPU_BACKEND`
-/// always overrides (a user hitting a Vulkan-overlay crash can force `dx12`,
-/// trading transparency for stability). No-op on non-Windows platforms.
+/// **Vulkan is now the Windows default for BOTH opaque and transparent windows**
+/// — it is immune to the DX12 font-atlas `write_texture`→sample hazard that
+/// intermittently garbles the terminal grid on some NVIDIA DX12 drivers
+/// (wgpu#1306 / #6829, DX12-only), and it is the only backend whose WSI exposes
+/// the pre-multiplied alpha a see-through window needs. The trade-off: some
+/// third-party Vulkan *overlay layers* (e.g. `GalaxyOverlayVkLayer`) corrupt the
+/// Vulkan instance and panic egui-wgpu — a user hitting that forces DX12 back via
+/// the config override (below) or `WGPU_BACKEND=dx12`, trading the glyph-hazard
+/// immunity for overlay robustness. No-op on non-Windows platforms.
 ///
 /// `backend_override` is the persisted [`GraphicsBackend`](c0pl4nd_core::config::GraphicsBackend)
-/// setting: `Auto` keeps the transparency-smart default above, while an explicit
-/// variant forces that backend — the in-app escape hatch for a driver-specific
-/// rendering glitch (e.g. corrupted grid glyphs under a bad DX12 driver → pick
-/// Vulkan). Precedence: `WGPU_BACKEND` env (one-off debug) > config override >
-/// platform default. Effective on Windows; inert elsewhere (the glitch it exists
-/// to work around is the Windows DX12 present path).
+/// setting: `Auto` keeps the Vulkan default above, while an explicit variant
+/// forces that backend — the in-app escape hatch either way (Vulkan-overlay crash
+/// → force DX12; a DX12-only need → force DX12). Precedence: `WGPU_BACKEND` env
+/// (one-off debug) > config override > platform default. Effective on Windows;
+/// inert elsewhere.
 fn prefer_backend_on_windows(
     options: &mut eframe::NativeOptions,
     want_transparency: bool,
@@ -317,13 +319,18 @@ fn prefer_backend_on_windows(
         use eframe::wgpu::Backends;
         if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
         {
-            // Platform-smart default: Vulkan when the user wants a see-through
-            // window, else the more overlay-robust DX12.
-            let platform_default = if want_transparency {
-                Backends::VULKAN
-            } else {
-                Backends::DX12
-            };
+            // Platform default: VULKAN, for BOTH the transparent and the opaque
+            // window. Vulkan is immune to the DX12 font-atlas `write_texture`→sample
+            // hazard that intermittently garbles the terminal grid on some NVIDIA
+            // DX12 drivers (wgpu#1306 / #6829 — DX12-only; the in-app atlas fence
+            // only mitigates it), AND it is the only backend whose WSI exposes the
+            // pre-multiplied alpha a see-through window needs. DX12 remains one
+            // setting away — the `graphics_backend` config override (or
+            // `WGPU_BACKEND=dx12`) forces it for anyone who hits a Vulkan-overlay
+            // layer crash (e.g. GalaxyOverlayVkLayer), trading the glyph-hazard
+            // immunity back for overlay robustness.
+            let _ = want_transparency; // both paths default to Vulkan now
+            let platform_default = Backends::VULKAN;
             // The persisted setting maps to an explicit backend; `Auto` defers to
             // the platform default. The `WGPU_BACKEND` env still wins over both.
             let configured = resolve_configured_backends(backend_override, platform_default);
