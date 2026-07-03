@@ -52,6 +52,7 @@ const CATEGORIES: &[&str] = &[
     "Cursor",
     "Terminal",
     "Window",
+    "Toolbar",
     "Keybindings",
     "Privacy",
     "Updates",
@@ -553,6 +554,163 @@ pub fn show(
         clear_history,
         set_incognito,
     }
+}
+
+/// Settings → Toolbar: edit the customizable top-bar quick-action cluster —
+/// reorder (▲/▼), remove (✕), add from the palette, park actions in the overflow
+/// "⋯" menu, and reset to defaults. Returns whether `config.toolbar` changed.
+fn toolbar_settings_section(ui: &mut egui::Ui, config: &mut Config) -> bool {
+    use super::chrome_toolbar as tb;
+    let mut changed = false;
+    ui.heading("Toolbar");
+    help(
+        ui,
+        "Customize the quick-action buttons pinned to the right of the top bar \
+         (just left of the settings gear). Reorder, add, remove, or park actions \
+         in an overflow \"⋯\" menu.",
+    );
+
+    // ---- Buttons shown on the bar (config.toolbar.items) ----
+    ui.label(egui::RichText::new("Buttons on the bar (left → right)").strong());
+    changed |= toolbar_list_ui(ui, config, false);
+    ui.horizontal(|ui| {
+        let avail = tb::available_to_add(&config.toolbar.items, &config.toolbar.menu);
+        ui.add_enabled_ui(!avail.is_empty(), |ui| {
+            ui.menu_button("Add button ▾", |ui| {
+                for id in &avail {
+                    if ui.button(tb::action_label(id).unwrap_or(id)).clicked() {
+                        if tb::add_unique(&mut config.toolbar.items, &config.toolbar.menu, id) {
+                            changed = true;
+                        }
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                }
+            });
+        });
+        if ui
+            .button("Reset toolbar")
+            .on_hover_text("Restore the default buttons, order, and menu.")
+            .clicked()
+        {
+            config.toolbar = c0pl4nd_core::config::ToolbarConfig::default();
+            changed = true;
+        }
+    });
+
+    ui.add_space(12.0);
+
+    // ---- Overflow "⋯" menu (config.toolbar.menu) ----
+    ui.label(egui::RichText::new("Overflow \"⋯\" menu (parked actions)").strong());
+    help(
+        ui,
+        "Actions parked here are reachable via a single \"⋯\" menu on the bar \
+         instead of taking a slot.",
+    );
+    changed |= ui
+        .checkbox(
+            &mut config.toolbar.show_overflow,
+            "Show the ⋯ button when the menu has actions",
+        )
+        .changed();
+    changed |= toolbar_list_ui(ui, config, true);
+    ui.horizontal(|ui| {
+        let avail = tb::available_to_add(&config.toolbar.items, &config.toolbar.menu);
+        ui.add_enabled_ui(!avail.is_empty(), |ui| {
+            ui.menu_button("Add to menu ▾", |ui| {
+                for id in &avail {
+                    if ui.button(tb::action_label(id).unwrap_or(id)).clicked() {
+                        if tb::add_unique(&mut config.toolbar.menu, &config.toolbar.items, id) {
+                            changed = true;
+                        }
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                }
+            });
+        });
+        if ui
+            .button("Clear menu")
+            .on_hover_text("Remove every parked action.")
+            .clicked()
+            && !config.toolbar.menu.is_empty()
+        {
+            config.toolbar.menu.clear();
+            changed = true;
+        }
+    });
+    changed
+}
+
+/// Render one reorderable list of toolbar action ids (the bar `items` when
+/// `is_menu` is false, else the overflow `menu`): each row is `▲ ▼ ✕  Label`. The
+/// mutation is deferred to AFTER the row loop so the immutable render-borrow and
+/// the mutable list-edit never overlap. Returns whether the list changed.
+fn toolbar_list_ui(ui: &mut egui::Ui, config: &mut Config, is_menu: bool) -> bool {
+    use super::chrome_toolbar as tb;
+    {
+        let list = if is_menu {
+            &config.toolbar.menu
+        } else {
+            &config.toolbar.items
+        };
+        if list.is_empty() {
+            ui.weak(if is_menu {
+                "No parked actions."
+            } else {
+                "No buttons — add one below."
+            });
+            return false;
+        }
+    }
+    let n = if is_menu {
+        config.toolbar.menu.len()
+    } else {
+        config.toolbar.items.len()
+    };
+    let mut do_up: Option<usize> = None;
+    let mut do_down: Option<usize> = None;
+    let mut do_remove: Option<usize> = None;
+    {
+        let list = if is_menu {
+            &config.toolbar.menu
+        } else {
+            &config.toolbar.items
+        };
+        for (i, id) in list.iter().enumerate() {
+            let label = tb::action_label(id).unwrap_or(id.as_str()).to_string();
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(i > 0, |ui| {
+                    if ui.small_button("▲").on_hover_text("Move left").clicked() {
+                        do_up = Some(i);
+                    }
+                });
+                ui.add_enabled_ui(i + 1 < n, |ui| {
+                    if ui.small_button("▼").on_hover_text("Move right").clicked() {
+                        do_down = Some(i);
+                    }
+                });
+                if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                    do_remove = Some(i);
+                }
+                ui.label(label);
+            });
+        }
+    }
+    let list = if is_menu {
+        &mut config.toolbar.menu
+    } else {
+        &mut config.toolbar.items
+    };
+    let mut changed = false;
+    if let Some(i) = do_up {
+        changed |= tb::move_up(list, i);
+    }
+    if let Some(i) = do_down {
+        changed |= tb::move_down(list, i);
+    }
+    if let Some(i) = do_remove {
+        changed |= tb::remove_at(list, i).is_some();
+    }
+    changed
 }
 
 /// Render every category section visible for the current selection / search
@@ -1361,6 +1519,24 @@ fn render_sections(
                 ui.end_row();
             }
         });
+        group_gap(ui);
+    }
+
+    // ------------------------------------------------------------------- Toolbar
+    if section_visible(
+        sel,
+        q,
+        "Toolbar",
+        &[
+            "toolbar",
+            "buttons",
+            "quick actions",
+            "top bar",
+            "overflow",
+            "reorder",
+        ],
+    ) {
+        changed |= toolbar_settings_section(ui, config);
         group_gap(ui);
     }
 

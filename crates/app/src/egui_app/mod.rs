@@ -17,6 +17,7 @@
 
 pub mod bidi;
 pub mod chrome;
+pub mod chrome_toolbar;
 mod crt;
 pub mod fonts;
 pub mod grid;

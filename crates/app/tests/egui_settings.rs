@@ -110,6 +110,45 @@ fn toggling_cursor_blink_flips_the_live_config() {
 }
 
 #[test]
+fn toolbar_section_overflow_toggle_and_reset_are_wired() {
+    // The Settings → Toolbar section must render and drive the live config: flip
+    // the overflow checkbox off, then Reset must restore every default (including
+    // the overflow flag back to on) — proving the real widgets → real config path.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    assert!(
+        app.borrow().config_toolbar_show_overflow(),
+        "precondition: overflow defaults on"
+    );
+    let default_items = app.borrow().config_toolbar_items();
+    let mut h = harness(&app);
+
+    open_settings(&mut h);
+    select_category(&mut h, "Toolbar");
+
+    // Flip the overflow checkbox OFF.
+    h.get_by_label("Show the ⋯ button when the menu has actions")
+        .click();
+    h.run();
+    assert!(
+        !app.borrow().config_toolbar_show_overflow(),
+        "toggling the overflow checkbox must turn it OFF in the live config"
+    );
+
+    // Reset restores the defaults (overflow back on, items back to default order).
+    h.get_by_label("Reset toolbar").click();
+    h.run();
+    assert!(
+        app.borrow().config_toolbar_show_overflow(),
+        "Reset toolbar must restore show_overflow to its default (on)"
+    );
+    assert_eq!(
+        app.borrow().config_toolbar_items(),
+        default_items,
+        "Reset toolbar must restore the default items"
+    );
+}
+
+#[test]
 fn toggling_paste_warn_flips_the_live_config() {
     // paste_warn_multiline defaults to TRUE (a security default). Toggling it
     // must turn it off — proving the Terminal-section toggle is wired.

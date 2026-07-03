@@ -45,6 +45,25 @@ impl super::C0pl4ndApp {
         self.config.cursor.blink
     }
 
+    /// The customizable toolbar's on-bar item ids from the live config.
+    /// Observation accessor for the Settings → Toolbar interaction tests.
+    #[allow(dead_code)]
+    pub fn config_toolbar_items(&self) -> Vec<String> {
+        self.config.toolbar.items.clone()
+    }
+
+    /// The customizable toolbar's overflow-menu ids from the live config.
+    #[allow(dead_code)]
+    pub fn config_toolbar_menu(&self) -> Vec<String> {
+        self.config.toolbar.menu.clone()
+    }
+
+    /// Whether the toolbar's overflow "⋯" button is enabled in the live config.
+    #[allow(dead_code)]
+    pub fn config_toolbar_show_overflow(&self) -> bool {
+        self.config.toolbar.show_overflow
+    }
+
     /// The master transparency toggle from the live config. Observation
     /// accessor for the transparency interaction tests.
     #[allow(dead_code)]

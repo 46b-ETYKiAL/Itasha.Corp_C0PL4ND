@@ -534,6 +534,56 @@ impl EffectsConfig {
     }
 }
 
+/// Customizable top-bar quick-action toolbar (the cluster pinned to the RIGHT of
+/// the titlebar, immediately left of the settings gear). The user chooses which
+/// quick actions appear, in what order, and which are parked in an overflow "⋯"
+/// menu — edited in Settings → Toolbar. Action ids are from the app's
+/// `TOOLBAR_ACTIONS` catalog; an unknown id is skipped at render time (so a config
+/// written by a newer/older build never breaks the bar). The fixed affordances
+/// (wordmark, tab strip, the tab-adjacent "+", and the window caption cluster) are
+/// NOT part of this list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolbarConfig {
+    /// Ordered action ids shown as buttons in the right cluster, LEFT→RIGHT (so
+    /// the LAST id renders immediately left of the settings gear).
+    pub items: Vec<String>,
+    /// Action ids parked in the overflow "⋯" menu instead of taking a bar slot —
+    /// reachable without cluttering the bar. Same id space as [`items`](Self::items).
+    pub menu: Vec<String>,
+    /// Show the overflow "⋯" menu button when [`menu`](Self::menu) is non-empty.
+    /// Default `true`; turn off to hide the overflow button entirely (parked
+    /// actions stay reachable via the command palette / keybindings).
+    pub show_overflow: bool,
+}
+
+impl ToolbarConfig {
+    /// The default right-cluster contents, LEFT→RIGHT: view-toggle, equalize,
+    /// shell-switcher, then the script launcher nearest the gear (matching the
+    /// shipped default layout).
+    pub fn default_items() -> Vec<String> {
+        [
+            "view_mode",
+            "equalize_panes",
+            "shell_switcher",
+            "script_launcher",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+}
+
+impl Default for ToolbarConfig {
+    fn default() -> Self {
+        ToolbarConfig {
+            items: ToolbarConfig::default_items(),
+            menu: Vec::new(),
+            show_overflow: true,
+        }
+    }
+}
+
 /// W1TN3SS manual "Report an issue" coordinates: the GitHub `owner/repo` the
 /// prefilled Issue-Form deep link targets, and the support email alias the
 /// `mailto:` fallback addresses. Both have sane C0PL4ND defaults and are
@@ -667,6 +717,10 @@ pub struct Config {
     /// set `false` to hide it and reclaim the row for the terminal grid.
     #[serde(default = "default_true")]
     pub show_status_bar: bool,
+    /// Customizable top-bar quick-action toolbar (right cluster, by the gear). See
+    /// [`ToolbarConfig`]; edited in Settings → Toolbar.
+    #[serde(default)]
+    pub toolbar: ToolbarConfig,
     /// GPU backend the renderer requests at startup. [`GraphicsBackend::Auto`]
     /// (default) keeps the platform-smart choice (DX12 on Windows, Vulkan when
     /// window transparency is on; wgpu default elsewhere). Set an explicit
@@ -773,6 +827,7 @@ impl Default for Config {
             startup_panel: true,
             link_pane_dividers: false,
             show_status_bar: true,
+            toolbar: ToolbarConfig::default(),
             graphics_backend: GraphicsBackend::default(),
             graphics_gpu: GpuPreference::default(),
             shell: None,
@@ -2017,6 +2072,41 @@ mod tests {
             WindowMode::Vibrancy,
             "an explicit master-on config is never re-migrated"
         );
+    }
+
+    #[test]
+    fn toolbar_config_defaults_when_absent_and_round_trips() {
+        let p = std::path::PathBuf::from("cfg.toml");
+        // An EXISTING config predating the feature (no `[toolbar]` table) loads the
+        // shipped defaults — never broken by the new field (serde-default merge).
+        let c = Config::from_toml("", &p).unwrap();
+        assert_eq!(c.toolbar, ToolbarConfig::default());
+        assert_eq!(
+            c.toolbar.items,
+            vec![
+                "view_mode",
+                "equalize_panes",
+                "shell_switcher",
+                "script_launcher"
+            ]
+        );
+        assert!(c.toolbar.show_overflow);
+        assert!(c.toolbar.menu.is_empty());
+
+        // A PARTIAL `[toolbar]` (only `items`) fills the other fields from defaults.
+        let partial = Config::from_toml("[toolbar]\nitems = [\"view_mode\"]\n", &p).unwrap();
+        assert_eq!(partial.toolbar.items, vec!["view_mode"]);
+        assert!(partial.toolbar.show_overflow); // default true, not clobbered
+        assert!(partial.toolbar.menu.is_empty());
+
+        // A fully-customized toolbar round-trips through TOML unchanged.
+        let mut custom = Config::default();
+        custom.toolbar.items = vec!["script_launcher".into(), "view_mode".into()];
+        custom.toolbar.menu = vec!["equalize_panes".into()];
+        custom.toolbar.show_overflow = false;
+        let toml = toml::to_string(&custom).expect("serialize");
+        let back = Config::from_toml(&toml, &p).unwrap();
+        assert_eq!(back.toolbar, custom.toolbar);
     }
 
     #[cfg(unix)]

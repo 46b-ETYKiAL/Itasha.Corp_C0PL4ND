@@ -122,6 +122,16 @@ fn script_menu_label(cmd: &str) -> String {
     cmd.to_string()
 }
 
+/// The horizontal slot width (logical px) a customizable toolbar action occupies
+/// in the right cluster. The two menu actions carry a `▾` (and, for scripts, a
+/// wider glyph), so they need more room than the single-glyph toggle buttons.
+fn toolbar_item_width(id: &str) -> f32 {
+    match id {
+        "shell_switcher" | "script_launcher" => 52.0,
+        _ => 32.0,
+    }
+}
+
 impl C0pl4ndApp {
     /// Paint the titlebar (wordmark + tab strip + caption controls). Returns the
     /// actions the host should apply this frame. `colors` carries the
@@ -287,93 +297,12 @@ impl C0pl4ndApp {
                 actions.new_terminal = true;
             }
 
-            // View-mode toggle (#30): flip the pane shell between the multi-pane
-            // egui_tiles GRID and the single-pane TABS view. The glyph reflects
-            // the CURRENT mode (a 4-cell grid icon while in Grid, a single-card
-            // icon while in Tabs) and the tooltip names the action it performs.
-            // Clicking routes through the action struct so the host flips
-            // `config.view_mode` after the panel closes.
-            let in_tabs = self.config.view_mode == c0pl4nd_core::config::ViewMode::Tabs;
-            let view_glyph = if in_tabs {
-                icon::CARDS
-            } else {
-                icon::GRID_FOUR
-            };
-            let view_hover = if in_tabs {
-                "switch to grid view (show all panes)"
-            } else {
-                "switch to tabs view (one pane at a time)"
-            };
-            let view_btn = ui
-                .button(RichText::new(view_glyph).size(16.0).color(colors.muted))
-                .on_hover_text(view_hover);
-            // Stable accessible label for the a11y tree + the interaction test —
-            // the visible content is a glyph, so the semantic name is set here.
-            view_btn.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "toggle view: grid/tabs")
-            });
-            if view_btn.clicked() {
-                actions.toggle_view_mode = true;
-            }
-
-            // "Make panes symmetrical" — a one-click equalise of every split so all
-            // panes are the same size. Only meaningful in GRID view with a real
-            // split (2+ panes), so it appears only then (it would be a dead button
-            // in tabs view or with a single pane). Independent of the
-            // `link_pane_dividers` setting — a one-shot even when dividers are free.
-            if !in_tabs && self.pane_count() >= 2 {
-                let sym = ui
-                    .button(RichText::new(icon::COLUMNS).size(16.0).color(colors.muted))
-                    .on_hover_text("make panes symmetrical (equal sizes)");
-                sym.widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::WidgetType::Button,
-                        true,
-                        "make panes symmetrical",
-                    )
-                });
-                if sym.clicked() {
-                    actions.equalize_panes = true;
-                }
-            }
-
-            // Shell switcher (▾): lists the shells detected on this machine.
-            // Picking one opens a new terminal running it AND makes it the active
-            // profile for the plain "+" button — the Windows-Terminal "+ ▾"
-            // profile pattern. This is the user's "run things other than
-            // PowerShell — an easy switch in the top bar" affordance.
-            let menu = ui.menu_button(
-                RichText::new(format!("{} ▾", icon::TERMINAL_WINDOW)).size(13.0),
-                |ui| {
-                    ui.label(RichText::new("Open a new terminal with…").weak().small());
-                    ui.separator();
-                    let active = self.active_shell_label().to_owned();
-                    for (i, profile) in self.shell_profiles().iter().enumerate() {
-                        let is_active = profile.label == active;
-                        // The active shell is shown via egui's SELECTABLE-LABEL
-                        // highlight — NOT an appended "✓", which rendered as a tofu
-                        // box (the glyph is absent from the menu font) AND wrapped
-                        // onto its own line. selectable_label keeps the marker
-                        // inline (it IS the row) and always renders.
-                        let item = ui.selectable_label(is_active, &profile.label);
-                        item.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::WidgetType::Button,
-                                true,
-                                format!("open shell {}", profile.label),
-                            )
-                        });
-                        if item.clicked() {
-                            actions.open_shell = Some(i);
-                        }
-                    }
-                },
-            );
-            menu.response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "shell menu")
-            });
-            menu.response
-                .on_hover_text("Choose which shell new terminals run");
+            // The customizable quick-action buttons (view-mode, equalize,
+            // shell-switcher, script-launcher) are NO LONGER rendered here in the
+            // flow — they are the user-configurable RIGHT cluster, absolute-placed
+            // right-to-left from the settings gear after the caption cluster below
+            // (see `config.toolbar` + `render_toolbar_cluster`). The tab-adjacent
+            // "+" above stays fixed.
 
             // ---- right-pinned caption cluster ----
             // Placed at ABSOLUTE rects via `ui.put`. Every layout-flow attempt
@@ -431,106 +360,294 @@ impl C0pl4ndApp {
                 right_x -= bw + 2.0;
             }
 
-            // Script launcher (📜 ▾) — pinned to the RIGHT, immediately LEFT of the
-            // settings gear (the caption cluster's leftmost glyph). After the loop
-            // above, `right_x` sits at the gear's left edge, so place the menu
-            // button just left of it. Absolute-positioned in a child ui (via
-            // `scope_builder` at a fixed rect) for the same reason the caption
-            // cluster is — this non-justified `horizontal_centered` row cannot
-            // right-align in flow. The `right_to_left` layout snugs the button
-            // against the gear. The menu pins an "Open…" item (native file picker →
-            // run the chosen script), lists previously-run commands newest-first
-            // (click to re-run), and a W1TN3SS "Report an issue…" item. All
-            // outcomes defer to the host via the action struct — the picker BLOCKS
-            // and the run/report paths are `&mut self`, unsafe mid-panel.
-            let scripts_w = 52.0_f32;
-            let scripts_rect = egui::Rect::from_min_max(
-                egui::pos2(right_x - scripts_w, cy - bh / 2.0),
-                egui::pos2(right_x, cy + bh / 2.0),
+            // Customizable quick-action cluster — pinned to the RIGHT, laid out
+            // right-to-left from the settings gear (`right_x` is at the gear's left
+            // edge after the caption loop). Contents + order come from
+            // `config.toolbar`; the LAST item renders immediately left of the gear.
+            self.render_toolbar_cluster(ui, right_x, cy, bh, &mut actions, colors);
+        });
+        actions
+    }
+
+    /// Render the user-configurable quick-action cluster (`config.toolbar.items`)
+    /// pinned to the right of the titlebar, laid out RIGHT-TO-LEFT starting at
+    /// `right_x` (the settings gear's left edge) so `items.last()` sits nearest the
+    /// gear. Each item is absolute-placed in its own child ui (via `scope_builder`)
+    /// for the same reason the caption cluster is — the non-justified row cannot
+    /// right-align in flow. An unknown id, or an item whose action is not currently
+    /// applicable (e.g. `equalize_panes` outside grid view), is skipped and takes
+    /// no slot. When `menu` is non-empty and `show_overflow` is on, an overflow
+    /// "⋯" button is placed at the LEFT end (farthest from the gear).
+    fn render_toolbar_cluster(
+        &self,
+        ui: &mut egui::Ui,
+        right_x: f32,
+        cy: f32,
+        bh: f32,
+        actions: &mut ChromeActions,
+        colors: ChromeColors,
+    ) {
+        let mut cx = right_x;
+        // items.last() nearest the gear → iterate in reverse, sweeping leftward.
+        for id in self.config.toolbar.items.iter().rev() {
+            if !self.toolbar_action_applicable(id) {
+                continue;
+            }
+            let w = toolbar_item_width(id);
+            let rect = egui::Rect::from_min_max(
+                egui::pos2(cx - w, cy - bh / 2.0),
+                egui::pos2(cx, cy + bh / 2.0),
             );
             ui.scope_builder(
                 egui::UiBuilder::new()
-                    .max_rect(scripts_rect)
+                    .max_rect(rect)
                     .layout(egui::Layout::right_to_left(egui::Align::Center)),
-                |ui| {
-                    let scripts = ui.menu_button(
-                        RichText::new(format!("{} ▾", icon::SCROLL)).size(13.0),
-                        |ui| {
-                            if ui
-                                .button(format!("{} Open…", icon::FOLDER_OPEN))
-                                .on_hover_text("Pick a script file to run in the focused terminal")
-                                .clicked()
-                            {
-                                actions.open_script_file = true;
-                                ui.close_kind(egui::UiKind::Menu);
-                            }
-                            ui.separator();
-                            // `entries()` is already most-recent-first (see
-                            // `command_history`). Collect owned so the borrow of
-                            // `self` does not outlive the closure's per-row widgets.
-                            let entries: Vec<String> =
-                                self.cmd_history.entries().map(str::to_string).collect();
-                            if entries.is_empty() {
-                                ui.weak("No commands run yet.");
-                            } else {
-                                egui::ScrollArea::vertical()
-                                    .id_salt("script_menu_history")
-                                    .max_height(320.0)
-                                    .show(ui, |ui| {
-                                        for cmd in &entries {
-                                            // Show the script's file NAME (not the
-                                            // long absolute path) for a picked-file
-                                            // run; the full command stays in the
-                                            // hover tooltip and is what re-runs.
-                                            let label = script_menu_label(cmd);
-                                            let item = ui.button(&label).on_hover_text(cmd);
-                                            item.widget_info(|| {
-                                                egui::WidgetInfo::labeled(
-                                                    egui::WidgetType::Button,
-                                                    true,
-                                                    format!("re-run {cmd}"),
-                                                )
-                                            });
-                                            if item.clicked() {
-                                                actions.rerun_command = Some(cmd.clone());
-                                                ui.close_kind(egui::UiKind::Menu);
-                                            }
-                                        }
-                                    });
-                            }
-                            // W1TN3SS manual "Report an issue…" entry (opt-in,
-                            // user-initiated). Opens the prefilled-GitHub-issue
-                            // dialog; nothing is sent until the user reviews +
-                            // submits in their browser. Deferred to the host.
-                            ui.separator();
-                            let report = ui
-                                .button(format!("{} Report an issue…", icon::BUG))
-                                .on_hover_text(
-                                    "Open a prefilled GitHub issue (review before submitting)",
-                                );
-                            report.widget_info(|| {
-                                egui::WidgetInfo::labeled(
-                                    egui::WidgetType::Button,
-                                    true,
-                                    "report an issue",
-                                )
-                            });
-                            if report.clicked() {
-                                actions.report_issue = true;
-                                ui.close_kind(egui::UiKind::Menu);
-                            }
-                        },
-                    );
-                    scripts.response.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "script menu")
-                    });
-                    scripts
-                        .response
-                        .on_hover_text("Run a script file or re-run a previous command");
-                },
+                |ui| self.render_toolbar_item(ui, id, actions, colors),
             );
+            cx -= w + 2.0;
+        }
+        // Overflow "⋯" menu at the left end of the cluster (parked actions).
+        if self.config.toolbar.show_overflow
+            && self
+                .config
+                .toolbar
+                .menu
+                .iter()
+                .any(|id| self.toolbar_action_applicable(id))
+        {
+            let w = 32.0_f32;
+            let rect = egui::Rect::from_min_max(
+                egui::pos2(cx - w, cy - bh / 2.0),
+                egui::pos2(cx, cy + bh / 2.0),
+            );
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                |ui| self.render_toolbar_overflow(ui, actions, colors),
+            );
+        }
+    }
+
+    /// Whether a toolbar action id should render THIS frame: a known catalog id
+    /// whose action is currently applicable. `equalize_panes` only applies in grid
+    /// view with a real split (2+ panes) — outside that it is a dead button, so it
+    /// is skipped (takes no slot) exactly as the old inline button was hidden.
+    fn toolbar_action_applicable(&self, id: &str) -> bool {
+        if !super::chrome_toolbar::is_known_action(id) {
+            return false;
+        }
+        if id == "equalize_panes" {
+            let in_tabs = self.config.view_mode == c0pl4nd_core::config::ViewMode::Tabs;
+            return !in_tabs && self.pane_count() >= 2;
+        }
+        true
+    }
+
+    /// Render a single quick-action widget (button or menu) for `id` into the
+    /// current (already absolute-placed) child ui, wiring its click to `actions`.
+    fn render_toolbar_item(
+        &self,
+        ui: &mut egui::Ui,
+        id: &str,
+        actions: &mut ChromeActions,
+        colors: ChromeColors,
+    ) {
+        match id {
+            "view_mode" => {
+                let in_tabs = self.config.view_mode == c0pl4nd_core::config::ViewMode::Tabs;
+                let (glyph, hover) = if in_tabs {
+                    (icon::CARDS, "switch to grid view (show all panes)")
+                } else {
+                    (icon::GRID_FOUR, "switch to tabs view (one pane at a time)")
+                };
+                let btn = ui
+                    .button(RichText::new(glyph).size(16.0).color(colors.muted))
+                    .on_hover_text(hover);
+                btn.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        "toggle view: grid/tabs",
+                    )
+                });
+                if btn.clicked() {
+                    actions.toggle_view_mode = true;
+                }
+            }
+            "equalize_panes" => {
+                let sym = ui
+                    .button(RichText::new(icon::COLUMNS).size(16.0).color(colors.muted))
+                    .on_hover_text("make panes symmetrical (equal sizes)");
+                sym.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        "make panes symmetrical",
+                    )
+                });
+                if sym.clicked() {
+                    actions.equalize_panes = true;
+                }
+            }
+            "shell_switcher" => {
+                let menu = ui.menu_button(
+                    RichText::new(format!("{} ▾", icon::TERMINAL_WINDOW)).size(13.0),
+                    |ui| self.toolbar_shell_menu(ui, actions),
+                );
+                menu.response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "shell menu")
+                });
+                menu.response
+                    .on_hover_text("Choose which shell new terminals run");
+            }
+            "script_launcher" => {
+                let scripts = ui.menu_button(
+                    RichText::new(format!("{} ▾", icon::SCROLL)).size(13.0),
+                    |ui| self.toolbar_script_menu(ui, actions),
+                );
+                scripts.response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "script menu")
+                });
+                scripts
+                    .response
+                    .on_hover_text("Run a script file or re-run a previous command");
+            }
+            _ => {}
+        }
+    }
+
+    /// The overflow "⋯" menu: each parked (`config.toolbar.menu`) action as a row
+    /// that performs the SAME action as its toolbar button would.
+    fn render_toolbar_overflow(
+        &self,
+        ui: &mut egui::Ui,
+        actions: &mut ChromeActions,
+        _colors: ChromeColors,
+    ) {
+        let menu = ui.menu_button(RichText::new(icon::DOTS_THREE).size(16.0), |ui| {
+            ui.label(RichText::new("More actions").weak().small());
+            ui.separator();
+            for id in self.config.toolbar.menu.clone() {
+                if !self.toolbar_action_applicable(&id) {
+                    continue;
+                }
+                let label = super::chrome_toolbar::action_label(&id).unwrap_or("");
+                match id.as_str() {
+                    "view_mode" => {
+                        let clicked = ui.button(label).clicked();
+                        if clicked {
+                            actions.toggle_view_mode = true;
+                            ui.close_kind(egui::UiKind::Menu);
+                        }
+                    }
+                    "equalize_panes" => {
+                        let clicked = ui.button(label).clicked();
+                        if clicked {
+                            actions.equalize_panes = true;
+                            ui.close_kind(egui::UiKind::Menu);
+                        }
+                    }
+                    "shell_switcher" => {
+                        ui.menu_button(label, |ui| self.toolbar_shell_menu(ui, actions));
+                    }
+                    "script_launcher" => {
+                        ui.menu_button(label, |ui| self.toolbar_script_menu(ui, actions));
+                    }
+                    _ => {}
+                }
+            }
         });
-        actions
+        menu.response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "more actions")
+        });
+        menu.response.on_hover_text("More toolbar actions");
+    }
+
+    /// The shell-switcher menu body (shared by the toolbar button and the overflow
+    /// menu). Lists detected shells; picking one opens a new terminal with it and
+    /// makes it the active "+" profile.
+    fn toolbar_shell_menu(&self, ui: &mut egui::Ui, actions: &mut ChromeActions) {
+        ui.label(RichText::new("Open a new terminal with…").weak().small());
+        ui.separator();
+        let active = self.active_shell_label().to_owned();
+        for (i, profile) in self.shell_profiles().iter().enumerate() {
+            let is_active = profile.label == active;
+            // Active shell shown via egui's SELECTABLE-LABEL highlight (not an
+            // appended "✓", which renders as tofu in the menu font).
+            let item = ui.selectable_label(is_active, &profile.label);
+            item.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    format!("open shell {}", profile.label),
+                )
+            });
+            if item.clicked() {
+                actions.open_shell = Some(i);
+            }
+        }
+    }
+
+    /// The script-launcher menu body (shared by the toolbar button and the overflow
+    /// menu): an "Open…" file-picker item, the newest-first command history
+    /// (click to re-run), and a W1TN3SS "Report an issue…" item. Every outcome is
+    /// deferred to the host via `actions` (the picker BLOCKS and the run/report
+    /// paths are `&mut self`, unsafe mid-panel).
+    fn toolbar_script_menu(&self, ui: &mut egui::Ui, actions: &mut ChromeActions) {
+        if ui
+            .button(format!("{} Open…", icon::FOLDER_OPEN))
+            .on_hover_text("Pick a script file to run in the focused terminal")
+            .clicked()
+        {
+            actions.open_script_file = true;
+            ui.close_kind(egui::UiKind::Menu);
+        }
+        ui.separator();
+        // `entries()` is already most-recent-first. Collect owned so the borrow of
+        // `self` does not outlive the closure's per-row widget building.
+        let entries: Vec<String> = self.cmd_history.entries().map(str::to_string).collect();
+        if entries.is_empty() {
+            ui.weak("No commands run yet.");
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("script_menu_history")
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    for cmd in &entries {
+                        // Show the script's file NAME (not the long absolute path)
+                        // for a picked-file run; the full command stays in the
+                        // hover tooltip and is what actually re-runs.
+                        let label = script_menu_label(cmd);
+                        let item = ui.button(&label).on_hover_text(cmd);
+                        item.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                format!("re-run {cmd}"),
+                            )
+                        });
+                        if item.clicked() {
+                            actions.rerun_command = Some(cmd.clone());
+                            ui.close_kind(egui::UiKind::Menu);
+                        }
+                    }
+                });
+        }
+        // W1TN3SS manual "Report an issue…" entry (opt-in, user-initiated). Opens
+        // the prefilled-GitHub-issue dialog; nothing is sent until the user reviews
+        // + submits in their browser. Deferred to the host.
+        ui.separator();
+        let report = ui
+            .button(format!("{} Report an issue…", icon::BUG))
+            .on_hover_text("Open a prefilled GitHub issue (review before submitting)");
+        report.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "report an issue")
+        });
+        if report.clicked() {
+            actions.report_issue = true;
+            ui.close_kind(egui::UiKind::Menu);
+        }
     }
 
     /// Paint the bottom status bar — pane count + a theme-tinted hint. `colors`
