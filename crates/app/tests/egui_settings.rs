@@ -133,7 +133,7 @@ fn toolbar_section_default_zones_overflow_toggle_and_reset_are_wired() {
     select_category(&mut h, "Toolbar");
 
     // Flip the overflow checkbox OFF (uniquely-labelled control).
-    h.get_by_label("Show the overflow \"⋯\" button when its menu has actions")
+    h.get_by_label("Show the overflow menu button when its menu has actions")
         .click();
     h.run();
     assert!(

@@ -578,7 +578,8 @@ fn toolbar_settings_section(ui: &mut egui::Ui, config: &mut Config) -> bool {
         ui,
         "Choose where each quick-action button lives in the top bar: on the LEFT \
          (after the +), on the RIGHT (next to the settings gear), or parked in an \
-         overflow \"⋯\" menu — or hide it. Use the arrows to reorder within a zone.",
+         overflow menu. Use the arrows to reorder within a zone, the X to remove a \
+         button, and the dots menu to move it to another zone.",
     );
 
     // One deferred edit per frame (the user clicks a single control), applied
@@ -605,12 +606,12 @@ fn toolbar_settings_section(ui: &mut egui::Ui, config: &mut Config) -> bool {
     changed |= ui
         .checkbox(
             &mut config.toolbar.show_overflow,
-            "Show the overflow \"⋯\" button when its menu has actions",
+            "Show the overflow menu button when its menu has actions",
         )
         .changed();
     toolbar_zone_list(
         ui,
-        "Overflow \"⋯\" menu",
+        "Overflow menu",
         &config.toolbar.menu,
         Zone::Menu,
         &mut edit,
@@ -680,6 +681,14 @@ fn toolbar_zone_list(
                     *edit = Some(ToolbarEdit::Down(zone, i));
                 }
             });
+            // Remove this button from the bar (moves it to the Hidden pool, whence
+            // it can be re-added) — the visible X remove affordance.
+            if tb_icon_button(ui, egui_phosphor::thin::X, "Remove from the bar").clicked() {
+                *edit = Some(ToolbarEdit::MoveTo(
+                    id.clone(),
+                    super::chrome_toolbar::Zone::Hidden,
+                ));
+            }
             toolbar_place_menu(ui, id, Some(zone), edit);
             ui.label(super::chrome_toolbar::action_label(id).unwrap_or(id));
         });
@@ -696,22 +705,36 @@ fn toolbar_place_menu(
     edit: &mut Option<ToolbarEdit>,
 ) {
     use super::chrome_toolbar::Zone;
+    // Zone moves only (Left / Right / Overflow); removal is the row's X button.
     let targets = [
         (Zone::Left, "Move to left"),
         (Zone::Right, "Move to right"),
         (Zone::Menu, "Move to overflow menu"),
-        (Zone::Hidden, "Hide"),
     ];
+    let hover = if current.is_none() {
+        "Add this button to the bar"
+    } else {
+        "Move this button to another zone"
+    };
     ui.menu_button(
         egui::RichText::new(egui_phosphor::thin::DOTS_THREE).size(14.0),
         |ui| {
             for (tz, label) in targets {
-                // Skip the zone it is already in, and "Hide" for an already-hidden
-                // action.
-                if current == Some(tz) || (current.is_none() && tz == Zone::Hidden) {
-                    continue;
+                if current == Some(tz) {
+                    continue; // already in this zone
                 }
-                if ui.button(label).clicked() {
+                // A hidden action is being ADDED — say so instead of "Move to".
+                let text = if current.is_none() {
+                    match tz {
+                        Zone::Left => "Add to the left",
+                        Zone::Right => "Add to the right",
+                        Zone::Menu => "Add to the overflow menu",
+                        Zone::Hidden => label,
+                    }
+                } else {
+                    label
+                };
+                if ui.button(text).clicked() {
                     *edit = Some(ToolbarEdit::MoveTo(id.to_string(), tz));
                     ui.close_kind(egui::UiKind::Menu);
                 }
@@ -719,7 +742,7 @@ fn toolbar_place_menu(
         },
     )
     .response
-    .on_hover_text("Move this button to another part of the bar");
+    .on_hover_text(hover);
 }
 
 /// A compact Phosphor-glyph button for the toolbar editor (loaded icon font, not a

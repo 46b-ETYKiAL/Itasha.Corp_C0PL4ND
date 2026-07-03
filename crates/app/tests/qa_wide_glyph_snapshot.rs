@@ -166,6 +166,26 @@ fn qa_settings_page() {
 
 #[test]
 #[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
+fn qa_toolbar_settings_page() {
+    let Some(mut h) = build() else { return };
+    for _ in 0..10 {
+        h.step();
+    }
+    h.get_by_label("settings").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    // Select the Toolbar category to render the toolbar editor (icons must NOT be
+    // tofu; every row must show the reorder arrows + X remove + move menu).
+    h.get_by_label("Toolbar").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    snapshot(&mut h, "toolbar-settings");
+}
+
+#[test]
+#[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
 fn qa_command_palette() {
     let Some(mut h) = build() else { return };
     for _ in 0..10 {
