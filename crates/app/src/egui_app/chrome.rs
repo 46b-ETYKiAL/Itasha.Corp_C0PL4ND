@@ -375,83 +375,6 @@ impl C0pl4ndApp {
             menu.response
                 .on_hover_text("Choose which shell new terminals run");
 
-            // Script launcher (📜 ▾): sits in this flow row, immediately LEFT of
-            // the absolute-positioned caption cluster (whose leftmost glyph is the
-            // settings gear). The menu pins an "Open…" item at the top (native
-            // file picker → run the chosen script file) and lists the previously
-            // run commands newest-first; clicking a row re-runs it. Both outcomes
-            // are deferred to the host via the action struct — the picker BLOCKS
-            // and the run path is `&mut self`, neither of which is safe mid-panel.
-            let scripts = ui.menu_button(
-                RichText::new(format!("{} ▾", icon::SCROLL)).size(13.0),
-                |ui| {
-                    if ui
-                        .button(format!("{} Open…", icon::FOLDER_OPEN))
-                        .on_hover_text("Pick a script file to run in the focused terminal")
-                        .clicked()
-                    {
-                        actions.open_script_file = true;
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                    ui.separator();
-                    // `entries()` is already most-recent-first (see
-                    // `command_history`). Collect owned so the borrow of `self`
-                    // does not outlive the closure's per-row widget building.
-                    let entries: Vec<String> =
-                        self.cmd_history.entries().map(str::to_string).collect();
-                    if entries.is_empty() {
-                        ui.weak("No commands run yet.");
-                    } else {
-                        egui::ScrollArea::vertical()
-                            .id_salt("script_menu_history")
-                            .max_height(320.0)
-                            .show(ui, |ui| {
-                                for cmd in &entries {
-                                    // Show the script's file NAME (not the long
-                                    // absolute path) for a picked-file run; the
-                                    // full command stays in the hover tooltip and
-                                    // is what actually re-runs.
-                                    let label = script_menu_label(cmd);
-                                    let item = ui.button(&label).on_hover_text(cmd);
-                                    item.widget_info(|| {
-                                        egui::WidgetInfo::labeled(
-                                            egui::WidgetType::Button,
-                                            true,
-                                            format!("re-run {cmd}"),
-                                        )
-                                    });
-                                    if item.clicked() {
-                                        actions.rerun_command = Some(cmd.clone());
-                                        ui.close_kind(egui::UiKind::Menu);
-                                    }
-                                }
-                            });
-                    }
-                    // W1TN3SS manual "Report an issue…" entry (opt-in,
-                    // user-initiated). Opens the prefilled-GitHub-issue dialog;
-                    // nothing is sent until the user reviews + submits in their
-                    // browser. Deferred to the host (the dialog state is
-                    // `&mut self`, unsafe to touch mid-panel-borrow).
-                    ui.separator();
-                    let report = ui
-                        .button(format!("{} Report an issue…", icon::BUG))
-                        .on_hover_text("Open a prefilled GitHub issue (review before submitting)");
-                    report.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "report an issue")
-                    });
-                    if report.clicked() {
-                        actions.report_issue = true;
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                },
-            );
-            scripts.response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "script menu")
-            });
-            scripts
-                .response
-                .on_hover_text("Run a script file or re-run a previous command");
-
             // ---- right-pinned caption cluster ----
             // Placed at ABSOLUTE rects via `ui.put`. Every layout-flow attempt
             // (`right_to_left`, `Sides`, `allocate_ui_with_layout`, an
@@ -507,6 +430,105 @@ impl C0pl4ndApp {
                 }
                 right_x -= bw + 2.0;
             }
+
+            // Script launcher (📜 ▾) — pinned to the RIGHT, immediately LEFT of the
+            // settings gear (the caption cluster's leftmost glyph). After the loop
+            // above, `right_x` sits at the gear's left edge, so place the menu
+            // button just left of it. Absolute-positioned in a child ui (via
+            // `scope_builder` at a fixed rect) for the same reason the caption
+            // cluster is — this non-justified `horizontal_centered` row cannot
+            // right-align in flow. The `right_to_left` layout snugs the button
+            // against the gear. The menu pins an "Open…" item (native file picker →
+            // run the chosen script), lists previously-run commands newest-first
+            // (click to re-run), and a W1TN3SS "Report an issue…" item. All
+            // outcomes defer to the host via the action struct — the picker BLOCKS
+            // and the run/report paths are `&mut self`, unsafe mid-panel.
+            let scripts_w = 52.0_f32;
+            let scripts_rect = egui::Rect::from_min_max(
+                egui::pos2(right_x - scripts_w, cy - bh / 2.0),
+                egui::pos2(right_x, cy + bh / 2.0),
+            );
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(scripts_rect)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                |ui| {
+                    let scripts = ui.menu_button(
+                        RichText::new(format!("{} ▾", icon::SCROLL)).size(13.0),
+                        |ui| {
+                            if ui
+                                .button(format!("{} Open…", icon::FOLDER_OPEN))
+                                .on_hover_text("Pick a script file to run in the focused terminal")
+                                .clicked()
+                            {
+                                actions.open_script_file = true;
+                                ui.close_kind(egui::UiKind::Menu);
+                            }
+                            ui.separator();
+                            // `entries()` is already most-recent-first (see
+                            // `command_history`). Collect owned so the borrow of
+                            // `self` does not outlive the closure's per-row widgets.
+                            let entries: Vec<String> =
+                                self.cmd_history.entries().map(str::to_string).collect();
+                            if entries.is_empty() {
+                                ui.weak("No commands run yet.");
+                            } else {
+                                egui::ScrollArea::vertical()
+                                    .id_salt("script_menu_history")
+                                    .max_height(320.0)
+                                    .show(ui, |ui| {
+                                        for cmd in &entries {
+                                            // Show the script's file NAME (not the
+                                            // long absolute path) for a picked-file
+                                            // run; the full command stays in the
+                                            // hover tooltip and is what re-runs.
+                                            let label = script_menu_label(cmd);
+                                            let item = ui.button(&label).on_hover_text(cmd);
+                                            item.widget_info(|| {
+                                                egui::WidgetInfo::labeled(
+                                                    egui::WidgetType::Button,
+                                                    true,
+                                                    format!("re-run {cmd}"),
+                                                )
+                                            });
+                                            if item.clicked() {
+                                                actions.rerun_command = Some(cmd.clone());
+                                                ui.close_kind(egui::UiKind::Menu);
+                                            }
+                                        }
+                                    });
+                            }
+                            // W1TN3SS manual "Report an issue…" entry (opt-in,
+                            // user-initiated). Opens the prefilled-GitHub-issue
+                            // dialog; nothing is sent until the user reviews +
+                            // submits in their browser. Deferred to the host.
+                            ui.separator();
+                            let report = ui
+                                .button(format!("{} Report an issue…", icon::BUG))
+                                .on_hover_text(
+                                    "Open a prefilled GitHub issue (review before submitting)",
+                                );
+                            report.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    "report an issue",
+                                )
+                            });
+                            if report.clicked() {
+                                actions.report_issue = true;
+                                ui.close_kind(egui::UiKind::Menu);
+                            }
+                        },
+                    );
+                    scripts.response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "script menu")
+                    });
+                    scripts
+                        .response
+                        .on_hover_text("Run a script file or re-run a previous command");
+                },
+            );
         });
         actions
     }

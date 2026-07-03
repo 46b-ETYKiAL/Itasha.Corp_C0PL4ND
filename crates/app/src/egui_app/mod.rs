@@ -205,6 +205,24 @@ pub struct C0pl4ndApp {
     pub(crate) search_test_corpus: Option<String>,
     /// A transient status-bar message (e.g. "max 6 panes").
     pub(crate) toast: Option<String>,
+    /// The `(font-family-key, size-bits, pixels-per-point-bits)` the grid glyph
+    /// atlas was last PRE-WARMED for. When this differs from the live font stack
+    /// (first frame, a system-font swap, a zoom, OR a DPI/`pixels_per_point`
+    /// change — the last is why `ppp` is in the key: egui rasterises glyphs at
+    /// `size × ppp`, so a 1.0→1.5 DPI settle re-rasterises the whole set), the
+    /// atlas is re-warmed. Warming rasterises every glyph the grid draws up-front
+    /// so the atlas reaches its FINAL size in one step, never growing mid-render —
+    /// the growth that feeds the DX12 upload↔sample hazard (garbled/blank grid
+    /// glyphs). `None` == never warmed yet.
+    pub(crate) warmed_atlas: Option<(String, u32, u32)>,
+    /// Frames remaining in the atlas WARMUP GATE. While > 0 the grid draws NO
+    /// glyphs (empty panes) and `ui` blocks on `device.poll(Wait)` so the warmed
+    /// atlas upload is guaranteed RESIDENT on the GPU before any glyph is sampled —
+    /// the windowed-path equivalent of the offscreen render's implicit queue
+    /// drain, which is why the offscreen path never garbles. Re-armed to a small
+    /// count whenever the atlas is re-warmed. Startup/rare-only; zero steady-state
+    /// cost (the grid content — the shell banner — has not arrived yet anyway).
+    pub(crate) warmup_frames_left: u8,
     /// Debounced font-size persistence deadline (egui `input.time`, seconds).
     /// Live Ctrl+wheel / Ctrl+/- zoom changes `config.font.size` every notch and
     /// applies it in-memory immediately, but writing the whole config file per
@@ -535,6 +553,8 @@ impl C0pl4ndApp {
             search_sel: 0,
             search_test_corpus: None,
             toast: theme_notice,
+            warmed_atlas: None,
+            warmup_frames_left: 0,
             pending_font_save_at: None,
             update_rx: None,
             last_update_notice: None,
@@ -921,6 +941,10 @@ impl C0pl4ndApp {
         // by the selection painter below. Threaded as `&mut` (a separate field
         // from `terms`/`theme`) so the egui_tiles disjoint-borrow split holds.
         selection: &mut Option<Selection>,
+        // While the atlas-warmup gate is open, skip painting the grid glyphs (the
+        // pane still lays out, spawns, sizes, and paints its background) so no
+        // glyph is sampled before the warmed atlas is uploaded + resident.
+        warming: bool,
     ) -> PaneBodyOutcome {
         let (rect, resp) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -1096,19 +1120,21 @@ impl C0pl4ndApp {
                 // glyphon GPU paths (callback + offscreen texture) composited
                 // black inside `egui_tiles` panes live while passing the wgpu
                 // test harness.
-                paint_grid_native(
-                    &painter,
-                    rect,
-                    term,
-                    galley_cache,
-                    font_size,
-                    line_height_px,
-                    theme,
-                    focused,
-                    cursor_cfg,
-                    effects,
-                    pad,
-                );
+                if !warming {
+                    paint_grid_native(
+                        &painter,
+                        rect,
+                        term,
+                        galley_cache,
+                        font_size,
+                        line_height_px,
+                        theme,
+                        focused,
+                        cursor_cfg,
+                        effects,
+                        pad,
+                    );
+                }
                 // Find-overlay highlight: tint every match span (and outline the
                 // active one) over the rendered grid. Only the focused pane while
                 // the overlay is open carries a `SearchHighlight`.
@@ -1967,6 +1993,12 @@ impl C0pl4ndApp {
             // CRT scanlines + chromatic aberration, read LIVE so toggling them in
             // Settings takes effect this frame; both are zero-cost when off/zero.
             let effects = self.config.effects;
+            // While the atlas-warmup gate is open, render panes WITHOUT their grid
+            // glyphs (captured as a plain `bool` here so the disjoint-borrow
+            // closure need not touch `self`). This holds every glyph draw off until
+            // the warmed atlas is uploaded + GPU-resident (see `warmup_frames_left`
+            // + the `ui` poll), closing the DX12 upload↔sample race.
+            let warming = self.warmup_frames_left > 0;
             // Pane background alpha: full when opaque, opacity-folded when the
             // window is effectively translucent — painting the pane fill
             // non-opaque is what lets the OS blur / desktop show through (the
@@ -2026,6 +2058,7 @@ impl C0pl4ndApp {
                     link_modifier && pid == focused,
                     if pid == focused { ime_preedit } else { None },
                     selection,
+                    warming,
                 );
                 if outcome.clicked {
                     clicked = Some(pid);
@@ -2994,9 +3027,28 @@ impl eframe::App for C0pl4ndApp {
     /// `Panel::show(ctx, …)` path via a cloned `ctx`, matching the reference
     /// egui app. The work lives in [`frame_tick`](Self::frame_tick) so the
     /// headless tests can drive it without an `eframe::Frame`.
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // Atlas-warmup GPU fence: while the warmup gate is open, BLOCK until every
+        // previously-submitted GPU op — crucially the prior frame's font-atlas
+        // texture upload — is complete before this frame samples the atlas. This
+        // reproduces, on the real windowed present path, the queue drain that makes
+        // the offscreen render path race-free (the DX12 `write_texture`→sample
+        // hazard that garbles the grid). Startup/rare-only; no steady-state cost.
+        if self.warmup_frames_left > 0 {
+            if let Some(render_state) = frame.wgpu_render_state() {
+                let _ = render_state
+                    .device
+                    .poll(eframe::wgpu::PollType::wait_indefinitely());
+            }
+        }
         self.frame_tick(&ctx);
+        // Advance the warmup gate AFTER this frame drew (so this frame saw the
+        // pre-decrement value) and keep repainting until it closes.
+        if self.warmup_frames_left > 0 {
+            self.warmup_frames_left -= 1;
+            ctx.request_repaint();
+        }
         // The grid is painted with egui's native text painter inside
         // `render_pane_body` during `frame_tick`; there is no post-frame GPU pass.
     }
@@ -3111,6 +3163,32 @@ impl C0pl4ndApp {
             self.applied_font_family = font_apply_key(&self.config.font);
             self.fonts_installed = true;
         }
+        // Pre-warm the grid glyph atlas whenever the live font stack (family,
+        // size, OR DPI/pixels_per_point) differs from what it was last warmed for
+        // — first frame, a system-font swap, a live zoom, or a DPI settle. This
+        // rasterises the full grid glyph set at the FINAL scale in one step so the
+        // atlas reaches its final size immediately, and ARMS the warmup gate so the
+        // grid holds its glyphs off (and `ui` GPU-fences) until that atlas is
+        // uploaded + resident — closing the DX12 upload↔sample race (see
+        // `prewarm_grid_atlas` + `warmup_frames_left`).
+        let atlas_key = (
+            self.applied_font_family.clone(),
+            self.config.font.size.to_bits(),
+            ctx.pixels_per_point().to_bits(),
+        );
+        if self.warmed_atlas.as_ref() != Some(&atlas_key) {
+            prewarm_grid_atlas(ctx, self.config.font.size);
+            self.warmed_atlas = Some(atlas_key);
+            // The warmup GATE (grid-glyphs-off + `ui` GPU-fence) only matters on
+            // the real swapchain, where the DX12 upload↔sample race lives. A
+            // headless render (`live_window == false`) is offscreen/serialized —
+            // it never races — so keep the gate closed there so tests see grid
+            // text immediately (and never block on a poll).
+            if self.live_window {
+                self.warmup_frames_left = ATLAS_WARMUP_GATE_FRAMES;
+                ctx.request_repaint(); // drive the warmup frames without waiting on input
+            }
+        }
         // Flush a DEBOUNCED font-zoom save once its deadline has passed with no
         // further change (see `FONT_SAVE_DEBOUNCE_SECS`): coalesces a fast
         // Ctrl+wheel zoom into a SINGLE config write instead of one per notch.
@@ -3198,6 +3276,13 @@ impl C0pl4ndApp {
                     ctx.set_fonts(defs);
                     self.galley_cache.clear();
                     self.pending_fonts = None;
+                    // `set_fonts` RESET the glyph atlas. Invalidate the warm key so
+                    // the next frame's warm-check re-warms it (at the live ppp) and
+                    // re-arms the warmup gate, holding the grid's glyphs off until
+                    // the fresh atlas is uploaded + resident — no garble flash on
+                    // the system-font swap.
+                    self.warmed_atlas = None;
+                    ctx.request_repaint();
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.pending_fonts = None;
@@ -4150,6 +4235,42 @@ impl C0pl4ndApp {
 /// otherwise-quiescent screen. Matches the 530 ms cadence the cursor painter and
 /// the legacy winit shell use.
 const CURSOR_BLINK_HALF_PERIOD_MS: u64 = 530;
+
+/// Frames the atlas-warmup gate holds the grid's glyphs off (and GPU-fences in
+/// `ui`) after a (re)warm, so the warmed atlas is uploaded + resident before any
+/// glyph is sampled. Two frames: one to submit the warmed-atlas upload, one whose
+/// `poll(Wait)` guarantees it resident before the grid first draws. Invisible —
+/// the shell banner has not arrived this early anyway.
+const ATLAS_WARMUP_GATE_FRAMES: u8 = 2;
+
+/// Pre-warm the monospace glyph atlas: rasterise every glyph the terminal grid
+/// commonly draws — printable ASCII plus the Unicode box-drawing block — at the
+/// grid font size, so egui's font-atlas TEXTURE is fully populated and uploaded
+/// BEFORE the first banner/prompt frame draws.
+///
+/// This is the fix for the intermittently garbled / blank grid glyphs: egui grows
+/// the atlas lazily as new glyphs appear and re-uploads the texture, and on some
+/// GPUs a drawn frame can sample that texture WHILE the next frame's upload of a
+/// grown atlas is still in flight (an upload↔draw race that a low present latency
+/// makes worse — see the `desired_maximum_frame_latency` note in `egui_main`).
+/// Once the atlas is complete and STABLE, a steady-state frame never modifies the
+/// texture a previous frame is reading, so the race cannot occur. `layout_no_wrap`
+/// forces each glyph into the atlas as a side effect; the returned galley is
+/// discarded. Cheap (a few hundred glyphs, once per font-stack change).
+fn prewarm_grid_atlas(ctx: &egui::Context, font_size: f32) {
+    let font = egui::FontId::monospace(font_size);
+    // Laying out the glyphs ALLOCATES each in the texture atlas as a side effect
+    // (the same population the real grid draw triggers). Use `fonts_mut` — the
+    // atlas-mutating accessor — since layout takes `&mut FontsView` in egui 0.34.
+    // Printable ASCII (banners / prompts / output) + the Unicode box-drawing block
+    // (TUI borders / rules).
+    let mut glyphs = String::new();
+    glyphs.extend((0x20u8..=0x7e).map(char::from));
+    glyphs.extend((0x2500u32..=0x257f).filter_map(char::from_u32));
+    ctx.fonts_mut(|fonts| {
+        let _ = fonts.layout_no_wrap(glyphs, font, egui::Color32::WHITE);
+    });
+}
 
 /// Debounce window (seconds) for persisting a live font-zoom change. A fast
 /// Ctrl+wheel emits many notches; coalescing to ONE config write this long after

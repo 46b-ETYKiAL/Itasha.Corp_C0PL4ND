@@ -148,20 +148,21 @@ fn main() -> eframe::Result<()> {
     );
     apply_gpu_preference(&mut options, launch_gpu_preference());
 
-    // We KEEP eframe's default present latency (2). A previous
-    // `desired_maximum_frame_latency = Some(1)` "optimization" (shave one frame
-    // off keystroke→glyph lag) turned out to CORRUPT the terminal grid on real
-    // hardware: at latency 1 the swapchain draw could race egui's font-atlas
-    // texture upload, so glyphs rendered from a not-yet-complete atlas — badly
-    // garbled on a fast discrete GPU (NVIDIA), mildly on an integrated one, and
-    // NEVER in an offscreen/synchronous render (every headless snapshot was
-    // pixel-perfect, which is what made it so hard to pin down). One extra frame
-    // of latency is imperceptible for a terminal; a garbled grid is not. Do NOT
-    // re-add the latency-1 override without proving the atlas upload is
-    // synchronised first. We also deliberately keep the default vsync present
-    // mode (NOT Mailbox/AutoNoVsync): the app is event-driven, so an idle
-    // terminal repaints ~0 fps and Mailbox would force wasteful continuous
-    // high-FPS rendering.
+    // Present latency raises the swapchain frame-queue depth. A previous
+    // `= Some(1)` "optimization" CORRUPTED the terminal grid: the draw raced
+    // egui's font-atlas texture upload, so glyphs rendered from a not-yet-complete
+    // atlas — heavily garbled on a fast discrete GPU (NVIDIA), and NEVER in an
+    // offscreen/synchronous render (every headless snapshot is pixel-perfect,
+    // which is what made it so hard to pin down). Empirically the garble scales
+    // with latency: 1 = consistent, 2 (eframe/wgpu default) = intermittent, so we
+    // set it HIGHER to give the upload more frames to land before a draw samples
+    // it. 3 is still imperceptible for a terminal (< ~50 ms keystroke→glyph on a
+    // 60 Hz panel); a garbled grid is not. Paired with the startup font-atlas
+    // pre-warm (`prewarm_grid_atlas`), which keeps the atlas from GROWING mid-
+    // render. Do NOT lower this. We also keep the default vsync present mode (NOT
+    // Mailbox/AutoNoVsync): the app is event-driven, so an idle terminal repaints
+    // ~0 fps and Mailbox would force wasteful continuous high-FPS rendering.
+    options.wgpu_options.desired_maximum_frame_latency = Some(3);
 
     let result = eframe::run_native(
         "C0PL4ND",
