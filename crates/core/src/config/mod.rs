@@ -545,11 +545,12 @@ impl EffectsConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolbarConfig {
-    /// Ordered action ids shown as buttons in the right cluster, LEFT→RIGHT (so
-    /// the LAST id renders immediately left of the settings gear).
-    pub items: Vec<String>,
-    /// Action ids parked in the overflow "⋯" menu instead of taking a bar slot —
-    /// reachable without cluttering the bar. Same id space as [`items`](Self::items).
+    /// Actions in the LEFT group (titlebar flow, after the "+"), left→right order.
+    pub left: Vec<String>,
+    /// Actions in the RIGHT cluster (pinned by the settings gear), left→right (the
+    /// LAST id renders nearest the gear).
+    pub right: Vec<String>,
+    /// Actions parked in the overflow "⋯" menu instead of taking a bar slot.
     pub menu: Vec<String>,
     /// Show the overflow "⋯" menu button when [`menu`](Self::menu) is non-empty.
     /// Default `true`; turn off to hide the overflow button entirely (parked
@@ -558,26 +559,28 @@ pub struct ToolbarConfig {
 }
 
 impl ToolbarConfig {
-    /// The default right-cluster contents, LEFT→RIGHT: view-toggle, equalize,
-    /// shell-switcher, then the script launcher nearest the gear (matching the
-    /// shipped default layout).
-    pub fn default_items() -> Vec<String> {
-        [
-            "view_mode",
-            "equalize_panes",
-            "shell_switcher",
-            "script_launcher",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    /// The shipped default LEFT group (titlebar flow, after the "+"): view-toggle,
+    /// equalize, shell-switcher — exactly where they were before the toolbar
+    /// became customizable.
+    pub fn default_left() -> Vec<String> {
+        ["view_mode", "equalize_panes", "shell_switcher"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// The shipped default RIGHT cluster: just the script launcher, pinned next to
+    /// the settings gear.
+    pub fn default_right() -> Vec<String> {
+        vec!["script_launcher".to_string()]
     }
 }
 
 impl Default for ToolbarConfig {
     fn default() -> Self {
         ToolbarConfig {
-            items: ToolbarConfig::default_items(),
+            left: ToolbarConfig::default_left(),
+            right: ToolbarConfig::default_right(),
             menu: Vec::new(),
             show_overflow: true,
         }
@@ -2079,29 +2082,28 @@ mod tests {
         let p = std::path::PathBuf::from("cfg.toml");
         // An EXISTING config predating the feature (no `[toolbar]` table) loads the
         // shipped defaults — never broken by the new field (serde-default merge).
+        // The default keeps view/equalize/shell on the LEFT and pins ONLY the
+        // script launcher on the RIGHT (by the gear).
         let c = Config::from_toml("", &p).unwrap();
         assert_eq!(c.toolbar, ToolbarConfig::default());
         assert_eq!(
-            c.toolbar.items,
-            vec![
-                "view_mode",
-                "equalize_panes",
-                "shell_switcher",
-                "script_launcher"
-            ]
+            c.toolbar.left,
+            vec!["view_mode", "equalize_panes", "shell_switcher"]
         );
+        assert_eq!(c.toolbar.right, vec!["script_launcher"]);
         assert!(c.toolbar.show_overflow);
         assert!(c.toolbar.menu.is_empty());
 
-        // A PARTIAL `[toolbar]` (only `items`) fills the other fields from defaults.
-        let partial = Config::from_toml("[toolbar]\nitems = [\"view_mode\"]\n", &p).unwrap();
-        assert_eq!(partial.toolbar.items, vec!["view_mode"]);
+        // A PARTIAL `[toolbar]` (only `right`) fills the other fields from defaults.
+        let partial = Config::from_toml("[toolbar]\nright = [\"view_mode\"]\n", &p).unwrap();
+        assert_eq!(partial.toolbar.right, vec!["view_mode"]);
         assert!(partial.toolbar.show_overflow); // default true, not clobbered
         assert!(partial.toolbar.menu.is_empty());
 
         // A fully-customized toolbar round-trips through TOML unchanged.
         let mut custom = Config::default();
-        custom.toolbar.items = vec!["script_launcher".into(), "view_mode".into()];
+        custom.toolbar.left = vec!["view_mode".into()];
+        custom.toolbar.right = vec!["script_launcher".into(), "shell_switcher".into()];
         custom.toolbar.menu = vec!["equalize_panes".into()];
         custom.toolbar.show_overflow = false;
         let toml = toml::to_string(&custom).expect("serialize");

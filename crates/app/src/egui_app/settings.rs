@@ -556,161 +556,204 @@ pub fn show(
     }
 }
 
-/// Settings → Toolbar: edit the customizable top-bar quick-action cluster —
-/// reorder (▲/▼), remove (✕), add from the palette, park actions in the overflow
-/// "⋯" menu, and reset to defaults. Returns whether `config.toolbar` changed.
+/// A deferred toolbar edit, applied AFTER the render loop so an immutable
+/// render-borrow of a zone list never overlaps the mutable edit.
+enum ToolbarEdit {
+    /// Move the item at `idx` earlier (left/up) within its zone.
+    Up(super::chrome_toolbar::Zone, usize),
+    /// Move the item at `idx` later (right/down) within its zone.
+    Down(super::chrome_toolbar::Zone, usize),
+    /// Move `id` to a different zone (or Hidden).
+    MoveTo(String, super::chrome_toolbar::Zone),
+}
+
+/// Settings → Toolbar: place each quick-action button in a zone — LEFT (after the
+/// "+"), RIGHT (next to the settings gear), or the overflow "⋯" menu — or hide it;
+/// reorder within a zone; and reset. Returns whether `config.toolbar` changed.
 fn toolbar_settings_section(ui: &mut egui::Ui, config: &mut Config) -> bool {
-    use super::chrome_toolbar as tb;
+    use super::chrome_toolbar::{self as tb, Zone};
     let mut changed = false;
     ui.heading("Toolbar");
     help(
         ui,
-        "Customize the quick-action buttons pinned to the right of the top bar \
-         (just left of the settings gear). Reorder, add, remove, or park actions \
-         in an overflow \"⋯\" menu.",
+        "Choose where each quick-action button lives in the top bar: on the LEFT \
+         (after the +), on the RIGHT (next to the settings gear), or parked in an \
+         overflow \"⋯\" menu — or hide it. Use the arrows to reorder within a zone.",
     );
 
-    // ---- Buttons shown on the bar (config.toolbar.items) ----
-    ui.label(egui::RichText::new("Buttons on the bar (left → right)").strong());
-    changed |= toolbar_list_ui(ui, config, false);
-    ui.horizontal(|ui| {
-        let avail = tb::available_to_add(&config.toolbar.items, &config.toolbar.menu);
-        ui.add_enabled_ui(!avail.is_empty(), |ui| {
-            ui.menu_button("Add button ▾", |ui| {
-                for id in &avail {
-                    if ui.button(tb::action_label(id).unwrap_or(id)).clicked() {
-                        if tb::add_unique(&mut config.toolbar.items, &config.toolbar.menu, id) {
-                            changed = true;
-                        }
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-            });
-        });
-        if ui
-            .button("Reset toolbar")
-            .on_hover_text("Restore the default buttons, order, and menu.")
-            .clicked()
-        {
-            config.toolbar = c0pl4nd_core::config::ToolbarConfig::default();
-            changed = true;
-        }
-    });
+    // One deferred edit per frame (the user clicks a single control), applied
+    // after every list has rendered so no render-borrow overlaps the mutation.
+    let mut edit: Option<ToolbarEdit> = None;
 
-    ui.add_space(12.0);
-
-    // ---- Overflow "⋯" menu (config.toolbar.menu) ----
-    ui.label(egui::RichText::new("Overflow \"⋯\" menu (parked actions)").strong());
-    help(
+    toolbar_zone_list(
         ui,
-        "Actions parked here are reachable via a single \"⋯\" menu on the bar \
-         instead of taking a slot.",
+        "Left of the gear (after +)",
+        &config.toolbar.left,
+        Zone::Left,
+        &mut edit,
     );
+    ui.add_space(8.0);
+    toolbar_zone_list(
+        ui,
+        "Right (next to the gear)",
+        &config.toolbar.right,
+        Zone::Right,
+        &mut edit,
+    );
+
+    ui.add_space(8.0);
     changed |= ui
         .checkbox(
             &mut config.toolbar.show_overflow,
-            "Show the ⋯ button when the menu has actions",
+            "Show the overflow \"⋯\" button when its menu has actions",
         )
         .changed();
-    changed |= toolbar_list_ui(ui, config, true);
-    ui.horizontal(|ui| {
-        let avail = tb::available_to_add(&config.toolbar.items, &config.toolbar.menu);
-        ui.add_enabled_ui(!avail.is_empty(), |ui| {
-            ui.menu_button("Add to menu ▾", |ui| {
-                for id in &avail {
-                    if ui.button(tb::action_label(id).unwrap_or(id)).clicked() {
-                        if tb::add_unique(&mut config.toolbar.menu, &config.toolbar.items, id) {
-                            changed = true;
-                        }
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
+    toolbar_zone_list(
+        ui,
+        "Overflow \"⋯\" menu",
+        &config.toolbar.menu,
+        Zone::Menu,
+        &mut edit,
+    );
+
+    // Hidden pool — actions currently shown nowhere, each with a "show on ▾" menu.
+    let hidden = tb::hidden_actions(
+        &config.toolbar.left,
+        &config.toolbar.right,
+        &config.toolbar.menu,
+    );
+    if !hidden.is_empty() {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Hidden (not shown)").strong());
+        for &id in &hidden {
+            ui.horizontal(|ui| {
+                toolbar_place_menu(ui, id, None, &mut edit);
+                ui.label(tb::action_label(id).unwrap_or(id));
             });
-        });
-        if ui
-            .button("Clear menu")
-            .on_hover_text("Remove every parked action.")
-            .clicked()
-            && !config.toolbar.menu.is_empty()
-        {
-            config.toolbar.menu.clear();
-            changed = true;
         }
-    });
+    }
+
+    ui.add_space(10.0);
+    if ui
+        .button("Reset toolbar to defaults")
+        .on_hover_text("Restore the default button placement (script launcher on the right, the rest on the left).")
+        .clicked()
+    {
+        config.toolbar = c0pl4nd_core::config::ToolbarConfig::default();
+        changed = true;
+    }
+
+    if let Some(e) = edit {
+        changed |= apply_toolbar_edit(config, e);
+    }
     changed
 }
 
-/// Render one reorderable list of toolbar action ids (the bar `items` when
-/// `is_menu` is false, else the overflow `menu`): each row is `▲ ▼ ✕  Label`. The
-/// mutation is deferred to AFTER the row loop so the immutable render-borrow and
-/// the mutable list-edit never overlap. Returns whether the list changed.
-fn toolbar_list_ui(ui: &mut egui::Ui, config: &mut Config, is_menu: bool) -> bool {
-    use super::chrome_toolbar as tb;
-    {
-        let list = if is_menu {
-            &config.toolbar.menu
-        } else {
-            &config.toolbar.items
-        };
-        if list.is_empty() {
-            ui.weak(if is_menu {
-                "No parked actions."
-            } else {
-                "No buttons — add one below."
-            });
-            return false;
-        }
+/// Render one zone's action list: each row is `▲ ▼ ⋯move  Label`. Sets `*edit` on
+/// a click (applied by the caller after every list has rendered). Zone-agnostic.
+fn toolbar_zone_list(
+    ui: &mut egui::Ui,
+    title: &str,
+    list: &[String],
+    zone: super::chrome_toolbar::Zone,
+    edit: &mut Option<ToolbarEdit>,
+) {
+    ui.label(egui::RichText::new(title).strong());
+    if list.is_empty() {
+        ui.weak("   — none —");
+        return;
     }
-    let n = if is_menu {
-        config.toolbar.menu.len()
-    } else {
-        config.toolbar.items.len()
-    };
-    let mut do_up: Option<usize> = None;
-    let mut do_down: Option<usize> = None;
-    let mut do_remove: Option<usize> = None;
-    {
-        let list = if is_menu {
-            &config.toolbar.menu
-        } else {
-            &config.toolbar.items
-        };
-        for (i, id) in list.iter().enumerate() {
-            let label = tb::action_label(id).unwrap_or(id.as_str()).to_string();
-            ui.horizontal(|ui| {
-                ui.add_enabled_ui(i > 0, |ui| {
-                    if ui.small_button("▲").on_hover_text("Move left").clicked() {
-                        do_up = Some(i);
-                    }
-                });
-                ui.add_enabled_ui(i + 1 < n, |ui| {
-                    if ui.small_button("▼").on_hover_text("Move right").clicked() {
-                        do_down = Some(i);
-                    }
-                });
-                if ui.small_button("✕").on_hover_text("Remove").clicked() {
-                    do_remove = Some(i);
+    let n = list.len();
+    for (i, id) in list.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(i > 0, |ui| {
+                if tb_icon_button(ui, egui_phosphor::thin::CARET_UP, "Move earlier (left)")
+                    .clicked()
+                {
+                    *edit = Some(ToolbarEdit::Up(zone, i));
                 }
-                ui.label(label);
             });
-        }
+            ui.add_enabled_ui(i + 1 < n, |ui| {
+                if tb_icon_button(ui, egui_phosphor::thin::CARET_DOWN, "Move later (right)")
+                    .clicked()
+                {
+                    *edit = Some(ToolbarEdit::Down(zone, i));
+                }
+            });
+            toolbar_place_menu(ui, id, Some(zone), edit);
+            ui.label(super::chrome_toolbar::action_label(id).unwrap_or(id));
+        });
     }
-    let list = if is_menu {
-        &mut config.toolbar.menu
-    } else {
-        &mut config.toolbar.items
-    };
-    let mut changed = false;
-    if let Some(i) = do_up {
-        changed |= tb::move_up(list, i);
+}
+
+/// A "move to zone" (⋯) menu for a toolbar-editor row. `current` is the action's
+/// present zone (`None` = a hidden action). Offers every OTHER zone (+ Hide for a
+/// shown action). Sets `*edit` on selection.
+fn toolbar_place_menu(
+    ui: &mut egui::Ui,
+    id: &str,
+    current: Option<super::chrome_toolbar::Zone>,
+    edit: &mut Option<ToolbarEdit>,
+) {
+    use super::chrome_toolbar::Zone;
+    let targets = [
+        (Zone::Left, "Move to left"),
+        (Zone::Right, "Move to right"),
+        (Zone::Menu, "Move to overflow menu"),
+        (Zone::Hidden, "Hide"),
+    ];
+    ui.menu_button(
+        egui::RichText::new(egui_phosphor::thin::DOTS_THREE).size(14.0),
+        |ui| {
+            for (tz, label) in targets {
+                // Skip the zone it is already in, and "Hide" for an already-hidden
+                // action.
+                if current == Some(tz) || (current.is_none() && tz == Zone::Hidden) {
+                    continue;
+                }
+                if ui.button(label).clicked() {
+                    *edit = Some(ToolbarEdit::MoveTo(id.to_string(), tz));
+                    ui.close_kind(egui::UiKind::Menu);
+                }
+            }
+        },
+    )
+    .response
+    .on_hover_text("Move this button to another part of the bar");
+}
+
+/// A compact Phosphor-glyph button for the toolbar editor (loaded icon font, not a
+/// raw Unicode arrow — those render as tofu in the UI font).
+fn tb_icon_button(ui: &mut egui::Ui, glyph: &str, hover: &str) -> egui::Response {
+    ui.button(egui::RichText::new(glyph).size(14.0))
+        .on_hover_text(hover)
+}
+
+/// Apply a single deferred toolbar edit to the live config. Returns whether it
+/// changed anything.
+fn apply_toolbar_edit(config: &mut Config, edit: ToolbarEdit) -> bool {
+    use super::chrome_toolbar::{self as tb, Zone};
+    match edit {
+        ToolbarEdit::Up(z, i) => match z {
+            Zone::Left => tb::move_up(&mut config.toolbar.left, i),
+            Zone::Right => tb::move_up(&mut config.toolbar.right, i),
+            Zone::Menu => tb::move_up(&mut config.toolbar.menu, i),
+            Zone::Hidden => false,
+        },
+        ToolbarEdit::Down(z, i) => match z {
+            Zone::Left => tb::move_down(&mut config.toolbar.left, i),
+            Zone::Right => tb::move_down(&mut config.toolbar.right, i),
+            Zone::Menu => tb::move_down(&mut config.toolbar.menu, i),
+            Zone::Hidden => false,
+        },
+        ToolbarEdit::MoveTo(id, target) => tb::move_to_zone(
+            &mut config.toolbar.left,
+            &mut config.toolbar.right,
+            &mut config.toolbar.menu,
+            target,
+            &id,
+        ),
     }
-    if let Some(i) = do_down {
-        changed |= tb::move_down(list, i);
-    }
-    if let Some(i) = do_remove {
-        changed |= tb::remove_at(list, i).is_some();
-    }
-    changed
 }
 
 /// Render every category section visible for the current selection / search

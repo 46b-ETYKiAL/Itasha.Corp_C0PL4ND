@@ -45,11 +45,17 @@ impl super::C0pl4ndApp {
         self.config.cursor.blink
     }
 
-    /// The customizable toolbar's on-bar item ids from the live config.
+    /// The customizable toolbar's LEFT-group action ids from the live config.
     /// Observation accessor for the Settings → Toolbar interaction tests.
     #[allow(dead_code)]
-    pub fn config_toolbar_items(&self) -> Vec<String> {
-        self.config.toolbar.items.clone()
+    pub fn config_toolbar_left(&self) -> Vec<String> {
+        self.config.toolbar.left.clone()
+    }
+
+    /// The customizable toolbar's RIGHT-cluster action ids from the live config.
+    #[allow(dead_code)]
+    pub fn config_toolbar_right(&self) -> Vec<String> {
+        self.config.toolbar.right.clone()
     }
 
     /// The customizable toolbar's overflow-menu ids from the live config.

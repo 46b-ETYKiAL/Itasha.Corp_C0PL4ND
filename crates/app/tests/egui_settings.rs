@@ -110,23 +110,30 @@ fn toggling_cursor_blink_flips_the_live_config() {
 }
 
 #[test]
-fn toolbar_section_overflow_toggle_and_reset_are_wired() {
-    // The Settings → Toolbar section must render and drive the live config: flip
-    // the overflow checkbox off, then Reset must restore every default (including
-    // the overflow flag back to on) — proving the real widgets → real config path.
+fn toolbar_section_default_zones_overflow_toggle_and_reset_are_wired() {
+    // The Settings → Toolbar section must render and drive the live config. Default
+    // placement: view/equalize/shell on the LEFT, only the script launcher on the
+    // RIGHT (by the gear) — the "only the script button moved" contract.
     let app = RefCell::new(C0pl4ndApp::bootstrap());
-    assert!(
-        app.borrow().config_toolbar_show_overflow(),
-        "precondition: overflow defaults on"
+    assert_eq!(
+        app.borrow().config_toolbar_left(),
+        vec!["view_mode", "equalize_panes", "shell_switcher"],
+        "default LEFT group is view/equalize/shell"
     );
-    let default_items = app.borrow().config_toolbar_items();
+    assert_eq!(
+        app.borrow().config_toolbar_right(),
+        vec!["script_launcher"],
+        "default RIGHT cluster is ONLY the script launcher"
+    );
+    assert!(app.borrow().config_toolbar_show_overflow());
+    let default_left = app.borrow().config_toolbar_left();
     let mut h = harness(&app);
 
     open_settings(&mut h);
     select_category(&mut h, "Toolbar");
 
-    // Flip the overflow checkbox OFF.
-    h.get_by_label("Show the ⋯ button when the menu has actions")
+    // Flip the overflow checkbox OFF (uniquely-labelled control).
+    h.get_by_label("Show the overflow \"⋯\" button when its menu has actions")
         .click();
     h.run();
     assert!(
@@ -134,17 +141,22 @@ fn toolbar_section_overflow_toggle_and_reset_are_wired() {
         "toggling the overflow checkbox must turn it OFF in the live config"
     );
 
-    // Reset restores the defaults (overflow back on, items back to default order).
-    h.get_by_label("Reset toolbar").click();
+    // Reset restores the defaults (overflow back on, zones back to default).
+    h.get_by_label("Reset toolbar to defaults").click();
     h.run();
     assert!(
         app.borrow().config_toolbar_show_overflow(),
-        "Reset toolbar must restore show_overflow to its default (on)"
+        "Reset must restore show_overflow to its default (on)"
     );
     assert_eq!(
-        app.borrow().config_toolbar_items(),
-        default_items,
-        "Reset toolbar must restore the default items"
+        app.borrow().config_toolbar_left(),
+        default_left,
+        "Reset must restore the default LEFT group"
+    );
+    assert_eq!(
+        app.borrow().config_toolbar_right(),
+        vec!["script_launcher"],
+        "Reset must restore the default RIGHT cluster"
     );
 }
 

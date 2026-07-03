@@ -297,12 +297,17 @@ impl C0pl4ndApp {
                 actions.new_terminal = true;
             }
 
-            // The customizable quick-action buttons (view-mode, equalize,
-            // shell-switcher, script-launcher) are NO LONGER rendered here in the
-            // flow — they are the user-configurable RIGHT cluster, absolute-placed
-            // right-to-left from the settings gear after the caption cluster below
-            // (see `config.toolbar` + `render_toolbar_cluster`). The tab-adjacent
-            // "+" above stays fixed.
+            // LEFT toolbar group (`config.toolbar.left`): the customizable
+            // quick-action buttons that live in the titlebar flow, right after the
+            // "+". By default view-mode, equalize, and shell-switcher are here; the
+            // script launcher defaults to the RIGHT cluster (below). Contents +
+            // order come from config; an id not applicable this frame (e.g.
+            // equalize outside grid view) is skipped and takes no slot.
+            for id in &self.config.toolbar.left {
+                if self.toolbar_action_applicable(id) {
+                    self.render_toolbar_item(ui, id, &mut actions, colors);
+                }
+            }
 
             // ---- right-pinned caption cluster ----
             // Placed at ABSOLUTE rects via `ui.put`. Every layout-flow attempt
@@ -369,9 +374,9 @@ impl C0pl4ndApp {
         actions
     }
 
-    /// Render the user-configurable quick-action cluster (`config.toolbar.items`)
+    /// Render the user-configurable quick-action cluster (`config.toolbar.right`)
     /// pinned to the right of the titlebar, laid out RIGHT-TO-LEFT starting at
-    /// `right_x` (the settings gear's left edge) so `items.last()` sits nearest the
+    /// `right_x` (the settings gear's left edge) so `right.last()` sits nearest the
     /// gear. Each item is absolute-placed in its own child ui (via `scope_builder`)
     /// for the same reason the caption cluster is — the non-justified row cannot
     /// right-align in flow. An unknown id, or an item whose action is not currently
@@ -388,8 +393,8 @@ impl C0pl4ndApp {
         colors: ChromeColors,
     ) {
         let mut cx = right_x;
-        // items.last() nearest the gear → iterate in reverse, sweeping leftward.
-        for id in self.config.toolbar.items.iter().rev() {
+        // right.last() nearest the gear → iterate in reverse, sweeping leftward.
+        for id in self.config.toolbar.right.iter().rev() {
             if !self.toolbar_action_applicable(id) {
                 continue;
             }
