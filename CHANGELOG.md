@@ -43,6 +43,21 @@ page.
   and terminal synchronized-output (DEC `?2026`) is honored so full-screen TUIs
   repaint without tearing.
 
+### Fixed — window transparency & tint
+
+- **Transparency now covers the whole window.** The titlebar and status bar were
+  opaque even with transparency on, so only the pane backgrounds went
+  see-through. They now fold in the same opacity as the panes, so the entire
+  window — chrome included — is translucent.
+- **The color tint no longer discolors text or the Settings window.** It was a
+  full-window overlay painted over everything; it is now a single wash on the
+  background layer that shows through the panes, gaps, and top-bar buttons
+  uniformly, while the terminal text and the (opaque) Settings window stay their
+  true colors.
+- **Opacity can go fully transparent.** The opacity slider floored at 15%; it now
+  runs the whole 0–100% range for a much more see-through background (the text
+  stays readable at its own opacity).
+
 ## [0.4.13] - 2026-06-30
 
 ### Added — macOS and ARM64 builds
