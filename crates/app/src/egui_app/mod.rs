@@ -36,6 +36,7 @@ mod config_load;
 pub(crate) use config_load::*;
 mod window_effects;
 pub(crate) use window_effects::*;
+mod caption_close;
 mod font_setup;
 pub(crate) use font_setup::*;
 mod app_config;
@@ -446,14 +447,24 @@ impl C0pl4ndApp {
         if app.config.effective_translucent() {
             apply_window_effect(cc, app.config.window_mode, &app.config.tint);
         }
-        // The residual native min/max caption buttons winit leaves on the
-        // undecorated window (winit #2754) — which DWM composites through a
-        // translucent backdrop as a doubled set — are suppressed at WINDOW
-        // CREATION via `ViewportBuilder::with_minimize_button(false)` /
-        // `with_maximize_button(false)` in `egui_main.rs`. That is the DWM-safe
-        // fix: no runtime style manipulation, so winit's frameless composition is
-        // never disturbed. WS_SYSMENU is left intact (Alt+F4 / taskbar Close keep
-        // working) and our own titlebar draws the controls the user clicks.
+        // The residual native MIN/MAX caption buttons winit leaves on the
+        // undecorated window (winit #2754) are suppressed at WINDOW CREATION via
+        // `ViewportBuilder::with_minimize_button(false)`/`with_maximize_button(false)`
+        // (egui_main.rs). The native CLOSE button has no creation-time flag
+        // (WS_SYSMENU is always in winit's base style), so prime the close-button
+        // stripper with the real window handle; `ensure_close_button_stripped`
+        // (run each frame in `ui`) clears ONLY WS_SYSMENU — leaving WS_CAPTION
+        // intact so the frameless composition is never disturbed. Alt+F4 is
+        // restored in-app (see `frame_tick`).
+        #[cfg(windows)]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(handle) = cc.window_handle() {
+                if let RawWindowHandle::Win32(w) = handle.as_raw() {
+                    caption_close::set_main_hwnd(w.hwnd.get());
+                }
+            }
+        }
         // Apply Visuals DERIVED FROM the loaded terminal theme so the whole
         // chrome follows the active theme from the first frame (a light theme →
         // light UI, a dark theme → dark UI). Done after `bootstrap()` so
@@ -3061,6 +3072,12 @@ impl eframe::App for C0pl4ndApp {
     /// headless tests can drive it without an `eframe::Frame`.
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // Strip the residual native close (WS_SYSMENU) button each frame so DWM
+        // stops drawing a second "×" over our custom titlebar close (self-heals if
+        // winit re-asserts the bit on resize/restore; near-zero cost once cleared).
+        // No-op on non-Windows and before priming. Min/max are already suppressed
+        // at creation (see `new`); this is the only runtime caption touch.
+        caption_close::ensure_close_button_stripped();
         // Atlas-warmup GPU fence: while the warmup gate is open, BLOCK until every
         // previously-submitted GPU op — crucially the prior frame's font-atlas
         // texture upload — is complete before this frame samples the atlas. This
@@ -3182,6 +3199,18 @@ impl C0pl4ndApp {
         // Gated on `live_window` so the headless egui_kittest harness, which has
         // no real viewport, never calls `process::exit` mid-test.
         if self.live_window && ctx.input(|i| i.viewport().close_requested()) {
+            self.prepare_shutdown();
+            std::process::exit(0);
+        }
+        // Alt+F4 close, restored in-app. Removing WS_SYSMENU (to kill the doubled
+        // native close button — see `caption_close`) means DefWindowProc no longer
+        // translates Alt+F4 into a WM_CLOSE, so egui/winit still delivers the key
+        // event but the OS never turns it into a close_requested. Handle it here
+        // and take the same fast-exit path as the caption-× / OS close. Gated on
+        // `live_window` so the headless harness never calls `process::exit`.
+        if self.live_window
+            && ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::F4))
+        {
             self.prepare_shutdown();
             std::process::exit(0);
         }
