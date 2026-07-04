@@ -73,6 +73,15 @@ page.
   residual native caption-button window styles are now cleared, so only the app's
   own controls show, in every mode.
 
+### Changed — settings layout
+
+- **The Settings window is clearer to read and use.** Every on/off row is now a
+  real checkbox instead of click-to-toggle text (it was not obvious the labels
+  were clickable), and the longer sections are split into labelled sub-groups —
+  each with a heading, a one-line description, and a divider — so related options
+  (Theme, Transparency & tint, Interface scale, Shell & scrollback, Clipboard,
+  window Layout, Graphics) group together instead of running into one list.
+
 ## [0.4.13] - 2026-06-30
 
 ### Added — macOS and ARM64 builds
