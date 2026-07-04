@@ -3997,12 +3997,11 @@ impl C0pl4ndApp {
         // 0c) Frameless window edge/corner RESIZE (#24). The decorations are off,
         //     so the OS gives no resize border — we synthesize one: hint the
         //     matching resize cursor over an edge band, and on a primary press
-        //     there (when no widget wants the pointer) start an OS resize via
-        //     ViewportCommand::BeginResize. Run early, BEFORE the panels, so an
-        //     edge grab wins; the `!wants_pointer_input()` guard still lets a
-        //     widget sitting at the very edge get its click. Skipped in
-        //     fullscreen (#36): there is no window edge to resize, and the
-        //     synthetic resize cursors at the screen edge would be visually wrong.
+        //     there drive a MANUAL resize (per-frame `InnerSize` from the pointer
+        //     delta), NOT the OS `BeginResize` modal loop — which needs the
+        //     stripped `WS_SYSMENU` and hung the window. Run early, BEFORE the
+        //     panels, so an edge grab wins. Skipped in fullscreen (#36): there is
+        //     no window edge to resize.
         if !self.fullscreen {
             handle_frameless_resize(ctx);
         }
@@ -4528,62 +4527,95 @@ fn resize_dir_at(
     }
 }
 
-/// Frameless window edge-resize, the no-Area way (#24). Each frame: if the
-/// pointer is over an edge band, hint the matching resize cursor; on a primary
-/// press there — and only when egui isn't already using the pointer for a
-/// widget — start an OS resize via `ViewportCommand::BeginResize`. No persistent
-/// `Order::Foreground` Areas, so it never swallows clicks meant for the tabs /
-/// caption buttons / panes, and it works on every resize, not just the first.
+/// Minimum window size (logical points) the manual edge-resize enforces. Mirrors
+/// the `with_min_inner_size` seed in `egui_main.rs`.
+const MIN_WINDOW_W: f32 = 520.0;
+const MIN_WINDOW_H: f32 = 360.0;
+
+/// Which edges the frameless resize offers. Only the three that grow WITHOUT
+/// moving the window origin — East, South, SouthEast — because those need only an
+/// `InnerSize` command. The origin-moving edges (West/North + their corners) would
+/// need an `OuterPosition` move per frame, which is not offered here.
+fn resize_supported(dir: egui::ResizeDirection) -> bool {
+    use egui::ResizeDirection as D;
+    matches!(dir, D::East | D::South | D::SouthEast)
+}
+
+fn resize_cursor(dir: egui::ResizeDirection) -> egui::CursorIcon {
+    use egui::{CursorIcon as C, ResizeDirection as D};
+    match dir {
+        D::East => C::ResizeEast,
+        D::South => C::ResizeSouth,
+        D::SouthEast => C::ResizeSouthEast,
+        _ => C::Default,
+    }
+}
+
+/// Frameless window edge-resize — MANUAL, not the OS modal loop.
+///
+/// This app draws its own frameless titlebar and STRIPS `WS_SYSMENU` (to kill the
+/// doubled native close button). `ViewportCommand::BeginResize` drives resize via
+/// `WM_SYSCOMMAND | SC_SIZE`, a system-menu command that needs `WS_SYSMENU` — with
+/// it stripped, BeginResize entered a broken OS modal-resize loop that PAUSED the
+/// render thread and HUNG the window (garbled, unresponsive). So instead we resize
+/// MANUALLY: hold the direction across frames and each frame apply the pointer's
+/// motion to the window's inner size via `InnerSize`. No OS modal loop → the event
+/// loop keeps pumping → no freeze, no `WS_SYSMENU` dependency. All math is in
+/// egui's LOGICAL-POINT space (`viewport_rect`, `pointer.delta`, `InnerSize` all
+/// agree), so it is HiDPI-correct by construction.
 fn handle_frameless_resize(ctx: &egui::Context) {
-    use egui::{CursorIcon as C, ResizeDirection as D, ViewportCommand};
+    use egui::ResizeDirection as D;
+    let id = egui::Id::new("c0pl4nd_manual_resize_dir");
+
+    // A resize in progress? Drive it from this frame's pointer motion until the
+    // primary button is released.
+    let active: Option<D> = ctx.data(|d| d.get_temp(id));
+    if let Some(dir) = active {
+        if !ctx.input(|i| i.pointer.primary_down()) {
+            ctx.data_mut(|d| d.remove::<D>(id)); // released → stop resizing
+            return;
+        }
+        ctx.set_cursor_icon(resize_cursor(dir));
+        // Keep the grid from starting a text-selection while we own the drag.
+        ctx.stop_dragging();
+        let delta = ctx.input(|i| i.pointer.delta());
+        if delta != egui::Vec2::ZERO {
+            let cur = ctx.viewport_rect().size();
+            let mut ns = cur;
+            if matches!(dir, D::East | D::SouthEast) {
+                ns.x += delta.x;
+            }
+            if matches!(dir, D::South | D::SouthEast) {
+                ns.y += delta.y;
+            }
+            ns.x = ns.x.max(MIN_WINDOW_W);
+            ns.y = ns.y.max(MIN_WINDOW_H);
+            if ns != cur {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(ns));
+            }
+        }
+        return;
+    }
+
+    // Not resizing: hint the cursor over a supported edge band and START a resize
+    // on a primary press there. Gated on `!egui_is_using_pointer()` (an ACTIVE
+    // drag) — NOT `egui_wants_pointer_input()` (mere hover), which the grid sets
+    // true across the whole window and which blocked resize everywhere. This is
+    // SAFE with the manual resize (unlike BeginResize): a click without motion
+    // resizes by nothing and clears on release, and there is no OS modal loop to
+    // hang.
     let Some(p) = ctx.pointer_latest_pos() else {
         return;
     };
-    // Hit-test against the FULL window surface (viewport_rect), NOT content_rect:
-    // egui 0.34 split the old `screen_rect` into `viewport_rect()` (the whole
-    // inner window) and `content_rect()` (the area inside the panels). We need
-    // the whole window — content_rect excludes the top titlebar / bottom status
-    // panels, which would push the resize bands inward off the real window edges
-    // so the user couldn't grab them. `viewport_rect()` is the non-deprecated
-    // successor for the whole-window surface the SCR1B3 reference used.
     let Some(dir) = resize_dir_at(p, ctx.viewport_rect(), RESIZE_EDGE_PX, RESIZE_CORNER_PX) else {
         return;
     };
-    ctx.set_cursor_icon(match dir {
-        D::North => C::ResizeNorth,
-        D::South => C::ResizeSouth,
-        D::West => C::ResizeWest,
-        D::East => C::ResizeEast,
-        D::NorthWest => C::ResizeNorthWest,
-        D::NorthEast => C::ResizeNorthEast,
-        D::SouthWest => C::ResizeSouthWest,
-        D::SouthEast => C::ResizeSouthEast,
-    });
-    // Start the OS resize only if egui isn't consuming the press for a widget
-    // (so a button / tab sitting at the very edge still gets its click).
-    // `egui_wants_pointer_input` is the non-deprecated rename of
-    // `wants_pointer_input` in egui 0.34.
-    //
-    // NOTE: this guard is intentionally STRICT. An earlier attempt relaxed it to
-    // `!egui_is_using_pointer()` (fire on any edge press not mid-drag) to make
-    // edge-resize work over the grid — but that fired `BeginResize` spuriously on
-    // ordinary clicks near an edge, entering winit's OS MODAL resize loop, which
-    // pauses the render thread (leaving a half-uploaded font atlas = garbled,
-    // frozen frame) and hangs the window. A safer edge-resize fix must NOT widen
-    // this trigger; the correct approach is a dedicated, non-interactive edge
-    // margin the grid does not cover, so this guard can stay strict.
-    if ctx.input(|i| i.pointer.primary_pressed()) && !ctx.egui_wants_pointer_input() {
-        ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
-        // The OS now owns the drag. winit's modal resize loop swallows the
-        // button-up, so egui can be left believing a drag is still in progress —
-        // which makes `wants_pointer_input()` return true forever and blocks
-        // EVERY subsequent resize (the "works once, then never" bug). Clearing
-        // egui's drag bookkeeping here unsticks that state so resize re-arms.
-        ctx.stop_dragging();
+    if !resize_supported(dir) {
+        return;
     }
-    // Belt-and-suspenders: with no button held there can be no legitimate drag,
-    // so proactively clear any phantom drag the OS resize loop may have orphaned.
-    if !ctx.input(|i| i.pointer.any_down()) {
+    ctx.set_cursor_icon(resize_cursor(dir));
+    if ctx.input(|i| i.pointer.primary_pressed()) && !ctx.egui_is_using_pointer() {
+        ctx.data_mut(|d| d.insert_temp(id, dir));
         ctx.stop_dragging();
     }
 }
