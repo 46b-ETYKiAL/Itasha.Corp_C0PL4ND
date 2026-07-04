@@ -252,6 +252,14 @@ pub struct C0pl4ndApp {
     /// tests can assert that clicking a caption button had its real effect (the
     /// OS command itself is not observable in a headless harness).
     pub(crate) last_window_cmd: Option<WindowCmd>,
+    /// Last known UN-maximized inner size (logical points). Updated every frame
+    /// the window is not maximized, and used to drive an EXPLICIT restore size
+    /// when the user un-maximizes: eframe's persisted window state can leave
+    /// winit's own restore geometry equal to the maximized (monitor) size, so a
+    /// plain un-maximize "restores" to a full-monitor window the user must then
+    /// shrink by hand. `None` until the first un-maximized frame — the restore
+    /// then falls back to the first-run default size.
+    pub(crate) restore_size: Option<egui::Vec2>,
     /// True when running in a real eframe window (a wgpu render state exists),
     /// false in the headless `egui_kittest` harness. Drives the per-frame
     /// `request_repaint` pump so live PTY output animates without an input
@@ -584,6 +592,7 @@ impl C0pl4ndApp {
             update_rx: None,
             last_update_notice: None,
             last_window_cmd: None,
+            restore_size: None,
             live_window: false,
             fullscreen: false,
             was_focused: true,
@@ -771,6 +780,34 @@ impl C0pl4ndApp {
     #[allow(dead_code)]
     pub fn last_window_cmd(&self) -> Option<WindowCmd> {
         self.last_window_cmd
+    }
+
+    /// First-run default window size (logical points), used as the restore
+    /// target before the user has ever un-maximized. Mirrors the
+    /// `with_inner_size` seed in `egui_main.rs`.
+    const DEFAULT_INNER_SIZE: egui::Vec2 = egui::vec2(1100.0, 720.0);
+
+    /// Toggle the OS maximize state for the single app window. When RESTORING
+    /// (currently maximized), drive the restore EXPLICITLY: return to the last
+    /// un-maximized size (or the first-run default) and re-center on the monitor,
+    /// rather than trusting winit's own restore geometry — which eframe's
+    /// persisted window state can leave equal to the maximized (monitor) size, so
+    /// a plain un-maximize yanks the window back to full-monitor and the user has
+    /// to shrink it by hand (the reported bug). Maximizing is the plain command.
+    fn toggle_maximize(&self, ctx: &egui::Context, is_max: bool) {
+        if !is_max {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            return;
+        }
+        let target = self.restore_size.unwrap_or(Self::DEFAULT_INNER_SIZE);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target));
+        // Re-center on the monitor so the restored window lands in the middle,
+        // not at the monitor's top-left. `monitor_size` is in logical points.
+        if let Some(mon) = ctx.input(|i| i.viewport().monitor_size) {
+            let pos = ((mon - target) * 0.5).max(egui::vec2(0.0, 0.0));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos.to_pos2()));
+        }
     }
 
     /// The visible grid text of a pane's terminal, or `None` if the pane has no
@@ -3078,6 +3115,22 @@ impl eframe::App for C0pl4ndApp {
         // No-op on non-Windows and before priming. Min/max are already suppressed
         // at creation (see `new`); this is the only runtime caption touch.
         caption_close::ensure_close_button_stripped();
+        // Remember the last UN-maximized inner size so the restore button can
+        // return to it explicitly (see `toggle_maximize`). Skip while maximized so
+        // the monitor-sized maximized rect is never captured as the restore size;
+        // a floor guards against a transient tiny/zero read during a resize.
+        {
+            let (maxed, inner) =
+                ctx.input(|i| (i.viewport().maximized.unwrap_or(false), i.viewport().inner_rect));
+            if !maxed {
+                if let Some(r) = inner {
+                    let sz = r.size();
+                    if sz.x >= 400.0 && sz.y >= 300.0 {
+                        self.restore_size = Some(sz);
+                    }
+                }
+            }
+        }
         // Atlas-warmup GPU fence: while the warmup gate is open, BLOCK until every
         // previously-submitted GPU op — crucially the prior frame's font-atlas
         // texture upload — is complete before this frame samples the atlas. This
@@ -3993,8 +4046,7 @@ impl C0pl4ndApp {
                     }
                     if bar.double_clicked() {
                         let is_max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                        self.toggle_maximize(ui.ctx(), is_max);
                     }
                     // Flat chrome buttons: no idle background, fill only on hover —
                     // so the controls read as part of the (translucent) bar instead
@@ -4125,7 +4177,7 @@ impl C0pl4ndApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
                 WindowCmd::ToggleMaximize => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                    self.toggle_maximize(ctx, is_max);
                 }
                 WindowCmd::Close => {
                     // Fast clean shutdown: run the necessary cleanup (persist

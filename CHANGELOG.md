@@ -76,6 +76,10 @@ page.
 - **The maximize button now reflects the window state.** It showed the same
   "maximize" square whether the window was maximized or not; it now switches to a
   "restore" glyph while maximized, matching the standard caption-button behavior.
+- **Restoring from maximized returns to a normal, centered window.** Un-maximizing
+  used to snap the window to nearly the full monitor size (so you had to shrink it
+  by hand to move it); it now restores to your last un-maximized size — or a sane
+  default on first use — and re-centers on the monitor.
 
 ### Changed — settings layout
 
@@ -92,6 +96,8 @@ page.
 - **The Settings window is resizable, and remembers its size.** Drag any edge to
   resize it; the size is saved and restored on the next launch. It also no longer
   gets shifted or clipped when the main window is maximized.
+- **Settings now opens centered.** The first time you open it, it appears dead
+  center over the app instead of tucked into the top-left corner.
 
 ## [0.4.13] - 2026-06-30
 

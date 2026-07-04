@@ -383,7 +383,12 @@ pub fn show(
     // now user-resizable (see the builder below); a filling child no longer
     // balloons it because the content `ScrollArea` uses `auto_shrink([false,
     // false])` — it fills the width it is GIVEN rather than demanding its own.
-    let screen = ctx.content_rect();
+    // Use the FULL viewport rect (not `content_rect()`, which excludes the
+    // titlebar/status panels and can read small on the very first frame the window
+    // opens — the cause of the "settings appeared in the top-left" report). The
+    // window is then centered via a CENTER_CENTER pivot on `screen.center()` in the
+    // builder below, so the first open lands dead-center regardless of its size.
+    let screen = ctx.viewport_rect();
     let screen_max_w = (screen.width() - 24.0).max(SETTINGS_MIN_W);
     let screen_max_h = (screen.height() - 24.0).max(SETTINGS_MIN_H);
     let want_w = config
@@ -397,7 +402,7 @@ pub fn show(
     let def_w = want_w.clamp(SETTINGS_MIN_W, screen_max_w);
     let def_h = want_h.clamp(SETTINGS_MIN_H, screen_max_h);
     let default_size = egui::vec2(def_w, def_h);
-    let default_pos = screen.center() - default_size * 0.5;
+    let default_center = screen.center();
 
     // Esc dismisses settings (in addition to the title-bar ✕ and the in-content
     // Close button) — the conventional overlay-dismiss key.
@@ -442,7 +447,12 @@ pub fn show(
         // to the full screen keeps it visible without forcing a re-centre.
         .constrain_to(screen)
         .movable(true)
-        .default_pos(default_pos)
+        // Center on first open: place the window's CENTER at the screen center.
+        // `default_pos` + a CENTER_CENTER pivot centers regardless of the window's
+        // size, and (like `default_pos`) applies only on first creation, so the
+        // user can freely drag it afterward.
+        .default_pos(default_center)
+        .pivot(egui::Align2::CENTER_CENTER)
         .frame(egui::Frame::window(&ctx.global_style()).fill(colors.panel))
         .show(ctx, |ui| {
             // ---- Width discipline ----
@@ -957,79 +967,78 @@ fn render_sections(
                 ui.end_row();
             }
 
+            // Each dependent row is THREE direct grid cells (label · control · ↺)
+            // exactly like every other section — NOT one `add_enabled_ui` wrapping
+            // all three, which collapsed the row into a single column-1 cell and
+            // left columns 2/3 empty (the reported "Transparency & tint isn't
+            // aligned in columns"). The control cell greys out when disabled; the
+            // label + reset stay put so the columns line up on every row.
             if row_visible(q, "transparency mode glass mica vibrancy") {
-                ui.add_enabled_ui(config.transparency_enabled, |ui| {
-                    ui.label("Mode").on_hover_text(
-                        "Opaque · Transparent (portable) · Glass/Mica/Vibrancy \
-                         (OS blur — applies on restart).",
-                    );
-                    ui.horizontal(|ui| {
-                        let wmodes = [
-                            (WindowMode::Opaque, "opaque"),
-                            (WindowMode::Transparent, "transparent"),
-                            (WindowMode::Glass, "glass / acrylic"),
-                            (WindowMode::Mica, "mica (Win11)"),
-                            (WindowMode::Vibrancy, "vibrancy (macOS)"),
-                        ];
-                        egui::ComboBox::from_id_salt("c0pl4nd-window-mode")
-                            .selected_text(
-                                wmodes
-                                    .iter()
-                                    .find(|(m, _)| *m == config.window_mode)
-                                    .map(|(_, s)| *s)
-                                    .unwrap_or("opaque"),
-                            )
-                            .show_ui(ui, |ui| {
-                                for (m, label) in wmodes {
-                                    changed |= ui
-                                        .selectable_value(&mut config.window_mode, m, label)
-                                        .changed();
-                                }
-                            })
-                            .response
-                            .on_hover_text(
-                                "Transparent applies live; Glass/Mica/Vibrancy switch \
-                                 the OS blur backend and apply on restart.",
-                            );
-                        changed |= reset_to_default(ui, &mut config.window_mode, &def.window_mode);
-                    });
+                let en = config.transparency_enabled;
+                ui.label("Mode").on_hover_text(
+                    "Opaque · Transparent (portable) · Glass/Mica/Vibrancy \
+                     (OS blur — applies on restart).",
+                );
+                ui.add_enabled_ui(en, |ui| {
+                    let wmodes = [
+                        (WindowMode::Opaque, "opaque"),
+                        (WindowMode::Transparent, "transparent"),
+                        (WindowMode::Glass, "glass / acrylic"),
+                        (WindowMode::Mica, "mica (Win11)"),
+                        (WindowMode::Vibrancy, "vibrancy (macOS)"),
+                    ];
+                    egui::ComboBox::from_id_salt("c0pl4nd-window-mode")
+                        .selected_text(
+                            wmodes
+                                .iter()
+                                .find(|(m, _)| *m == config.window_mode)
+                                .map(|(_, s)| *s)
+                                .unwrap_or("opaque"),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (m, label) in wmodes {
+                                changed |= ui
+                                    .selectable_value(&mut config.window_mode, m, label)
+                                    .changed();
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "Transparent applies live; Glass/Mica/Vibrancy switch \
+                             the OS blur backend and apply on restart.",
+                        );
                 });
+                changed |= reset_to_default(ui, &mut config.window_mode, &def.window_mode);
                 ui.end_row();
             }
 
             if row_visible(q, "opacity transparency") {
-                ui.add_enabled_ui(
-                    config.transparency_enabled && config.window_mode.is_translucent(),
-                    |ui| {
-                        ui.label("Opacity").on_hover_text(
-                            "Surface opacity for every translucent mode (Glass / \
-                             Mica / Vibrancy / Transparent) — below 100% the \
-                             desktop / blur shows through, and the slider tunes how \
-                             see-through the terminal is across its full range.",
-                        );
-                        changed |= ui
-                            .add(
-                                egui::Slider::new(&mut config.opacity, 0.0..=1.0)
-                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                                    .custom_parser(|s| {
-                                        s.trim_end_matches('%')
-                                            .trim()
-                                            .parse::<f64>()
-                                            .ok()
-                                            .map(|v| v / 100.0)
-                                    }),
-                            )
-                            .changed();
-                        changed |= reset_to_default(ui, &mut config.opacity, &def.opacity);
-                    },
+                let en = config.transparency_enabled && config.window_mode.is_translucent();
+                ui.label("Opacity").on_hover_text(
+                    "Surface opacity for every translucent mode (Glass / Mica / \
+                     Vibrancy / Transparent) — below 100% the desktop / blur shows \
+                     through, and the slider tunes how see-through the terminal is \
+                     across its full range.",
                 );
+                changed |= ui
+                    .add_enabled(
+                        en,
+                        egui::Slider::new(&mut config.opacity, 0.0..=1.0)
+                            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                            .custom_parser(|s| {
+                                s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)
+                            }),
+                    )
+                    .changed();
+                changed |= reset_to_default(ui, &mut config.opacity, &def.opacity);
                 ui.end_row();
             }
 
             if row_visible(q, "tint color overlay wash picker") {
-                ui.add_enabled_ui(config.transparency_enabled, |ui| {
-                    ui.label("Tint color")
-                        .on_hover_text("Color washed over the window (strength below).");
+                let en = config.transparency_enabled;
+                ui.label("Tint color")
+                    .on_hover_text("Color washed over the window (strength below).");
+                ui.add_enabled_ui(en, |ui| {
                     ui.horizontal(|ui| {
                         // A real color PICKER (swatch button → palette popup) over
                         // the `#RRGGBB` config string, instead of raw hex entry.
@@ -1043,31 +1052,27 @@ fn render_sections(
                         }
                         // Compact hex readout so the exact value is visible/copyable.
                         ui.monospace(&config.tint);
-                        changed |= reset_to_default(ui, &mut config.tint, &def.tint);
                     });
                 });
+                changed |= reset_to_default(ui, &mut config.tint, &def.tint);
                 ui.end_row();
             }
 
             if row_visible(q, "tint strength wash overlay") {
-                ui.add_enabled_ui(config.transparency_enabled, |ui| {
-                    ui.label("Tint strength")
-                        .on_hover_text("0% = no tint .. 100% = strong color wash.");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut config.tint_strength, 0.0..=1.0)
-                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                                .custom_parser(|s| {
-                                    s.trim_end_matches('%')
-                                        .trim()
-                                        .parse::<f64>()
-                                        .ok()
-                                        .map(|v| v / 100.0)
-                                }),
-                        )
-                        .changed();
-                    changed |= reset_to_default(ui, &mut config.tint_strength, &def.tint_strength);
-                });
+                let en = config.transparency_enabled;
+                ui.label("Tint strength")
+                    .on_hover_text("0% = no tint .. 100% = strong color wash.");
+                changed |= ui
+                    .add_enabled(
+                        en,
+                        egui::Slider::new(&mut config.tint_strength, 0.0..=1.0)
+                            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                            .custom_parser(|s| {
+                                s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)
+                            }),
+                    )
+                    .changed();
+                changed |= reset_to_default(ui, &mut config.tint_strength, &def.tint_strength);
                 ui.end_row();
             }
         });
