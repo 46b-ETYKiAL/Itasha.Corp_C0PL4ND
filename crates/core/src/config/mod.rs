@@ -787,6 +787,15 @@ pub struct Config {
     /// with no `[reporting]` table loads with reporting fully off.
     #[serde(default)]
     pub reporting: ReportingConfig,
+    /// Persisted size of the Settings sub-window, in logical points, so a user's
+    /// resize sticks across launches. `None` (default, and for older configs
+    /// without the field) = use the built-in default size. Clamped to a sane
+    /// floor/ceiling on use so a malformed value can never spawn an unusable
+    /// window.
+    #[serde(default)]
+    pub settings_win_w: Option<f32>,
+    #[serde(default)]
+    pub settings_win_h: Option<f32>,
 }
 
 /// serde default for boolean fields that should default to `true` when absent
@@ -840,6 +849,8 @@ impl Default for Config {
             paste_warn_multiline: true,
             history_capture_enabled: true,
             reporting: ReportingConfig::default(),
+            settings_win_w: None,
+            settings_win_h: None,
         }
     }
 }

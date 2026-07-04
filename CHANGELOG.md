@@ -73,6 +73,9 @@ page.
   offset set. The native minimize/maximize are now suppressed at window creation
   and the native close button is removed, so only the app's own controls show.
   Alt+F4 and the taskbar "Close window" still close the window as usual.
+- **The maximize button now reflects the window state.** It showed the same
+  "maximize" square whether the window was maximized or not; it now switches to a
+  "restore" glyph while maximized, matching the standard caption-button behavior.
 
 ### Changed — settings layout
 
@@ -82,6 +85,13 @@ page.
   each with a heading, a one-line description, and a divider — so related options
   (Theme, Transparency & tint, Interface scale, Shell & scrollback, Clipboard,
   window Layout, Graphics) group together instead of running into one list.
+- **Every settings tab now lines up the same way.** All pages — including Privacy,
+  which previously used a different, looser layout — share one three-column grid
+  (label · control · reset), so labels, controls, and the ↺ revert buttons align
+  consistently as you move between tabs.
+- **The Settings window is resizable, and remembers its size.** Drag any edge to
+  resize it; the size is saved and restored on the next launch. It also no longer
+  gets shifted or clipped when the main window is maximized.
 
 ## [0.4.13] - 2026-06-30
 

@@ -79,13 +79,13 @@ const UPDATE_CHANNELS: &[&str] = &["stable", "beta", "nightly"];
 const SETTINGS_DEFAULT_W: f32 = 760.0;
 /// Default window HEIGHT (px), before the screen-fit clamp.
 const SETTINGS_DEFAULT_H: f32 = 560.0;
-/// Hard cap on the inner CONTENT width (nav + pane). Slightly under the window
-/// inner width so the content fills it without ever driving it wider.
-const SETTINGS_CONTENT_W: f32 = 740.0;
-/// Hard cap on the right-hand content PANE width (after the nav + separator).
-const SETTINGS_PANE_W: f32 = 556.0;
 /// Fixed width of the left category nav column.
 const SETTINGS_NAV_W: f32 = 170.0;
+/// Minimum window WIDTH (px) the user may shrink the resizable settings window
+/// to. Below this the nav + content pane collide, so the resize handle stops.
+const SETTINGS_MIN_W: f32 = 560.0;
+/// Minimum window HEIGHT (px) for the resizable settings window.
+const SETTINGS_MIN_H: f32 = 400.0;
 
 /// The terminal color themes that ship in `assets/themes/` (file stems). The
 /// theme combo offers these built-ins; a free text field below it accepts any
@@ -375,21 +375,27 @@ pub fn show(
     // cause of the "settings can't be dragged" report. `.default_pos` places it
     // once, then the title bar drags freely.
     //
-    // #26 root-cause: an `egui::Window` is AUTO/content-sized by default, and its
-    // Area grows to the widest child's desired size. A filling `Slider` / the
-    // search box reports `available_width()` / `f32::INFINITY` every frame, so the
-    // window ballooned to the screen edge ("much too wide + blank right gutter").
-    // The cure is a snug, screen-clamped EXPLICIT size PLUS a hard Area bound:
-    // `.fixed_size(default_size)` fixes the inner content, and `.constrain_to(rect)`
-    // bounds the floating Area itself (fixed_size alone does NOT — the Area still
-    // auto-expands to the viewport, painting the frame full-width behind a snug
-    // content column, which IS the reported blank gutter). Together they hold a
-    // stable, centred ~760px window on every page; a long page scrolls INTERNALLY
-    // via the content `ScrollArea` (height is fixed; the scroll-area fills it).
-    // Screen-clamped so a small display never spawns an off-screen window.
+    // Initial window size: the user's last resized size (persisted in the config
+    // TOML), else the built-in default. Each dimension is clamped to a sane floor
+    // (`SETTINGS_MIN_*`) and to the live screen (minus a 24px margin) so a
+    // malformed persisted value or a tiny display can never spawn an unusable or
+    // off-screen window. A non-finite persisted value is ignored. The window is
+    // now user-resizable (see the builder below); a filling child no longer
+    // balloons it because the content `ScrollArea` uses `auto_shrink([false,
+    // false])` — it fills the width it is GIVEN rather than demanding its own.
     let screen = ctx.content_rect();
-    let def_w = SETTINGS_DEFAULT_W.min(screen.width() - 24.0);
-    let def_h = SETTINGS_DEFAULT_H.min(screen.height() - 24.0);
+    let screen_max_w = (screen.width() - 24.0).max(SETTINGS_MIN_W);
+    let screen_max_h = (screen.height() - 24.0).max(SETTINGS_MIN_H);
+    let want_w = config
+        .settings_win_w
+        .filter(|v| v.is_finite())
+        .unwrap_or(SETTINGS_DEFAULT_W);
+    let want_h = config
+        .settings_win_h
+        .filter(|v| v.is_finite())
+        .unwrap_or(SETTINGS_DEFAULT_H);
+    let def_w = want_w.clamp(SETTINGS_MIN_W, screen_max_w);
+    let def_h = want_h.clamp(SETTINGS_MIN_H, screen_max_h);
     let default_size = egui::vec2(def_w, def_h);
     let default_pos = screen.center() - default_size * 0.5;
 
@@ -408,46 +414,48 @@ pub fn show(
     // and (b) reads as low-contrast on the dark custom frame. The in-content
     // button + Esc are the single, obvious dismiss path (the "two close buttons"
     // report). Closing flows through `keep_open` → `*open` exactly as before.
-    egui::Window::new("settings")
+    let win_resp = egui::Window::new("settings")
         // No egui title bar: it rendered a SECOND, redundant top bar (a centered
         // lowercase "settings") above the in-content header that carries the
         // "Settings" heading + the ✕ close button. The in-content header is the
         // single titlebar; dragging still works via egui's window-frame drag.
         .title_bar(false)
         .collapsible(false)
-        // FIXED size (#26 root-cause fix). A `resizable` egui `Window` auto-GROWS
-        // its width to the widest child's desired size, and a fill-width child
-        // (the header's `right_to_left` close row, a filling `Slider`, the search
-        // box) reports `available_width`/`INFINITY` — so the window balloons to the
-        // screen edge ("much too wide + blank right gutter"). Clamping the inner
-        // content `Ui` (`set_max_width`) does NOT stop this, because the Resize
-        // widget measures the child's UNCLAMPED desired width. A FIXED window size
-        // is the robust cure: the window holds a snug, stable width on every page,
-        // and a long page scrolls INTERNALLY via the content `ScrollArea` (height
-        // is fixed and the scroll-area fills it). `min`'d to the live screen so a
-        // tiny display never spawns an off-screen window.
-        .fixed_size(default_size)
-        .constrain_to(egui::Rect::from_center_size(screen.center(), default_size))
+        // USER-RESIZABLE with a persisted size. `default_size` seeds the window
+        // the first time it appears (from the persisted-or-default size computed
+        // above); thereafter egui remembers the user's drag within the session and
+        // the write-back below persists it across restarts. `min_size` stops the
+        // user from shrinking it until the nav + content pane collide. The old
+        // ballooning failure mode (a filling child demanding near-infinite width)
+        // is prevented at the source: the content `ScrollArea` uses
+        // `auto_shrink([false, false])`, so it fills the width the window gives it
+        // rather than reporting its own desired width back up to the Resize widget.
+        .resizable(true)
+        .default_size(default_size)
+        .min_size(egui::vec2(SETTINGS_MIN_W, SETTINGS_MIN_H))
+        // Constrain to the WHOLE screen (keep the window on-screen), NOT to a
+        // default_size box re-centered every frame. The latter re-pinned the
+        // window to the live screen centre each frame, so maximizing the MAIN
+        // window (which moves `screen.center()`) yanked the settings Area to the
+        // new centre while its content had been laid out at the old position —
+        // the reported "contents get moved and cut off when maximized". Bounding
+        // to the full screen keeps it visible without forcing a re-centre.
+        .constrain_to(screen)
         .movable(true)
         .default_pos(default_pos)
         .frame(egui::Frame::window(&ctx.global_style()).fill(colors.panel))
         .show(ctx, |ui| {
-            // ---- Width discipline (#26 root-cause fix) ----
-            // egui sizes this window to its content. Any child that returns
-            // `available_width()` (a `horizontal` row) or `f32::INFINITY` (a
-            // filling slider / the search box) as its desired size would demand a
-            // near-infinite width and balloon the whole window to the screen edge
-            // — the reported "much too wide + blank gutter on the right" bug, and
-            // a DIFFERENT amount per page. Clamping to `available_width()` does
-            // NOT fix it, because once the window has ballooned `available_width()`
-            // IS that inflated width. The robust fix (proven on the sibling SCR1B3
-            // editor) is a FIXED content-width budget: clamp the content `Ui` to a
-            // const cap so no page can demand more than the budget. The window
-            // then holds a snug, stable width identical on every page, and any
-            // overflow goes to the vertical ScrollArea, never to horizontal
-            // growth. `.min(available_width())` lets a deliberately-shrunk window
-            // still track its smaller inner width without overflowing.
-            let content_w = ui.available_width().min(SETTINGS_CONTENT_W);
+            // ---- Width discipline ----
+            // The content fills the width the (now user-resizable) window gives
+            // it. The old ballooning failure mode — a filling child reporting
+            // `available_width()`/`INFINITY` as its desired size and driving the
+            // window ever wider — is prevented at the source by the content
+            // `ScrollArea`'s `auto_shrink([false, false])` below: it consumes the
+            // width it is given rather than demanding its own. So `available_width`
+            // here is a real, bounded number (the window's inner width), and using
+            // it lets a grown window put the extra space to work instead of
+            // stranding it in a right-hand gutter.
+            let content_w = ui.available_width();
             ui.set_max_width(content_w);
             // In-content header: title + an unmissable Close ✕. The egui
             // title-bar ✕ can read as low-contrast against the dark custom
@@ -488,16 +496,13 @@ pub fn show(
 
                 // ---- Searchable, internally-scrolling content pane ----
                 ui.vertical(|ui| {
-                    // Clamp the content pane to a fixed budget (capped by the
-                    // width left after the nav + separator). This makes the pane
-                    // width identical on every page (the grids below size to THIS
-                    // width, not to their own desired width), and gives the search
-                    // box a finite width to fill. A const cap (NOT raw
-                    // `available_width()`) is what stops a filling slider / the
-                    // search box from demanding near-infinite width and ballooning
-                    // the window — the same root-cause fix as the content clamp
-                    // above, one level down.
-                    let pane_w = ui.available_width().min(SETTINGS_PANE_W);
+                    // The content pane fills the width left after the nav +
+                    // separator. The grids below size to THIS width (not to their
+                    // own desired width), and the search box gets a finite width to
+                    // fill. Ballooning is prevented at the source by the content
+                    // `ScrollArea`'s `auto_shrink([false, false])`, so raw
+                    // `available_width()` is a real bounded number here.
+                    let pane_w = ui.available_width();
                     ui.set_max_width(pane_w);
                     ui.horizontal(|ui| {
                         ui.label(egui_phosphor::thin::MAGNIFYING_GLASS);
@@ -540,6 +545,29 @@ pub fn show(
 
     if close_requested {
         keep_open = false;
+    }
+
+    // Persist a user resize so the window reopens at the size they left it. Only
+    // write when the pointer is UP (the drag has settled) and the size moved by
+    // more than a dead-band — this both avoids a TOML write-storm during the drag
+    // and keeps the outer-rect/inner-size frame-margin difference from re-arming a
+    // write every time the window reopens (the dead-band exceeds the window frame
+    // margin, so a plain reopen is never mistaken for a resize).
+    if let Some(win_resp) = &win_resp {
+        let sz = win_resp.response.rect.size();
+        let pointer_up = ctx.input(|i| !i.pointer.any_down());
+        let base_w = config.settings_win_w.unwrap_or(SETTINGS_DEFAULT_W);
+        let base_h = config.settings_win_h.unwrap_or(SETTINGS_DEFAULT_H);
+        const DEAD_BAND: f32 = 12.0;
+        if pointer_up
+            && sz.x.is_finite()
+            && sz.y.is_finite()
+            && ((sz.x - base_w).abs() > DEAD_BAND || (sz.y - base_h).abs() > DEAD_BAND)
+        {
+            config.settings_win_w = Some(sz.x);
+            config.settings_win_h = Some(sz.y);
+            changed = true;
+        }
     }
 
     ctx.data_mut(|d| {
@@ -1984,110 +2012,141 @@ fn render_sections(
              connection is the opt-in update check. Command history is kept in \
              memory only (never written to disk).",
         );
-        ui.add_space(6.0);
 
-        changed |= ui
-            .checkbox(
-                &mut config.history_capture_enabled,
-                "Record command history",
-            )
-            .on_hover_text(
-                "Capture typed commands for the Ctrl+Shift+P palette + the history \
-                 sidebar. Passwords typed at prompts are never captured (they are \
-                 not echoed); inline secrets like --password=… / API_KEY=… are \
-                 redacted. Turn off for a no-history posture.",
-            )
-            .changed();
-        changed |= reset_to_default(
+        // ---- Command history (grid-aligned, matching every other section) ----
+        group(
             ui,
-            &mut config.history_capture_enabled,
-            &def.history_capture_enabled,
+            "Command history",
+            "Kept in memory only — never written to disk.",
         );
+        grid("privacy_history").show(ui, |ui| {
+            if row_visible(q, "record command history capture") {
+                ui.label("Record history").on_hover_text(
+                    "Capture typed commands for the Ctrl+Shift+P palette + the \
+                     history sidebar.",
+                );
+                changed |= ui
+                    .checkbox(&mut config.history_capture_enabled, "Capture typed commands")
+                    .on_hover_text(
+                        "Passwords typed at prompts are never captured (they are not \
+                         echoed); inline secrets like --password=… / API_KEY=… are \
+                         redacted. Turn off for a no-history posture.",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.history_capture_enabled,
+                    &def.history_capture_enabled,
+                );
+                ui.end_row();
+            }
 
-        ui.add_space(10.0);
-        ui.separator();
-        ui.add_space(6.0);
+            if row_visible(q, "incognito secret session no history") {
+                // Incognito is RUNTIME state (never persisted) owned by the host;
+                // reflect it and report a toggle back via `set_incognito`.
+                ui.label("Incognito").on_hover_text(
+                    "Stop recording history for THIS session; resets off next launch.",
+                );
+                let mut inc = incognito;
+                if ui
+                    .checkbox(&mut inc, "No history this session")
+                    .on_hover_text(
+                        "Stop recording command history for THIS session and clear \
+                         what is already recorded. Resets to off on the next launch.",
+                    )
+                    .changed()
+                {
+                    *set_incognito = Some(inc);
+                }
+                ui.label(""); // runtime state — no ↺ revert column
+                ui.end_row();
+            }
+        });
+
+        // ---- Clear data (grid-aligned action rows) ----
+        let status_id = egui::Id::new("c0pl4nd_clear_ui_state_status");
+        group(
+            ui,
+            "Clear data",
+            "One-click erase of in-memory and older on-disk state.",
+        );
+        grid("privacy_clear").show(ui, |ui| {
+            if row_visible(q, "clear command history erase now") {
+                ui.label("Command history");
+                if ui
+                    .button("Clear now")
+                    .on_hover_text("Erase (zeroize) every recorded command immediately.")
+                    .clicked()
+                {
+                    *clear_history = true;
+                }
+                ui.label(""); // action row — no ↺ column
+                ui.end_row();
+            }
+
+            if row_visible(q, "clear saved window ui state") {
+                // Delete eframe's persisted `app.ron` (window/UI state). Even
+                // though C0PL4ND no longer persists egui Memory (privacy F1 —
+                // `C0pl4ndApp::persist_egui_memory` returns false), a file written
+                // by an OLDER build may still hold typed find/palette undo history,
+                // so give the user an explicit one-click erase. Window geometry is
+                // unaffected: it lives in the config TOML, not app.ron.
+                ui.label("Window/UI state");
+                ui.vertical(|ui| {
+                    if ui
+                        .button("Clear saved state")
+                        .on_hover_text(
+                            "Delete the on-disk app.ron that older builds used to \
+                             persist window/UI state (and, in those builds, typed \
+                             find/palette undo history). Your window size/position \
+                             are kept (stored separately).",
+                        )
+                        .clicked()
+                    {
+                        let msg = clear_saved_ui_state();
+                        ui.ctx().data_mut(|d| d.insert_temp(status_id, msg));
+                    }
+                    if let Some(msg) = ui.ctx().data(|d| d.get_temp::<String>(status_id)) {
+                        ui.add(egui::Label::new(egui::RichText::new(msg).weak().small()).wrap());
+                    }
+                });
+                ui.label(""); // action row — no ↺ column
+                ui.end_row();
+            }
+        });
 
         // ---- W1TN3SS opt-in crash/error/issue reporting (default OFF) ----
-        ui.heading("Report a crash or issue");
-        help(
+        group(
             ui,
-            "Reporting is OPT-IN and OFF by default. Nothing is ever sent without \
-             your per-report consent, and every report is shown to you — editable \
-             — before it leaves. No accounts, no identifiers, no tracking. Reports \
-             go only to the project's own self-hosted endpoint (none is configured \
-             by default, so a default build sends nothing).",
+            "Report a crash or issue",
+            "Opt-in and OFF by default — nothing is sent without your per-report \
+             consent, and every report is shown to you (editable) before it leaves.",
         );
-        ui.add_space(6.0);
-        ui.label("Crash reports");
-        // Equal-weight 3-way selector (Off / Ask each time / Always) — no
-        // pre-ticked default-on path; the Off radio is first + selected by
-        // default. Mirrors the proven consent shape.
-        changed |= reporting_mode_selector(
-            ui,
-            "crash_reports_mode",
-            &mut config.reporting.streams.crash_reports,
-        );
-        ui.add_space(6.0);
-        ui.label("Manual issue reports");
-        changed |= reporting_mode_selector(
-            ui,
-            "manual_issues_mode",
-            &mut config.reporting.streams.manual_issues,
-        );
-
-        ui.add_space(10.0);
-        ui.separator();
-        ui.add_space(6.0);
-
-        // Incognito is RUNTIME state (never persisted) owned by the host; reflect
-        // it and report a toggle back via `set_incognito`.
-        let mut inc = incognito;
-        if ui
-            .checkbox(&mut inc, "Incognito session (no history)")
-            .on_hover_text(
-                "Stop recording command history for THIS session and clear what is \
-                 already recorded. Resets to off on the next launch.",
-            )
-            .changed()
-        {
-            *set_incognito = Some(inc);
-        }
-
-        ui.add_space(6.0);
-
-        if ui
-            .button("Clear command history now")
-            .on_hover_text("Erase (zeroize) every recorded command immediately.")
-            .clicked()
-        {
-            *clear_history = true;
-        }
-
-        ui.add_space(6.0);
-
-        // Delete eframe's persisted `app.ron` (window/UI state). Even though
-        // C0PL4ND no longer persists egui Memory (privacy F1 —
-        // `C0pl4ndApp::persist_egui_memory` returns false), a file written by an
-        // OLDER build may still hold typed find/palette undo history, so give the
-        // user an explicit one-click erase. Window geometry is unaffected: it
-        // lives in the config TOML + eframe's native window state, not app.ron.
-        let status_id = egui::Id::new("c0pl4nd_clear_ui_state_status");
-        if ui
-            .button("Clear saved window/UI state")
-            .on_hover_text(
-                "Delete the on-disk app.ron that older builds used to persist \
-                 window/UI state (and, in those builds, typed find/palette undo \
-                 history). Your window size/position are kept (stored separately).",
-            )
-            .clicked()
-        {
-            let msg = clear_saved_ui_state();
-            ui.ctx().data_mut(|d| d.insert_temp(status_id, msg));
-        }
-        if let Some(msg) = ui.ctx().data(|d| d.get_temp::<String>(status_id)) {
-            ui.add(egui::Label::new(egui::RichText::new(msg).weak().small()).wrap());
-        }
+        grid("privacy_reporting").show(ui, |ui| {
+            // Equal-weight 3-way selectors (Off / Ask each time / Always) — no
+            // pre-ticked default-on path; the Off radio is first + selected by
+            // default. Mirrors the proven consent shape.
+            if row_visible(q, "crash reports") {
+                ui.label("Crash reports");
+                changed |= reporting_mode_selector(
+                    ui,
+                    "crash_reports_mode",
+                    &mut config.reporting.streams.crash_reports,
+                );
+                ui.label(""); // selector carries its own state — no ↺ column
+                ui.end_row();
+            }
+            if row_visible(q, "manual issue reports") {
+                ui.label("Manual issues");
+                changed |= reporting_mode_selector(
+                    ui,
+                    "manual_issues_mode",
+                    &mut config.reporting.streams.manual_issues,
+                );
+                ui.label("");
+                ui.end_row();
+            }
+        });
 
         group_gap(ui);
     }
