@@ -36,7 +36,6 @@ mod config_load;
 pub(crate) use config_load::*;
 mod window_effects;
 pub(crate) use window_effects::*;
-mod caption_strip;
 mod font_setup;
 pub(crate) use font_setup::*;
 mod app_config;
@@ -447,21 +446,14 @@ impl C0pl4ndApp {
         if app.config.effective_translucent() {
             apply_window_effect(cc, app.config.window_mode, &app.config.tint);
         }
-        // Prime the caption-strip with the REAL window handle (the same one
-        // `apply_window_effect` applies the backdrop to) so `ensure_caption_stripped`
-        // — run each frame in `ui` — can clear the residual native min/max/close
-        // that winit leaves on the undecorated window and DWM composites through the
-        // translucent surface as a doubled set (see `caption_strip`). Unconditional:
-        // stripping is correct in opaque mode too (harmless — the styles are unused).
-        #[cfg(windows)]
-        {
-            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            if let Ok(handle) = cc.window_handle() {
-                if let RawWindowHandle::Win32(w) = handle.as_raw() {
-                    caption_strip::set_main_hwnd(w.hwnd.get());
-                }
-            }
-        }
+        // The residual native min/max caption buttons winit leaves on the
+        // undecorated window (winit #2754) — which DWM composites through a
+        // translucent backdrop as a doubled set — are suppressed at WINDOW
+        // CREATION via `ViewportBuilder::with_minimize_button(false)` /
+        // `with_maximize_button(false)` in `egui_main.rs`. That is the DWM-safe
+        // fix: no runtime style manipulation, so winit's frameless composition is
+        // never disturbed. WS_SYSMENU is left intact (Alt+F4 / taskbar Close keep
+        // working) and our own titlebar draws the controls the user clicks.
         // Apply Visuals DERIVED FROM the loaded terminal theme so the whole
         // chrome follows the active theme from the first frame (a light theme →
         // light UI, a dark theme → dark UI). Done after `bootstrap()` so
@@ -3069,12 +3061,6 @@ impl eframe::App for C0pl4ndApp {
     /// headless tests can drive it without an `eframe::Frame`.
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        // Clear the residual native caption buttons winit leaves on the frameless
-        // window every frame (self-heals if winit re-asserts them on resize/restore;
-        // near-zero cost when already stripped). This is what removes the doubled
-        // min/max/close DWM composites over our custom titlebar once the window is
-        // translucent (see `caption_strip`). No-op on non-Windows and before priming.
-        caption_strip::ensure_caption_stripped();
         // Atlas-warmup GPU fence: while the warmup gate is open, BLOCK until every
         // previously-submitted GPU op — crucially the prior frame's font-atlas
         // texture upload — is complete before this frame samples the atlas. This

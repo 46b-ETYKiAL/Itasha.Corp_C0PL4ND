@@ -68,10 +68,11 @@ page.
   translucent, tinted background as the panes — and each pane's border folds in
   the window opacity, so a focused pane still reads clearly while the seams blend
   into the see-through window.
-- **No more doubled window buttons (Windows).** With transparency on, the OS drew
-  its own min/max/close over the app's custom ones — a second, offset set. The
-  residual native caption-button window styles are now cleared, so only the app's
-  own controls show, in every mode.
+- **No more doubled window buttons (Windows).** With a translucent backdrop on,
+  the OS drew its own native minimize/maximize over the app's custom ones — a
+  second, offset set. The window is now created without those native button
+  styles, so only the app's own controls show. (Alt+F4 and the taskbar Close menu
+  are unaffected.)
 
 ### Changed — settings layout
 

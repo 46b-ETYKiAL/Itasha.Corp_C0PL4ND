@@ -118,7 +118,21 @@ fn main() -> eframe::Result<()> {
         .with_app_id("com.itashacorp.c0pl4nd")
         .with_title("C0PL4ND")
         .with_decorations(false) // frameless — we draw our own titlebar
-        .with_transparent(true); // required for rounded corners + acrylic blur
+        .with_transparent(true) // required for rounded corners + acrylic blur
+        // Suppress the native min/max caption buttons at CREATION. winit leaves
+        // WS_MINIMIZEBOX | WS_MAXIMIZEBOX set on an undecorated window (winit
+        // #2754), and Win11 DWM draws native min/max caption buttons from those
+        // style bits — which, once a translucent backdrop (mica/acrylic) is
+        // applied, composite THROUGH as a second, offset set over our own custom
+        // titlebar (the reported "doubled caption buttons"). Clearing the bits at
+        // creation stops winit from ever setting them, so DWM draws no native
+        // min/max buttons — with ZERO runtime style manipulation (a runtime
+        // SetWindowLongPtr/SWP_FRAMECHANGED fights winit's frameless composition
+        // and repaints a stray native frame). WS_SYSMENU is left intact, so
+        // Alt+F4, the taskbar right-click Close, and the window system menu all
+        // keep working; our own titlebar draws the min/max/close the user clicks.
+        .with_minimize_button(false)
+        .with_maximize_button(false);
                                  // Runtime window + taskbar icon (the sigil). The exe's embedded icon
                                  // resource (build.rs) covers the Start-menu shortcut / Explorer /
                                  // Add-Remove-Programs; this covers the live window. Best-effort — a decode
