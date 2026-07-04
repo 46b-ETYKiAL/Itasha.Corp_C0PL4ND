@@ -80,12 +80,6 @@ page.
   used to snap the window to nearly the full monitor size (so you had to shrink it
   by hand to move it); it now restores to your last un-maximized size — or a sane
   default on first use — and re-centers on the monitor.
-- **The main window can be resized from its edges again.** Because the app draws
-  its own frameless titlebar, edge-resize is synthesized in-app — but the guard
-  that let a button at the very edge still get its click was too aggressive and
-  blocked resizing across the whole window (grabbing an edge did nothing or just
-  moved the window). Edge and corner drags now start a resize as expected; the
-  window size is persisted across launches.
 
 ### Changed — settings layout
 
