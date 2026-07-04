@@ -953,7 +953,7 @@ fn render_sections(
                         );
                         changed |= ui
                             .add(
-                                egui::Slider::new(&mut config.opacity, 0.15..=1.0)
+                                egui::Slider::new(&mut config.opacity, 0.0..=1.0)
                                     .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
                                     .custom_parser(|s| {
                                         s.trim_end_matches('%')

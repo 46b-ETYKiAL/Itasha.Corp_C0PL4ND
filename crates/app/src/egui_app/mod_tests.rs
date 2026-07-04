@@ -639,13 +639,20 @@ fn clear_color_folds_opacity_into_alpha_for_transparent_mode() {
         "Transparent mode alpha must equal the opacity slider (got {a})"
     );
 
-    // The 0.05 floor (down from the old 0.30 dead band — #27) is honoured
-    // even if a lower opacity slips through, so the slider's travel is live.
+    // The floor is now 0.0, so a very low opacity passes straight through (the
+    // background can go fully transparent; the terminal text keeps its own alpha).
     cfg.opacity = 0.01;
     let [_, _, _, a2] = window_clear_color(&cfg, &app.theme);
     assert!(
-        (a2 - TRANSLUCENT_ALPHA_FLOOR).abs() < 1e-6,
-        "alpha is clamped to the 0.05 floor"
+        (a2 - 0.01).abs() < 1e-6,
+        "a low opacity passes through unclamped (floor is 0.0), got {a2}"
+    );
+    // Opacity 0 = a fully transparent background (maximum transparency).
+    cfg.opacity = 0.0;
+    let [_, _, _, a3] = window_clear_color(&cfg, &app.theme);
+    assert!(
+        (a3 - TRANSLUCENT_ALPHA_FLOOR).abs() < 1e-6 && a3 == 0.0,
+        "opacity 0 clears fully transparent, got {a3}"
     );
 }
 

@@ -1083,6 +1083,12 @@ impl C0pl4ndApp {
             .get(&pane_id)
             .map(PaneTerm::background_rgb)
             .unwrap_or((18, 18, 18));
+        // The pane background is NOT tinted here — the tinted `central_fill` behind
+        // it shows through the (translucent) pane fill, so the tint reaches the pane
+        // in exactly ONE pass, identical to the gaps between panes and the chrome
+        // panels. Tinting the pane fill too would DOUBLE the wash on panes and make
+        // them redder than the dividers/top bar (the reported mismatch). The glyph
+        // text is drawn with its own colour below, so it is never tinted.
         painter.rect_filled(
             rect,
             egui::CornerRadius::same(4),
@@ -3884,6 +3890,27 @@ impl C0pl4ndApp {
         // light, a dark one dark). The wordmark keeps its fixed brand accent.
         let colors = theme::ChromeColors::from_theme(&self.theme);
 
+        // Chrome panel fill (titlebar + status bar): fold in the SAME opacity alpha
+        // the panes + central fill use when the window is effectively translucent,
+        // so the WHOLE app window is see-through — top bar + status bar included —
+        // not just the pane backgrounds (an opaque `colors.panel` here left the top
+        // bar solid over an otherwise-transparent window). Fully opaque otherwise.
+        // The SETTINGS window deliberately keeps its own opaque `colors.panel` fill
+        // so it stays solid + readable regardless of window transparency.
+        let panel_alpha = pane_bg_alpha(&self.config);
+        let panel_fill = egui::Color32::from_rgba_unmultiplied(
+            colors.panel.r(),
+            colors.panel.g(),
+            colors.panel.b(),
+            panel_alpha,
+        );
+        // The window tint is a single wash painted on the BACKGROUND layer HERE —
+        // before any panel — so it sits behind every translucent background fill
+        // (panes, gaps, titlebar, status) and shows through them UNIFORMLY at any
+        // opacity, while the glyph text + the Settings window (painted later /
+        // higher) are never tinted. See `paint_background_tint`.
+        window_effects::paint_background_tint(ctx, &self.config);
+
         // 1) custom titlebar + tab strip. Fixed height so the drag region below
         //    is exactly the bar (not the whole remaining column), and so the
         //    caption-cluster geometry is stable. In fullscreen (#36) the titlebar
@@ -3896,7 +3923,7 @@ impl C0pl4ndApp {
         } else {
             egui::TopBottomPanel::top("titlebar")
                 .exact_height(40.0)
-                .frame(egui::Frame::new().fill(colors.panel).inner_margin(6.0))
+                .frame(egui::Frame::new().fill(panel_fill).inner_margin(6.0))
                 .show(ctx, |ui| {
                     // Frameless-window move: dragging any EMPTY part of the
                     // titlebar moves the window; double-click toggles maximize.
@@ -3916,7 +3943,11 @@ impl C0pl4ndApp {
                         ui.ctx()
                             .send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
                     }
-                    self.titlebar_and_tabs(ui, colors)
+                    let actions = self.titlebar_and_tabs(ui, colors);
+                    // Tint the top bar (incl. its buttons) to match the window wash
+                    // — chrome buttons DO carry the tint (unlike terminal text).
+                    window_effects::paint_tint_over(ui, &self.config);
+                    actions
                 })
                 .inner
         };
@@ -3926,8 +3957,11 @@ impl C0pl4ndApp {
         //    the terminal grid).
         if !self.fullscreen && self.config.show_status_bar {
             egui::TopBottomPanel::bottom("status")
-                .frame(egui::Frame::new().fill(colors.panel).inner_margin(4.0))
-                .show(ctx, |ui| self.status_bar(ui, colors));
+                .frame(egui::Frame::new().fill(panel_fill).inner_margin(4.0))
+                .show(ctx, |ui| {
+                    self.status_bar(ui, colors);
+                    window_effects::paint_tint_over(ui, &self.config);
+                });
         }
 
         // 2b) command-history quick-run sidebar (#21), if open. Rendered as a
@@ -4089,13 +4123,12 @@ impl C0pl4ndApp {
         self.render_crash_consent(ctx);
         self.render_report_issue(ctx);
 
-        // 6) window color-tint overlay (a subtle full-window wash). Only painted
-        //    when the window is effectively translucent AND the user dialled in
-        //    a tint strength — mirrors SCR1B3. A solid (opaque) window never
-        //    gets washed; the gate keeps the default experience untouched.
-        if self.config.effective_translucent() && self.config.tint_strength > 0.0 {
-            paint_tint_overlay(ctx, &self.config.tint, self.config.tint_strength);
-        }
+        // Window color-tint: NO LONGER a full-window overlay (which washed the
+        // text + the settings window). It is now blended into the BACKGROUND fills
+        // only — pane backgrounds (`bg_tint` in `render_pane_body`), the titlebar /
+        // status `panel_fill`, and the `central_fill` above — so the wash colours
+        // the app background without discolouring terminal text or the opaque
+        // settings window. See `window_effects::background_tint` / `apply_tint`.
 
         // Live terminals: schedule the IDLE repaint fallback — but ONLY in the
         // real window (`live_window`). PTY output now wakes the UI instantly via

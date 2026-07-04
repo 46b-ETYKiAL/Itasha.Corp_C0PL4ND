@@ -5,11 +5,13 @@
 //! from the `egui_app` god-module. The colour math is pure (`&Config`/`&Theme`) and
 //! unit-testable. Re-exported via `pub(crate) use window_effects::*`.
 
-/// The minimum translucent panel alpha (fraction). Below this the grid text
-/// would be unreadable; matches SCR1B3's `0.05` slider floor so the full
-/// opacity-slider travel is live (the old `0.30` floor was a dead band that
-/// made low opacities "just dim" instead of going see-through — issue #27).
-pub(crate) const TRANSLUCENT_ALPHA_FLOOR: f32 = 0.05;
+/// The minimum translucent BACKGROUND alpha (fraction). `0.0` = the pane/window
+/// background can go FULLY transparent (only the terminal text — drawn at its own
+/// full alpha — and the desktop remain), which is what "maximum transparency"
+/// means. There is no readability floor because the grid TEXT alpha is independent
+/// of this background alpha, so a near-zero background never hides the text; the
+/// user drives the whole range with the opacity slider.
+pub(crate) const TRANSLUCENT_ALPHA_FLOOR: f32 = 0.0;
 
 /// The alpha (0..=255) to paint the pane grid background (and the central panel
 /// fill) with, for the current config:
@@ -17,8 +19,9 @@ pub(crate) const TRANSLUCENT_ALPHA_FLOOR: f32 = 0.05;
 /// * **Opaque** (master toggle off, or `Opaque` mode): `255` — a solid fill so
 ///   the desktop never bleeds through. The unchanged, safe default.
 /// * **Translucent** (`effective_translucent()`): the `opacity` slider folded
-///   into a 0..=255 alpha (floored at [`TRANSLUCENT_ALPHA_FLOOR`] so the grid
-///   never fully vanishes). The opacity slider drives the fill alpha across its
+///   into a 0..=255 alpha (floored at [`TRANSLUCENT_ALPHA_FLOOR`], now `0.0`, so
+///   the background can go fully transparent — text stays, drawn at its own
+///   alpha). The opacity slider drives the fill alpha across its
 ///   FULL range in every translucent mode — Glass/Mica/Vibrancy are
 ///   distinguished by their DWM backdrop EFFECT (acrylic / mica / plain, applied
 ///   separately via `window-vibrancy`), NOT by capping the alpha. A prior
@@ -69,9 +72,10 @@ pub(crate) fn window_clear_color(
         c0pl4nd_core::config::WindowMode::Glass
         | c0pl4nd_core::config::WindowMode::Mica
         | c0pl4nd_core::config::WindowMode::Vibrancy => [0.0, 0.0, 0.0, 0.0],
-        // Portable see-through: theme background, alpha = opacity slider. Floored
-        // at the shared TRANSLUCENT_ALPHA_FLOOR (0.05) so the slider's full travel
-        // is live (the old 0.30 floor was a dead band — #27).
+        // Portable see-through: theme background, alpha = opacity slider directly.
+        // The floor is now 0.0 (TRANSLUCENT_ALPHA_FLOOR), so the slider reaches a
+        // FULLY transparent background at its low end — the terminal text (its own
+        // alpha) stays visible over the desktop.
         c0pl4nd_core::config::WindowMode::Transparent => {
             let (r, g, b) =
                 c0pl4nd_core::theme::parse_hex(&theme.background).unwrap_or((0x12, 0x12, 0x12));
@@ -83,26 +87,55 @@ pub(crate) fn window_clear_color(
     }
 }
 
-/// Paint a full-window translucent tint overlay (a subtle color wash) on a
-/// foreground layer — portable across every translucent mode and OS, mirroring
-/// SCR1B3's `paint_tint_overlay`. A no-op when `strength <= 0` or the tint is
-/// not a valid `#RRGGBB`.
-pub(crate) fn paint_tint_overlay(ctx: &egui::Context, tint_hex: &str, strength: f32) {
-    if strength <= 0.0 {
+/// The 0..=255 alpha for a given tint `strength` (0..=1). Scaled so the slider's
+/// top end is a clearly-visible wash without fully hiding the background. Pure, so
+/// the mapping is unit-testable.
+pub(crate) fn tint_alpha(strength: f32) -> u8 {
+    (strength.clamp(0.0, 1.0) * 120.0).round() as u8
+}
+
+/// Paint the window tint as a single colour wash on the BACKGROUND layer, EARLY —
+/// call this BEFORE any panel is shown. Because it is the first thing drawn on the
+/// background layer, it sits BEHIND every translucent background fill (pane
+/// backgrounds, the gaps between panes, the titlebar + status panels): at a low
+/// opacity those fills let the wash show through UNIFORMLY across the whole window,
+/// so panes, dividers, and the chrome/buttons are all tinted the same. Crucially it
+/// is BEHIND the glyph text (drawn later on the same layer) and BELOW the Settings
+/// window (a higher-order area), so neither the terminal text nor the settings UI
+/// is ever tinted — the reported "tint colours the text / the buttons aren't
+/// tinted" issues. A no-op when `tint_strength <= 0` or the hex is invalid.
+pub(crate) fn paint_background_tint(ctx: &egui::Context, config: &c0pl4nd_core::Config) {
+    if config.tint_strength <= 0.0 {
         return;
     }
-    let Ok((r, g, b)) = c0pl4nd_core::theme::parse_hex(tint_hex) else {
+    let Ok((r, g, b)) = c0pl4nd_core::theme::parse_hex(&config.tint) else {
         return;
     };
-    let a = (strength.clamp(0.0, 1.0) * 90.0).round() as u8;
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("c0pl4nd-tint-overlay"),
-    ));
+    let painter = ctx.layer_painter(egui::LayerId::background());
     painter.rect_filled(
         ctx.content_rect(),
         0.0,
-        egui::Color32::from_rgba_unmultiplied(r, g, b, a),
+        egui::Color32::from_rgba_unmultiplied(r, g, b, tint_alpha(config.tint_strength)),
+    );
+}
+
+/// Paint the tint wash OVER a chrome panel's content (`ui.max_rect()`) — used for
+/// the titlebar + status bar. Unlike the terminal grid (whose TEXT must stay
+/// untinted, so the wash is painted BEHIND it via [`paint_background_tint`]), the
+/// chrome's buttons/labels SHOULD carry the wash, so here it is painted on top at
+/// the same `tint_alpha`. This gives the top bar + status bar the same tint the
+/// panes get behind the background layer. A no-op when tint is off / hex invalid.
+pub(crate) fn paint_tint_over(ui: &egui::Ui, config: &c0pl4nd_core::Config) {
+    if config.tint_strength <= 0.0 {
+        return;
+    }
+    let Ok((r, g, b)) = c0pl4nd_core::theme::parse_hex(&config.tint) else {
+        return;
+    };
+    ui.painter().rect_filled(
+        ui.max_rect(),
+        0.0,
+        egui::Color32::from_rgba_unmultiplied(r, g, b, tint_alpha(config.tint_strength)),
     );
 }
 
@@ -189,5 +222,22 @@ pub(crate) fn apply_window_effect(
         // native blur). Opaque: no effect at all.
         c0pl4nd_core::config::WindowMode::Transparent
         | c0pl4nd_core::config::WindowMode::Opaque => {}
+    }
+}
+
+#[cfg(test)]
+mod tint_tests {
+    use super::tint_alpha;
+
+    #[test]
+    fn tint_alpha_scales_and_clamps() {
+        // Off / clamped low.
+        assert_eq!(tint_alpha(0.0), 0);
+        assert_eq!(tint_alpha(-1.0), 0);
+        // Full strength = a clearly-visible (but not opaque) wash.
+        assert_eq!(tint_alpha(1.0), 120);
+        assert_eq!(tint_alpha(2.0), 120, "clamped above 1.0");
+        // Mid strength scales linearly.
+        assert_eq!(tint_alpha(0.5), 60);
     }
 }
