@@ -814,6 +814,25 @@ fn render_sections(
             .min_col_width(140.0) // SCR1B3-parity column floor
     };
 
+    // Sub-group header WITHIN a section: a strong label, a muted one-line
+    // description, and a divider rule — the SCR1B3 settings idiom that breaks a
+    // long section into scannable, clearly-titled blocks with visible dividers
+    // (the "divider lines, clear headings, descriptions" the user asked for).
+    // Skipped while a search query is active: search flattens to the matching
+    // rows, so decorative sub-headers (which don't themselves match) would just
+    // leave empty titled blocks.
+    let group = |ui: &mut egui::Ui, label: &str, desc: &str| {
+        if !q.is_empty() {
+            return;
+        }
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new(label).strong());
+        if !desc.is_empty() {
+            ui.label(egui::RichText::new(desc).weak().small());
+        }
+        ui.separator();
+    };
+
     // ---------------------------------------------------------------- Appearance
     if section_visible(
         sel,
@@ -839,7 +858,8 @@ fn render_sections(
     ) {
         ui.heading("Appearance");
         help(ui, "Colors, transparency, and CRT post-effects.");
-        grid("appearance_grid").show(ui, |ui| {
+        group(ui, "Theme", "The terminal colour palette.");
+        grid("appearance_theme").show(ui, |ui| {
             if row_visible(q, "theme color") {
                 ui.label("Theme")
                     .on_hover_text("Terminal color theme — a file stem under the themes dir.");
@@ -872,7 +892,15 @@ fn render_sections(
                 ui.label(""); // no ↺ on the alias field (it edits the same `theme`)
                 ui.end_row();
             }
+        });
 
+        group(
+            ui,
+            "Transparency & tint",
+            "Make the window see-through, choose the OS blur backend, and wash it \
+             with a colour.",
+        );
+        grid("appearance_transparency").show(ui, |ui| {
             // ---- Transparency / glass (SCR1B3-parity model) ----
             // Master on/off switch for the whole transparency system. Off by
             // default: a solid window is fast and never leaves a DWM ghost on
@@ -883,7 +911,7 @@ fn render_sections(
                 ui.label("Transparency")
                     .on_hover_text("Master switch for the whole transparency system.");
                 changed |= ui
-                    .toggle_value(
+                    .checkbox(
                         &mut config.transparency_enabled,
                         "Enable window transparency",
                     )
@@ -1014,7 +1042,14 @@ fn render_sections(
                 });
                 ui.end_row();
             }
+        });
 
+        group(
+            ui,
+            "Interface scale",
+            "Accessibility zoom for the whole interface, saved across launches.",
+        );
+        grid("appearance_scale").show(ui, |ui| {
             // ---- UI scale (F2-3): persisted accessibility zoom for the UI ----
             // Placed AFTER opacity + tint so the existing slider-order assertions
             // in egui_settings.rs (opacity = slider 0, tint = slider 1) hold.
@@ -1034,11 +1069,18 @@ fn render_sections(
                 changed |= reset_to_default(ui, &mut config.ui_scale, &def.ui_scale);
                 ui.end_row();
             }
+        });
 
+        group(
+            ui,
+            "CRT effects",
+            "Retro post-processing drawn behind the terminal text.",
+        );
+        grid("appearance_effects").show(ui, |ui| {
             if row_visible(q, "crt scanlines") {
                 ui.label("CRT scanlines");
                 changed |= ui
-                    .toggle_value(&mut config.effects.crt_scanlines, "Animated scan lines")
+                    .checkbox(&mut config.effects.crt_scanlines, "Animated scan lines")
                     .on_hover_text(
                         "Dark scan-line bands with a rolling refresh sweep. \
                          Auto-disabled under reduced-motion / battery-save.",
@@ -1193,7 +1235,7 @@ fn render_sections(
                 // be formed. Shown greyed with an honest tooltip rather than as a
                 // dead toggle that silently does nothing.
                 ui.add_enabled_ui(false, |ui| {
-                    ui.toggle_value(&mut config.ligatures, "Programming ligatures (->, !=)")
+                    ui.checkbox(&mut config.ligatures, "Programming ligatures (->, !=)")
                         .on_hover_text(
                             "Not available: the GPU text renderer draws strict \
                              monospace cells and does not do glyph shaping.",
@@ -1283,7 +1325,7 @@ fn render_sections(
             if row_visible(q, "blink") {
                 ui.label("Blink");
                 changed |= ui
-                    .toggle_value(&mut config.cursor.blink, "Blink the cursor")
+                    .checkbox(&mut config.cursor.blink, "Blink the cursor")
                     .changed();
                 changed |= reset_to_default(ui, &mut config.cursor.blink, &def.cursor.blink);
                 ui.end_row();
@@ -1307,7 +1349,12 @@ fn render_sections(
     ) {
         ui.heading("Terminal");
         help(ui, "Scrollback, shell, and clipboard behavior.");
-        grid("terminal_grid").show(ui, |ui| {
+        group(
+            ui,
+            "Shell & scrollback",
+            "Which shell launches and how much history each pane keeps.",
+        );
+        grid("terminal_shell").show(ui, |ui| {
             if row_visible(q, "scrollback lines history") {
                 ui.label("Scrollback").on_hover_text(
                     "History lines kept per pane. Applies on restart — a pane's \
@@ -1333,7 +1380,7 @@ fn render_sections(
                 // with an honest tooltip rather than a dead toggle that silently
                 // does nothing — matching the ligatures / copy-on-select rows.
                 ui.add_enabled_ui(false, |ui| {
-                    ui.toggle_value(&mut config.startup_panel, "Show logo + system info")
+                    ui.checkbox(&mut config.startup_panel, "Show logo + system info")
                         .on_hover_text(
                             "Not available: the launch splash is not drawn in this shell yet.",
                         );
@@ -1363,7 +1410,10 @@ fn render_sections(
                 changed |= reset_to_default(ui, &mut config.shell, &def.shell);
                 ui.end_row();
             }
+        });
 
+        group(ui, "Clipboard", "Copy-on-select and paste safety.");
+        grid("terminal_clipboard").show(ui, |ui| {
             if row_visible(q, "copy on select clipboard") {
                 ui.label("Copy on select");
                 // Live again: mouse text-selection now exists in the egui shell
@@ -1371,7 +1421,7 @@ fn render_sections(
                 // selection is still made (and Ctrl/Cmd+Shift+C copies on demand);
                 // when ON the selection is copied to the clipboard on release.
                 changed |= ui
-                    .toggle_value(&mut config.copy_on_select, "X11-style auto-copy")
+                    .checkbox(&mut config.copy_on_select, "X11-style auto-copy")
                     .on_hover_text(
                         "Copy a mouse selection to the clipboard automatically when \
                          the drag is released.",
@@ -1384,7 +1434,7 @@ fn render_sections(
             if row_visible(q, "paste warn multiline newline security") {
                 ui.label("Multi-line paste");
                 changed |= ui
-                    .toggle_value(
+                    .checkbox(
                         &mut config.paste_warn_multiline,
                         "Warn before multi-line paste",
                     )
@@ -1427,7 +1477,12 @@ fn render_sections(
             "Inner padding and the initial grid size. Live size/position is \
              remembered automatically.",
         );
-        grid("window_grid").show(ui, |ui| {
+        group(
+            ui,
+            "Layout",
+            "Padding, split-pane dividers, and the status bar.",
+        );
+        grid("window_layout").show(ui, |ui| {
             if row_visible(q, "padding inner margin") {
                 ui.label("Padding")
                     .on_hover_text("Inner inset between the pane edge and the terminal grid.");
@@ -1446,7 +1501,7 @@ fn render_sections(
             if row_visible(q, "panes dividers linked symmetrical equal split") {
                 ui.label("Linked dividers");
                 changed |= ui
-                    .toggle_value(&mut config.link_pane_dividers, "Keep panes equal")
+                    .checkbox(&mut config.link_pane_dividers, "Keep panes equal")
                     .on_hover_text(
                         "Hold split-pane dividers at equal positions so every pane \
                          stays the same size. The top-bar symmetrical button equalises \
@@ -1461,7 +1516,7 @@ fn render_sections(
             if row_visible(q, "status bar bottom hide show") {
                 ui.label("Status bar");
                 changed |= ui
-                    .toggle_value(&mut config.show_status_bar, "Show bottom status bar")
+                    .checkbox(&mut config.show_status_bar, "Show bottom status bar")
                     .on_hover_text(
                         "The bottom bar (pane count + hints). Turn off to reclaim the \
                          row for the terminal grid.",
@@ -1470,7 +1525,14 @@ fn render_sections(
                 changed |= reset_to_default(ui, &mut config.show_status_bar, &def.show_status_bar);
                 ui.end_row();
             }
+        });
 
+        group(
+            ui,
+            "Graphics",
+            "GPU backend and adapter — change only if glyphs render garbled.",
+        );
+        grid("window_graphics").show(ui, |ui| {
             if row_visible(q, "graphics backend gpu renderer dx12 vulkan gl") {
                 ui.label("Graphics backend");
                 let backends = [
@@ -1540,7 +1602,15 @@ fn render_sections(
                 changed |= reset_to_default(ui, &mut config.graphics_gpu, &def.graphics_gpu);
                 ui.end_row();
             }
+        });
 
+        group(
+            ui,
+            "Initial grid size",
+            "Legacy columns/rows — this shell sizes the window in pixels and \
+             remembers it, so these are inactive.",
+        );
+        grid("window_initial_size").show(ui, |ui| {
             // Initial terminal grid width at launch. The live window size is
             // remembered separately (geometry persistence), so this is the
             // first-launch / no-saved-geometry size; it takes effect on restart.
@@ -1917,7 +1987,7 @@ fn render_sections(
         ui.add_space(6.0);
 
         changed |= ui
-            .toggle_value(
+            .checkbox(
                 &mut config.history_capture_enabled,
                 "Record command history",
             )
@@ -1974,7 +2044,7 @@ fn render_sections(
         // it and report a toggle back via `set_incognito`.
         let mut inc = incognito;
         if ui
-            .toggle_value(&mut inc, "Incognito session (no history)")
+            .checkbox(&mut inc, "Incognito session (no history)")
             .on_hover_text(
                 "Stop recording command history for THIS session and clear what is \
                  already recorded. Resets to off on the next launch.",
