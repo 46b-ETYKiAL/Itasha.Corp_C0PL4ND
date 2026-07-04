@@ -4559,17 +4559,20 @@ fn handle_frameless_resize(ctx: &egui::Context) {
         D::SouthWest => C::ResizeSouthWest,
         D::SouthEast => C::ResizeSouthEast,
     });
-    // Start the OS resize on a primary press over an edge band, UNLESS egui is
-    // ALREADY actively dragging something (a slider, an in-progress text
-    // selection, a window). We gate on `is_using_pointer()` (an ACTIVE drag), NOT
-    // `egui_wants_pointer_input()` (mere hover): the terminal grid, the titlebar
-    // drag surface, and the status bar all sense drag, so they set
-    // `wants_pointer_input` true on HOVER — which covered the ENTIRE window and
-    // blocked edge-resize everywhere (grabbing an edge just moved the window or did
-    // nothing — the reported "main window cannot be resized"). The 8px edge / 12px
-    // corner bands are too thin to overlap a real caption button or tab target, so
-    // yielding only to an active drag is the correct, industry-standard balance.
-    if ctx.input(|i| i.pointer.primary_pressed()) && !ctx.egui_is_using_pointer() {
+    // Start the OS resize only if egui isn't consuming the press for a widget
+    // (so a button / tab sitting at the very edge still gets its click).
+    // `egui_wants_pointer_input` is the non-deprecated rename of
+    // `wants_pointer_input` in egui 0.34.
+    //
+    // NOTE: this guard is intentionally STRICT. An earlier attempt relaxed it to
+    // `!egui_is_using_pointer()` (fire on any edge press not mid-drag) to make
+    // edge-resize work over the grid — but that fired `BeginResize` spuriously on
+    // ordinary clicks near an edge, entering winit's OS MODAL resize loop, which
+    // pauses the render thread (leaving a half-uploaded font atlas = garbled,
+    // frozen frame) and hangs the window. A safer edge-resize fix must NOT widen
+    // this trigger; the correct approach is a dedicated, non-interactive edge
+    // margin the grid does not cover, so this guard can stay strict.
+    if ctx.input(|i| i.pointer.primary_pressed()) && !ctx.egui_wants_pointer_input() {
         ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
         // The OS now owns the drag. winit's modal resize loop swallows the
         // button-up, so egui can be left believing a drag is still in progress —
