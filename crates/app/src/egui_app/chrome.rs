@@ -326,14 +326,22 @@ impl C0pl4ndApp {
             let bh = 28.0_f32;
             let cy = row.center().y;
             let right_edge = screen.right() - 8.0; // window edge minus panel inset
+            // Maximize button follows the Windows convention: a single square when
+            // the window is restored (click → maximize), and a "restore" glyph (two
+            // overlapping squares) when the window is maximized (click → restore
+            // down). Without this the button showed a static square in both states,
+            // giving no visual cue of the current window state. The maximized state
+            // is read from the live viewport (the same source the titlebar
+            // double-click-to-toggle uses).
+            let is_maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+            let (max_glyph, max_hover) = if is_maximized {
+                (icon::COPY, "restore")
+            } else {
+                (icon::SQUARE, "maximize")
+            };
             let specs: [(&str, &str, super::WindowCmd, bool); 4] = [
                 (icon::X, "close", super::WindowCmd::Close, false),
-                (
-                    icon::SQUARE,
-                    "maximize",
-                    super::WindowCmd::ToggleMaximize,
-                    false,
-                ),
+                (max_glyph, max_hover, super::WindowCmd::ToggleMaximize, false),
                 (icon::MINUS, "minimize", super::WindowCmd::Minimize, false),
                 (icon::GEAR, "settings", super::WindowCmd::Close, true), // gear → settings
             ];
