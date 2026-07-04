@@ -366,6 +366,33 @@ impl egui_tiles::Behavior<Pane> for GridBehavior<'_> {
         4.0
     }
 
+    /// The seam between panes is NEGATIVE SPACE, not a painted line.
+    ///
+    /// egui_tiles' default idle `resize_stroke` fills the whole `gap_width` with
+    /// `tab_bar_color` = `visuals.extreme_bg_color` (the OPAQUE theme background),
+    /// so the divider read as a hard dark bar that stayed solid no matter the
+    /// window opacity/tint — the reported "dividers seem unaffected by tint or
+    /// transparency" bug. Returning `Stroke::NONE` for the idle state paints
+    /// NOTHING in the gap, so the translucent central-fill / desktop tint shows
+    /// straight through it, exactly like the pane bodies. This is correct by
+    /// construction across opaque, transparent, and tinted modes (the kitty
+    /// `draw_minimal_borders` / i3 "gaps show the surface" model) — the seam can
+    /// never be more opaque than the panes because it is never painted. Pane
+    /// separation is carried by each pane's own translucency-folded bezel border
+    /// (see `render_pane_body`).
+    ///
+    /// Hovering/Dragging keep the default widget stroke: the resize handle is a
+    /// transient INTERACTION affordance that should reappear at full strength
+    /// while the user is actually grabbing it (VS Code's `sash.hoverBorder`
+    /// reveal-on-interaction), so it is deliberately NOT folded down.
+    fn resize_stroke(&self, style: &egui::Style, state: egui_tiles::ResizeState) -> egui::Stroke {
+        match state {
+            egui_tiles::ResizeState::Idle => egui::Stroke::NONE,
+            egui_tiles::ResizeState::Hovering => style.visuals.widgets.hovered.fg_stroke,
+            egui_tiles::ResizeState::Dragging => style.visuals.widgets.active.fg_stroke,
+        }
+    }
+
     fn retain_pane(&mut self, pane: &Pane) -> bool {
         !self.close_requests.contains(&pane.pane_id)
     }

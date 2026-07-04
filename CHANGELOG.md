@@ -57,6 +57,17 @@ page.
 - **Opacity can go fully transparent.** The opacity slider floored at 15%; it now
   runs the whole 0–100% range for a much more see-through background (the text
   stays readable at its own opacity).
+- **Top-bar buttons fit the bar again.** Once the titlebar went translucent, every
+  control kept its own opaque background and read as a floating chip. The chrome
+  buttons are now flat — no idle background, with a subtle fill only on hover or
+  press — the standard for a translucent titlebar (Windows Terminal, VS Code,
+  macOS vibrancy, libadwaita `.flat`), so they sit on the bar instead of over it.
+- **Pane dividers now respect transparency and tint.** The seams between split
+  terminals were painted as opaque bars that stayed solid regardless of the
+  window opacity/tint. The divider is now negative space — the gap shows the same
+  translucent, tinted background as the panes — and each pane's border folds in
+  the window opacity, so a focused pane still reads clearly while the seams blend
+  into the see-through window.
 
 ## [0.4.13] - 2026-06-30
 

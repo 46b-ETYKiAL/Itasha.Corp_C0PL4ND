@@ -155,6 +155,29 @@ pub(crate) fn flatten_chrome_buttons(ui: &mut egui::Ui, dark: bool) {
     widgets.active.bg_fill = veil(32);
 }
 
+/// Fold the window-transparency alpha (`bg_alpha`, 0..=255 — the same value
+/// [`pane_bg_alpha`] paints the pane bodies with) into a chrome stroke colour so
+/// the stroke is exactly as translucent as the panes and never out-paints them.
+///
+/// This is the fix for the pane-divider/border reading as a hard OPAQUE line that
+/// is "unaffected by tint or transparency": the per-pane bezel/focus border was
+/// drawn at full alpha over the translucent framebuffer, so it sat ON TOP of the
+/// see-through window as a solid bar. Multiplying its alpha by the window alpha
+/// makes the border fade into negative space as the window goes see-through
+/// (the kitty/i3 "the seam is the surface" model) and tint uniformly with the
+/// rest of the chrome at partial opacity. `bg_alpha == 255` (opaque window)
+/// returns the colour unchanged, so the opaque path is byte-for-byte untouched.
+///
+/// egui `Color32` is premultiplied, so [`egui::Color32::gamma_multiply`] scales
+/// every premultiplied channel together — the premult-correct way to lower a
+/// colour's effective opacity. Pure, so the fold is unit-testable without a window.
+pub(crate) fn fold_alpha(color: egui::Color32, bg_alpha: u8) -> egui::Color32 {
+    if bg_alpha == 255 {
+        return color;
+    }
+    color.gamma_multiply(f32::from(bg_alpha) / 255.0)
+}
+
 /// Parse a `#RRGGBB` tint to an RGBA quad for native blur tinting.
 ///
 /// Only consumed by Windows' `window_vibrancy::apply_acrylic` (acrylic takes a
@@ -243,7 +266,34 @@ pub(crate) fn apply_window_effect(
 
 #[cfg(test)]
 mod tint_tests {
-    use super::{flatten_chrome_buttons, tint_alpha};
+    use super::{flatten_chrome_buttons, fold_alpha, tint_alpha};
+
+    #[test]
+    fn fold_alpha_passes_opaque_through_and_scales_translucent() {
+        let accent = egui::Color32::from_rgb(0x00, 0xFF, 0x90); // brand green, opaque
+                                                                // Opaque window (bg_alpha 255): the colour is returned UNCHANGED so the
+                                                                // existing opaque divider path is byte-for-byte identical.
+        assert_eq!(
+            fold_alpha(accent, 255),
+            accent,
+            "opaque window must not alter the stroke colour"
+        );
+        // Fully transparent fold collapses the stroke to nothing (negative-space
+        // seam) — the divider cannot out-paint a fully see-through window.
+        assert_eq!(
+            fold_alpha(accent, 0).a(),
+            0,
+            "zero window alpha → invisible seam"
+        );
+        // A partial window opacity yields a partial, non-zero, non-opaque stroke
+        // that tints/fades with the window instead of sitting on top of it.
+        let folded = fold_alpha(accent, 128);
+        assert!(
+            folded.a() > 0 && folded.a() < 255,
+            "half opacity → translucent stroke (got alpha {})",
+            folded.a()
+        );
+    }
 
     #[test]
     fn tint_alpha_scales_and_clamps() {

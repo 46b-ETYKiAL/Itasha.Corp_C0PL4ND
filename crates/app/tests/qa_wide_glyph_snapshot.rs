@@ -226,7 +226,10 @@ fn qa_split_panes() {
 /// fixes must be eyeballed in. `new(cc)` loads the persisted config, then we
 /// override just the transparency fields for the QA render (mirrors the user
 /// dialling Settings → Appearance). `None` when no GPU adapter is present.
-fn build_tinted(opacity: f32, tint_strength: f32) -> Option<Harness<'static, egui_app::C0pl4ndApp>> {
+fn build_tinted(
+    opacity: f32,
+    tint_strength: f32,
+) -> Option<Harness<'static, egui_app::C0pl4ndApp>> {
     use c0pl4nd_core::config::WindowMode;
     if !gpu_available() {
         eprintln!("QA-SNAPSHOT: no GPU adapter on this host; skipping (not a failure).");

@@ -1095,12 +1095,24 @@ impl C0pl4ndApp {
             egui::Color32::from_rgba_unmultiplied(bg.0, bg.1, bg.2, bg_alpha),
         );
         // Focus ring + bezel follow the active theme (accent on focus, bezel
-        // otherwise) so the grid chrome matches the rest of the themed UI.
+        // otherwise) so the grid chrome matches the rest of the themed UI. Both
+        // fold the window-transparency alpha (`bg_alpha`) so the border is as
+        // translucent as the pane it frames — a full-alpha border over a
+        // see-through window read as a hard opaque line "unaffected by tint or
+        // transparency" (the reported divider bug). At an opaque window
+        // (`bg_alpha == 255`) `fold_alpha` returns the colour unchanged.
         let pane_colors = theme::ChromeColors::from_theme(theme);
         let stroke = if focused {
-            egui::Stroke::new(2.0, pane_colors.accent)
+            // Focus is SEMANTIC (which pane has keyboard focus), so floor its
+            // folded alpha: it still tints/fades with the window, but never drops
+            // below a legible strength even at very low opacity.
+            const FOCUS_RING_ALPHA_FLOOR: u8 = 150;
+            let a = bg_alpha.max(FOCUS_RING_ALPHA_FLOOR);
+            egui::Stroke::new(2.0, window_effects::fold_alpha(pane_colors.accent, a))
         } else {
-            egui::Stroke::new(1.0, pane_colors.bezel)
+            // The unfocused bezel is pure definition — let it fully fade into
+            // negative space as the window goes see-through.
+            egui::Stroke::new(1.0, window_effects::fold_alpha(pane_colors.bezel, bg_alpha))
         };
         painter.rect_stroke(
             rect,
