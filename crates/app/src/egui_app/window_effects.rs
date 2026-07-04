@@ -119,24 +119,40 @@ pub(crate) fn paint_background_tint(ctx: &egui::Context, config: &c0pl4nd_core::
     );
 }
 
-/// Paint the tint wash OVER a chrome panel's content (`ui.max_rect()`) — used for
-/// the titlebar + status bar. Unlike the terminal grid (whose TEXT must stay
-/// untinted, so the wash is painted BEHIND it via [`paint_background_tint`]), the
-/// chrome's buttons/labels SHOULD carry the wash, so here it is painted on top at
-/// the same `tint_alpha`. This gives the top bar + status bar the same tint the
-/// panes get behind the background layer. A no-op when tint is off / hex invalid.
-pub(crate) fn paint_tint_over(ui: &egui::Ui, config: &c0pl4nd_core::Config) {
-    if config.tint_strength <= 0.0 {
-        return;
-    }
-    let Ok((r, g, b)) = c0pl4nd_core::theme::parse_hex(&config.tint) else {
-        return;
+/// Style the chrome (titlebar + status bar) buttons as FLAT: no idle background,
+/// with a subtle fill appearing ONLY on hover / press. This is the industry
+/// standard for a translucent titlebar — Windows Terminal (`useAcrylicInTabRow`),
+/// VS Code's titlebar toolbar, macOS vibrancy title-bar controls, and libadwaita
+/// `.flat` header buttons all draw idle icon-buttons with NO background so they
+/// read as part of the bar. A per-button opaque fill (what egui draws by default
+/// from `inactive.weak_bg_fill`) turns every control into a floating chip once the
+/// bar itself goes translucent — the reported "buttons don't fit the top bar" bug.
+///
+/// Scoped to the chrome `ui`: the Settings window + overlays (separate uis) keep
+/// their normal filled buttons. `dark` picks a white hover-veil on dark themes and
+/// a black one on light, so the hover reads over whatever desktop shows through.
+/// Called each frame, so it tracks live opacity/theme changes. The window tint
+/// reaches the bar as a background wash through the translucent panel fill (see
+/// [`paint_background_tint`]) — never as a flat film painted over the buttons.
+pub(crate) fn flatten_chrome_buttons(ui: &mut egui::Ui, dark: bool) {
+    let veil = |a: u8| {
+        if dark {
+            egui::Color32::from_white_alpha(a)
+        } else {
+            egui::Color32::from_black_alpha(a)
+        }
     };
-    ui.painter().rect_filled(
-        ui.max_rect(),
-        0.0,
-        egui::Color32::from_rgba_unmultiplied(r, g, b, tint_alpha(config.tint_strength)),
-    );
+    let widgets = &mut ui.visuals_mut().widgets;
+    // Idle = frameless: no chip, no border. The icon/label sits on the bar itself.
+    widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+    widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+    widgets.inactive.bg_stroke = egui::Stroke::NONE;
+    // A subtle fill appears only under the pointer / while pressed — the sole
+    // affordance, shared across every mode so a button can never revert to a chip.
+    widgets.hovered.weak_bg_fill = veil(20);
+    widgets.hovered.bg_fill = veil(20);
+    widgets.active.weak_bg_fill = veil(32);
+    widgets.active.bg_fill = veil(32);
 }
 
 /// Parse a `#RRGGBB` tint to an RGBA quad for native blur tinting.
@@ -227,7 +243,7 @@ pub(crate) fn apply_window_effect(
 
 #[cfg(test)]
 mod tint_tests {
-    use super::tint_alpha;
+    use super::{flatten_chrome_buttons, tint_alpha};
 
     #[test]
     fn tint_alpha_scales_and_clamps() {
@@ -239,5 +255,47 @@ mod tint_tests {
         assert_eq!(tint_alpha(2.0), 120, "clamped above 1.0");
         // Mid strength scales linearly.
         assert_eq!(tint_alpha(0.5), 60);
+    }
+
+    #[test]
+    fn flatten_chrome_buttons_makes_idle_frameless_and_hover_visible() {
+        // The core contract: after flattening, an idle chrome button paints NO
+        // background (so it can never float as an opaque chip over a translucent
+        // bar), while hover/press DO paint a subtle veil (the sole affordance).
+        egui::__run_test_ui(|ui| {
+            // Precondition: egui's default idle button fill is NOT transparent.
+            assert_ne!(
+                ui.visuals().widgets.inactive.weak_bg_fill,
+                egui::Color32::TRANSPARENT,
+                "precondition: default idle fill is a visible chip"
+            );
+
+            flatten_chrome_buttons(ui, true); // dark theme → white veil
+
+            let w = &ui.visuals().widgets;
+            assert_eq!(
+                w.inactive.weak_bg_fill,
+                egui::Color32::TRANSPARENT,
+                "idle button must be frameless"
+            );
+            assert_eq!(w.inactive.bg_fill, egui::Color32::TRANSPARENT);
+            assert_eq!(w.inactive.bg_stroke, egui::Stroke::NONE);
+            // Hover/active carry a subtle, non-transparent, non-opaque veil.
+            assert_eq!(w.hovered.weak_bg_fill, egui::Color32::from_white_alpha(20));
+            assert_eq!(w.active.weak_bg_fill, egui::Color32::from_white_alpha(32));
+            assert!(w.hovered.weak_bg_fill.a() > 0 && w.hovered.weak_bg_fill.a() < 255);
+        });
+    }
+
+    #[test]
+    fn flatten_chrome_buttons_light_theme_uses_black_veil() {
+        egui::__run_test_ui(|ui| {
+            flatten_chrome_buttons(ui, false); // light theme → black veil
+            assert_eq!(
+                ui.visuals().widgets.hovered.weak_bg_fill,
+                egui::Color32::from_black_alpha(20),
+                "light theme hover must be a black veil so it reads on a light bar"
+            );
+        });
     }
 }

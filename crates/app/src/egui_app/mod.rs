@@ -3889,6 +3889,10 @@ impl C0pl4ndApp {
         // terminal theme through these (a light theme flips the whole chrome
         // light, a dark one dark). The wordmark keeps its fixed brand accent.
         let colors = theme::ChromeColors::from_theme(&self.theme);
+        // Whether the active theme is dark — picks the hover-veil polarity for the
+        // FLAT chrome buttons (white veil on dark, black on light) so the hover
+        // reads over whatever shows through a translucent bar.
+        let dark = !theme::is_light(colors.bg);
 
         // Chrome panel fill (titlebar + status bar): fold in the SAME opacity alpha
         // the panes + central fill use when the window is effectively translucent,
@@ -3943,11 +3947,11 @@ impl C0pl4ndApp {
                         ui.ctx()
                             .send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
                     }
-                    let actions = self.titlebar_and_tabs(ui, colors);
-                    // Tint the top bar (incl. its buttons) to match the window wash
-                    // — chrome buttons DO carry the tint (unlike terminal text).
-                    window_effects::paint_tint_over(ui, &self.config);
-                    actions
+                    // Flat chrome buttons: no idle background, fill only on hover —
+                    // so the controls read as part of the (translucent) bar instead
+                    // of floating opaque chips. Must run BEFORE the buttons draw.
+                    window_effects::flatten_chrome_buttons(ui, dark);
+                    self.titlebar_and_tabs(ui, colors)
                 })
                 .inner
         };
@@ -3959,8 +3963,8 @@ impl C0pl4ndApp {
             egui::TopBottomPanel::bottom("status")
                 .frame(egui::Frame::new().fill(panel_fill).inner_margin(4.0))
                 .show(ctx, |ui| {
+                    window_effects::flatten_chrome_buttons(ui, dark);
                     self.status_bar(ui, colors);
-                    window_effects::paint_tint_over(ui, &self.config);
                 });
         }
 
@@ -4123,12 +4127,14 @@ impl C0pl4ndApp {
         self.render_crash_consent(ctx);
         self.render_report_issue(ctx);
 
-        // Window color-tint: NO LONGER a full-window overlay (which washed the
-        // text + the settings window). It is now blended into the BACKGROUND fills
-        // only — pane backgrounds (`bg_tint` in `render_pane_body`), the titlebar /
-        // status `panel_fill`, and the `central_fill` above — so the wash colours
-        // the app background without discolouring terminal text or the opaque
-        // settings window. See `window_effects::background_tint` / `apply_tint`.
+        // Window color-tint recap: it is a SINGLE background-layer wash
+        // (`paint_background_tint`, painted early above), behind every translucent
+        // panel/pane fill — so it colours the app background uniformly WITHOUT
+        // discolouring the terminal text or the opaque Settings window, and never a
+        // flat film painted over the chrome. The top-bar/status buttons carry it the
+        // same way the panes do: the wash shows through their translucent bar, and
+        // the buttons themselves are FLAT (`flatten_chrome_buttons`), so no opaque
+        // chip floats over the see-through bar.
 
         // Live terminals: schedule the IDLE repaint fallback — but ONLY in the
         // real window (`live_window`). PTY output now wakes the UI instantly via
