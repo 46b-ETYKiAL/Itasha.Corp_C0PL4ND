@@ -796,6 +796,14 @@ pub struct Config {
     pub settings_win_w: Option<f32>,
     #[serde(default)]
     pub settings_win_h: Option<f32>,
+    /// Persisted top-left POSITION of the Settings sub-window, in logical points,
+    /// so a user's move sticks across launches. `None` (default) = no saved
+    /// position yet, so the window opens centered over the app. Clamped to the
+    /// live screen on use so a stale off-screen value can never hide the window.
+    #[serde(default)]
+    pub settings_win_x: Option<f32>,
+    #[serde(default)]
+    pub settings_win_y: Option<f32>,
 }
 
 /// serde default for boolean fields that should default to `true` when absent
@@ -851,6 +859,8 @@ impl Default for Config {
             reporting: ReportingConfig::default(),
             settings_win_w: None,
             settings_win_h: None,
+            settings_win_x: None,
+            settings_win_y: None,
         }
     }
 }

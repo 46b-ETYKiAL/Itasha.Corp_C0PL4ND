@@ -260,6 +260,14 @@ pub struct C0pl4ndApp {
     /// shrink by hand. `None` until the first un-maximized frame — the restore
     /// then falls back to the first-run default size.
     pub(crate) restore_size: Option<egui::Vec2>,
+    /// True on the first frame the Settings window opens (a closed→open edge),
+    /// so `settings::show` FORCES the window to its saved-or-centered position
+    /// that frame instead of trusting egui's `default_pos` (which read a
+    /// not-yet-sized viewport on the open frame and parked the window top-left).
+    /// Consumed (reset) after one frame so the window is freely movable after.
+    pub(crate) settings_place_pending: bool,
+    /// Previous frame's `settings_open`, used to detect the open edge above.
+    pub(crate) settings_was_open: bool,
     /// True when running in a real eframe window (a wgpu render state exists),
     /// false in the headless `egui_kittest` harness. Drives the per-frame
     /// `request_repaint` pump so live PTY output animates without an input
@@ -593,6 +601,8 @@ impl C0pl4ndApp {
             last_update_notice: None,
             last_window_cmd: None,
             restore_size: None,
+            settings_place_pending: false,
+            settings_was_open: false,
             live_window: false,
             fullscreen: false,
             was_focused: true,
@@ -2374,7 +2384,18 @@ impl C0pl4ndApp {
         // Theme-derived palette so the settings window fill + headings follow
         // the active theme along with the rest of the chrome.
         let colors = theme::ChromeColors::from_theme(&self.theme);
-        let outcome = settings::show(ctx, &mut self.config, &mut open, colors, self.incognito);
+        // Consume the place-on-open flag: `show` force-positions the window this
+        // one frame, then it is freely movable.
+        let place_now = self.settings_place_pending;
+        self.settings_place_pending = false;
+        let outcome = settings::show(
+            ctx,
+            &mut self.config,
+            &mut open,
+            colors,
+            self.incognito,
+            place_now,
+        );
         self.settings_open = open;
 
         // Privacy-section actions (runtime, not config): handle before the
@@ -4194,10 +4215,16 @@ impl C0pl4ndApp {
             }
         }
 
-        // 4) the (opaque) settings window, if open
+        // 4) the (opaque) settings window, if open. Detect the closed→open edge so
+        //    `settings_window` can force the window to its saved-or-centered
+        //    position on that first frame.
         if self.settings_open {
+            if !self.settings_was_open {
+                self.settings_place_pending = true;
+            }
             self.settings_window(ctx);
         }
+        self.settings_was_open = self.settings_open;
 
         // 5) the command palette overlay, if open (rendered last so it floats
         //    above the chrome + grid; its nav keys were handled in step 0b).
@@ -4532,11 +4559,17 @@ fn handle_frameless_resize(ctx: &egui::Context) {
         D::SouthWest => C::ResizeSouthWest,
         D::SouthEast => C::ResizeSouthEast,
     });
-    // Start the OS resize only if egui isn't consuming the press for a widget
-    // (so a button / tab sitting at the very edge still gets its click).
-    // `egui_wants_pointer_input` is the non-deprecated rename of
-    // `wants_pointer_input` in egui 0.34.
-    if ctx.input(|i| i.pointer.primary_pressed()) && !ctx.egui_wants_pointer_input() {
+    // Start the OS resize on a primary press over an edge band, UNLESS egui is
+    // ALREADY actively dragging something (a slider, an in-progress text
+    // selection, a window). We gate on `is_using_pointer()` (an ACTIVE drag), NOT
+    // `egui_wants_pointer_input()` (mere hover): the terminal grid, the titlebar
+    // drag surface, and the status bar all sense drag, so they set
+    // `wants_pointer_input` true on HOVER — which covered the ENTIRE window and
+    // blocked edge-resize everywhere (grabbing an edge just moved the window or did
+    // nothing — the reported "main window cannot be resized"). The 8px edge / 12px
+    // corner bands are too thin to overlap a real caption button or tab target, so
+    // yielding only to an active drag is the correct, industry-standard balance.
+    if ctx.input(|i| i.pointer.primary_pressed()) && !ctx.egui_is_using_pointer() {
         ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
         // The OS now owns the drag. winit's modal resize loop swallows the
         // button-up, so egui can be left believing a drag is still in progress —

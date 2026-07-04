@@ -335,6 +335,7 @@ pub fn show(
     open: &mut bool,
     colors: ChromeColors,
     incognito: bool,
+    place_now: bool,
 ) -> Outcome {
     let mut changed = false;
     let mut keep_open = *open;
@@ -383,12 +384,21 @@ pub fn show(
     // now user-resizable (see the builder below); a filling child no longer
     // balloons it because the content `ScrollArea` uses `auto_shrink([false,
     // false])` — it fills the width it is GIVEN rather than demanding its own.
-    // Use the FULL viewport rect (not `content_rect()`, which excludes the
-    // titlebar/status panels and can read small on the very first frame the window
-    // opens — the cause of the "settings appeared in the top-left" report). The
-    // window is then centered via a CENTER_CENTER pivot on `screen.center()` in the
-    // builder below, so the first open lands dead-center regardless of its size.
-    let screen = ctx.viewport_rect();
+    // Full window rect, read robustly: `viewport_rect()` is the whole inner
+    // window, but on some frames it can read empty — fall back to the input-layer
+    // screen rect, which is populated directly from the windowing backend. This is
+    // the size/position reference for the window below.
+    let screen = {
+        let vr = ctx.viewport_rect();
+        if vr.width() > 1.0 && vr.height() > 1.0 {
+            vr
+        } else {
+            // Paranoia fallback for a not-yet-sized viewport: a sane default rect
+            // from the origin. The clamps below keep the window on-screen once the
+            // real viewport size arrives.
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 720.0))
+        }
+    };
     let screen_max_w = (screen.width() - 24.0).max(SETTINGS_MIN_W);
     let screen_max_h = (screen.height() - 24.0).max(SETTINGS_MIN_H);
     let want_w = config
@@ -402,7 +412,25 @@ pub fn show(
     let def_w = want_w.clamp(SETTINGS_MIN_W, screen_max_w);
     let def_h = want_h.clamp(SETTINGS_MIN_H, screen_max_h);
     let default_size = egui::vec2(def_w, def_h);
-    let default_center = screen.center();
+
+    // Target top-left for a forced placement: the saved position (a prior move) if
+    // both coordinates are present + finite, else CENTERED over the window. Both
+    // are clamped to the live screen so a stale off-screen value can never hide the
+    // window. This is applied via `current_pos` ONLY on the open frame (`place_now`)
+    // — deterministic, so it never depends on `default_pos` timing.
+    let centered = screen.center() - default_size * 0.5;
+    let saved_pos = match (config.settings_win_x, config.settings_win_y) {
+        (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Some(egui::pos2(x, y)),
+        _ => None,
+    };
+    let target_pos = saved_pos.unwrap_or(centered);
+    // Keep it on-screen: clamp so the whole window stays within the viewport.
+    let max_x = (screen.right() - def_w).max(screen.left());
+    let max_y = (screen.bottom() - def_h).max(screen.top());
+    let target_pos = egui::pos2(
+        target_pos.x.clamp(screen.left(), max_x),
+        target_pos.y.clamp(screen.top(), max_y),
+    );
 
     // Esc dismisses settings (in addition to the title-bar ✕ and the in-content
     // Close button) — the conventional overlay-dismiss key.
@@ -419,7 +447,15 @@ pub fn show(
     // and (b) reads as low-contrast on the dark custom frame. The in-content
     // button + Esc are the single, obvious dismiss path (the "two close buttons"
     // report). Closing flows through `keep_open` → `*open` exactly as before.
-    let win_resp = egui::Window::new("settings")
+    let mut win = egui::Window::new("settings");
+    // Force the position on the open frame ONLY (`place_now`): `current_pos` pins
+    // the window this frame, egui then remembers it, and on later frames we stop
+    // pinning so the user can freely drag it. This is what makes the first open
+    // land centered (or at the saved spot) deterministically.
+    if place_now {
+        win = win.current_pos(target_pos);
+    }
+    let win_resp = win
         // No egui title bar: it rendered a SECOND, redundant top bar (a centered
         // lowercase "settings") above the in-content header that carries the
         // "Settings" heading + the ✕ close button. The in-content header is the
@@ -447,12 +483,6 @@ pub fn show(
         // to the full screen keeps it visible without forcing a re-centre.
         .constrain_to(screen)
         .movable(true)
-        // Center on first open: place the window's CENTER at the screen center.
-        // `default_pos` + a CENTER_CENTER pivot centers regardless of the window's
-        // size, and (like `default_pos`) applies only on first creation, so the
-        // user can freely drag it afterward.
-        .default_pos(default_center)
-        .pivot(egui::Align2::CENTER_CENTER)
         .frame(egui::Frame::window(&ctx.global_style()).fill(colors.panel))
         .show(ctx, |ui| {
             // ---- Width discipline ----
@@ -557,26 +587,34 @@ pub fn show(
         keep_open = false;
     }
 
-    // Persist a user resize so the window reopens at the size they left it. Only
-    // write when the pointer is UP (the drag has settled) and the size moved by
-    // more than a dead-band — this both avoids a TOML write-storm during the drag
-    // and keeps the outer-rect/inner-size frame-margin difference from re-arming a
-    // write every time the window reopens (the dead-band exceeds the window frame
-    // margin, so a plain reopen is never mistaken for a resize).
-    if let Some(win_resp) = &win_resp {
-        let sz = win_resp.response.rect.size();
-        let pointer_up = ctx.input(|i| !i.pointer.any_down());
-        let base_w = config.settings_win_w.unwrap_or(SETTINGS_DEFAULT_W);
-        let base_h = config.settings_win_h.unwrap_or(SETTINGS_DEFAULT_H);
-        const DEAD_BAND: f32 = 12.0;
-        if pointer_up
-            && sz.x.is_finite()
-            && sz.y.is_finite()
-            && ((sz.x - base_w).abs() > DEAD_BAND || (sz.y - base_h).abs() > DEAD_BAND)
-        {
-            config.settings_win_w = Some(sz.x);
-            config.settings_win_h = Some(sz.y);
-            changed = true;
+    // Persist a user resize/move so the window reopens at the size + position they
+    // left it. Only write when the pointer is UP (the drag has settled). The SIZE
+    // dead-band is deliberately larger than the window frame margin so the
+    // outer-rect/inner-size difference never re-arms a write on a plain reopen; the
+    // POSITION dead-band is small (position is stable when not dragged). Writing
+    // either updates all four fields so size + position stay coherent.
+    if !place_now {
+        if let Some(win_resp) = &win_resp {
+            let rect = win_resp.response.rect;
+            let sz = rect.size();
+            let pos = rect.min;
+            let pointer_up = ctx.input(|i| !i.pointer.any_down());
+            let base_w = config.settings_win_w.unwrap_or(SETTINGS_DEFAULT_W);
+            let base_h = config.settings_win_h.unwrap_or(SETTINGS_DEFAULT_H);
+            let base_x = config.settings_win_x.unwrap_or(pos.x);
+            let base_y = config.settings_win_y.unwrap_or(pos.y);
+            const SIZE_DEAD_BAND: f32 = 12.0;
+            const POS_DEAD_BAND: f32 = 4.0;
+            let all_finite = sz.x.is_finite() && sz.y.is_finite() && pos.x.is_finite() && pos.y.is_finite();
+            let size_moved = (sz.x - base_w).abs() > SIZE_DEAD_BAND || (sz.y - base_h).abs() > SIZE_DEAD_BAND;
+            let pos_moved = (pos.x - base_x).abs() > POS_DEAD_BAND || (pos.y - base_y).abs() > POS_DEAD_BAND;
+            if pointer_up && all_finite && (size_moved || pos_moved) {
+                config.settings_win_w = Some(sz.x);
+                config.settings_win_h = Some(sz.y);
+                config.settings_win_x = Some(pos.x);
+                config.settings_win_y = Some(pos.y);
+                changed = true;
+            }
         }
     }
 
