@@ -1,9 +1,9 @@
 //! CRT / chromatic-aberration painter effects (research §2).
 //!
 //! Pure, GPU-free painter approximations extracted from the `egui_app` god-module.
-//! The math fns are unit-testable without a GPU; the painter fn draws filled bands
-//! and a rolling brighten band with `egui::Painter`. ZERO-cost when the caller gates
-//! on the setting being off/zero. Re-exported into `egui_app` via `pub(crate) use crt::*`.
+//! The math fns are unit-testable without a GPU; the painter fn draws filled dark
+//! bands with a slow vertical drift via `egui::Painter`. ZERO-cost when the caller
+//! gates on the setting being off/zero. Re-exported into `egui_app` via `pub(crate) use crt::*`.
 
 // ---- CRT / chromatic-aberration painter effects (research §2) -------------
 //
@@ -34,11 +34,12 @@ pub(crate) const CRT_SCANLINE_DUTY: f32 = 0.66;
 /// — the research band that reads as distinct lines, not a flat film (#28); full
 /// darkness (1.0) caps at 240 (a near-black trough for a heavy-CRT look).
 pub(crate) const CRT_SCANLINE_MAX_DARK_ALPHA: f32 = 240.0;
-/// The animated rolling "scan" band speed (LOGICAL points / second) — the
-/// classic CRT refresh sweep drifting down the pane.
-pub(crate) const CRT_ROLL_SPEED_PTS_PER_SEC: f32 = 60.0;
-/// The rolling scan band's height as a fraction of the content height.
-pub(crate) const CRT_ROLL_HEIGHT_FRAC: f32 = 0.18;
+/// The speed (LOGICAL points / second) at which the whole dark-band field slowly
+/// drifts DOWN — a calm CRT shimmer. Modeled on SCR1B3's `effects.rs` motion
+/// (~6 pt/s): a gentle sub-period creep, NOT the old bright "rolling scan" bar
+/// that swept a white bloom down the pane (it read as a distracting flash). At
+/// this speed the pattern moves perceptibly without the flash.
+pub(crate) const CRT_SCANLINE_DRIFT_PTS_PER_SEC: f32 = 6.0;
 
 /// The maximum horizontal RGB ghost offset (PHYSICAL pixels) — capped so a wild
 /// config value can never smear the text into illegibility.
@@ -143,26 +144,27 @@ pub(crate) fn scanline_dark_alpha(darkness: f32) -> u8 {
         .round() as u8
 }
 
-/// The top Y (LOGICAL points) of the animated rolling "scan" band at time `t`
-/// seconds for a content rect `[top, bottom)`. The band drifts down at
-/// [`CRT_ROLL_SPEED_PTS_PER_SEC`] and wraps, starting fully off the top so it
-/// sweeps in from above — the classic CRT refresh sweep. Pure → unit-testable.
-pub(crate) fn scanline_roll_top(top: f32, height: f32, roll_h: f32, t: f32) -> f32 {
-    if !height.is_finite() || height <= 0.0 {
-        return top;
+/// The vertical DRIFT offset (LOGICAL points, in `0..period`) of the scanline
+/// field at time `t` seconds. The whole band pattern creeps down at
+/// [`CRT_SCANLINE_DRIFT_PTS_PER_SEC`] and wraps every `period`, so the motion is
+/// seamless — the pattern at `drift == period` is identical to `drift == 0`.
+/// Pure → unit-testable.
+pub(crate) fn scanline_drift(period: f32, t: f32) -> f32 {
+    if !period.is_finite() || period <= 0.0 {
+        return 0.0;
     }
-    let span = height + roll_h;
-    let phase = (t * CRT_ROLL_SPEED_PTS_PER_SEC).rem_euclid(span);
-    top + phase - roll_h
+    (t * CRT_SCANLINE_DRIFT_PTS_PER_SEC).rem_euclid(period)
 }
 
 /// Paint REAL CRT scan lines across the WHOLE pane content `rect` (issue #28) —
-/// filled DARK BANDS (not 1px slivers) at a PHYSICAL-px-anchored period, plus an
-/// animated rolling brighten band so the tube visibly "scans". `ppp` resolves
-/// the period to logical points; `t` is the animation clock (seconds);
+/// filled DARK BANDS (not 1px slivers) at a PHYSICAL-px-anchored period, the
+/// whole field drifting slowly DOWN for a calm CRT shimmer (SCR1B3-style; the old
+/// bright "rolling scan" bar was removed — it read as a distracting flash). `ppp`
+/// resolves the period to logical points; `t` is the animation clock (seconds);
 /// `darkness` (0..=1) tunes the trough darkness. GPU-free (filled rects). The
-/// caller's `painter_at(rect)` clip keeps every band inside the pane; the caller
-/// also requests a repaint each frame so the roll keeps moving.
+/// caller's `painter_at(rect)` clip keeps every band inside the pane and trims the
+/// drift overhang; the caller also requests a repaint each frame so the drift
+/// keeps moving.
 pub(crate) fn paint_crt_scanlines(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -173,27 +175,18 @@ pub(crate) fn paint_crt_scanlines(
     let period = scanline_period_pts(ppp);
     let band_h = period * CRT_SCANLINE_DUTY;
     let dark = egui::Color32::from_black_alpha(scanline_dark_alpha(darkness));
-    // --- static dark bands: filled rects across the whole content width ---
+    // The whole band field drifts down by a sub-period offset that wraps every
+    // period (seamless). Start one band ABOVE the top (i = -1) so the drift never
+    // exposes an ungapped strip at the top edge; the painter clip trims the
+    // overhang at the top and bottom.
+    let drift = scanline_drift(period, t);
     let lines = scanline_count(rect.height(), ppp);
-    for i in 0..lines {
-        let y = rect.top() + i as f32 * period;
+    for i in -1..lines as i32 {
+        let y = rect.top() + i as f32 * period + drift;
         let band = egui::Rect::from_min_max(
             egui::pos2(rect.left(), y),
             egui::pos2(rect.right(), y + band_h),
         );
         painter.rect_filled(band, 0.0, dark);
-    }
-    // --- animated rolling "scan" band: a soft white brighten bar drifting down,
-    // built from a few stacked translucent rects for a cheap gaussian falloff.
-    let roll_h = (rect.height() * CRT_ROLL_HEIGHT_FRAC).max(1.0);
-    let roll_top = scanline_roll_top(rect.top(), rect.height(), roll_h, t);
-    for k in 0..4u8 {
-        let a = (10u8.saturating_sub(k * 2)).max(2);
-        let inset = roll_h * f32::from(k) / 8.0;
-        let band = egui::Rect::from_min_max(
-            egui::pos2(rect.left(), roll_top + inset),
-            egui::pos2(rect.right(), roll_top + roll_h - inset),
-        );
-        painter.rect_filled(band, 0.0, egui::Color32::from_white_alpha(a));
     }
 }

@@ -132,6 +132,20 @@ fn toolbar_item_width(id: &str) -> f32 {
     }
 }
 
+/// The last `n` non-blank lines of `text`, joined with '\n' — the tail of a
+/// pane's visible terminal grid for the tab hover preview (#15). Trailing blank
+/// rows (the unused bottom of the grid) are dropped first so the preview shows
+/// real output, not empty space. Pure → unit-testable.
+fn last_nonblank_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let end = lines
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map_or(0, |i| i + 1);
+    let start = end.saturating_sub(n);
+    lines[start..end].join("\n")
+}
+
 impl C0pl4ndApp {
     /// Paint the titlebar (wordmark + tab strip + caption controls). Returns the
     /// actions the host should apply this frame. `colors` carries the
@@ -192,16 +206,64 @@ impl C0pl4ndApp {
             // common case pixel-identical: with few tabs the region shrinks to its
             // content and "+" sits immediately after the last tab; only an
             // overflowing strip scrolls instead of bleeding under the caption.
+            // ---- overflow arrow-stepping (#14) ----
+            // When the tabs overflow the strip's reserved width, flank it with ‹ ›
+            // chevrons that STEP the focused tab to the previous/next one
+            // (Ctrl+Tab-like) and scroll it into view — clearer than a thin
+            // horizontal scrollbar. Overflow is only known AFTER the strip lays
+            // out, so the LEFT chevron (rendered first) reads LAST frame's flag
+            // from ctx memory; the RIGHT chevron uses this frame's. A one-shot
+            // `follow` flag, set on any arrow click and consumed next frame, drives
+            // `scroll_to_me` on the newly-focused tab (the host applies the focus
+            // AFTER this closure returns, so the scroll lands one frame later).
+            let overflow_id = egui::Id::new("tab_strip_overflow");
+            let follow_id = egui::Id::new("tab_strip_follow");
+            let show_left_arrow = ui
+                .ctx()
+                .data(|d| d.get_temp::<bool>(overflow_id).unwrap_or(false));
+            let follow = ui.ctx().data_mut(|d| {
+                let v = d.get_temp::<bool>(follow_id).unwrap_or(false);
+                d.remove::<bool>(follow_id);
+                v
+            });
+            // Sorted (pinned-first) order, hoisted OUT of the strip closure so the
+            // arrows can compute the prev/next targets before the strip consumes
+            // the list.
+            let mut tabs = self.pane_titles();
+            // Stable sort: pinned first, original visual order preserved within
+            // each group (`sort_by_key` is stable).
+            tabs.sort_by_key(|(pid, _)| !self.pinned.contains(pid));
+            let cur = tabs.iter().position(|(pid, _)| *pid == self.focused_pane);
+            let prev_target = cur
+                .filter(|&i| i > 0)
+                .and_then(|i| tabs.get(i - 1))
+                .map(|(p, _)| *p);
+            let next_target = cur.and_then(|i| tabs.get(i + 1)).map(|(p, _)| *p);
+            // LEFT chevron — only when the strip overflowed last frame; disabled at
+            // the first tab.
+            if show_left_arrow {
+                let left = ui
+                    .add_enabled(
+                        prev_target.is_some(),
+                        egui::Button::new(
+                            RichText::new(icon::CARET_LEFT)
+                                .size(14.0)
+                                .color(colors.muted),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text("previous tab");
+                if left.clicked() {
+                    actions.focus_tab = prev_target;
+                    ui.ctx().data_mut(|d| d.insert_temp(follow_id, true));
+                }
+            }
             let tabs_max_w = tab_strip_max_width(ui.available_width());
-            egui::ScrollArea::horizontal()
+            let strip_out = egui::ScrollArea::horizontal()
                 .id_salt("tab_strip")
                 .max_width(tabs_max_w)
                 .auto_shrink([true, false])
                 .show(ui, |ui| {
-                    let mut tabs = self.pane_titles();
-                    // Stable sort: pinned first, original visual order preserved
-                    // within each group (`sort_by_key` is stable).
-                    tabs.sort_by_key(|(pid, _)| !self.pinned.contains(pid));
                     for (pane_id, title) in tabs {
                         let selected = pane_id == self.focused_pane;
                         let is_pinned = self.pinned.contains(&pane_id);
@@ -233,6 +295,32 @@ impl C0pl4ndApp {
                                 colors.muted
                             });
                             let tab = ui.selectable_label(selected, label);
+                            // Hover preview (#15): the last few lines of THIS pane's
+                            // visible terminal, shown after egui's built-in hover
+                            // delay. Attached to the tab label response ONLY — the
+                            // pin/× buttons keep their own `.on_hover_text`, so nothing
+                            // fights. `grid_text` briefly locks the term mutex; called
+                            // once per frame for the single hovered tab → negligible.
+                            let tab = match self
+                                .terms
+                                .get(&pane_id)
+                                .and_then(super::pane_term::PaneTerm::grid_text)
+                                .map(|text| last_nonblank_lines(&text, 8))
+                                .filter(|s| !s.trim().is_empty())
+                            {
+                                Some(body) => tab.on_hover_ui(|ui| {
+                                    ui.set_max_width(520.0);
+                                    ui.label(RichText::new(&title).strong());
+                                    ui.separator();
+                                    ui.label(RichText::new(body).monospace().size(11.0));
+                                }),
+                                None => tab,
+                            };
+                            // Bring an arrow-stepped tab into view the frame after the
+                            // click (the host has applied the new focus by then).
+                            if follow && selected {
+                                tab.scroll_to_me(Some(egui::Align::Center));
+                            }
                             // Override the accessible name with the UNIQUE label so the
                             // a11y tree never has two same-named tab nodes (the visible
                             // text is unchanged — still just the title).
@@ -293,6 +381,29 @@ impl C0pl4ndApp {
                         ui.separator();
                     }
                 });
+            // Record overflow for NEXT frame's left-arrow gate, and render the
+            // RIGHT chevron now (it may use THIS frame's overflow). Overflow =
+            // content wider than the viewport (egui's own "needs scrolling" signal).
+            let overflowing = strip_out.content_size.x > strip_out.inner_rect.width() + 0.5;
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(overflow_id, overflowing));
+            if overflowing {
+                let right = ui
+                    .add_enabled(
+                        next_target.is_some(),
+                        egui::Button::new(
+                            RichText::new(icon::CARET_RIGHT)
+                                .size(14.0)
+                                .color(colors.muted),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text("next tab");
+                if right.clicked() {
+                    actions.focus_tab = next_target;
+                    ui.ctx().data_mut(|d| d.insert_temp(follow_id, true));
+                }
+            }
 
             // Single "+" new-terminal button: opens a new pane and lets the host
             // expand the grid logically (it splits the focused pane along its

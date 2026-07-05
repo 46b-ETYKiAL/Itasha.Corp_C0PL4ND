@@ -114,6 +114,20 @@ page.
   like the rest of the titlebar (double-click still maximizes / restores), while
   still showing the name in its brand colors.
 
+### Changed — tabs & CRT effect
+
+- **The CRT scanline effect is calmer.** It used to sweep a bright white bar down
+  each pane, which read as a distracting flash. The crisp scanlines stay, but the
+  whole field now drifts down slowly for a gentle CRT shimmer (matching the SCR1B3
+  editor's effect) instead of the bright rolling bar.
+- **Tab overflow now uses ‹ › step arrows instead of a scrollbar.** When you have
+  more tabs than fit, chevron buttons appear on either side of the strip and step
+  the active tab to the previous/next one, scrolling it into view — clearer than
+  a thin horizontal scrollbar.
+- **Hovering a tab previews its terminal.** Rest the pointer on a tab to see the
+  last few lines of that pane's output in a small popup, so you can tell inactive
+  panes apart without clicking into each one.
+
 ## [0.4.13] - 2026-06-30
 
 ### Added — macOS and ARM64 builds

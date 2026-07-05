@@ -879,27 +879,25 @@ fn scanline_dark_alpha_maps_darkness_to_a_visible_band() {
 }
 
 #[test]
-fn scanline_roll_band_moves_with_time_and_wraps() {
-    // The animated roll band drifts down as time advances (the visible
-    // proof of animation), starting off the top so it sweeps in.
-    let (top, height, roll_h) = (0.0_f32, 200.0, 36.0);
-    let y0 = scanline_roll_top(top, height, roll_h, 0.0);
-    let y1 = scanline_roll_top(top, height, roll_h, 0.5);
-    assert!(y1 > y0, "the scan band moves DOWN as time advances");
+fn scanline_field_drifts_with_time_and_wraps() {
+    // The whole dark-band field creeps DOWN as time advances (the visible proof
+    // of animation) and wraps seamlessly every period — SCR1B3-style calm drift,
+    // replacing the old bright rolling-scan bar.
+    let period = 3.0_f32;
+    let d0 = scanline_drift(period, 0.0);
+    let d1 = scanline_drift(period, 0.1);
+    assert_eq!(d0, 0.0, "at t=0 the field sits at its base offset");
+    assert!(d1 > d0, "the field drifts DOWN as time advances");
+    // The offset stays within one period, never running away unbounded.
+    assert!(scanline_drift(period, 123.4) < period);
+    // One full period returns the field to its start (seamless wrap).
+    let one_period_t = period / CRT_SCANLINE_DRIFT_PTS_PER_SEC;
     assert!(
-        y0 <= top,
-        "at t=0 the band starts at/above the top (sweeps in from above)"
+        scanline_drift(period, one_period_t).abs() < 1e-3,
+        "one full period wraps back to the base offset"
     );
-    // It wraps within one period, never running away unbounded.
-    let span = height + roll_h;
-    let period = span / CRT_ROLL_SPEED_PTS_PER_SEC;
-    let wrapped = scanline_roll_top(top, height, roll_h, period);
-    assert!(
-        (wrapped - y0).abs() < 1e-2,
-        "one full period returns the band to its start (wraps)"
-    );
-    // Degenerate height never panics.
-    assert!(scanline_roll_top(top, 0.0, roll_h, 1.0).is_finite());
+    // Degenerate period never panics.
+    assert_eq!(scanline_drift(0.0, 1.0), 0.0);
 }
 
 // ---- Translucent pane background alpha (the transparency fix) ----
