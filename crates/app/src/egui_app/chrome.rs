@@ -157,7 +157,18 @@ impl C0pl4ndApp {
             };
             job.append("C0PL", 0.0, fmt(brand::PURPLE));
             job.append("4ND", 0.0, fmt(brand::GREEN));
-            let title_resp = ui.add(egui::Label::new(job).sense(Sense::click_and_drag()));
+            // `.selectable(false)` is load-bearing: egui labels are text-selectable
+            // by default (`style.interaction.selectable_labels`), so a drag on the
+            // wordmark began a TEXT SELECTION (the reported "it highlights the app
+            // name") instead of moving the window — the selection consumed the drag
+            // before `StartDrag` could fire. With selection off, the wordmark is a
+            // pure caption drag-handle: click-and-drag moves the window, double-click
+            // maximizes, and the name still renders in its two-tone brand colors.
+            let title_resp = ui.add(
+                egui::Label::new(job)
+                    .selectable(false)
+                    .sense(Sense::click_and_drag()),
+            );
             if title_resp.drag_started_by(egui::PointerButton::Primary) {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
@@ -326,13 +337,13 @@ impl C0pl4ndApp {
             let bh = 28.0_f32;
             let cy = row.center().y;
             let right_edge = screen.right() - 8.0; // window edge minus panel inset
-            // Maximize button follows the Windows convention: a single square when
-            // the window is restored (click → maximize), and a "restore" glyph (two
-            // overlapping squares) when the window is maximized (click → restore
-            // down). Without this the button showed a static square in both states,
-            // giving no visual cue of the current window state. The maximized state
-            // is read from the live viewport (the same source the titlebar
-            // double-click-to-toggle uses).
+                                                   // Maximize button follows the Windows convention: a single square when
+                                                   // the window is restored (click → maximize), and a "restore" glyph (two
+                                                   // overlapping squares) when the window is maximized (click → restore
+                                                   // down). Without this the button showed a static square in both states,
+                                                   // giving no visual cue of the current window state. The maximized state
+                                                   // is read from the live viewport (the same source the titlebar
+                                                   // double-click-to-toggle uses).
             let is_maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
             let (max_glyph, max_hover) = if is_maximized {
                 (icon::COPY, "restore")
@@ -341,7 +352,12 @@ impl C0pl4ndApp {
             };
             let specs: [(&str, &str, super::WindowCmd, bool); 4] = [
                 (icon::X, "close", super::WindowCmd::Close, false),
-                (max_glyph, max_hover, super::WindowCmd::ToggleMaximize, false),
+                (
+                    max_glyph,
+                    max_hover,
+                    super::WindowCmd::ToggleMaximize,
+                    false,
+                ),
                 (icon::MINUS, "minimize", super::WindowCmd::Minimize, false),
                 (icon::GEAR, "settings", super::WindowCmd::Close, true), // gear → settings
             ];

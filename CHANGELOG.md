@@ -101,6 +101,19 @@ page.
   it), it appears dead center over the app instead of tucked into the top-left
   corner; after that it reopens wherever you last left it.
 
+### Added — window management
+
+- **The main window resizes from every edge and corner.** The frameless window
+  gave no way to drag-resize it before. You can now grab any edge or corner: the
+  right/bottom edges grow the window in place, and the left/top edges (and their
+  corners) move the opposite side so the window grows toward your pointer. A
+  minimum size keeps it from collapsing, and the size is remembered across
+  launches.
+- **The app name is now a window drag-handle.** Dragging the two-tone "C0PL4ND"
+  wordmark in the top-left used to highlight the text; it now moves the window
+  like the rest of the titlebar (double-click still maximizes / restores), while
+  still showing the name in its brand colors.
+
 ## [0.4.13] - 2026-06-30
 
 ### Added — macOS and ARM64 builds
