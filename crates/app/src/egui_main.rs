@@ -133,10 +133,10 @@ fn main() -> eframe::Result<()> {
         // keep working; our own titlebar draws the min/max/close the user clicks.
         .with_minimize_button(false)
         .with_maximize_button(false);
-                                 // Runtime window + taskbar icon (the sigil). The exe's embedded icon
-                                 // resource (build.rs) covers the Start-menu shortcut / Explorer /
-                                 // Add-Remove-Programs; this covers the live window. Best-effort — a decode
-                                 // failure leaves the platform default rather than blocking startup.
+    // Runtime window + taskbar icon (the sigil). The exe's embedded icon
+    // resource (build.rs) covers the Start-menu shortcut / Explorer /
+    // Add-Remove-Programs; this covers the live window. Best-effort — a decode
+    // failure leaves the platform default rather than blocking startup.
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }

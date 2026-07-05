@@ -137,9 +137,7 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use windows::Win32::UI::WindowsAndMessaging::{
-            WS_CAPTION, WS_MAXIMIZE, WS_SYSMENU,
-        };
+        use windows::Win32::UI::WindowsAndMessaging::{WS_CAPTION, WS_MAXIMIZE, WS_SYSMENU};
 
         #[test]
         fn close_button_style_detected_and_cleared_leaving_caption() {

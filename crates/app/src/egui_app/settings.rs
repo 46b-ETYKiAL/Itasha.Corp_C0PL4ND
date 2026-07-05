@@ -605,9 +605,12 @@ pub fn show(
             let base_y = config.settings_win_y.unwrap_or(pos.y);
             const SIZE_DEAD_BAND: f32 = 12.0;
             const POS_DEAD_BAND: f32 = 4.0;
-            let all_finite = sz.x.is_finite() && sz.y.is_finite() && pos.x.is_finite() && pos.y.is_finite();
-            let size_moved = (sz.x - base_w).abs() > SIZE_DEAD_BAND || (sz.y - base_h).abs() > SIZE_DEAD_BAND;
-            let pos_moved = (pos.x - base_x).abs() > POS_DEAD_BAND || (pos.y - base_y).abs() > POS_DEAD_BAND;
+            let all_finite =
+                sz.x.is_finite() && sz.y.is_finite() && pos.x.is_finite() && pos.y.is_finite();
+            let size_moved =
+                (sz.x - base_w).abs() > SIZE_DEAD_BAND || (sz.y - base_h).abs() > SIZE_DEAD_BAND;
+            let pos_moved =
+                (pos.x - base_x).abs() > POS_DEAD_BAND || (pos.y - base_y).abs() > POS_DEAD_BAND;
             if pointer_up && all_finite && (size_moved || pos_moved) {
                 config.settings_win_w = Some(sz.x);
                 config.settings_win_h = Some(sz.y);
@@ -1064,7 +1067,11 @@ fn render_sections(
                         egui::Slider::new(&mut config.opacity, 0.0..=1.0)
                             .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
                             .custom_parser(|s| {
-                                s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)
+                                s.trim_end_matches('%')
+                                    .trim()
+                                    .parse::<f64>()
+                                    .ok()
+                                    .map(|v| v / 100.0)
                             }),
                     )
                     .changed();
@@ -1106,7 +1113,11 @@ fn render_sections(
                         egui::Slider::new(&mut config.tint_strength, 0.0..=1.0)
                             .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
                             .custom_parser(|s| {
-                                s.trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)
+                                s.trim_end_matches('%')
+                                    .trim()
+                                    .parse::<f64>()
+                                    .ok()
+                                    .map(|v| v / 100.0)
                             }),
                     )
                     .changed();
@@ -2069,7 +2080,10 @@ fn render_sections(
                      history sidebar.",
                 );
                 changed |= ui
-                    .checkbox(&mut config.history_capture_enabled, "Capture typed commands")
+                    .checkbox(
+                        &mut config.history_capture_enabled,
+                        "Capture typed commands",
+                    )
                     .on_hover_text(
                         "Passwords typed at prompts are never captured (they are not \
                          echoed); inline secrets like --password=… / API_KEY=… are \
