@@ -1364,6 +1364,8 @@ mod tests {
             mesh_density: -3.0,
             mesh_brightness: 9.0,
             cursor_trail_intensity: 9.0,
+            mesh_speed: 9.0,
+            vhs_intensity: 5.0,
             ..EffectsConfig::default()
         };
         assert_eq!(wild.clamped_animation_intensity(), 2.0);
@@ -1371,6 +1373,10 @@ mod tests {
         assert_eq!(wild.clamped_mesh_density(), 0.0);
         assert_eq!(wild.clamped_mesh_brightness(), 3.0);
         assert_eq!(wild.clamped_cursor_trail_intensity(), 2.0);
+        // Out-of-band high inputs clamp to each band's ceiling — proves the clamp
+        // is load-bearing (kills the "remove clamp" mutant on the new accessors).
+        assert_eq!(wild.clamped_mesh_speed(), 2.0);
+        assert_eq!(wild.clamped_vhs_intensity(), 1.0);
     }
 
     #[test]
