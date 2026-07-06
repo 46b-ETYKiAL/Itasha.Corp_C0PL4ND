@@ -520,6 +520,11 @@ pub struct EffectsConfig {
     /// default.
     #[serde(default)]
     pub vhs_tracking: bool,
+    /// VHS tracking-line intensity (0.0 = faint .. 1.0 = bold, clamped). Scales
+    /// how bright the drifting tracking bands read. Only applied when
+    /// [`vhs_tracking`](Self::vhs_tracking) is on.
+    #[serde(default = "default_vhs_intensity")]
+    pub vhs_intensity: f32,
     /// Animated wired node-mesh ambient background (Lain "Wired" feel), drawn at
     /// Background order behind the panes. OFF by default.
     #[serde(default)]
@@ -534,6 +539,12 @@ pub struct EffectsConfig {
     /// [`wired_ambient`](Self::wired_ambient) is on.
     #[serde(default = "default_mesh_brightness")]
     pub mesh_brightness: f32,
+    /// Node-mesh movement amount (0.0 = a still lattice .. 1.0 = the shipped
+    /// drift .. 2.0 = brisk, clamped). Scales how fast the mesh nodes drift; at
+    /// 0 the field holds a static frame. Only applied when
+    /// [`wired_ambient`](Self::wired_ambient) is on.
+    #[serde(default = "default_mesh_speed")]
+    pub mesh_speed: f32,
     /// Cursor ghost-trail: a fading echo follows the focused terminal cursor as
     /// it moves. OFF by default.
     #[serde(default)]
@@ -583,6 +594,17 @@ pub fn default_cursor_trail_intensity() -> f32 {
     0.6
 }
 
+/// Default node-mesh movement — 1.0 = the shipped drift speed (no change to the
+/// current feel until the user tunes it).
+pub fn default_mesh_speed() -> f32 {
+    1.0
+}
+
+/// Default VHS tracking-line intensity — a clearly-visible-but-calm band.
+pub fn default_vhs_intensity() -> f32 {
+    0.5
+}
+
 /// Default scanline darkness — strong enough to read as scan lines (not a flat
 /// dimming film). Free function so `#[serde(default = ...)]` can name it.
 pub fn default_scanline_darkness() -> f32 {
@@ -608,9 +630,11 @@ impl Default for EffectsConfig {
             flicker: false,
             flicker_strength: default_flicker_strength(),
             vhs_tracking: false,
+            vhs_intensity: default_vhs_intensity(),
             wired_ambient: false,
             mesh_density: default_mesh_density(),
             mesh_brightness: default_mesh_brightness(),
+            mesh_speed: default_mesh_speed(),
             cursor_trail: false,
             cursor_trail_intensity: default_cursor_trail_intensity(),
             boot_glitch: false,
@@ -666,6 +690,19 @@ impl EffectsConfig {
     /// can't drive it out of band.
     pub fn clamped_cursor_trail_intensity(&self) -> f32 {
         self.cursor_trail_intensity.clamp(0.0, 2.0)
+    }
+
+    /// Node-mesh movement clamped to `0.0..=2.0`. 0 holds a static lattice; 1.0
+    /// is the shipped drift; up to 2.0 is a brisk field. Scales the mesh
+    /// animation phase in the painter.
+    pub fn clamped_mesh_speed(&self) -> f32 {
+        self.mesh_speed.clamp(0.0, 2.0)
+    }
+
+    /// VHS tracking-line intensity clamped to `0.0..=1.0`. Scales the drifting
+    /// tracking-band alpha in the painter.
+    pub fn clamped_vhs_intensity(&self) -> f32 {
+        self.vhs_intensity.clamp(0.0, 1.0)
     }
 }
 
@@ -1346,6 +1383,8 @@ mod tests {
         assert_eq!(default_flicker_strength(), 0.06);
         assert_eq!(default_mesh_density(), 0.4);
         assert_eq!(default_mesh_brightness(), 1.0);
+        assert_eq!(default_mesh_speed(), 1.0);
+        assert_eq!(default_vhs_intensity(), 0.5);
         assert_eq!(default_cursor_trail_intensity(), 0.6);
 
         // A value already INSIDE each band must pass through UNCHANGED — the
@@ -1358,6 +1397,8 @@ mod tests {
             flicker_strength: 0.5,
             mesh_density: 1.2,
             mesh_brightness: 1.5,
+            mesh_speed: 1.5,
+            vhs_intensity: 0.7,
             cursor_trail_intensity: 1.0,
             ..EffectsConfig::default()
         };
@@ -1365,6 +1406,8 @@ mod tests {
         assert_eq!(mid.clamped_flicker_strength(), 0.5);
         assert_eq!(mid.clamped_mesh_density(), 1.2);
         assert_eq!(mid.clamped_mesh_brightness(), 1.5);
+        assert_eq!(mid.clamped_mesh_speed(), 1.5);
+        assert_eq!(mid.clamped_vhs_intensity(), 0.7);
         assert_eq!(mid.clamped_cursor_trail_intensity(), 1.0);
     }
 

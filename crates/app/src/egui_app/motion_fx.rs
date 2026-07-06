@@ -116,13 +116,24 @@ pub(crate) fn paint_flicker(ctx: &Context, strength: f32, t: f64, exclude: Optio
 }
 
 /// VHS-style tracking lines: faint bright horizontal bands sweeping down the
-/// window at two different speeds, like analogue tape tracking error. `exclude`
-/// keeps an open panel clean.
-pub(crate) fn paint_vhs_tracking(ctx: &Context, t: f64, exclude: Option<Rect>) {
+/// window at two different speeds, like analogue tape tracking error. `intensity`
+/// (0..=1, default 0.5) scales how bright the bands read. `exclude` keeps an open
+/// panel clean.
+pub(crate) fn paint_vhs_tracking(ctx: &Context, t: f64, intensity: f32, exclude: Option<Rect>) {
     let rect = ctx.content_rect();
     if rect.height() < 1.0 {
         return;
     }
+    // The base alphas below (9 / 7) are the shipped look at the DEFAULT intensity
+    // (0.5), so `k = intensity * 2` keeps a just-enabled VHS effect identical to
+    // the old feel while letting the Motion → VHS-intensity slider dim it toward
+    // nothing or brighten it to a bold, unmistakable band.
+    let k = intensity.clamp(0.0, 1.0) * 2.0;
+    if k <= 0.0 {
+        return;
+    }
+    let a_main = (9.0 * k).round().clamp(0.0, 255.0) as u8;
+    let a_core = (7.0 * k).round().clamp(0.0, 255.0) as u8;
     let painter = ctx.layer_painter(LayerId::new(
         Order::Foreground,
         Id::new("motion-vhs-tracking"),
@@ -139,7 +150,7 @@ pub(crate) fn paint_vhs_tracking(ctx: &Context, t: f64, exclude: Option<Rect>) {
             ),
             exclude,
             0.0,
-            Color32::from_rgba_unmultiplied(255, 255, 255, 9),
+            Color32::from_rgba_unmultiplied(255, 255, 255, a_main),
         );
         fill_around(
             &painter,
@@ -149,7 +160,7 @@ pub(crate) fn paint_vhs_tracking(ctx: &Context, t: f64, exclude: Option<Rect>) {
             ),
             exclude,
             0.0,
-            Color32::from_rgba_unmultiplied(255, 255, 255, 7),
+            Color32::from_rgba_unmultiplied(255, 255, 255, a_core),
         );
     }
 }

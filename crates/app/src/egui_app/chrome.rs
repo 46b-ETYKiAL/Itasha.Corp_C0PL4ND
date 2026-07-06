@@ -140,10 +140,11 @@ impl C0pl4ndApp {
     /// Paint the titlebar (wordmark + tab strip + caption controls). Returns the
     /// actions the host should apply this frame. `colors` carries the
     /// theme-derived chrome palette so the tab text / caption glyphs / accents
-    /// follow the active terminal theme. The two-tone C0PL4ND wordmark keeps its
-    /// fixed purple structural anchor ("C0PL" — the recognizable brand identity)
-    /// while its "4ND" live tone tints with the theme accent, so the logo picks
-    /// up the active palette without losing the brand's two-tone signature.
+    /// follow the active terminal theme. BOTH tones of the two-tone C0PL4ND
+    /// wordmark ("C0PL" + "4ND") are theme-derived ([`ChromeColors::logo_a`] /
+    /// [`ChromeColors::logo_b`]) — each guaranteed readable + bright against the
+    /// titlebar and hue-distant from the other, so the logo tints with the active
+    /// palette while always staying a legible, contrasting two-tone signature.
     pub(super) fn titlebar_and_tabs(
         &self,
         ui: &mut egui::Ui,
@@ -161,12 +162,14 @@ impl C0pl4ndApp {
                 font_id: egui::FontId::proportional(16.0),
                 ..Default::default()
             };
-            // "C0PL" = fixed purple structural anchor (constant brand identity);
-            // "4ND" = the theme's live accent, so the wordmark tints with the
-            // active terminal theme. On a theme that omits a selection colour the
-            // accent falls back to brand green — the original two-tone look.
-            job.append("C0PL", 0.0, fmt(brand::PURPLE));
-            job.append("4ND", 0.0, fmt(colors.accent));
+            // BOTH tones are theme-derived and readability-guaranteed: "C0PL"
+            // from the theme's bright magenta (echoing brand purple), "4ND" from
+            // the theme's bright green (echoing brand green). Each is tone-lifted
+            // to stay bright + readable against the titlebar and hue-distant from
+            // the other, so the wordmark tints with the theme yet never goes dark,
+            // muddy, or low-contrast. (See ChromeColors::logo_a / logo_b.)
+            job.append("C0PL", 0.0, fmt(colors.logo_a));
+            job.append("4ND", 0.0, fmt(colors.logo_b));
             // `.selectable(false)` is load-bearing: egui labels are text-selectable
             // by default (`style.interaction.selectable_labels`), so a drag on the
             // wordmark began a TEXT SELECTION (the reported "it highlights the app

@@ -93,7 +93,10 @@ const MOTION_SEARCH_LABELS: &[&str] = &[
     "chromatic aberration",
     "wired mesh background",
     "mesh density",
+    "mesh brightness",
+    "mesh movement",
     "vhs tracking",
+    "vhs intensity",
     "screen flicker",
     "flicker strength",
     "cursor trail",
@@ -1040,8 +1043,6 @@ fn render_sections(
             // a native-blur backend (glass/mica/vibrancy) on/off needs a window
             // re-init, so that part takes effect on restart (labelled below).
             if row_visible(q, "transparency master enable glass") {
-                ui.label("Transparency")
-                    .on_hover_text("Master switch for the whole transparency system.");
                 changed |= ui
                     .checkbox(
                         &mut config.transparency_enabled,
@@ -1053,6 +1054,7 @@ fn render_sections(
                          glass / mica / vibrancy.",
                     )
                     .changed();
+                ui.label(""); // empty control column — checkbox carries the label
                 changed |= reset_to_default(
                     ui,
                     &mut config.transparency_enabled,
@@ -1278,19 +1280,25 @@ fn render_sections(
             }
 
             if row_visible(q, "ligatures shaping") {
-                ui.label("Ligatures");
                 // DISABLED: the egui native text painter draws the grid glyph-by-
                 // glyph (strict monospace cell fidelity) and does NOT run a shaping
                 // engine (HarfBuzz / cosmic-text), so programming ligatures can't
                 // be formed. Shown greyed with an honest tooltip rather than as a
                 // dead toggle that silently does nothing.
                 ui.add_enabled_ui(false, |ui| {
-                    ui.checkbox(&mut config.ligatures, "Programming ligatures (->, !=)")
+                    // Label kept short (the "->/!=" examples live in the tooltip) so
+                    // this checkbox-left row does not widen the Fonts grid past the
+                    // shared settings-window width — the equal-width-on-every-page
+                    // invariant (see `every_settings_page_has_the_same_window_width`).
+                    ui.checkbox(&mut config.ligatures, "Programming ligatures")
                         .on_hover_text(
                             "Not available: the GPU text renderer draws strict \
-                             monospace cells and does not do glyph shaping.",
+                             monospace cells and does not do glyph shaping — so \
+                             programming ligatures (-> ligature, != ligature) can't \
+                             be formed.",
                         );
                 });
+                ui.label("");
                 ui.end_row();
             }
 
@@ -1373,10 +1381,10 @@ fn render_sections(
             }
 
             if row_visible(q, "blink") {
-                ui.label("Blink");
                 changed |= ui
                     .checkbox(&mut config.cursor.blink, "Blink the cursor")
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(ui, &mut config.cursor.blink, &def.cursor.blink);
                 ui.end_row();
             }
@@ -1424,7 +1432,6 @@ fn render_sections(
             }
 
             if row_visible(q, "startup panel neofetch logo") {
-                ui.label("Startup panel");
                 // DISABLED: the neofetch-style launch splash is not drawn by the
                 // egui shell (only the legacy winit shell rendered it). Greyed
                 // with an honest tooltip rather than a dead toggle that silently
@@ -1435,6 +1442,7 @@ fn render_sections(
                             "Not available: the launch splash is not drawn in this shell yet.",
                         );
                 });
+                ui.label("");
                 ui.end_row();
             }
 
@@ -1465,24 +1473,23 @@ fn render_sections(
         group(ui, "Clipboard", "Copy-on-select and paste safety.");
         grid("terminal_clipboard").show(ui, |ui| {
             if row_visible(q, "copy on select clipboard") {
-                ui.label("Copy on select");
                 // Live again: mouse text-selection now exists in the egui shell
                 // (drag to select), so the drag-end can auto-copy. When OFF the
                 // selection is still made (and Ctrl/Cmd+Shift+C copies on demand);
                 // when ON the selection is copied to the clipboard on release.
                 changed |= ui
-                    .checkbox(&mut config.copy_on_select, "X11-style auto-copy")
+                    .checkbox(&mut config.copy_on_select, "Copy on select")
                     .on_hover_text(
-                        "Copy a mouse selection to the clipboard automatically when \
-                         the drag is released.",
+                        "X11-style: copy a mouse selection to the clipboard \
+                         automatically when the drag is released.",
                     )
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(ui, &mut config.copy_on_select, &def.copy_on_select);
                 ui.end_row();
             }
 
             if row_visible(q, "paste warn multiline newline security") {
-                ui.label("Multi-line paste");
                 changed |= ui
                     .checkbox(
                         &mut config.paste_warn_multiline,
@@ -1490,6 +1497,7 @@ fn render_sections(
                     )
                     .on_hover_text("Security: a pasted newline can run a shell command instantly.")
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(
                     ui,
                     &mut config.paste_warn_multiline,
@@ -1549,7 +1557,6 @@ fn render_sections(
             }
 
             if row_visible(q, "panes dividers linked symmetrical equal split") {
-                ui.label("Linked dividers");
                 changed |= ui
                     .checkbox(&mut config.link_pane_dividers, "Keep panes equal")
                     .on_hover_text(
@@ -1558,13 +1565,13 @@ fn render_sections(
                          once regardless of this setting.",
                     )
                     .changed();
+                ui.label("");
                 changed |=
                     reset_to_default(ui, &mut config.link_pane_dividers, &def.link_pane_dividers);
                 ui.end_row();
             }
 
             if row_visible(q, "status bar bottom hide show") {
-                ui.label("Status bar");
                 changed |= ui
                     .checkbox(&mut config.show_status_bar, "Show bottom status bar")
                     .on_hover_text(
@@ -1572,6 +1579,7 @@ fn render_sections(
                          row for the terminal grid.",
                     )
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(ui, &mut config.show_status_bar, &def.show_status_bar);
                 ui.end_row();
             }
@@ -1735,9 +1743,8 @@ fn render_sections(
              switch off for a fully static UI; every effect below is gated behind \
              it and off by default.",
         );
-        grid("motion_grid").show(ui, |ui| {
+        grid("motion_master").show(ui, |ui| {
             if row_visible(q, "enable animations") {
-                ui.label("Animations");
                 changed |= ui
                     .checkbox(&mut config.effects.animations_enabled, "Enable animations")
                     .on_hover_text(
@@ -1746,6 +1753,7 @@ fn render_sections(
                          cost the same as plain egui.",
                     )
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(
                     ui,
                     &mut config.effects.animations_enabled,
@@ -1776,22 +1784,28 @@ fn render_sections(
                 );
                 ui.end_row();
             }
+        });
 
+        let on = config.effects.animations_enabled;
+
+        group(
+            ui,
+            "CRT screen",
+            "Scan lines, RGB split, and brightness flicker.",
+        );
+        grid("motion_crt").show(ui, |ui| {
             if row_visible(q, "crt scanlines") {
-                ui.label("CRT scanlines");
                 changed |= ui
                     .add_enabled(
                         on,
-                        egui::Checkbox::new(
-                            &mut config.effects.crt_scanlines,
-                            "Animated scan lines",
-                        ),
+                        egui::Checkbox::new(&mut config.effects.crt_scanlines, "CRT scan lines"),
                     )
                     .on_hover_text(
                         "Dark scan-line bands drifting slowly down the panes for a \
                          calm retro CRT look. Auto-disabled under reduced-motion.",
                     )
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(
                     ui,
                     &mut config.effects.crt_scanlines,
@@ -1819,45 +1833,38 @@ fn render_sections(
             }
 
             if row_visible(q, "chromatic aberration") {
-                ui.label("Chromatic aberration");
-                // The checkbox + the intensity slider share ONE grid cell (col 2),
-                // stacked vertically, so this stays a 3-column row like every other
-                // one (a filling `Slider` in its own 4th column has no width budget
-                // and balloons the grid past the close button).
-                ui.vertical(|ui| {
-                    // Explicit ON/OFF checkbox: the intensity slider alone read as
-                    // "broken" when it sat at 0. On first enable, default the
-                    // intensity to a visible value so the effect shows.
-                    let was_enabled = config.effects.chromatic_aberration_enabled;
-                    if ui
-                        .add_enabled(
-                            on,
-                            egui::Checkbox::new(
-                                &mut config.effects.chromatic_aberration_enabled,
-                                "RGB split",
-                            ),
-                        )
-                        .on_hover_text("Pure-channel red/blue fringing behind the text.")
-                        .changed()
+                // Explicit ON/OFF checkbox in col 1 (checkbox-left), the intensity
+                // slider in col 2. The intensity slider alone read as "broken" when
+                // it sat at 0, so on first enable we default it to a visible value.
+                let was_enabled = config.effects.chromatic_aberration_enabled;
+                if ui
+                    .add_enabled(
+                        on,
+                        egui::Checkbox::new(
+                            &mut config.effects.chromatic_aberration_enabled,
+                            "Chromatic aberration",
+                        ),
+                    )
+                    .on_hover_text("Pure-channel red/blue fringing behind the text (RGB split).")
+                    .changed()
+                {
+                    changed = true;
+                    if config.effects.chromatic_aberration_enabled
+                        && !was_enabled
+                        && config.effects.chromatic_aberration <= 0.0
                     {
-                        changed = true;
-                        if config.effects.chromatic_aberration_enabled
-                            && !was_enabled
-                            && config.effects.chromatic_aberration <= 0.0
-                        {
-                            config.effects.chromatic_aberration =
-                                c0pl4nd_core::config::DEFAULT_CHROMATIC_INTENSITY;
-                        }
+                        config.effects.chromatic_aberration =
+                            c0pl4nd_core::config::DEFAULT_CHROMATIC_INTENSITY;
                     }
-                    let ca_on = on && config.effects.chromatic_aberration_enabled;
-                    changed |= ui
-                        .add_enabled(
-                            ca_on,
-                            egui::Slider::new(&mut config.effects.chromatic_aberration, 0.1..=1.5)
-                                .text("intensity"),
-                        )
-                        .changed();
-                });
+                }
+                let ca_on = on && config.effects.chromatic_aberration_enabled;
+                changed |= ui
+                    .add_enabled(
+                        ca_on,
+                        egui::Slider::new(&mut config.effects.chromatic_aberration, 0.1..=1.5)
+                            .text("intensity"),
+                    )
+                    .changed();
                 changed |= reset_to_default(
                     ui,
                     &mut config.effects.chromatic_aberration,
@@ -1865,9 +1872,15 @@ fn render_sections(
                 );
                 ui.end_row();
             }
+        });
 
+        group(
+            ui,
+            "Ambient node-mesh",
+            "The animated \"Wired\" lattice drawn behind the panes.",
+        );
+        grid("motion_mesh").show(ui, |ui| {
             if row_visible(q, "wired mesh background") {
-                ui.label("Wired mesh");
                 changed |= ui
                     .add_enabled(
                         on,
@@ -1882,6 +1895,7 @@ fn render_sections(
                          uses a translucent mode; hidden behind fully-opaque panes.",
                     )
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(
                     ui,
                     &mut config.effects.wired_ambient,
@@ -1931,18 +1945,42 @@ fn render_sections(
                 ui.end_row();
             }
 
+            if row_visible(q, "mesh movement") {
+                ui.label("Mesh movement").on_hover_text(
+                    "How fast the node lattice drifts. 0 holds a still frame; 1 is \
+                     the shipped drift; up to 2 is a brisk, roaming field.",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.wired_ambient,
+                        egui::Slider::new(&mut config.effects.mesh_speed, 0.0..=2.0)
+                            .text("movement"),
+                    )
+                    .changed();
+                changed |=
+                    reset_to_default(ui, &mut config.effects.mesh_speed, &def.effects.mesh_speed);
+                ui.end_row();
+            }
+        });
+
+        group(
+            ui,
+            "Tape & motion accents",
+            "VHS tracking, the cursor ghost-trail, and the boot sweep.",
+        );
+        grid("motion_accents").show(ui, |ui| {
             if row_visible(q, "vhs tracking") {
-                ui.label("VHS tracking");
                 changed |= ui
                     .add_enabled(
                         on,
-                        egui::Checkbox::new(&mut config.effects.vhs_tracking, "Tracking lines"),
+                        egui::Checkbox::new(&mut config.effects.vhs_tracking, "VHS tracking lines"),
                     )
                     .on_hover_text(
                         "Faint bright bands sweep down the window like analogue tape \
                          tracking error.",
                     )
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(
                     ui,
                     &mut config.effects.vhs_tracking,
@@ -1951,8 +1989,27 @@ fn render_sections(
                 ui.end_row();
             }
 
+            if row_visible(q, "vhs intensity") {
+                ui.label("VHS intensity").on_hover_text(
+                    "How bright the VHS tracking bands read — from a faint whisper \
+                     to a bold, unmistakable sweep.",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.vhs_tracking,
+                        egui::Slider::new(&mut config.effects.vhs_intensity, 0.0..=1.0)
+                            .text("intensity"),
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.vhs_intensity,
+                    &def.effects.vhs_intensity,
+                );
+                ui.end_row();
+            }
+
             if row_visible(q, "screen flicker") {
-                ui.label("Screen flicker");
                 changed |= ui
                     .add_enabled(
                         on,
@@ -1960,6 +2017,7 @@ fn render_sections(
                     )
                     .on_hover_text("Subtle CRT-style brightness flicker over the whole window.")
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(ui, &mut config.effects.flicker, &def.effects.flicker);
                 ui.end_row();
             }
@@ -1986,14 +2044,14 @@ fn render_sections(
             }
 
             if row_visible(q, "cursor trail") {
-                ui.label("Cursor trail");
                 changed |= ui
                     .add_enabled(
                         on,
-                        egui::Checkbox::new(&mut config.effects.cursor_trail, "Ghost-trail"),
+                        egui::Checkbox::new(&mut config.effects.cursor_trail, "Cursor ghost-trail"),
                     )
                     .on_hover_text("A fading echo follows the focused terminal cursor as it moves.")
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(
                     ui,
                     &mut config.effects.cursor_trail,
@@ -2025,16 +2083,16 @@ fn render_sections(
             }
 
             if row_visible(q, "boot glitch") {
-                ui.label("Boot glitch");
                 changed |= ui
                     .add_enabled(
                         on,
-                        egui::Checkbox::new(&mut config.effects.boot_glitch, "Startup sweep"),
+                        egui::Checkbox::new(&mut config.effects.boot_glitch, "Boot glitch sweep"),
                     )
                     .on_hover_text(
                         "A one-shot glitch sweep plays for a moment when the app launches.",
                     )
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(
                     ui,
                     &mut config.effects.boot_glitch,
@@ -2363,21 +2421,19 @@ fn render_sections(
         );
         grid("privacy_history").show(ui, |ui| {
             if row_visible(q, "record command history capture") {
-                ui.label("Record history").on_hover_text(
-                    "Capture typed commands for the Ctrl+Shift+P palette + the \
-                     history sidebar.",
-                );
                 changed |= ui
                     .checkbox(
                         &mut config.history_capture_enabled,
-                        "Capture typed commands",
+                        "Record command history",
                     )
                     .on_hover_text(
-                        "Passwords typed at prompts are never captured (they are not \
-                         echoed); inline secrets like --password=… / API_KEY=… are \
-                         redacted. Turn off for a no-history posture.",
+                        "Capture typed commands for the Ctrl+Shift+P palette + the \
+                         history sidebar. Passwords typed at prompts are never captured \
+                         (they are not echoed); inline secrets like --password=… / \
+                         API_KEY=… are redacted. Turn off for a no-history posture.",
                     )
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(
                     ui,
                     &mut config.history_capture_enabled,
@@ -2389,9 +2445,6 @@ fn render_sections(
             if row_visible(q, "incognito secret session no history") {
                 // Incognito is RUNTIME state (never persisted) owned by the host;
                 // reflect it and report a toggle back via `set_incognito`.
-                ui.label("Incognito").on_hover_text(
-                    "Stop recording history for THIS session; resets off next launch.",
-                );
                 let mut inc = incognito;
                 if ui
                     .checkbox(&mut inc, "No history this session")
@@ -2403,6 +2456,7 @@ fn render_sections(
                 {
                     *set_incognito = Some(inc);
                 }
+                ui.label(""); // empty control column
                 ui.label(""); // runtime state — no ↺ revert column
                 ui.end_row();
             }

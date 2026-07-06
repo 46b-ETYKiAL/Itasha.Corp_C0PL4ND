@@ -4401,18 +4401,24 @@ impl C0pl4ndApp {
             let mut animating = false;
             if fx.wired_ambient {
                 let accent = theme::ChromeColors::from_theme(&self.theme).accent;
+                // The Motion → Mesh-movement slider (`mesh_speed`) scales the
+                // mesh's OWN drift clock ON TOP of the global animation speed, so
+                // the node lattice can hold a static frame (0) or drift briskly (2)
+                // independently of the other effects. `ts * mesh_move` = the
+                // per-mesh clock; at 0 the nodes stop moving.
+                let mesh_move = fx.clamped_mesh_speed() as f64;
                 paint_wired_mesh(
                     ctx,
                     fx.clamped_mesh_density(),
                     fx.clamped_mesh_brightness(),
                     accent,
-                    ts,
+                    ts * mesh_move,
                     exclude,
                 );
-                animating |= speed > 0.0;
+                animating |= speed > 0.0 && mesh_move > 0.0;
             }
             if fx.vhs_tracking {
-                paint_vhs_tracking(ctx, ts, exclude);
+                paint_vhs_tracking(ctx, ts, fx.clamped_vhs_intensity(), exclude);
                 animating |= speed > 0.0;
             }
             if fx.flicker {

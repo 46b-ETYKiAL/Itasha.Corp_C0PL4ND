@@ -186,6 +186,27 @@ fn qa_toolbar_settings_page() {
 
 #[test]
 #[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
+fn qa_motion_settings_page() {
+    let Some(mut h) = build() else { return };
+    for _ in 0..10 {
+        h.step();
+    }
+    h.get_by_label("settings").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    // Select the Motion category to render the regrouped Motion page — the four
+    // grouped sections (master / CRT screen / Ambient node-mesh / Tape & motion
+    // accents) with checkbox-left rows and the new movement/intensity sliders.
+    h.get_by_label("Motion").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    snapshot(&mut h, "motion-settings");
+}
+
+#[test]
+#[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
 fn qa_command_palette() {
     let Some(mut h) = build() else { return };
     for _ in 0..10 {
