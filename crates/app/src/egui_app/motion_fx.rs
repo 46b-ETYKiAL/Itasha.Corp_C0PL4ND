@@ -222,9 +222,10 @@ pub(crate) fn paint_wired_mesh(
     // Drop any node that falls inside an open panel's rect so the mesh previews on
     // the terminal without washing over the panel. `contains` is cheap; skipping a
     // node also skips every link touching it (both endpoints are tested below).
-    // `map_or(true, …)` (not `is_none_or`, which is Rust 1.82+) keeps the crate's
-    // 1.80 MSRV: no exclude ⇒ every node is outside.
-    let outside = |p: Pos2| exclude.map_or(true, |e| !e.contains(p));
+    // `!is_some_and(…)` (not `is_none_or`, which is Rust 1.82+, nor `map_or(true,…)`,
+    // which clippy's `unnecessary_map_or` rejects) keeps the crate's 1.80 MSRV: no
+    // exclude ⇒ nothing is "some and inside" ⇒ every node is outside.
+    let outside = |p: Pos2| !exclude.is_some_and(|e| e.contains(p));
     // The link radius tracks the ACTUAL mean node spacing (≥ a screen-fraction
     // floor), so neighbours reliably connect at any window size — otherwise, on a
     // large screen, no pair falls within a fixed radius and the "mesh" collapses to

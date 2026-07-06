@@ -60,7 +60,7 @@ fn open_settings(h: &mut Harness<'_>) {
     h.run();
 }
 
-/// Click a left-nav category by its label (e.g. "Cursor", "Font"). The nav
+/// Click a left-nav category by its label (e.g. "Cursor", "Fonts"). The nav
 /// item is a selectable (role `Button`); querying by role disambiguates it from
 /// the section `heading` of the same name (role `Label`), which renders for the
 /// currently-selected category.
@@ -816,13 +816,13 @@ fn every_settings_page_has_the_same_window_width() {
     open_settings(&mut h);
 
     let appearance = close_button_right_on_page(&mut h, "Appearance");
-    let font = close_button_right_on_page(&mut h, "Font");
+    let font = close_button_right_on_page(&mut h, "Fonts");
     let updates = close_button_right_on_page(&mut h, "Updates");
     let keybindings = close_button_right_on_page(&mut h, "Keybindings");
 
     // All four right edges must agree within 1px — a stable-width window.
     for (name, x) in [
-        ("Font", font),
+        ("Fonts", font),
         ("Updates", updates),
         ("Keybindings", keybindings),
     ] {
