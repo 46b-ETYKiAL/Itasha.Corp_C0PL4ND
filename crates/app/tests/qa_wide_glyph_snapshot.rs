@@ -166,6 +166,47 @@ fn qa_settings_page() {
 
 #[test]
 #[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
+fn qa_toolbar_settings_page() {
+    let Some(mut h) = build() else { return };
+    for _ in 0..10 {
+        h.step();
+    }
+    h.get_by_label("settings").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    // Select the Toolbar category to render the toolbar editor (icons must NOT be
+    // tofu; every row must show the reorder arrows + X remove + move menu).
+    h.get_by_label("Toolbar").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    snapshot(&mut h, "toolbar-settings");
+}
+
+#[test]
+#[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
+fn qa_motion_settings_page() {
+    let Some(mut h) = build() else { return };
+    for _ in 0..10 {
+        h.step();
+    }
+    h.get_by_label("settings").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    // Select the Motion category to render the regrouped Motion page — the four
+    // grouped sections (master / CRT screen / Ambient node-mesh / Tape & motion
+    // accents) with checkbox-left rows and the new movement/intensity sliders.
+    h.get_by_label("Motion").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    snapshot(&mut h, "motion-settings");
+}
+
+#[test]
+#[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
 fn qa_command_palette() {
     let Some(mut h) = build() else { return };
     for _ in 0..10 {
@@ -199,4 +240,75 @@ fn qa_split_panes() {
         h.step();
     }
     snapshot(&mut h, "split");
+}
+
+/// Build a real-wgpu harness whose live config has window-transparency ON with a
+/// strong background TINT at a LOW opacity — the exact state the tint/transparency
+/// fixes must be eyeballed in. `new(cc)` loads the persisted config, then we
+/// override just the transparency fields for the QA render (mirrors the user
+/// dialling Settings → Appearance). `None` when no GPU adapter is present.
+fn build_tinted(
+    opacity: f32,
+    tint_strength: f32,
+) -> Option<Harness<'static, egui_app::C0pl4ndApp>> {
+    use c0pl4nd_core::config::WindowMode;
+    if !gpu_available() {
+        eprintln!("QA-SNAPSHOT: no GPU adapter on this host; skipping (not a failure).");
+        return None;
+    }
+    Some(
+        Harness::builder()
+            .with_size(egui::vec2(1100.0, 720.0))
+            .wgpu()
+            .build_eframe(move |cc| {
+                let mut app = egui_app::C0pl4ndApp::new(cc);
+                app.config.transparency_enabled = true;
+                app.config.window_mode = WindowMode::Transparent;
+                app.config.opacity = opacity;
+                app.config.tint = "#ff0040".to_string();
+                app.config.tint_strength = tint_strength;
+                app
+            }),
+    )
+}
+
+/// VISUAL-QA: window transparency ON + strong red tint at LOW opacity, split into
+/// two panes. Eyeball checklist against the tint/transparency fixes:
+///   1. the TINT wash reaches the panes, the gap/divider between them, AND the
+///      top bar + status bar UNIFORMLY (not just the pane backgrounds);
+///   2. the terminal TEXT is NOT reddened (tint is behind the glyphs);
+///   3. at this low opacity the background reads as clearly see-through.
+#[test]
+#[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
+fn qa_tint_transparent_low_opacity() {
+    let Some(mut h) = build_tinted(0.10, 0.8) else {
+        return;
+    };
+    for _ in 0..10 {
+        h.step();
+    }
+    chord(&mut h, egui::Key::D); // split right → two panes + a divider to inspect
+    for _ in 0..8 {
+        h.step();
+    }
+    snapshot(&mut h, "tint-transparent-low-opacity");
+}
+
+/// VISUAL-QA: with the SAME tint/transparency config, open Settings. The Settings
+/// window MUST stay solid + readable (opaque) and MUST NOT be washed red — the
+/// reported "settings window is tinted/transparent" bug.
+#[test]
+#[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
+fn qa_tint_settings_stays_opaque() {
+    let Some(mut h) = build_tinted(0.10, 0.8) else {
+        return;
+    };
+    for _ in 0..10 {
+        h.step();
+    }
+    h.get_by_label("settings").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    snapshot(&mut h, "tint-settings-opaque");
 }

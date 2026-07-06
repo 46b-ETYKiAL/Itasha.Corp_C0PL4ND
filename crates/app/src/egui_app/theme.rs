@@ -7,11 +7,12 @@
 //! via [`is_light`]). The terminal grid's glyph colours still come from the same
 //! `Theme`'s ANSI map (Milestone 2).
 //!
-//! The two-tone C0PL4ND wordmark keeps its fixed brand accent — Itasha purple
-//! `#7700FF` + `.Corp` green `#00FF90` — the brand identity; everything else
-//! (surfaces, text, hover/press/selection accents) is derived from the theme.
-//! The [`brand`] module exposes those two accents plus `BG`/`FG` fallbacks used
-//! when a minimal theme omits the optional background/foreground/selection slots.
+//! The two-tone C0PL4ND wordmark tints BOTH tones from the theme (bright,
+//! readability-guaranteed via [`ensure_readable_tone`], hue-distant so they
+//! contrast); everything else (surfaces, text, hover/press/selection accents)
+//! is likewise derived from the theme. The [`brand`] module exposes the Itasha
+//! purple/`.Corp` green pair as the wordmark FALLBACKS plus `BG`/`FG` fallbacks
+//! used when a minimal theme omits the optional slots.
 
 use egui::{Color32, CornerRadius, Stroke, Visuals};
 
@@ -51,6 +52,33 @@ fn shade(base: Color32, amount: f32) -> Color32 {
         Color32::WHITE
     };
     base.lerp_to_gamma(toward, amount)
+}
+
+/// Nudge `tone` until it reads clearly and BRIGHTLY against `bg`: if the
+/// luminance gap to `bg` is below a legibility floor, lerp the tone toward the
+/// readable pole (white on a dark surface, black on a light one) just far enough
+/// to clear the floor. A tone that already contrasts is returned untouched, so a
+/// vivid theme colour keeps its chroma; only a muddy/too-dark (or, on a light
+/// theme, too-pale) tone is lifted off the background. This is what keeps the
+/// wordmark from rendering as a near-background, hard-to-read blob — the failure
+/// mode of a fixed dark purple sitting on the dark void surface.
+fn ensure_readable_tone(tone: Color32, bg: Color32) -> Color32 {
+    const MIN_GAP: f32 = 0.34;
+    let bg_l = luminance(bg);
+    let toward = if bg_l < 0.5 {
+        Color32::WHITE
+    } else {
+        Color32::BLACK
+    };
+    let mut out = tone;
+    let mut t = 0.0_f32;
+    // Cap at 0.8 so a lifted tone keeps some of its hue rather than washing fully
+    // to white/black; ~10 steps max, evaluated once per frame.
+    while (luminance(out) - bg_l).abs() < MIN_GAP && t < 0.8 {
+        t += 0.08;
+        out = tone.lerp_to_gamma(toward, t);
+    }
+    out
 }
 
 /// Build an `egui::Visuals` DERIVED FROM the active terminal colour `theme`, so
@@ -137,8 +165,9 @@ pub fn visuals_from_theme(theme: &c0pl4nd_core::Theme) -> Visuals {
 /// Theme-derived chrome colours, computed once per frame from the active
 /// terminal [`c0pl4nd_core::Theme`] and handed to the chrome painters so the
 /// titlebar / tab strip / status bar / settings panels follow the theme without
-/// each call-site re-deriving them. The two-tone C0PL4ND wordmark keeps its
-/// fixed [`brand::PURPLE`]/[`brand::GREEN`] accent; everything else is theme-led.
+/// each call-site re-deriving them. The two-tone C0PL4ND wordmark's tones
+/// ([`ChromeColors::logo_a`]/[`ChromeColors::logo_b`]) are themselves
+/// theme-derived (bright, readability-guaranteed); everything else is theme-led.
 #[derive(Debug, Clone, Copy)]
 pub struct ChromeColors {
     /// Window background (the central pane fill behind the grid).
@@ -154,6 +183,16 @@ pub struct ChromeColors {
     /// Live/selected accent (from the theme selection colour; brand green when
     /// the theme omits it). Used for the focused tab, status accent, headings.
     pub accent: Color32,
+    /// First tone of the two-tone C0PL4ND wordmark ("C0PL"). Derived from the
+    /// theme's BRIGHT magenta (echoing the brand purple) and guaranteed both
+    /// readable and bright against the titlebar surface, so it tints with the
+    /// theme yet is never a muddy, too-dark, low-contrast wordmark.
+    pub logo_a: Color32,
+    /// Second tone of the wordmark ("4ND"). Derived from the theme's BRIGHT green
+    /// (echoing the brand green), hue-distant from [`Self::logo_a`] so the two
+    /// tones always contrast, and likewise guaranteed readable + bright against
+    /// the titlebar surface.
+    pub logo_b: Color32,
 }
 
 impl ChromeColors {
@@ -165,13 +204,22 @@ impl ChromeColors {
         let bg = theme_color(&theme.background, brand::BG);
         let fg = theme_color(&theme.foreground, brand::FG);
         let accent = theme_color(&theme.selection_background, brand::GREEN);
+        let panel = shade(bg, 0.06);
+        // The two-tone wordmark draws on the titlebar `panel` surface, so both
+        // tones are made readable against `panel` (not the window bg). They pull
+        // from the theme's BRIGHT magenta/green — hue-distant, so they always
+        // contrast — and fall back to the brand purple/green pair.
+        let logo_a = ensure_readable_tone(theme_color(&theme.bright.magenta, brand::PURPLE), panel);
+        let logo_b = ensure_readable_tone(theme_color(&theme.bright.green, brand::GREEN), panel);
         Self {
             bg,
-            panel: shade(bg, 0.06),
+            panel,
             bezel: shade(bg, 0.12),
             fg,
             muted: fg.lerp_to_gamma(bg, 0.55),
             accent,
+            logo_a,
+            logo_b,
         }
     }
 }
@@ -253,5 +301,38 @@ mod tests {
             &c0pl4nd_core::Theme::builtin_named("ghost-paper").expect("ghost-paper embedded"),
         );
         assert!(is_light(light.bg) && is_light(light.panel));
+    }
+
+    #[test]
+    fn wordmark_tones_are_readable_bright_and_contrasting() {
+        // Normalised per-channel distance (0.0..=1.0) — proves the two tones are
+        // genuinely different colours, not just different luminances.
+        let chan_dist = |a: Color32, b: Color32| {
+            let [ar, ag, ab, _] = a.to_array();
+            let [br, bg, bb, _] = b.to_array();
+            ((ar as f32 - br as f32).abs()
+                + (ag as f32 - bg as f32).abs()
+                + (ab as f32 - bb as f32).abs())
+                / (255.0 * 3.0)
+        };
+        for name in ["void", "ghost-paper"] {
+            let theme = if name == "void" {
+                c0pl4nd_core::Theme::builtin_void()
+            } else {
+                c0pl4nd_core::Theme::builtin_named("ghost-paper").expect("ghost-paper embedded")
+            };
+            let c = ChromeColors::from_theme(&theme);
+            // Each tone clears the legibility floor against the titlebar surface…
+            let gap_a = (luminance(c.logo_a) - luminance(c.panel)).abs();
+            let gap_b = (luminance(c.logo_b) - luminance(c.panel)).abs();
+            assert!(gap_a >= 0.30, "{name}: logo_a not readable (gap {gap_a})");
+            assert!(gap_b >= 0.30, "{name}: logo_b not readable (gap {gap_b})");
+            // …and the two tones are visibly DIFFERENT colours (contrasting).
+            let d = chan_dist(c.logo_a, c.logo_b);
+            assert!(
+                d > 0.12,
+                "{name}: wordmark tones too similar (chan_dist {d})"
+            );
+        }
     }
 }

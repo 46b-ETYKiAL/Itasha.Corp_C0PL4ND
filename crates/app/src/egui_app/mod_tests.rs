@@ -553,13 +553,14 @@ fn close_then_new_terminal_keeps_every_pane_reachable() {
 /// (no test pollution) — it asserts the no-orphan child-reaping side effect,
 /// which is the load-bearing correctness guarantee of the fast exit.
 #[test]
-fn prepare_shutdown_reaps_all_terminals_without_exit() {
+fn prepare_shutdown_kills_shells_without_dropping_panes_or_exiting() {
     let mut app = C0pl4ndApp::bootstrap();
-    // Open a couple more panes so there are several live PaneTerms to reap.
+    // Open a couple more panes so there are several live shells to kill.
     app.new_terminal();
     app.new_terminal();
+    let n = app.term_count();
     assert!(
-        app.term_count() > 0,
+        n > 0,
         "precondition: at least one live terminal before shutdown"
     );
     assert!(
@@ -567,17 +568,27 @@ fn prepare_shutdown_reaps_all_terminals_without_exit() {
         "bootstrap() is headless: the config save is skipped (no test pollution)"
     );
 
-    // The cleanup the real Close handler runs before process::exit(0).
+    // The cleanup the real Close handler runs before process::exit(0). It kills
+    // every pane's shell (`PaneTerm::kill_child` → `Session::kill_child` →
+    // `PtyProcess::kill`; that the kill actually terminates the child is proven
+    // deterministically by `pty::tests::kill_terminates_interactive_child`).
     app.prepare_shutdown();
 
+    // The load-bearing FAST-CLOSE contract: prepare_shutdown must NOT drop the
+    // panes. Dropping runs the per-pane `ClosePseudoConsole` that BLOCKS until
+    // each child exits, sequentially — the slow-to-close latency this change
+    // removes. `process::exit(0)` (which the real Close handler calls right after)
+    // runs no destructors, so the blocking drop never fires; the shells are still
+    // reaped because they were killed above, and the OS reclaims the pseudoconsole
+    // handles on process exit.
     assert_eq!(
         app.term_count(),
-        0,
-        "every PaneTerm must be dropped (Session::Drop kills its PTY child) \
-             so no shell is orphaned after the window closes"
+        n,
+        "prepare_shutdown must NOT drop the panes (the blocking per-pane \
+             ClosePseudoConsole is skipped on the fast-exit path)"
     );
     // Reaching here proves prepare_shutdown returned normally — it did NOT
-    // call process::exit (which would abort the test runner).
+    // call process::exit (which would abort the test runner) and did NOT block.
 }
 
 // ---- Transparency clear-color (SCR1B3-parity model) ----
@@ -628,13 +639,20 @@ fn clear_color_folds_opacity_into_alpha_for_transparent_mode() {
         "Transparent mode alpha must equal the opacity slider (got {a})"
     );
 
-    // The 0.05 floor (down from the old 0.30 dead band — #27) is honoured
-    // even if a lower opacity slips through, so the slider's travel is live.
+    // The floor is now 0.0, so a very low opacity passes straight through (the
+    // background can go fully transparent; the terminal text keeps its own alpha).
     cfg.opacity = 0.01;
     let [_, _, _, a2] = window_clear_color(&cfg, &app.theme);
     assert!(
-        (a2 - TRANSLUCENT_ALPHA_FLOOR).abs() < 1e-6,
-        "alpha is clamped to the 0.05 floor"
+        (a2 - 0.01).abs() < 1e-6,
+        "a low opacity passes through unclamped (floor is 0.0), got {a2}"
+    );
+    // Opacity 0 = a fully transparent background (maximum transparency).
+    cfg.opacity = 0.0;
+    let [_, _, _, a3] = window_clear_color(&cfg, &app.theme);
+    assert!(
+        (a3 - TRANSLUCENT_ALPHA_FLOOR).abs() < 1e-6 && a3 == 0.0,
+        "opacity 0 clears fully transparent, got {a3}"
     );
 }
 
@@ -861,27 +879,25 @@ fn scanline_dark_alpha_maps_darkness_to_a_visible_band() {
 }
 
 #[test]
-fn scanline_roll_band_moves_with_time_and_wraps() {
-    // The animated roll band drifts down as time advances (the visible
-    // proof of animation), starting off the top so it sweeps in.
-    let (top, height, roll_h) = (0.0_f32, 200.0, 36.0);
-    let y0 = scanline_roll_top(top, height, roll_h, 0.0);
-    let y1 = scanline_roll_top(top, height, roll_h, 0.5);
-    assert!(y1 > y0, "the scan band moves DOWN as time advances");
+fn scanline_field_drifts_with_time_and_wraps() {
+    // The whole dark-band field creeps DOWN as time advances (the visible proof
+    // of animation) and wraps seamlessly every period — SCR1B3-style calm drift,
+    // replacing the old bright rolling-scan bar.
+    let period = 3.0_f32;
+    let d0 = scanline_drift(period, 0.0);
+    let d1 = scanline_drift(period, 0.1);
+    assert_eq!(d0, 0.0, "at t=0 the field sits at its base offset");
+    assert!(d1 > d0, "the field drifts DOWN as time advances");
+    // The offset stays within one period, never running away unbounded.
+    assert!(scanline_drift(period, 123.4) < period);
+    // One full period returns the field to its start (seamless wrap).
+    let one_period_t = period / CRT_SCANLINE_DRIFT_PTS_PER_SEC;
     assert!(
-        y0 <= top,
-        "at t=0 the band starts at/above the top (sweeps in from above)"
+        scanline_drift(period, one_period_t).abs() < 1e-3,
+        "one full period wraps back to the base offset"
     );
-    // It wraps within one period, never running away unbounded.
-    let span = height + roll_h;
-    let period = span / CRT_ROLL_SPEED_PTS_PER_SEC;
-    let wrapped = scanline_roll_top(top, height, roll_h, period);
-    assert!(
-        (wrapped - y0).abs() < 1e-2,
-        "one full period returns the band to its start (wraps)"
-    );
-    // Degenerate height never panics.
-    assert!(scanline_roll_top(top, 0.0, roll_h, 1.0).is_finite());
+    // Degenerate period never panics.
+    assert_eq!(scanline_drift(0.0, 1.0), 0.0);
 }
 
 // ---- Translucent pane background alpha (the transparency fix) ----

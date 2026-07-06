@@ -5,11 +5,13 @@
 //! from the `egui_app` god-module. The colour math is pure (`&Config`/`&Theme`) and
 //! unit-testable. Re-exported via `pub(crate) use window_effects::*`.
 
-/// The minimum translucent panel alpha (fraction). Below this the grid text
-/// would be unreadable; matches SCR1B3's `0.05` slider floor so the full
-/// opacity-slider travel is live (the old `0.30` floor was a dead band that
-/// made low opacities "just dim" instead of going see-through — issue #27).
-pub(crate) const TRANSLUCENT_ALPHA_FLOOR: f32 = 0.05;
+/// The minimum translucent BACKGROUND alpha (fraction). `0.0` = the pane/window
+/// background can go FULLY transparent (only the terminal text — drawn at its own
+/// full alpha — and the desktop remain), which is what "maximum transparency"
+/// means. There is no readability floor because the grid TEXT alpha is independent
+/// of this background alpha, so a near-zero background never hides the text; the
+/// user drives the whole range with the opacity slider.
+pub(crate) const TRANSLUCENT_ALPHA_FLOOR: f32 = 0.0;
 
 /// The alpha (0..=255) to paint the pane grid background (and the central panel
 /// fill) with, for the current config:
@@ -17,8 +19,9 @@ pub(crate) const TRANSLUCENT_ALPHA_FLOOR: f32 = 0.05;
 /// * **Opaque** (master toggle off, or `Opaque` mode): `255` — a solid fill so
 ///   the desktop never bleeds through. The unchanged, safe default.
 /// * **Translucent** (`effective_translucent()`): the `opacity` slider folded
-///   into a 0..=255 alpha (floored at [`TRANSLUCENT_ALPHA_FLOOR`] so the grid
-///   never fully vanishes). The opacity slider drives the fill alpha across its
+///   into a 0..=255 alpha (floored at [`TRANSLUCENT_ALPHA_FLOOR`], now `0.0`, so
+///   the background can go fully transparent — text stays, drawn at its own
+///   alpha). The opacity slider drives the fill alpha across its
 ///   FULL range in every translucent mode — Glass/Mica/Vibrancy are
 ///   distinguished by their DWM backdrop EFFECT (acrylic / mica / plain, applied
 ///   separately via `window-vibrancy`), NOT by capping the alpha. A prior
@@ -69,9 +72,10 @@ pub(crate) fn window_clear_color(
         c0pl4nd_core::config::WindowMode::Glass
         | c0pl4nd_core::config::WindowMode::Mica
         | c0pl4nd_core::config::WindowMode::Vibrancy => [0.0, 0.0, 0.0, 0.0],
-        // Portable see-through: theme background, alpha = opacity slider. Floored
-        // at the shared TRANSLUCENT_ALPHA_FLOOR (0.05) so the slider's full travel
-        // is live (the old 0.30 floor was a dead band — #27).
+        // Portable see-through: theme background, alpha = opacity slider directly.
+        // The floor is now 0.0 (TRANSLUCENT_ALPHA_FLOOR), so the slider reaches a
+        // FULLY transparent background at its low end — the terminal text (its own
+        // alpha) stays visible over the desktop.
         c0pl4nd_core::config::WindowMode::Transparent => {
             let (r, g, b) =
                 c0pl4nd_core::theme::parse_hex(&theme.background).unwrap_or((0x12, 0x12, 0x12));
@@ -83,27 +87,95 @@ pub(crate) fn window_clear_color(
     }
 }
 
-/// Paint a full-window translucent tint overlay (a subtle color wash) on a
-/// foreground layer — portable across every translucent mode and OS, mirroring
-/// SCR1B3's `paint_tint_overlay`. A no-op when `strength <= 0` or the tint is
-/// not a valid `#RRGGBB`.
-pub(crate) fn paint_tint_overlay(ctx: &egui::Context, tint_hex: &str, strength: f32) {
-    if strength <= 0.0 {
+/// The 0..=255 alpha for a given tint `strength` (0..=1). Scaled so the slider's
+/// top end is a clearly-visible wash without fully hiding the background. Pure, so
+/// the mapping is unit-testable.
+pub(crate) fn tint_alpha(strength: f32) -> u8 {
+    (strength.clamp(0.0, 1.0) * 120.0).round() as u8
+}
+
+/// Paint the window tint as a single colour wash on the BACKGROUND layer, EARLY —
+/// call this BEFORE any panel is shown. Because it is the first thing drawn on the
+/// background layer, it sits BEHIND every translucent background fill (pane
+/// backgrounds, the gaps between panes, the titlebar + status panels): at a low
+/// opacity those fills let the wash show through UNIFORMLY across the whole window,
+/// so panes, dividers, and the chrome/buttons are all tinted the same. Crucially it
+/// is BEHIND the glyph text (drawn later on the same layer) and BELOW the Settings
+/// window (a higher-order area), so neither the terminal text nor the settings UI
+/// is ever tinted — the reported "tint colours the text / the buttons aren't
+/// tinted" issues. A no-op when `tint_strength <= 0` or the hex is invalid.
+pub(crate) fn paint_background_tint(ctx: &egui::Context, config: &c0pl4nd_core::Config) {
+    if config.tint_strength <= 0.0 {
         return;
     }
-    let Ok((r, g, b)) = c0pl4nd_core::theme::parse_hex(tint_hex) else {
+    let Ok((r, g, b)) = c0pl4nd_core::theme::parse_hex(&config.tint) else {
         return;
     };
-    let a = (strength.clamp(0.0, 1.0) * 90.0).round() as u8;
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("c0pl4nd-tint-overlay"),
-    ));
+    let painter = ctx.layer_painter(egui::LayerId::background());
     painter.rect_filled(
         ctx.content_rect(),
         0.0,
-        egui::Color32::from_rgba_unmultiplied(r, g, b, a),
+        egui::Color32::from_rgba_unmultiplied(r, g, b, tint_alpha(config.tint_strength)),
     );
+}
+
+/// Style the chrome (titlebar + status bar) buttons as FLAT: no idle background,
+/// with a subtle fill appearing ONLY on hover / press. This is the industry
+/// standard for a translucent titlebar — Windows Terminal (`useAcrylicInTabRow`),
+/// VS Code's titlebar toolbar, macOS vibrancy title-bar controls, and libadwaita
+/// `.flat` header buttons all draw idle icon-buttons with NO background so they
+/// read as part of the bar. A per-button opaque fill (what egui draws by default
+/// from `inactive.weak_bg_fill`) turns every control into a floating chip once the
+/// bar itself goes translucent — the reported "buttons don't fit the top bar" bug.
+///
+/// Scoped to the chrome `ui`: the Settings window + overlays (separate uis) keep
+/// their normal filled buttons. `dark` picks a white hover-veil on dark themes and
+/// a black one on light, so the hover reads over whatever desktop shows through.
+/// Called each frame, so it tracks live opacity/theme changes. The window tint
+/// reaches the bar as a background wash through the translucent panel fill (see
+/// [`paint_background_tint`]) — never as a flat film painted over the buttons.
+pub(crate) fn flatten_chrome_buttons(ui: &mut egui::Ui, dark: bool) {
+    let veil = |a: u8| {
+        if dark {
+            egui::Color32::from_white_alpha(a)
+        } else {
+            egui::Color32::from_black_alpha(a)
+        }
+    };
+    let widgets = &mut ui.visuals_mut().widgets;
+    // Idle = frameless: no chip, no border. The icon/label sits on the bar itself.
+    widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+    widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+    widgets.inactive.bg_stroke = egui::Stroke::NONE;
+    // A subtle fill appears only under the pointer / while pressed — the sole
+    // affordance, shared across every mode so a button can never revert to a chip.
+    widgets.hovered.weak_bg_fill = veil(20);
+    widgets.hovered.bg_fill = veil(20);
+    widgets.active.weak_bg_fill = veil(32);
+    widgets.active.bg_fill = veil(32);
+}
+
+/// Fold the window-transparency alpha (`bg_alpha`, 0..=255 — the same value
+/// [`pane_bg_alpha`] paints the pane bodies with) into a chrome stroke colour so
+/// the stroke is exactly as translucent as the panes and never out-paints them.
+///
+/// This is the fix for the pane-divider/border reading as a hard OPAQUE line that
+/// is "unaffected by tint or transparency": the per-pane bezel/focus border was
+/// drawn at full alpha over the translucent framebuffer, so it sat ON TOP of the
+/// see-through window as a solid bar. Multiplying its alpha by the window alpha
+/// makes the border fade into negative space as the window goes see-through
+/// (the kitty/i3 "the seam is the surface" model) and tint uniformly with the
+/// rest of the chrome at partial opacity. `bg_alpha == 255` (opaque window)
+/// returns the colour unchanged, so the opaque path is byte-for-byte untouched.
+///
+/// egui `Color32` is premultiplied, so [`egui::Color32::gamma_multiply`] scales
+/// every premultiplied channel together — the premult-correct way to lower a
+/// colour's effective opacity. Pure, so the fold is unit-testable without a window.
+pub(crate) fn fold_alpha(color: egui::Color32, bg_alpha: u8) -> egui::Color32 {
+    if bg_alpha == 255 {
+        return color;
+    }
+    color.gamma_multiply(f32::from(bg_alpha) / 255.0)
 }
 
 /// Parse a `#RRGGBB` tint to an RGBA quad for native blur tinting.
@@ -189,5 +261,91 @@ pub(crate) fn apply_window_effect(
         // native blur). Opaque: no effect at all.
         c0pl4nd_core::config::WindowMode::Transparent
         | c0pl4nd_core::config::WindowMode::Opaque => {}
+    }
+}
+
+#[cfg(test)]
+mod tint_tests {
+    use super::{flatten_chrome_buttons, fold_alpha, tint_alpha};
+
+    #[test]
+    fn fold_alpha_passes_opaque_through_and_scales_translucent() {
+        let accent = egui::Color32::from_rgb(0x00, 0xFF, 0x90); // brand green, opaque
+                                                                // Opaque window (bg_alpha 255): the colour is returned UNCHANGED so the
+                                                                // existing opaque divider path is byte-for-byte identical.
+        assert_eq!(
+            fold_alpha(accent, 255),
+            accent,
+            "opaque window must not alter the stroke colour"
+        );
+        // Fully transparent fold collapses the stroke to nothing (negative-space
+        // seam) — the divider cannot out-paint a fully see-through window.
+        assert_eq!(
+            fold_alpha(accent, 0).a(),
+            0,
+            "zero window alpha → invisible seam"
+        );
+        // A partial window opacity yields a partial, non-zero, non-opaque stroke
+        // that tints/fades with the window instead of sitting on top of it.
+        let folded = fold_alpha(accent, 128);
+        assert!(
+            folded.a() > 0 && folded.a() < 255,
+            "half opacity → translucent stroke (got alpha {})",
+            folded.a()
+        );
+    }
+
+    #[test]
+    fn tint_alpha_scales_and_clamps() {
+        // Off / clamped low.
+        assert_eq!(tint_alpha(0.0), 0);
+        assert_eq!(tint_alpha(-1.0), 0);
+        // Full strength = a clearly-visible (but not opaque) wash.
+        assert_eq!(tint_alpha(1.0), 120);
+        assert_eq!(tint_alpha(2.0), 120, "clamped above 1.0");
+        // Mid strength scales linearly.
+        assert_eq!(tint_alpha(0.5), 60);
+    }
+
+    #[test]
+    fn flatten_chrome_buttons_makes_idle_frameless_and_hover_visible() {
+        // The core contract: after flattening, an idle chrome button paints NO
+        // background (so it can never float as an opaque chip over a translucent
+        // bar), while hover/press DO paint a subtle veil (the sole affordance).
+        egui::__run_test_ui(|ui| {
+            // Precondition: egui's default idle button fill is NOT transparent.
+            assert_ne!(
+                ui.visuals().widgets.inactive.weak_bg_fill,
+                egui::Color32::TRANSPARENT,
+                "precondition: default idle fill is a visible chip"
+            );
+
+            flatten_chrome_buttons(ui, true); // dark theme → white veil
+
+            let w = &ui.visuals().widgets;
+            assert_eq!(
+                w.inactive.weak_bg_fill,
+                egui::Color32::TRANSPARENT,
+                "idle button must be frameless"
+            );
+            assert_eq!(w.inactive.bg_fill, egui::Color32::TRANSPARENT);
+            assert_eq!(w.inactive.bg_stroke, egui::Stroke::NONE);
+            // Hover/active carry a subtle, non-transparent, non-opaque veil.
+            assert_eq!(w.hovered.weak_bg_fill, egui::Color32::from_white_alpha(20));
+            assert_eq!(w.active.weak_bg_fill, egui::Color32::from_white_alpha(32));
+            assert!(w.hovered.weak_bg_fill.a() > 0 && w.hovered.weak_bg_fill.a() < 255);
+        });
+    }
+
+    #[test]
+    fn flatten_chrome_buttons_light_theme_uses_black_veil() {
+        egui::__run_test_ui(|ui| {
+            flatten_chrome_buttons(ui, false); // light theme → black veil
+            assert_eq!(
+                ui.visuals().widgets.hovered.weak_bg_fill,
+                egui::Color32::from_black_alpha(20),
+                "light theme hover must be a black veil so it reads on a light bar"
+            );
+        });
     }
 }

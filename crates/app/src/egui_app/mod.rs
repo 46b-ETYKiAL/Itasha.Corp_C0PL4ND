@@ -17,23 +17,28 @@
 
 pub mod bidi;
 pub mod chrome;
+pub mod chrome_toolbar;
 mod crt;
 pub mod fonts;
 pub mod grid;
 pub mod hyperlink;
+pub mod job_object;
 mod layout_state;
+mod motion_fx;
 pub mod pane_term;
 mod search_ui;
 mod settings;
 pub mod shells;
 mod theme;
 pub(crate) use crt::*;
+pub(crate) use motion_fx::*;
 mod grid_interaction;
 pub(crate) use grid_interaction::*;
 mod config_load;
 pub(crate) use config_load::*;
 mod window_effects;
 pub(crate) use window_effects::*;
+mod caption_close;
 mod font_setup;
 pub(crate) use font_setup::*;
 mod app_config;
@@ -136,6 +141,13 @@ pub struct C0pl4ndApp {
     pub(crate) applied_ui_scale: f32,
     /// Whether the settings window is open.
     pub(crate) settings_open: bool,
+    /// The union bounding rect of whichever centered chrome panels (Settings
+    /// window, command palette, multi-line-paste confirm) are open THIS frame,
+    /// captured as each draws (before the whole-window motion-overlay block runs).
+    /// The overlays paint AROUND this rect so a Motion setting previews live on the
+    /// terminal WHILE the panel stays clean (no mesh/flicker washing over it).
+    /// Reset to `None` each frame before the panels draw. `None` = no panel open.
+    pub(crate) overlay_exclude_rect: Option<egui::Rect>,
     /// Recently-run commands, surfaced by the command palette for quick
     /// find/run. Captured best-effort from typed input (committed on Enter).
     pub(crate) cmd_history: c0pl4nd_core::command_history::CommandHistory,
@@ -204,6 +216,36 @@ pub struct C0pl4ndApp {
     pub(crate) search_test_corpus: Option<String>,
     /// A transient status-bar message (e.g. "max 6 panes").
     pub(crate) toast: Option<String>,
+    /// The `(font-family-key, size-bits, pixels-per-point-bits)` the grid glyph
+    /// atlas was last PRE-WARMED for. When this differs from the live font stack
+    /// (first frame, a system-font swap, a zoom, OR a DPI/`pixels_per_point`
+    /// change — the last is why `ppp` is in the key: egui rasterises glyphs at
+    /// `size × ppp`, so a 1.0→1.5 DPI settle re-rasterises the whole set), the
+    /// atlas is re-warmed. Warming rasterises every glyph the grid draws up-front
+    /// so the atlas reaches its FINAL size in one step, never growing mid-render —
+    /// the growth that feeds the DX12 upload↔sample hazard (garbled/blank grid
+    /// glyphs). `None` == never warmed yet.
+    pub(crate) warmed_atlas: Option<(String, u32, u32)>,
+    /// Frames remaining in the atlas WARMUP GATE. While > 0 the grid draws NO
+    /// glyphs (empty panes) and `ui` blocks on `device.poll(Wait)` so the warmed
+    /// atlas upload is guaranteed RESIDENT on the GPU before any glyph is sampled —
+    /// the windowed-path equivalent of the offscreen render's implicit queue
+    /// drain, which is why the offscreen path never garbles. Re-armed to a small
+    /// count whenever the atlas is re-warmed. Startup/rare-only; zero steady-state
+    /// cost (the grid content — the shell banner — has not arrived yet anyway).
+    pub(crate) warmup_frames_left: u8,
+    /// Frames elapsed while waiting for the off-thread custom font to swap in. Caps
+    /// the font-load warmup gate (see `FONT_WAIT_GATE_CAP`) so a failed/slow font
+    /// load can never hide the grid indefinitely.
+    pub(crate) font_wait_frames: u32,
+    /// Debounced font-size persistence deadline (egui `input.time`, seconds).
+    /// Live Ctrl+wheel / Ctrl+/- zoom changes `config.font.size` every notch and
+    /// applies it in-memory immediately, but writing the whole config file per
+    /// notch (atomic temp-write + rename + perms) is wasteful under a fast scroll.
+    /// Instead each zoom sets this to `now + debounce`; `frame_tick` flushes ONE
+    /// save once the deadline passes with no further change. `None` == nothing
+    /// pending. Shutdown also saves, so a pending zoom is never lost on close.
+    pub(crate) pending_font_save_at: Option<f64>,
     /// Receiver for an opt-in launch update check spawned by the binary entry
     /// point (`egui_main`). The background thread sends a one-line "newer
     /// version available" notice exactly once; `frame_tick` polls this and
@@ -219,6 +261,33 @@ pub struct C0pl4ndApp {
     /// tests can assert that clicking a caption button had its real effect (the
     /// OS command itself is not observable in a headless harness).
     pub(crate) last_window_cmd: Option<WindowCmd>,
+    /// Last known UN-maximized inner size (logical points). Updated every frame
+    /// the window is not maximized, and used to drive an EXPLICIT restore size
+    /// when the user un-maximizes: eframe's persisted window state can leave
+    /// winit's own restore geometry equal to the maximized (monitor) size, so a
+    /// plain un-maximize "restores" to a full-monitor window the user must then
+    /// shrink by hand. `None` until the first un-maximized frame — the restore
+    /// then falls back to the first-run default size.
+    pub(crate) restore_size: Option<egui::Vec2>,
+    /// Fading echoes of the focused terminal cursor's recent cell rects (screen
+    /// coords) + their birth-times, feeding the optional cursor ghost-trail
+    /// motion overlay ([`paint_cursor_trail`]). Bounded to a few dozen entries;
+    /// pruned each frame once an echo outlives its fade. Empty (and unused) when
+    /// the `cursor_trail` effect is off — never persisted.
+    pub(crate) cursor_trail: std::collections::VecDeque<(egui::Rect, f64)>,
+    /// The egui clock time (seconds) of the first rendered frame, captured once
+    /// so the one-shot boot-glitch overlay measures its sweep from the first
+    /// frame the user actually sees — not from context creation (which may
+    /// predate the window by the atlas-warmup cost, hiding the sweep entirely).
+    pub(crate) first_frame_time: Option<f64>,
+    /// True on the first frame the Settings window opens (a closed→open edge),
+    /// so `settings::show` FORCES the window to its saved-or-centered position
+    /// that frame instead of trusting egui's `default_pos` (which read a
+    /// not-yet-sized viewport on the open frame and parked the window top-left).
+    /// Consumed (reset) after one frame so the window is freely movable after.
+    pub(crate) settings_place_pending: bool,
+    /// Previous frame's `settings_open`, used to detect the open edge above.
+    pub(crate) settings_was_open: bool,
     /// True when running in a real eframe window (a wgpu render state exists),
     /// false in the headless `egui_kittest` harness. Drives the per-frame
     /// `request_repaint` pump so live PTY output animates without an input
@@ -414,6 +483,24 @@ impl C0pl4ndApp {
         if app.config.effective_translucent() {
             apply_window_effect(cc, app.config.window_mode, &app.config.tint);
         }
+        // The residual native MIN/MAX caption buttons winit leaves on the
+        // undecorated window (winit #2754) are suppressed at WINDOW CREATION via
+        // `ViewportBuilder::with_minimize_button(false)`/`with_maximize_button(false)`
+        // (egui_main.rs). The native CLOSE button has no creation-time flag
+        // (WS_SYSMENU is always in winit's base style), so prime the close-button
+        // stripper with the real window handle; `ensure_close_button_stripped`
+        // (run each frame in `ui`) clears ONLY WS_SYSMENU — leaving WS_CAPTION
+        // intact so the frameless composition is never disturbed. Alt+F4 is
+        // restored in-app (see `frame_tick`).
+        #[cfg(windows)]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(handle) = cc.window_handle() {
+                if let RawWindowHandle::Win32(w) = handle.as_raw() {
+                    caption_close::set_main_hwnd(w.hwnd.get());
+                }
+            }
+        }
         // Apply Visuals DERIVED FROM the loaded terminal theme so the whole
         // chrome follows the active theme from the first frame (a light theme →
         // light UI, a dark theme → dark UI). Done after `bootstrap()` so
@@ -507,6 +594,7 @@ impl C0pl4ndApp {
             applied_font_family: String::new(),
             applied_ui_scale: f32::NAN,
             settings_open: false,
+            overlay_exclude_rect: None,
             cmd_history: c0pl4nd_core::command_history::CommandHistory::default(),
             input_line: String::new(),
             pending_paste: None,
@@ -526,9 +614,18 @@ impl C0pl4ndApp {
             search_sel: 0,
             search_test_corpus: None,
             toast: theme_notice,
+            warmed_atlas: None,
+            warmup_frames_left: 0,
+            font_wait_frames: 0,
+            pending_font_save_at: None,
             update_rx: None,
             last_update_notice: None,
             last_window_cmd: None,
+            restore_size: None,
+            cursor_trail: std::collections::VecDeque::new(),
+            first_frame_time: None,
+            settings_place_pending: false,
+            settings_was_open: false,
             live_window: false,
             fullscreen: false,
             was_focused: true,
@@ -716,6 +813,34 @@ impl C0pl4ndApp {
     #[allow(dead_code)]
     pub fn last_window_cmd(&self) -> Option<WindowCmd> {
         self.last_window_cmd
+    }
+
+    /// First-run default window size (logical points), used as the restore
+    /// target before the user has ever un-maximized. Mirrors the
+    /// `with_inner_size` seed in `egui_main.rs`.
+    const DEFAULT_INNER_SIZE: egui::Vec2 = egui::vec2(1100.0, 720.0);
+
+    /// Toggle the OS maximize state for the single app window. When RESTORING
+    /// (currently maximized), drive the restore EXPLICITLY: return to the last
+    /// un-maximized size (or the first-run default) and re-center on the monitor,
+    /// rather than trusting winit's own restore geometry — which eframe's
+    /// persisted window state can leave equal to the maximized (monitor) size, so
+    /// a plain un-maximize yanks the window back to full-monitor and the user has
+    /// to shrink it by hand (the reported bug). Maximizing is the plain command.
+    fn toggle_maximize(&self, ctx: &egui::Context, is_max: bool) {
+        if !is_max {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            return;
+        }
+        let target = self.restore_size.unwrap_or(Self::DEFAULT_INNER_SIZE);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target));
+        // Re-center on the monitor so the restored window lands in the middle,
+        // not at the monitor's top-left. `monitor_size` is in logical points.
+        if let Some(mon) = ctx.input(|i| i.viewport().monitor_size) {
+            let pos = ((mon - target) * 0.5).max(egui::vec2(0.0, 0.0));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos.to_pos2()));
+        }
     }
 
     /// The visible grid text of a pane's terminal, or `None` if the pane has no
@@ -911,6 +1036,10 @@ impl C0pl4ndApp {
         // by the selection painter below. Threaded as `&mut` (a separate field
         // from `terms`/`theme`) so the egui_tiles disjoint-borrow split holds.
         selection: &mut Option<Selection>,
+        // While the atlas-warmup gate is open, skip painting the grid glyphs (the
+        // pane still lays out, spawns, sizes, and paints its background) so no
+        // glyph is sampled before the warmed atlas is uploaded + resident.
+        warming: bool,
     ) -> PaneBodyOutcome {
         let (rect, resp) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -1043,18 +1172,36 @@ impl C0pl4ndApp {
             .get(&pane_id)
             .map(PaneTerm::background_rgb)
             .unwrap_or((18, 18, 18));
+        // The pane background is NOT tinted here — the tinted `central_fill` behind
+        // it shows through the (translucent) pane fill, so the tint reaches the pane
+        // in exactly ONE pass, identical to the gaps between panes and the chrome
+        // panels. Tinting the pane fill too would DOUBLE the wash on panes and make
+        // them redder than the dividers/top bar (the reported mismatch). The glyph
+        // text is drawn with its own colour below, so it is never tinted.
         painter.rect_filled(
             rect,
             egui::CornerRadius::same(4),
             egui::Color32::from_rgba_unmultiplied(bg.0, bg.1, bg.2, bg_alpha),
         );
         // Focus ring + bezel follow the active theme (accent on focus, bezel
-        // otherwise) so the grid chrome matches the rest of the themed UI.
+        // otherwise) so the grid chrome matches the rest of the themed UI. Both
+        // fold the window-transparency alpha (`bg_alpha`) so the border is as
+        // translucent as the pane it frames — a full-alpha border over a
+        // see-through window read as a hard opaque line "unaffected by tint or
+        // transparency" (the reported divider bug). At an opaque window
+        // (`bg_alpha == 255`) `fold_alpha` returns the colour unchanged.
         let pane_colors = theme::ChromeColors::from_theme(theme);
         let stroke = if focused {
-            egui::Stroke::new(2.0, pane_colors.accent)
+            // Focus is SEMANTIC (which pane has keyboard focus), so floor its
+            // folded alpha: it still tints/fades with the window, but never drops
+            // below a legible strength even at very low opacity.
+            const FOCUS_RING_ALPHA_FLOOR: u8 = 150;
+            let a = bg_alpha.max(FOCUS_RING_ALPHA_FLOOR);
+            egui::Stroke::new(2.0, window_effects::fold_alpha(pane_colors.accent, a))
         } else {
-            egui::Stroke::new(1.0, pane_colors.bezel)
+            // The unfocused bezel is pure definition — let it fully fade into
+            // negative space as the window goes see-through.
+            egui::Stroke::new(1.0, window_effects::fold_alpha(pane_colors.bezel, bg_alpha))
         };
         painter.rect_stroke(
             rect,
@@ -1086,19 +1233,21 @@ impl C0pl4ndApp {
                 // glyphon GPU paths (callback + offscreen texture) composited
                 // black inside `egui_tiles` panes live while passing the wgpu
                 // test harness.
-                paint_grid_native(
-                    &painter,
-                    rect,
-                    term,
-                    galley_cache,
-                    font_size,
-                    line_height_px,
-                    theme,
-                    focused,
-                    cursor_cfg,
-                    effects,
-                    pad,
-                );
+                if !warming {
+                    paint_grid_native(
+                        &painter,
+                        rect,
+                        term,
+                        galley_cache,
+                        font_size,
+                        line_height_px,
+                        theme,
+                        focused,
+                        cursor_cfg,
+                        effects,
+                        pad,
+                    );
+                }
                 // Find-overlay highlight: tint every match span (and outline the
                 // active one) over the rendered grid. Only the focused pane while
                 // the overlay is open carries a `SearchHighlight`.
@@ -1915,6 +2064,10 @@ impl C0pl4ndApp {
             .filter(|z| grid::tile_of_pane(&self.grid_tree, *z).is_some());
 
         // Snapshot BEFORE the frame so we can revert a drag that exceeds the cap.
+        // (Kept unconditional: the Tabs-view path below reads it as a non-`self`
+        // view of the tree while `terms` is mutably borrowed, so it cannot be
+        // replaced by a `self.grid_tree` borrow; the clone is a small ~pane-count
+        // structure and this runs only on an on-demand repaint.)
         let pre = self.grid_tree.clone();
         {
             // Disjoint borrows: the closure touches these fields, NOT grid_tree.
@@ -1953,6 +2106,12 @@ impl C0pl4ndApp {
             // CRT scanlines + chromatic aberration, read LIVE so toggling them in
             // Settings takes effect this frame; both are zero-cost when off/zero.
             let effects = self.config.effects;
+            // While the atlas-warmup gate is open, render panes WITHOUT their grid
+            // glyphs (captured as a plain `bool` here so the disjoint-borrow
+            // closure need not touch `self`). This holds every glyph draw off until
+            // the warmed atlas is uploaded + GPU-resident (see `warmup_frames_left`
+            // + the `ui` poll), closing the DX12 upload↔sample race.
+            let warming = self.warmup_frames_left > 0;
             // Pane background alpha: full when opaque, opacity-folded when the
             // window is effectively translucent — painting the pane fill
             // non-opaque is what lets the OS blur / desktop show through (the
@@ -2012,6 +2171,7 @@ impl C0pl4ndApp {
                     link_modifier && pid == focused,
                     if pid == focused { ime_preedit } else { None },
                     selection,
+                    warming,
                 );
                 if outcome.clicked {
                     clicked = Some(pid);
@@ -2092,6 +2252,31 @@ impl C0pl4ndApp {
                     cursor_rect,
                 });
             });
+            // Feed the cursor ghost-trail motion overlay: push a new echo only
+            // when the focused cursor CELL actually moved (so a blinking-but-still
+            // cursor doesn't stack dozens of coincident echoes), and only while the
+            // effect is enabled AND motion is not reduced. Bounded to 24 echoes;
+            // stale ones are pruned at the paint site each frame. The `else` clears
+            // the deque the instant the effect (or motion) is turned off, so no
+            // stale echoes linger to pop back on re-enable.
+            if self.config.effects.animations_enabled
+                && self.config.effects.cursor_trail
+                && !c0pl4nd_core::reduced_motion::reduced_motion()
+            {
+                let now = ui.ctx().input(|i| i.time);
+                let moved = self
+                    .cursor_trail
+                    .back()
+                    .is_none_or(|(r, _)| r.min.distance(cursor_rect.min) > 0.5);
+                if moved {
+                    self.cursor_trail.push_back((cursor_rect, now));
+                    while self.cursor_trail.len() > 24 {
+                        self.cursor_trail.pop_front();
+                    }
+                }
+            } else if !self.cursor_trail.is_empty() {
+                self.cursor_trail.clear();
+            }
         }
         // Record a Ctrl-clicked URL (the browser open already fired in-render);
         // most-recent-wins, observable for the interaction test.
@@ -2242,13 +2427,41 @@ impl C0pl4ndApp {
     /// `self`'s borrow), then live-applies any change: persist the config to
     /// disk, reload the terminal color theme when the theme stem changed (so the
     /// live panes repaint, not just the chrome), and re-apply the egui Visuals.
+    /// Union `r` into [`Self::overlay_exclude_rect`] — the bounding rect of the
+    /// open centered chrome panels this frame, which the whole-window motion
+    /// overlays paint AROUND. Reset to `None` each frame before the panels draw;
+    /// each open panel calls this after it renders. No-op when `r` is `None`.
+    fn note_overlay_rect(&mut self, r: Option<egui::Rect>) {
+        if let Some(r) = r {
+            self.overlay_exclude_rect = Some(match self.overlay_exclude_rect {
+                Some(existing) => existing.union(r),
+                None => r,
+            });
+        }
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.settings_open;
         // Theme-derived palette so the settings window fill + headings follow
         // the active theme along with the rest of the chrome.
         let colors = theme::ChromeColors::from_theme(&self.theme);
-        let outcome = settings::show(ctx, &mut self.config, &mut open, colors, self.incognito);
+        // Consume the place-on-open flag: `show` force-positions the window this
+        // one frame, then it is freely movable.
+        let place_now = self.settings_place_pending;
+        self.settings_place_pending = false;
+        let outcome = settings::show(
+            ctx,
+            &mut self.config,
+            &mut open,
+            colors,
+            self.incognito,
+            place_now,
+        );
         self.settings_open = open;
+        // Record the window rect so the whole-window motion overlays exclude it
+        // this frame — a live Motion-setting preview shows on the terminal without
+        // washing over the settings panel (the overlay block reads this below).
+        self.note_overlay_rect(outcome.window_rect);
 
         // Privacy-section actions (runtime, not config): handle before the
         // config-changed persistence below.
@@ -2414,7 +2627,7 @@ impl C0pl4ndApp {
 
         let mut do_send = false;
         let mut do_cancel = false;
-        egui::Window::new("Paste multiple lines?")
+        let win = egui::Window::new("Paste multiple lines?")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -2439,6 +2652,8 @@ impl C0pl4ndApp {
                     }
                 });
             });
+        // Exclude the confirm modal from the whole-window motion overlays this frame.
+        self.note_overlay_rect(win.map(|w| w.response.rect));
         if do_send {
             self.confirm_pending_paste();
         } else if do_cancel {
@@ -2870,7 +3085,7 @@ impl C0pl4ndApp {
         let query = &mut self.palette_query;
         let mut clicked: Option<usize> = None;
 
-        egui::Window::new("Command palette")
+        let win = egui::Window::new("Command palette")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
@@ -2906,6 +3121,8 @@ impl C0pl4ndApp {
                 ui.separator();
                 ui.weak("Up/Down select · Enter run · Esc close");
             });
+        // Exclude the palette from the whole-window motion overlays this frame.
+        self.note_overlay_rect(win.map(|w| w.response.rect));
 
         if let Some(i) = clicked {
             self.palette_sel = i;
@@ -2980,9 +3197,54 @@ impl eframe::App for C0pl4ndApp {
     /// `Panel::show(ctx, …)` path via a cloned `ctx`, matching the reference
     /// egui app. The work lives in [`frame_tick`](Self::frame_tick) so the
     /// headless tests can drive it without an `eframe::Frame`.
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // Strip the residual native close (WS_SYSMENU) button each frame so DWM
+        // stops drawing a second "×" over our custom titlebar close (self-heals if
+        // winit re-asserts the bit on resize/restore; near-zero cost once cleared).
+        // No-op on non-Windows and before priming. Min/max are already suppressed
+        // at creation (see `new`); this is the only runtime caption touch.
+        caption_close::ensure_close_button_stripped();
+        // Remember the last UN-maximized inner size so the restore button can
+        // return to it explicitly (see `toggle_maximize`). Skip while maximized so
+        // the monitor-sized maximized rect is never captured as the restore size;
+        // a floor guards against a transient tiny/zero read during a resize.
+        {
+            let (maxed, inner) = ctx.input(|i| {
+                (
+                    i.viewport().maximized.unwrap_or(false),
+                    i.viewport().inner_rect,
+                )
+            });
+            if !maxed {
+                if let Some(r) = inner {
+                    let sz = r.size();
+                    if sz.x >= 400.0 && sz.y >= 300.0 {
+                        self.restore_size = Some(sz);
+                    }
+                }
+            }
+        }
+        // Atlas-warmup GPU fence: while the warmup gate is open, BLOCK until every
+        // previously-submitted GPU op — crucially the prior frame's font-atlas
+        // texture upload — is complete before this frame samples the atlas. This
+        // reproduces, on the real windowed present path, the queue drain that makes
+        // the offscreen render path race-free (the DX12 `write_texture`→sample
+        // hazard that garbles the grid). Startup/rare-only; no steady-state cost.
+        if self.warmup_frames_left > 0 {
+            if let Some(render_state) = frame.wgpu_render_state() {
+                let _ = render_state
+                    .device
+                    .poll(eframe::wgpu::PollType::wait_indefinitely());
+            }
+        }
         self.frame_tick(&ctx);
+        // Advance the warmup gate AFTER this frame drew (so this frame saw the
+        // pre-decrement value) and keep repainting until it closes.
+        if self.warmup_frames_left > 0 {
+            self.warmup_frames_left -= 1;
+            ctx.request_repaint();
+        }
         // The grid is painted with egui's native text painter inside
         // `render_pane_body` during `frame_tick`; there is no post-frame GPU pass.
     }
@@ -3002,12 +3264,15 @@ impl C0pl4ndApp {
     ///    headless test never writes the user's real `%APPDATA%\c0pl4nd\config.toml`
     ///    (test pollution). This is the save-on-close that MUST still happen before
     ///    a fast exit.
-    /// 2. **Drop every live terminal** — `self.terms.clear()` drops each
-    ///    [`PaneTerm`], and dropping a `PaneTerm` runs its `Session::Drop`, which
-    ///    kills the PTY child. This is the no-orphan guarantee: after this call no
-    ///    `cmd.exe` (or other shell) is left running. It is ~2ms for the canonical
-    ///    six-pane layout and is done BEFORE the process exits so the children are
-    ///    reaped, not orphaned, even though `process::exit` runs no destructors.
+    /// 2. **Kill every live shell** — one pass of `PaneTerm::kill_child` over
+    ///    every pane (`TerminateProcess`, non-blocking) so all N children
+    ///    terminate in parallel. This is the no-orphan guarantee: after this call
+    ///    no `cmd.exe` (or other shell) is left running. It deliberately does NOT
+    ///    drop the panes (`self.terms.clear()`) — dropping runs the per-pane
+    ///    `ClosePseudoConsole` that BLOCKS until each child exits, sequentially,
+    ///    which was the slow-to-close latency. `process::exit(0)` runs no
+    ///    destructors, so skipping the drop skips that block entirely while the
+    ///    kill above still reaps every child.
     ///
     /// Kept separate from the `process::exit(0)` call so tests can exercise the
     /// cleanup (save + child reaping) WITHOUT terminating the test runner.
@@ -3043,9 +3308,24 @@ impl C0pl4ndApp {
                 }
             }
         }
-        // 2) Drop every PaneTerm → each Session::Drop kills its PTY child. No
-        //    orphaned shells survive the close.
-        self.terms.clear();
+        // 2) Kill every pane's shell FIRST, in one pass, so all N children
+        //    terminate in PARALLEL. This replaces the old `self.terms.clear()`,
+        //    which dropped each PaneTerm inline → per-pane `ClosePseudoConsole`
+        //    that BLOCKS until that child exits, run SEQUENTIALLY for all N panes
+        //    (the "takes a while to close" latency: N × block). Killing every
+        //    child up-front means:
+        //      * the fast-exit callers (`WindowCmd::Close`, OS close-requested)
+        //        then `std::process::exit(0)`, which runs NO destructors — so the
+        //        blocking `ClosePseudoConsole` never fires at all, yet no shell is
+        //        orphaned because it was just killed here; and
+        //      * the graceful `on_exit` path (eframe then drops the app, dropping
+        //        `self.terms`) finds every child already gone, so each
+        //        `ClosePseudoConsole` returns promptly instead of blocking.
+        //    `TerminateProcess` is effectively non-blocking (it requests
+        //    termination and returns), so this whole pass is fast regardless of N.
+        for term in self.terms.values_mut() {
+            term.kill_child();
+        }
     }
 
     /// One per-frame tick of the chrome + grid. Separated from `eframe::App::ui`
@@ -3069,6 +3349,46 @@ impl C0pl4ndApp {
             self.prepare_shutdown();
             std::process::exit(0);
         }
+        // Alt+F4 close, restored in-app. Removing WS_SYSMENU (to kill the doubled
+        // native close button — see `caption_close`) means DefWindowProc no longer
+        // translates Alt+F4 into a WM_CLOSE, so egui/winit still delivers the key
+        // event but the OS never turns it into a close_requested. Handle it here
+        // and take the same fast-exit path as the caption-× / OS close. Gated on
+        // `live_window` so the headless harness never calls `process::exit`.
+        if self.live_window && ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::F4)) {
+            self.prepare_shutdown();
+            std::process::exit(0);
+        }
+        // Motion master switch (SCR1B3 parity): scale egui's global animation time
+        // by the configured intensity, or zero it for a fully static UI when
+        // animations are disabled OR the user requested reduced motion (env or OS).
+        // Cheap; applied every frame so a live Settings change (Motion → Enable
+        // animations / Animation speed) takes effect at once. `1.0/12.0` is egui's
+        // stock `Style::animation_time`, so the default (enabled, intensity 1.0, no
+        // reduced-motion) reproduces the shipped feel exactly, while a reduced-motion
+        // preference now makes egui's own chrome fades instant too — not just the
+        // overlays.
+        {
+            const EGUI_DEFAULT_ANIMATION_TIME: f32 = 1.0 / 12.0;
+            let fx = &self.config.effects;
+            let anim = if fx.animations_enabled && !c0pl4nd_core::reduced_motion::reduced_motion() {
+                // The intensity band now extends to 2.0 to let the motion OVERLAYS run
+                // at up to double-rate, but the egui-chrome factor is capped at 1.0 so
+                // a >1.0 speed only accelerates the effects — it never LENGTHENS the UI
+                // fades (a >1.0 multiplier here would make menus/tooltips feel sluggish).
+                EGUI_DEFAULT_ANIMATION_TIME * fx.clamped_animation_intensity().min(1.0)
+            } else {
+                0.0
+            };
+            ctx.style_mut(|s| s.animation_time = anim);
+        }
+        // Capture the first rendered-frame clock so the one-shot boot-glitch
+        // overlay measures its sweep from the first frame the user actually sees,
+        // not from context creation (which predates the window by the atlas-warmup
+        // cost and would hide the sweep).
+        if self.first_frame_time.is_none() {
+            self.first_frame_time = Some(ctx.input(|i| i.time));
+        }
         // Ensure the chrome fonts (incl. the `phosphor-fill` family) are
         // installed before any widget references them — `new()` does this for
         // the real app; headless tests built via `bootstrap()` install here on
@@ -3078,6 +3398,57 @@ impl C0pl4ndApp {
             install_chrome_fonts(ctx, &self.config.font);
             self.applied_font_family = font_apply_key(&self.config.font);
             self.fonts_installed = true;
+        }
+        // Pre-warm the grid glyph atlas whenever the live font stack (family,
+        // size, OR DPI/pixels_per_point) differs from what it was last warmed for
+        // — first frame, a system-font swap, a live zoom, or a DPI settle. This
+        // rasterises the full grid glyph set at the FINAL scale in one step so the
+        // atlas reaches its final size immediately, and ARMS the warmup gate so the
+        // grid holds its glyphs off (and `ui` GPU-fences) until that atlas is
+        // uploaded + resident — closing the DX12 upload↔sample race (see
+        // `prewarm_grid_atlas` + `warmup_frames_left`).
+        let atlas_key = (
+            self.applied_font_family.clone(),
+            self.config.font.size.to_bits(),
+            ctx.pixels_per_point().to_bits(),
+        );
+        if self.warmed_atlas.as_ref() != Some(&atlas_key) {
+            prewarm_grid_atlas(ctx, self.config.font.size);
+            self.warmed_atlas = Some(atlas_key);
+            // The warmup GATE (grid-glyphs-off + `ui` GPU-fence) only matters on
+            // the real swapchain, where the DX12 upload↔sample race lives. A
+            // headless render (`live_window == false`) is offscreen/serialized —
+            // it never races — so keep the gate closed there so tests see grid
+            // text immediately (and never block on a poll).
+            if self.live_window {
+                self.warmup_frames_left = ATLAS_WARMUP_GATE_FRAMES;
+                ctx.request_repaint(); // drive the warmup frames without waiting on input
+            }
+        }
+        // Hold the grid gated (and `ui` GPU-fencing) until the OFF-THREAD custom
+        // font has actually swapped in. The system-font stack loads on a worker;
+        // until it arrives the grid would draw with the built-in mono, then the
+        // swap RESETS the atlas — and that reset↔redraw transition is a prime
+        // window for the DX12 upload↔sample race that garbles the grid. Keeping
+        // the grid hidden (glyphs off) through the whole font-load period means
+        // its FIRST real draw happens once the final font is warmed + resident.
+        // Capped by `FONT_WAIT_GATE_CAP` so a font-load failure can never hide the
+        // grid forever. Live-window only (headless never races and has no worker).
+        if self.live_window && self.pending_fonts.is_some() {
+            self.font_wait_frames = self.font_wait_frames.saturating_add(1);
+            if self.font_wait_frames < FONT_WAIT_GATE_CAP {
+                self.warmup_frames_left = self.warmup_frames_left.max(1);
+                ctx.request_repaint();
+            }
+        }
+        // Flush a DEBOUNCED font-zoom save once its deadline has passed with no
+        // further change (see `FONT_SAVE_DEBOUNCE_SECS`): coalesces a fast
+        // Ctrl+wheel zoom into a SINGLE config write instead of one per notch.
+        if let Some(deadline) = self.pending_font_save_at {
+            if ctx.input(|i| i.time) >= deadline {
+                self.pending_font_save_at = None;
+                self.persist_config_change("The font size");
+            }
         }
         // Zoom↔focus reconcile: a zoom (Ctrl+Shift+Z) renders ONLY the zoomed
         // pane, but focus can move to a DIFFERENT pane while zoomed (switching
@@ -3157,6 +3528,13 @@ impl C0pl4ndApp {
                     ctx.set_fonts(defs);
                     self.galley_cache.clear();
                     self.pending_fonts = None;
+                    // `set_fonts` RESET the glyph atlas. Invalidate the warm key so
+                    // the next frame's warm-check re-warms it (at the live ppp) and
+                    // re-arms the warmup gate, holding the grid's glyphs off until
+                    // the fresh atlas is uploaded + resident — no garble flash on
+                    // the system-font swap.
+                    self.warmed_atlas = None;
+                    ctx.request_repaint();
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.pending_fonts = None;
@@ -3358,13 +3736,18 @@ impl C0pl4ndApp {
             }
             if self.config.font.size != before {
                 // The renderer reads `config.font.size` every frame, so the new
-                // size applies live. Persist it so the zoom survives a relaunch,
-                // mirroring the settings-change + view-mode saves (real-window-
-                // only, best-effort — a write failure surfaces as a toast and
-                // never blocks the live apply; the headless harness has
-                // `live_window == false`, so a test never writes the real config).
+                // size applies live immediately. The PERSIST is DEBOUNCED: writing
+                // the whole config file (atomic temp-write + rename + perms) on
+                // every wheel notch is wasteful under a fast zoom, so we schedule a
+                // single save `FONT_SAVE_DEBOUNCE` after the LAST change instead.
+                // `frame_tick` flushes it; a repaint is scheduled for the deadline
+                // so an otherwise-idle app still wakes to write it.
                 ctx.request_repaint();
-                self.persist_config_change("The font size");
+                let now = ctx.input(|i| i.time);
+                self.pending_font_save_at = Some(now + FONT_SAVE_DEBOUNCE_SECS);
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                    FONT_SAVE_DEBOUNCE_SECS,
+                ));
             }
         }
 
@@ -3715,12 +4098,11 @@ impl C0pl4ndApp {
         // 0c) Frameless window edge/corner RESIZE (#24). The decorations are off,
         //     so the OS gives no resize border — we synthesize one: hint the
         //     matching resize cursor over an edge band, and on a primary press
-        //     there (when no widget wants the pointer) start an OS resize via
-        //     ViewportCommand::BeginResize. Run early, BEFORE the panels, so an
-        //     edge grab wins; the `!wants_pointer_input()` guard still lets a
-        //     widget sitting at the very edge get its click. Skipped in
-        //     fullscreen (#36): there is no window edge to resize, and the
-        //     synthetic resize cursors at the screen edge would be visually wrong.
+        //     there drive a MANUAL resize (per-frame `InnerSize` from the pointer
+        //     delta), NOT the OS `BeginResize` modal loop — which needs the
+        //     stripped `WS_SYSMENU` and hung the window. Run early, BEFORE the
+        //     panels, so an edge grab wins. Skipped in fullscreen (#36): there is
+        //     no window edge to resize.
         if !self.fullscreen {
             handle_frameless_resize(ctx);
         }
@@ -3730,6 +4112,31 @@ impl C0pl4ndApp {
         // terminal theme through these (a light theme flips the whole chrome
         // light, a dark one dark). The wordmark keeps its fixed brand accent.
         let colors = theme::ChromeColors::from_theme(&self.theme);
+        // Whether the active theme is dark — picks the hover-veil polarity for the
+        // FLAT chrome buttons (white veil on dark, black on light) so the hover
+        // reads over whatever shows through a translucent bar.
+        let dark = !theme::is_light(colors.bg);
+
+        // Chrome panel fill (titlebar + status bar): fold in the SAME opacity alpha
+        // the panes + central fill use when the window is effectively translucent,
+        // so the WHOLE app window is see-through — top bar + status bar included —
+        // not just the pane backgrounds (an opaque `colors.panel` here left the top
+        // bar solid over an otherwise-transparent window). Fully opaque otherwise.
+        // The SETTINGS window deliberately keeps its own opaque `colors.panel` fill
+        // so it stays solid + readable regardless of window transparency.
+        let panel_alpha = pane_bg_alpha(&self.config);
+        let panel_fill = egui::Color32::from_rgba_unmultiplied(
+            colors.panel.r(),
+            colors.panel.g(),
+            colors.panel.b(),
+            panel_alpha,
+        );
+        // The window tint is a single wash painted on the BACKGROUND layer HERE —
+        // before any panel — so it sits behind every translucent background fill
+        // (panes, gaps, titlebar, status) and shows through them UNIFORMLY at any
+        // opacity, while the glyph text + the Settings window (painted later /
+        // higher) are never tinted. See `paint_background_tint`.
+        window_effects::paint_background_tint(ctx, &self.config);
 
         // 1) custom titlebar + tab strip. Fixed height so the drag region below
         //    is exactly the bar (not the whole remaining column), and so the
@@ -3743,7 +4150,7 @@ impl C0pl4ndApp {
         } else {
             egui::TopBottomPanel::top("titlebar")
                 .exact_height(40.0)
-                .frame(egui::Frame::new().fill(colors.panel).inner_margin(6.0))
+                .frame(egui::Frame::new().fill(panel_fill).inner_margin(6.0))
                 .show(ctx, |ui| {
                     // Frameless-window move: dragging any EMPTY part of the
                     // titlebar moves the window; double-click toggles maximize.
@@ -3760,9 +4167,12 @@ impl C0pl4ndApp {
                     }
                     if bar.double_clicked() {
                         let is_max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                        self.toggle_maximize(ui.ctx(), is_max);
                     }
+                    // Flat chrome buttons: no idle background, fill only on hover —
+                    // so the controls read as part of the (translucent) bar instead
+                    // of floating opaque chips. Must run BEFORE the buttons draw.
+                    window_effects::flatten_chrome_buttons(ui, dark);
                     self.titlebar_and_tabs(ui, colors)
                 })
                 .inner
@@ -3773,8 +4183,11 @@ impl C0pl4ndApp {
         //    the terminal grid).
         if !self.fullscreen && self.config.show_status_bar {
             egui::TopBottomPanel::bottom("status")
-                .frame(egui::Frame::new().fill(colors.panel).inner_margin(4.0))
-                .show(ctx, |ui| self.status_bar(ui, colors));
+                .frame(egui::Frame::new().fill(panel_fill).inner_margin(4.0))
+                .show(ctx, |ui| {
+                    window_effects::flatten_chrome_buttons(ui, dark);
+                    self.status_bar(ui, colors);
+                });
         }
 
         // 2b) command-history quick-run sidebar (#21), if open. Rendered as a
@@ -3864,12 +4277,16 @@ impl C0pl4ndApp {
                 }
             }
         }
-        // One-shot "make panes symmetrical": equalise every split so all panes are
-        // the same size. Independent of the `link_pane_dividers` setting (works
-        // even when dividers are freely draggable). No-op / no repaint when there
-        // is no split to equalise.
-        if actions.equalize_panes && grid::equalize_pane_shares(&mut self.grid_tree) {
-            ctx.request_repaint();
+        // One-shot "make panes symmetrical": rebuild the layout as a UNIFORM grid
+        // so all panes are equal-sized regardless of the prior (possibly nested /
+        // asymmetric) split structure — the fix for "clicked symmetrical but the
+        // panes stayed uneven". Preserves pane order + every attached terminal
+        // (panes carry only their id). No-op for a 0/1-pane tree.
+        if actions.equalize_panes {
+            if let Some(grid) = grid::rebuild_as_uniform_grid(&self.grid_tree) {
+                self.grid_tree = grid;
+                ctx.request_repaint();
+            }
         }
         // Caption command: issue the REAL OS viewport command AND record it so an
         // interaction test can assert the click had its effect.
@@ -3881,7 +4298,7 @@ impl C0pl4ndApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
                 WindowCmd::ToggleMaximize => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                    self.toggle_maximize(ctx, is_max);
                 }
                 WindowCmd::Close => {
                     // Fast clean shutdown: run the necessary cleanup (persist
@@ -3898,10 +4315,22 @@ impl C0pl4ndApp {
             }
         }
 
-        // 4) the (opaque) settings window, if open
+        // Reset the motion-overlay exclude rect each frame; each centered panel
+        // drawn below records its rect (via `note_overlay_rect`) so the overlay
+        // block further down paints AROUND whatever is open this frame. A closed
+        // panel therefore clears the exclusion automatically.
+        self.overlay_exclude_rect = None;
+
+        // 4) the (opaque) settings window, if open. Detect the closed→open edge so
+        //    `settings_window` can force the window to its saved-or-centered
+        //    position on that first frame.
         if self.settings_open {
+            if !self.settings_was_open {
+                self.settings_place_pending = true;
+            }
             self.settings_window(ctx);
         }
+        self.settings_was_open = self.settings_open;
 
         // 5) the command palette overlay, if open (rendered last so it floats
         //    above the chrome + grid; its nav keys were handled in step 0b).
@@ -3932,13 +4361,112 @@ impl C0pl4ndApp {
         self.render_crash_consent(ctx);
         self.render_report_issue(ctx);
 
-        // 6) window color-tint overlay (a subtle full-window wash). Only painted
-        //    when the window is effectively translucent AND the user dialled in
-        //    a tint strength — mirrors SCR1B3. A solid (opaque) window never
-        //    gets washed; the gate keeps the default experience untouched.
-        if self.config.effective_translucent() && self.config.tint_strength > 0.0 {
-            paint_tint_overlay(ctx, &self.config.tint, self.config.tint_strength);
+        // Whole-window motion overlays (SCR1B3 parity): flicker / VHS-tracking /
+        // wired-mesh ambient / cursor ghost-trail / boot-glitch, each painted once
+        // per frame at the Context layer (Background for the ambient mesh so it
+        // sits BEHIND the panes, Foreground for the rest so they wash OVER the
+        // composited view). Gated behind the master `animations_enabled` switch AND
+        // each per-effect toggle, suppressed under reduced-motion (env or OS) and
+        // in the headless harness (`live_window == false`) so tests stay
+        // deterministic. Any active animated overlay drives a per-frame repaint so
+        // its motion keeps advancing without a free-running timer.
+        // Exclude whichever centered chrome surface is open (Settings window,
+        // command palette, multi-line-paste confirm) from the whole-window overlays,
+        // rather than suppressing them entirely: the Foreground effects otherwise
+        // wash OVER those opaque panels — the reported "the mesh overlays the settings
+        // menu" — but suppressing them meant a Motion setting only took visible effect
+        // AFTER Settings closed ("made me think they weren't working"). Painting the
+        // effects everywhere EXCEPT the panel rect gives a live terminal-area preview
+        // while keeping the panel clean. The panel rect was captured earlier THIS
+        // frame (`overlay_exclude_rect`, set as each panel drew above) and is padded
+        // so the effect doesn't crowd the panel edge.
+        let exclude = self
+            .overlay_exclude_rect
+            .map(|r| r.expand(8.0).intersect(ctx.content_rect()));
+        if self.live_window
+            && self.config.effects.animations_enabled
+            && !c0pl4nd_core::reduced_motion::reduced_motion()
+        {
+            let fx = self.config.effects;
+            let t = ctx.input(|i| i.time);
+            // The Animation-speed slider (`animation_intensity`) governs how fast
+            // the continuous drift overlays move: a SCALED clock `ts = t * speed`
+            // is fed to the scanline-style drift effects (mesh / VHS / flicker) so
+            // the slider is visibly effective — at 0 they freeze, at 1 they run at
+            // the shipped rate. The event-driven cursor trail and the one-shot boot
+            // sweep keep the REAL clock (their timing anchors to cursor movement /
+            // the first frame, not a drift phase, so scaling would corrupt them).
+            let speed = fx.clamped_animation_intensity() as f64;
+            let ts = t * speed;
+            let mut animating = false;
+            if fx.wired_ambient {
+                let accent = theme::ChromeColors::from_theme(&self.theme).accent;
+                // The Motion → Mesh-movement slider (`mesh_speed`) scales the
+                // mesh's OWN drift clock ON TOP of the global animation speed, so
+                // the node lattice can hold a static frame (0) or drift briskly (2)
+                // independently of the other effects. `ts * mesh_move` = the
+                // per-mesh clock; at 0 the nodes stop moving.
+                let mesh_move = fx.clamped_mesh_speed() as f64;
+                paint_wired_mesh(
+                    ctx,
+                    fx.clamped_mesh_density(),
+                    fx.clamped_mesh_brightness(),
+                    accent,
+                    ts * mesh_move,
+                    exclude,
+                );
+                animating |= speed > 0.0 && mesh_move > 0.0;
+            }
+            if fx.vhs_tracking {
+                paint_vhs_tracking(ctx, ts, fx.clamped_vhs_intensity(), exclude);
+                animating |= speed > 0.0;
+            }
+            if fx.flicker {
+                paint_flicker(ctx, fx.clamped_flicker_strength(), ts, exclude);
+                animating |= speed > 0.0;
+            }
+            if fx.cursor_trail {
+                // The trail intensity scales BOTH opacity and lifetime; prune with
+                // the SAME lifetime the painter fades over so the deque can't grow
+                // while the cursor sits still (the fresh-echo push only happens on
+                // cursor movement).
+                let trail_intensity = fx.clamped_cursor_trail_intensity();
+                let life = cursor_trail_life(trail_intensity);
+                while self
+                    .cursor_trail
+                    .front()
+                    .is_some_and(|(_, born)| t - born > life)
+                {
+                    self.cursor_trail.pop_front();
+                }
+                let accent = theme::ChromeColors::from_theme(&self.theme).accent;
+                paint_cursor_trail(ctx, &self.cursor_trail, accent, t, trail_intensity, exclude);
+                if !self.cursor_trail.is_empty() {
+                    animating = true;
+                }
+            }
+            if fx.boot_glitch {
+                if let Some(t0) = self.first_frame_time {
+                    let elapsed = t - t0;
+                    paint_boot_glitch(ctx, elapsed);
+                    if (0.0..=0.55).contains(&elapsed) {
+                        animating = true;
+                    }
+                }
+            }
+            if animating {
+                ctx.request_repaint();
+            }
         }
+
+        // Window color-tint recap: it is a SINGLE background-layer wash
+        // (`paint_background_tint`, painted early above), behind every translucent
+        // panel/pane fill — so it colours the app background uniformly WITHOUT
+        // discolouring the terminal text or the opaque Settings window, and never a
+        // flat film painted over the chrome. The top-bar/status buttons carry it the
+        // same way the panes do: the wash shows through their translucent bar, and
+        // the buttons themselves are FLAT (`flatten_chrome_buttons`), so no opaque
+        // chip floats over the see-through bar.
 
         // Live terminals: schedule the IDLE repaint fallback — but ONLY in the
         // real window (`live_window`). PTY output now wakes the UI instantly via
@@ -4065,7 +4593,17 @@ impl C0pl4ndApp {
     /// frame-scheduling contract — the single biggest perceived-latency / battery
     /// lever — shared with the renderer crate.
     fn frame_policy(&self) -> c0pl4nd_renderer::FramePolicy {
-        if self.config.effects.crt_scanlines && !c0pl4nd_core::reduced_motion::reduced_motion() {
+        // Continuous redraw only while the scanline drift is actually MOVING: the
+        // effect is on, reduced-motion is off, the master animation switch is on,
+        // AND the Animation-speed slider is above zero. When the drift is frozen
+        // (any of those false) the bands are a static texture and OnDamage keeps
+        // the terminal off the vsync treadmill (battery / perceived-latency lever).
+        let fx = &self.config.effects;
+        let scanline_animating = fx.crt_scanlines
+            && fx.animations_enabled
+            && fx.clamped_animation_intensity() > 0.0
+            && !c0pl4nd_core::reduced_motion::reduced_motion();
+        if scanline_animating {
             c0pl4nd_renderer::FramePolicy::Continuous
         } else {
             c0pl4nd_renderer::FramePolicy::OnDamage
@@ -4104,6 +4642,53 @@ impl C0pl4ndApp {
 /// otherwise-quiescent screen. Matches the 530 ms cadence the cursor painter and
 /// the legacy winit shell use.
 const CURSOR_BLINK_HALF_PERIOD_MS: u64 = 530;
+
+/// Frames the atlas-warmup gate holds the grid's glyphs off (and GPU-fences in
+/// `ui`) after a (re)warm, so the warmed atlas is uploaded + resident before any
+/// glyph is sampled. Two frames: one to submit the warmed-atlas upload, one whose
+/// `poll(Wait)` guarantees it resident before the grid first draws. Invisible —
+/// the shell banner has not arrived this early anyway.
+const ATLAS_WARMUP_GATE_FRAMES: u8 = 2;
+
+/// Max frames the grid stays gated waiting for the off-thread custom font to swap
+/// in (~4 s at 60 fps). A safety cap: past it the grid renders regardless, so a
+/// failed/hung font load can never hide the terminal forever.
+const FONT_WAIT_GATE_CAP: u32 = 240;
+
+/// Pre-warm the monospace glyph atlas: rasterise every glyph the terminal grid
+/// commonly draws — printable ASCII plus the Unicode box-drawing block — at the
+/// grid font size, so egui's font-atlas TEXTURE is fully populated and uploaded
+/// BEFORE the first banner/prompt frame draws.
+///
+/// This is the fix for the intermittently garbled / blank grid glyphs: egui grows
+/// the atlas lazily as new glyphs appear and re-uploads the texture, and on some
+/// GPUs a drawn frame can sample that texture WHILE the next frame's upload of a
+/// grown atlas is still in flight (an upload↔draw race that a low present latency
+/// makes worse — see the `desired_maximum_frame_latency` note in `egui_main`).
+/// Once the atlas is complete and STABLE, a steady-state frame never modifies the
+/// texture a previous frame is reading, so the race cannot occur. `layout_no_wrap`
+/// forces each glyph into the atlas as a side effect; the returned galley is
+/// discarded. Cheap (a few hundred glyphs, once per font-stack change).
+fn prewarm_grid_atlas(ctx: &egui::Context, font_size: f32) {
+    let font = egui::FontId::monospace(font_size);
+    // Laying out the glyphs ALLOCATES each in the texture atlas as a side effect
+    // (the same population the real grid draw triggers). Use `fonts_mut` — the
+    // atlas-mutating accessor — since layout takes `&mut FontsView` in egui 0.34.
+    // Printable ASCII (banners / prompts / output) + the Unicode box-drawing block
+    // (TUI borders / rules).
+    let mut glyphs = String::new();
+    glyphs.extend((0x20u8..=0x7e).map(char::from));
+    glyphs.extend((0x2500u32..=0x257f).filter_map(char::from_u32));
+    ctx.fonts_mut(|fonts| {
+        let _ = fonts.layout_no_wrap(glyphs, font, egui::Color32::WHITE);
+    });
+}
+
+/// Debounce window (seconds) for persisting a live font-zoom change. A fast
+/// Ctrl+wheel emits many notches; coalescing to ONE config write this long after
+/// the last change avoids a temp-write + rename + perms per notch. Short enough
+/// that the size is durably saved almost immediately once the user stops zooming.
+const FONT_SAVE_DEBOUNCE_SECS: f64 = 0.6;
 
 /// Width of the 4 edge resize zones, in logical px. Slim so they only intercept
 /// pointer events right at the window border (#24).
@@ -4157,53 +4742,132 @@ fn resize_dir_at(
     }
 }
 
-/// Frameless window edge-resize, the no-Area way (#24). Each frame: if the
-/// pointer is over an edge band, hint the matching resize cursor; on a primary
-/// press there — and only when egui isn't already using the pointer for a
-/// widget — start an OS resize via `ViewportCommand::BeginResize`. No persistent
-/// `Order::Foreground` Areas, so it never swallows clicks meant for the tabs /
-/// caption buttons / panes, and it works on every resize, not just the first.
+/// Minimum window size (logical points) the manual edge-resize enforces. Mirrors
+/// the `with_min_inner_size` seed in `egui_main.rs`.
+const MIN_WINDOW_W: f32 = 520.0;
+const MIN_WINDOW_H: f32 = 360.0;
+
+fn resize_cursor(dir: egui::ResizeDirection) -> egui::CursorIcon {
+    use egui::{CursorIcon as C, ResizeDirection as D};
+    match dir {
+        D::North => C::ResizeNorth,
+        D::South => C::ResizeSouth,
+        D::East => C::ResizeEast,
+        D::West => C::ResizeWest,
+        D::NorthEast => C::ResizeNorthEast,
+        D::NorthWest => C::ResizeNorthWest,
+        D::SouthEast => C::ResizeSouthEast,
+        D::SouthWest => C::ResizeSouthWest,
+    }
+}
+
+/// Frameless window edge-resize — MANUAL, not the OS modal loop.
+///
+/// This app draws its own frameless titlebar and STRIPS `WS_SYSMENU` (to kill the
+/// doubled native close button). `ViewportCommand::BeginResize` drives resize via
+/// `WM_SYSCOMMAND | SC_SIZE`, a system-menu command that needs `WS_SYSMENU` — with
+/// it stripped, BeginResize entered a broken OS modal-resize loop that PAUSED the
+/// render thread and HUNG the window (garbled, unresponsive). So instead we resize
+/// MANUALLY: hold the direction across frames and each frame apply the pointer's
+/// motion to the window's inner size via `InnerSize`. No OS modal loop → the event
+/// loop keeps pumping → no freeze, no `WS_SYSMENU` dependency. All math is in
+/// egui's LOGICAL-POINT space (`viewport_rect`, `pointer.delta`, `InnerSize`,
+/// `outer_rect`, `OuterPosition` all agree), so it is HiDPI-correct by construction.
+///
+/// All eight edges/corners resize. East/South only grow the inner size (top-left
+/// stays put — one `InnerSize`). West/North also move the window's top-left via
+/// `OuterPosition` so the OPPOSITE edge stays anchored, reading the current outer
+/// origin from `ViewportInfo::outer_rect`; if the platform does not report it,
+/// those origin-moving edges no-op rather than drift.
 fn handle_frameless_resize(ctx: &egui::Context) {
-    use egui::{CursorIcon as C, ResizeDirection as D, ViewportCommand};
+    use egui::ResizeDirection as D;
+    let id = egui::Id::new("c0pl4nd_manual_resize_dir");
+
+    // A resize in progress? Drive it from this frame's pointer motion until the
+    // primary button is released.
+    let active: Option<D> = ctx.data(|d| d.get_temp(id));
+    if let Some(dir) = active {
+        if !ctx.input(|i| i.pointer.primary_down()) {
+            ctx.data_mut(|d| d.remove::<D>(id)); // released → stop resizing
+            return;
+        }
+        ctx.set_cursor_icon(resize_cursor(dir));
+        // Keep the grid from starting a text-selection while we own the drag.
+        ctx.stop_dragging();
+        let delta = ctx.input(|i| i.pointer.delta());
+        if delta == egui::Vec2::ZERO {
+            return;
+        }
+        let cur = ctx.viewport_rect().size();
+        // Current outer origin (top-left) in LOGICAL points. eframe fills
+        // ViewportInfo by dividing the physical winit rect by pixels_per_point, and
+        // its OuterPosition/InnerSize command handlers multiply by that SAME ppp —
+        // so the whole computation stays in one consistent logical space and is
+        // HiDPI-correct. Decorations are off, so outer≈inner (no frame inset).
+        let outer_min = ctx.input(|i| i.viewport().outer_rect.map(|r| r.min));
+
+        let west = matches!(dir, D::West | D::NorthWest | D::SouthWest);
+        let east = matches!(dir, D::East | D::NorthEast | D::SouthEast);
+        let north = matches!(dir, D::North | D::NorthWest | D::NorthEast);
+        let south = matches!(dir, D::South | D::SouthWest | D::SouthEast);
+
+        // The origin-moving edges (West/North) keep the OPPOSITE edge fixed by
+        // moving the window's top-left as they resize — which needs the current
+        // outer origin. If the platform did not report it, skip rather than let the
+        // window drift.
+        if (west || north) && outer_min.is_none() {
+            return;
+        }
+        let origin0 = outer_min.unwrap_or(egui::Pos2::ZERO);
+        let mut origin = origin0;
+        let mut nw = cur.x;
+        let mut nh = cur.y;
+
+        if east {
+            nw = (cur.x + delta.x).max(MIN_WINDOW_W);
+        } else if west {
+            nw = (cur.x - delta.x).max(MIN_WINDOW_W);
+            origin.x += cur.x - nw; // right edge stays put
+        }
+        if south {
+            nh = (cur.y + delta.y).max(MIN_WINDOW_H);
+        } else if north {
+            nh = (cur.y - delta.y).max(MIN_WINDOW_H);
+            origin.y += cur.y - nh; // bottom edge stays put
+        }
+
+        // Move first (if the origin changed), then resize. Both commands apply this
+        // frame, so the final rect is the same regardless of order.
+        if origin != origin0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(origin));
+        }
+        let ns = egui::vec2(nw, nh);
+        if ns != cur {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(ns));
+        }
+        return;
+    }
+
+    // Not resizing: hint the cursor over a supported edge band and START a resize
+    // on a primary press there. We do NOT gate on `egui_is_using_pointer()`: the
+    // terminal grid's background senses the pointer, so egui reports "using
+    // pointer" the instant the button lands ANYWHERE over the pane — that gate was
+    // true on every press and silently blocked every resize (confirmed by the
+    // resize-debug log). Instead we rely on the geometry: the edge band is only a
+    // few logical px at the very window border (`RESIZE_EDGE_PX` / corners
+    // `RESIZE_CORNER_PX`), well outboard of the tabs, caption buttons, and pane
+    // splitters, so a press there is unambiguously an edge grab. `stop_dragging()`
+    // cancels any text-selection the grid would otherwise begin under our drag.
+    // SAFE with the manual resize (unlike BeginResize): no OS modal loop to hang.
     let Some(p) = ctx.pointer_latest_pos() else {
         return;
     };
-    // Hit-test against the FULL window surface (viewport_rect), NOT content_rect:
-    // egui 0.34 split the old `screen_rect` into `viewport_rect()` (the whole
-    // inner window) and `content_rect()` (the area inside the panels). We need
-    // the whole window — content_rect excludes the top titlebar / bottom status
-    // panels, which would push the resize bands inward off the real window edges
-    // so the user couldn't grab them. `viewport_rect()` is the non-deprecated
-    // successor for the whole-window surface the SCR1B3 reference used.
     let Some(dir) = resize_dir_at(p, ctx.viewport_rect(), RESIZE_EDGE_PX, RESIZE_CORNER_PX) else {
         return;
     };
-    ctx.set_cursor_icon(match dir {
-        D::North => C::ResizeNorth,
-        D::South => C::ResizeSouth,
-        D::West => C::ResizeWest,
-        D::East => C::ResizeEast,
-        D::NorthWest => C::ResizeNorthWest,
-        D::NorthEast => C::ResizeNorthEast,
-        D::SouthWest => C::ResizeSouthWest,
-        D::SouthEast => C::ResizeSouthEast,
-    });
-    // Start the OS resize only if egui isn't consuming the press for a widget
-    // (so a button / tab sitting at the very edge still gets its click).
-    // `egui_wants_pointer_input` is the non-deprecated rename of
-    // `wants_pointer_input` in egui 0.34.
-    if ctx.input(|i| i.pointer.primary_pressed()) && !ctx.egui_wants_pointer_input() {
-        ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
-        // The OS now owns the drag. winit's modal resize loop swallows the
-        // button-up, so egui can be left believing a drag is still in progress —
-        // which makes `wants_pointer_input()` return true forever and blocks
-        // EVERY subsequent resize (the "works once, then never" bug). Clearing
-        // egui's drag bookkeeping here unsticks that state so resize re-arms.
-        ctx.stop_dragging();
-    }
-    // Belt-and-suspenders: with no button held there can be no legitimate drag,
-    // so proactively clear any phantom drag the OS resize loop may have orphaned.
-    if !ctx.input(|i| i.pointer.any_down()) {
+    ctx.set_cursor_icon(resize_cursor(dir));
+    if ctx.input(|i| i.pointer.primary_pressed()) {
+        ctx.data_mut(|d| d.insert_temp(id, dir));
         ctx.stop_dragging();
     }
 }
@@ -4501,13 +5165,19 @@ fn paint_grid_native(
         // animation repaint. This makes the "Auto-disabled under reduced-motion"
         // promise the settings UI already shows actually true.
         let reduce = c0pl4nd_core::reduced_motion::reduced_motion();
-        let t = if reduce {
-            0.0
+        // Freeze the scanline drift (static texture, bands still painted) under
+        // reduced-motion OR when the master animation switch is off; otherwise the
+        // drift clock is scaled by the Animation-speed slider so the same slider
+        // that governs the whole-window overlays also governs the scanline shimmer.
+        let speed = effects.clamped_animation_intensity();
+        let animate = !reduce && effects.animations_enabled && speed > 0.0;
+        let t = if animate {
+            painter.ctx().input(|i| i.time) as f32 * speed
         } else {
-            painter.ctx().input(|i| i.time) as f32
+            0.0
         };
         paint_crt_scanlines(painter, rect, ppp, t, effects.scanline_darkness);
-        if !reduce {
+        if animate {
             painter.ctx().request_repaint();
         }
     }

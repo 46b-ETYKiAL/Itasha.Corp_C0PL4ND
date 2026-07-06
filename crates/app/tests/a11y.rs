@@ -192,17 +192,21 @@ fn every_button_in_settings_has_a_label_and_every_combo_announces_a_value() {
          as its accessible name; these announce nothing: {valueless_combos:?}"
     );
 
-    // The eight left-nav category items must each be reachable by their exact
-    // accessible label — the names a keyboard/screen-reader user navigates by.
+    // Every left-nav category item must be reachable by its exact accessible
+    // label — the names a keyboard/screen-reader user navigates by. This list
+    // mirrors `settings::CATEGORIES` (display order); keep the two in sync when a
+    // category is added, renamed, or reordered.
     for category in [
         "Appearance",
-        "Font",
+        "Fonts",
         "Cursor",
         "Terminal",
         "Window",
+        "Toolbar",
+        "Motion",
         "Keybindings",
-        "Privacy",
         "Updates",
+        "Privacy",
     ] {
         assert!(
             nodes.iter().any(|(role, label, _, _)| {

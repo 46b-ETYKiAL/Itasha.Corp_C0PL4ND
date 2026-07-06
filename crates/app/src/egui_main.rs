@@ -52,6 +52,12 @@ fn main() -> eframe::Result<()> {
     // then chains to the default hook — it runs before the abort fires.
     panic_hook::install();
 
+    // Create the process-wide KILL_ON_JOB_CLOSE job object (Windows) so no PTY
+    // child shell — or anything it spawns — can outlive this process, even on a
+    // hard `std::process::exit(0)` or a crash. Best-effort; the fast-close
+    // `kill_child` path is the primary no-orphan guarantee, this is the backstop.
+    egui_app::job_object::init();
+
     // Best-effort tracing. Mirror the legacy binary EXACTLY (F9-2): read the
     // `C0PL4ND_LOG` env var (NOT the default `RUST_LOG`) and default to `warn`.
     // The two binaries previously diverged — this one read `RUST_LOG` and
@@ -112,11 +118,25 @@ fn main() -> eframe::Result<()> {
         .with_app_id("com.itashacorp.c0pl4nd")
         .with_title("C0PL4ND")
         .with_decorations(false) // frameless — we draw our own titlebar
-        .with_transparent(true); // required for rounded corners + acrylic blur
-                                 // Runtime window + taskbar icon (the sigil). The exe's embedded icon
-                                 // resource (build.rs) covers the Start-menu shortcut / Explorer /
-                                 // Add-Remove-Programs; this covers the live window. Best-effort — a decode
-                                 // failure leaves the platform default rather than blocking startup.
+        .with_transparent(true) // required for rounded corners + acrylic blur
+        // Suppress the native min/max caption buttons at CREATION. winit leaves
+        // WS_MINIMIZEBOX | WS_MAXIMIZEBOX set on an undecorated window (winit
+        // #2754), and Win11 DWM draws native min/max caption buttons from those
+        // style bits — which, once a translucent backdrop (mica/acrylic) is
+        // applied, composite THROUGH as a second, offset set over our own custom
+        // titlebar (the reported "doubled caption buttons"). Clearing the bits at
+        // creation stops winit from ever setting them, so DWM draws no native
+        // min/max buttons — with ZERO runtime style manipulation (a runtime
+        // SetWindowLongPtr/SWP_FRAMECHANGED fights winit's frameless composition
+        // and repaints a stray native frame). WS_SYSMENU is left intact, so
+        // Alt+F4, the taskbar right-click Close, and the window system menu all
+        // keep working; our own titlebar draws the min/max/close the user clicks.
+        .with_minimize_button(false)
+        .with_maximize_button(false);
+    // Runtime window + taskbar icon (the sigil). The exe's embedded icon
+    // resource (build.rs) covers the Start-menu shortcut / Explorer /
+    // Add-Remove-Programs; this covers the live window. Best-effort — a decode
+    // failure leaves the platform default rather than blocking startup.
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }
@@ -142,20 +162,21 @@ fn main() -> eframe::Result<()> {
     );
     apply_gpu_preference(&mut options, launch_gpu_preference());
 
-    // We KEEP eframe's default present latency (2). A previous
-    // `desired_maximum_frame_latency = Some(1)` "optimization" (shave one frame
-    // off keystroke→glyph lag) turned out to CORRUPT the terminal grid on real
-    // hardware: at latency 1 the swapchain draw could race egui's font-atlas
-    // texture upload, so glyphs rendered from a not-yet-complete atlas — badly
-    // garbled on a fast discrete GPU (NVIDIA), mildly on an integrated one, and
-    // NEVER in an offscreen/synchronous render (every headless snapshot was
-    // pixel-perfect, which is what made it so hard to pin down). One extra frame
-    // of latency is imperceptible for a terminal; a garbled grid is not. Do NOT
-    // re-add the latency-1 override without proving the atlas upload is
-    // synchronised first. We also deliberately keep the default vsync present
-    // mode (NOT Mailbox/AutoNoVsync): the app is event-driven, so an idle
-    // terminal repaints ~0 fps and Mailbox would force wasteful continuous
-    // high-FPS rendering.
+    // Present latency raises the swapchain frame-queue depth. A previous
+    // `= Some(1)` "optimization" CORRUPTED the terminal grid: the draw raced
+    // egui's font-atlas texture upload, so glyphs rendered from a not-yet-complete
+    // atlas — heavily garbled on a fast discrete GPU (NVIDIA), and NEVER in an
+    // offscreen/synchronous render (every headless snapshot is pixel-perfect,
+    // which is what made it so hard to pin down). Empirically the garble scales
+    // with latency: 1 = consistent, 2 (eframe/wgpu default) = intermittent, so we
+    // set it HIGHER to give the upload more frames to land before a draw samples
+    // it. 3 is still imperceptible for a terminal (< ~50 ms keystroke→glyph on a
+    // 60 Hz panel); a garbled grid is not. Paired with the startup font-atlas
+    // pre-warm (`prewarm_grid_atlas`), which keeps the atlas from GROWING mid-
+    // render. Do NOT lower this. We also keep the default vsync present mode (NOT
+    // Mailbox/AutoNoVsync): the app is event-driven, so an idle terminal repaints
+    // ~0 fps and Mailbox would force wasteful continuous high-FPS rendering.
+    options.wgpu_options.desired_maximum_frame_latency = Some(3);
 
     let result = eframe::run_native(
         "C0PL4ND",
@@ -286,20 +307,22 @@ fn launch_backend_override() -> c0pl4nd_core::config::GraphicsBackend {
 /// window only works on Vulkan — empirically verified on Win11 (and the reason the
 /// sibling SCR1B3, which uses the default Vulkan-first backend, is see-through).
 ///
-/// The trade-off: some third-party Vulkan *overlay layers* (e.g.
-/// `GalaxyOverlayVkLayer`) corrupt the Vulkan instance and panic egui-wgpu, which
-/// is why the OPAQUE path keeps the more robust DX12. So: when the user has
-/// enabled window transparency we select Vulkan; otherwise DX12. `WGPU_BACKEND`
-/// always overrides (a user hitting a Vulkan-overlay crash can force `dx12`,
-/// trading transparency for stability). No-op on non-Windows platforms.
+/// **Vulkan is now the Windows default for BOTH opaque and transparent windows**
+/// — it is immune to the DX12 font-atlas `write_texture`→sample hazard that
+/// intermittently garbles the terminal grid on some NVIDIA DX12 drivers
+/// (wgpu#1306 / #6829, DX12-only), and it is the only backend whose WSI exposes
+/// the pre-multiplied alpha a see-through window needs. The trade-off: some
+/// third-party Vulkan *overlay layers* (e.g. `GalaxyOverlayVkLayer`) corrupt the
+/// Vulkan instance and panic egui-wgpu — a user hitting that forces DX12 back via
+/// the config override (below) or `WGPU_BACKEND=dx12`, trading the glyph-hazard
+/// immunity for overlay robustness. No-op on non-Windows platforms.
 ///
 /// `backend_override` is the persisted [`GraphicsBackend`](c0pl4nd_core::config::GraphicsBackend)
-/// setting: `Auto` keeps the transparency-smart default above, while an explicit
-/// variant forces that backend — the in-app escape hatch for a driver-specific
-/// rendering glitch (e.g. corrupted grid glyphs under a bad DX12 driver → pick
-/// Vulkan). Precedence: `WGPU_BACKEND` env (one-off debug) > config override >
-/// platform default. Effective on Windows; inert elsewhere (the glitch it exists
-/// to work around is the Windows DX12 present path).
+/// setting: `Auto` keeps the Vulkan default above, while an explicit variant
+/// forces that backend — the in-app escape hatch either way (Vulkan-overlay crash
+/// → force DX12; a DX12-only need → force DX12). Precedence: `WGPU_BACKEND` env
+/// (one-off debug) > config override > platform default. Effective on Windows;
+/// inert elsewhere.
 fn prefer_backend_on_windows(
     options: &mut eframe::NativeOptions,
     want_transparency: bool,
@@ -310,13 +333,18 @@ fn prefer_backend_on_windows(
         use eframe::wgpu::Backends;
         if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
         {
-            // Platform-smart default: Vulkan when the user wants a see-through
-            // window, else the more overlay-robust DX12.
-            let platform_default = if want_transparency {
-                Backends::VULKAN
-            } else {
-                Backends::DX12
-            };
+            // Platform default: VULKAN, for BOTH the transparent and the opaque
+            // window. Vulkan is immune to the DX12 font-atlas `write_texture`→sample
+            // hazard that intermittently garbles the terminal grid on some NVIDIA
+            // DX12 drivers (wgpu#1306 / #6829 — DX12-only; the in-app atlas fence
+            // only mitigates it), AND it is the only backend whose WSI exposes the
+            // pre-multiplied alpha a see-through window needs. DX12 remains one
+            // setting away — the `graphics_backend` config override (or
+            // `WGPU_BACKEND=dx12`) forces it for anyone who hits a Vulkan-overlay
+            // layer crash (e.g. GalaxyOverlayVkLayer), trading the glyph-hazard
+            // immunity back for overlay robustness.
+            let _ = want_transparency; // both paths default to Vulkan now
+            let platform_default = Backends::VULKAN;
             // The persisted setting maps to an explicit backend; `Auto` defers to
             // the platform default. The `WGPU_BACKEND` env still wins over both.
             let configured = resolve_configured_backends(backend_override, platform_default);

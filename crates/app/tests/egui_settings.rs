@@ -60,7 +60,7 @@ fn open_settings(h: &mut Harness<'_>) {
     h.run();
 }
 
-/// Click a left-nav category by its label (e.g. "Cursor", "Font"). The nav
+/// Click a left-nav category by its label (e.g. "Cursor", "Fonts"). The nav
 /// item is a selectable (role `Button`); querying by role disambiguates it from
 /// the section `heading` of the same name (role `Label`), which renders for the
 /// currently-selected category.
@@ -110,6 +110,57 @@ fn toggling_cursor_blink_flips_the_live_config() {
 }
 
 #[test]
+fn toolbar_section_default_zones_overflow_toggle_and_reset_are_wired() {
+    // The Settings → Toolbar section must render and drive the live config. Default
+    // placement: view/equalize/shell on the LEFT, only the script launcher on the
+    // RIGHT (by the gear) — the "only the script button moved" contract.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    assert_eq!(
+        app.borrow().config_toolbar_left(),
+        vec!["view_mode", "equalize_panes", "shell_switcher"],
+        "default LEFT group is view/equalize/shell"
+    );
+    assert_eq!(
+        app.borrow().config_toolbar_right(),
+        vec!["script_launcher"],
+        "default RIGHT cluster is ONLY the script launcher"
+    );
+    assert!(app.borrow().config_toolbar_show_overflow());
+    let default_left = app.borrow().config_toolbar_left();
+    let mut h = harness(&app);
+
+    open_settings(&mut h);
+    select_category(&mut h, "Toolbar");
+
+    // Flip the overflow checkbox OFF (uniquely-labelled control).
+    h.get_by_label("Show the overflow menu button when its menu has actions")
+        .click();
+    h.run();
+    assert!(
+        !app.borrow().config_toolbar_show_overflow(),
+        "toggling the overflow checkbox must turn it OFF in the live config"
+    );
+
+    // Reset restores the defaults (overflow back on, zones back to default).
+    h.get_by_label("Reset toolbar to defaults").click();
+    h.run();
+    assert!(
+        app.borrow().config_toolbar_show_overflow(),
+        "Reset must restore show_overflow to its default (on)"
+    );
+    assert_eq!(
+        app.borrow().config_toolbar_left(),
+        default_left,
+        "Reset must restore the default LEFT group"
+    );
+    assert_eq!(
+        app.borrow().config_toolbar_right(),
+        vec!["script_launcher"],
+        "Reset must restore the default RIGHT cluster"
+    );
+}
+
+#[test]
 fn toggling_paste_warn_flips_the_live_config() {
     // paste_warn_multiline defaults to TRUE (a security default). Toggling it
     // must turn it off — proving the Terminal-section toggle is wired.
@@ -147,9 +198,9 @@ fn clicking_the_font_size_slider_changes_the_live_config() {
     let mut h = harness(&app);
 
     open_settings(&mut h);
-    select_category(&mut h, "Font");
+    select_category(&mut h, "Fonts");
 
-    // The Font section renders the Size slider first; click its track.
+    // The Fonts section renders the Size slider first; click its track.
     h.get_all_by_role(egui::accesskit::Role::Slider)
         .next()
         .expect("Font section must render a size slider")
@@ -765,13 +816,13 @@ fn every_settings_page_has_the_same_window_width() {
     open_settings(&mut h);
 
     let appearance = close_button_right_on_page(&mut h, "Appearance");
-    let font = close_button_right_on_page(&mut h, "Font");
+    let font = close_button_right_on_page(&mut h, "Fonts");
     let updates = close_button_right_on_page(&mut h, "Updates");
     let keybindings = close_button_right_on_page(&mut h, "Keybindings");
 
     // All four right edges must agree within 1px — a stable-width window.
     for (name, x) in [
-        ("Font", font),
+        ("Fonts", font),
         ("Updates", updates),
         ("Keybindings", keybindings),
     ] {

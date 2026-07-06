@@ -144,6 +144,15 @@ impl PtyProcess {
         Ok(status.success())
     }
 
+    /// Non-blocking check of whether the child has exited: `Some(success)` once it
+    /// has, `None` while it is still running. Unlike the reader thread's EOF (a
+    /// ConPTY output pipe does not close promptly when the client is killed), this
+    /// polls the child PROCESS directly, so it reflects a `kill()` immediately —
+    /// the deterministic signal for "was the shell reaped?".
+    pub fn try_wait(&mut self) -> Option<bool> {
+        self.child.try_wait().ok().flatten().map(|s| s.success())
+    }
+
     /// The OS process id of the child shell, if still known.
     pub fn child_pid(&self) -> Option<u32> {
         self.child.process_id()

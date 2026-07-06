@@ -495,6 +495,114 @@ pub struct EffectsConfig {
     /// Chromatic-aberration intensity (0.0 = off). Only applied when
     /// [`EffectsConfig::chromatic_aberration_enabled`] is `true`.
     pub chromatic_aberration: f32,
+
+    // ---- Motion / animation (SCR1B3 parity) --------------------------------
+    /// Master switch for the whole animation + motion-effect system. When
+    /// `false`, egui's animation time is zeroed (instant transitions, a fully
+    /// static UI) and every motion overlay below is suppressed regardless of its
+    /// own toggle. Default ON — preserves the current animated feel; a user who
+    /// wants a static surface flips this off.
+    #[serde(default = "default_animations_enabled")]
+    pub animations_enabled: bool,
+    /// 0.0..=1.0 scale applied to egui's global animation time when
+    /// [`animations_enabled`](Self::animations_enabled) is on. 1.0 = egui's
+    /// default speed (the shipped feel); lower slows fades/collapses.
+    #[serde(default = "default_animation_intensity")]
+    pub animation_intensity: f32,
+    /// Subtle full-window CRT-style brightness flicker. OFF by default; gated
+    /// behind the master switch.
+    #[serde(default)]
+    pub flicker: bool,
+    /// Flicker strength (0.0 = none .. capped at 0.20 for accessibility).
+    #[serde(default = "default_flicker_strength")]
+    pub flicker_strength: f32,
+    /// VHS-style horizontal tracking lines drifting down the window. OFF by
+    /// default.
+    #[serde(default)]
+    pub vhs_tracking: bool,
+    /// VHS tracking-line intensity (0.0 = faint .. 1.0 = bold, clamped). Scales
+    /// how bright the drifting tracking bands read. Only applied when
+    /// [`vhs_tracking`](Self::vhs_tracking) is on.
+    #[serde(default = "default_vhs_intensity")]
+    pub vhs_intensity: f32,
+    /// Animated wired node-mesh ambient background (Lain "Wired" feel), drawn at
+    /// Background order behind the panes. OFF by default.
+    #[serde(default)]
+    pub wired_ambient: bool,
+    /// Node-mesh density (0.0 = sparse .. 2.0 = dense, clamped). Drives the node
+    /// count of the wired-ambient background.
+    #[serde(default = "default_mesh_density")]
+    pub mesh_density: f32,
+    /// Node-mesh brightness (0.0 = invisible .. 1.0 = shipped .. 3.0 = bold,
+    /// clamped). Scales the lattice link + node-dot opacity so the mesh can be
+    /// dimmed toward nothing or brightened to clearly pop. Only applied when
+    /// [`wired_ambient`](Self::wired_ambient) is on.
+    #[serde(default = "default_mesh_brightness")]
+    pub mesh_brightness: f32,
+    /// Node-mesh movement amount (0.0 = a still lattice .. 1.0 = the shipped
+    /// drift .. 2.0 = brisk, clamped). Scales how fast the mesh nodes drift; at
+    /// 0 the field holds a static frame. Only applied when
+    /// [`wired_ambient`](Self::wired_ambient) is on.
+    #[serde(default = "default_mesh_speed")]
+    pub mesh_speed: f32,
+    /// Cursor ghost-trail: a fading echo follows the focused terminal cursor as
+    /// it moves. OFF by default.
+    #[serde(default)]
+    pub cursor_trail: bool,
+    /// Cursor ghost-trail intensity (0.0 = faint/short .. 1.0 = bold/long,
+    /// clamped). Scales both the echo opacity and how long each echo lingers, so
+    /// the trail can be tuned from a barely-there whisper to a pronounced comet
+    /// tail. Only applied when [`cursor_trail`](Self::cursor_trail) is on.
+    #[serde(default = "default_cursor_trail_intensity")]
+    pub cursor_trail_intensity: f32,
+    /// One-shot boot "glitch" sweep on the first frames after launch. OFF by
+    /// default; self-terminates.
+    #[serde(default)]
+    pub boot_glitch: bool,
+}
+
+/// Default master-animation switch — ON, preserving the shipped animated feel.
+pub fn default_animations_enabled() -> bool {
+    true
+}
+
+/// Default animation-intensity — 1.0 = egui's stock animation speed (no change
+/// to the current feel until the user tunes it down).
+pub fn default_animation_intensity() -> f32 {
+    1.0
+}
+
+/// Default flicker strength — barely perceptible.
+pub fn default_flicker_strength() -> f32 {
+    0.06
+}
+
+/// Default node-mesh density — a calm, sparse field.
+pub fn default_mesh_density() -> f32 {
+    0.4
+}
+
+/// Default node-mesh brightness — 1.0 = the shipped lattice opacity (no change
+/// to the current look until the user brightens or dims it).
+pub fn default_mesh_brightness() -> f32 {
+    1.0
+}
+
+/// Default cursor-trail intensity — a clearly-visible-but-tasteful comet tail
+/// (mid-high so the trail reads at once when first enabled, tunable either way).
+pub fn default_cursor_trail_intensity() -> f32 {
+    0.6
+}
+
+/// Default node-mesh movement — 1.0 = the shipped drift speed (no change to the
+/// current feel until the user tunes it).
+pub fn default_mesh_speed() -> f32 {
+    1.0
+}
+
+/// Default VHS tracking-line intensity — a clearly-visible-but-calm band.
+pub fn default_vhs_intensity() -> f32 {
+    0.5
 }
 
 /// Default scanline darkness — strong enough to read as scan lines (not a flat
@@ -517,6 +625,19 @@ impl Default for EffectsConfig {
             scanline_darkness: DEFAULT_SCANLINE_DARKNESS,
             chromatic_aberration_enabled: false,
             chromatic_aberration: 0.0,
+            animations_enabled: default_animations_enabled(),
+            animation_intensity: default_animation_intensity(),
+            flicker: false,
+            flicker_strength: default_flicker_strength(),
+            vhs_tracking: false,
+            vhs_intensity: default_vhs_intensity(),
+            wired_ambient: false,
+            mesh_density: default_mesh_density(),
+            mesh_brightness: default_mesh_brightness(),
+            mesh_speed: default_mesh_speed(),
+            cursor_trail: false,
+            cursor_trail_intensity: default_cursor_trail_intensity(),
+            boot_glitch: false,
         }
     }
 }
@@ -530,6 +651,110 @@ impl EffectsConfig {
             self.chromatic_aberration.max(0.0)
         } else {
             0.0
+        }
+    }
+
+    /// Animation-intensity clamped to `0.0..=2.0`. 1.0 is egui's stock feel; the
+    /// band extends to 2.0 so the Motion → Animation-speed slider can drive the
+    /// continuous drift overlays (mesh / VHS / flicker) up to double-rate. The
+    /// egui-chrome consumer separately caps the factor at 1.0 (see `mod.rs`) so a
+    /// >1.0 speed only accelerates the effects, never lengthens the UI fades.
+    pub fn clamped_animation_intensity(&self) -> f32 {
+        self.animation_intensity.clamp(0.0, 2.0)
+    }
+
+    /// Flicker strength clamped to `0.0..=1.0`. The old `0.20` ceiling read as a
+    /// barely-there shimmer; 1.0 lets the flicker reach a clearly-visible CRT
+    /// wobble. The painter's own alpha math keeps even the max well short of a
+    /// full-black strobe (photosensitivity guard), so the band is safe to widen.
+    pub fn clamped_flicker_strength(&self) -> f32 {
+        self.flicker_strength.clamp(0.0, 1.0)
+    }
+
+    /// Node-mesh density clamped to `0.0..=2.0` so the mesh can go from a calm
+    /// field to a busy web (the painter caps the node count for the O(n²) pass).
+    pub fn clamped_mesh_density(&self) -> f32 {
+        self.mesh_density.clamp(0.0, 2.0)
+    }
+
+    /// Node-mesh brightness clamped to `0.0..=3.0`. 1.0 is the shipped alpha;
+    /// below 1.0 dims the lattice toward invisible, above 1.0 brightens it so a
+    /// user who finds the default mesh too dim can make it clearly pop. Scales the
+    /// link + dot alpha in the painter.
+    pub fn clamped_mesh_brightness(&self) -> f32 {
+        self.mesh_brightness.clamp(0.0, 3.0)
+    }
+
+    /// Cursor-trail intensity clamped to `0.0..=2.0` so the echo opacity /
+    /// lifetime can reach a pronounced comet tail while a malformed config still
+    /// can't drive it out of band.
+    pub fn clamped_cursor_trail_intensity(&self) -> f32 {
+        self.cursor_trail_intensity.clamp(0.0, 2.0)
+    }
+
+    /// Node-mesh movement clamped to `0.0..=2.0`. 0 holds a static lattice; 1.0
+    /// is the shipped drift; up to 2.0 is a brisk field. Scales the mesh
+    /// animation phase in the painter.
+    pub fn clamped_mesh_speed(&self) -> f32 {
+        self.mesh_speed.clamp(0.0, 2.0)
+    }
+
+    /// VHS tracking-line intensity clamped to `0.0..=1.0`. Scales the drifting
+    /// tracking-band alpha in the painter.
+    pub fn clamped_vhs_intensity(&self) -> f32 {
+        self.vhs_intensity.clamp(0.0, 1.0)
+    }
+}
+
+/// Customizable top-bar quick-action toolbar (the cluster pinned to the RIGHT of
+/// the titlebar, immediately left of the settings gear). The user chooses which
+/// quick actions appear, in what order, and which are parked in an overflow "⋯"
+/// menu — edited in Settings → Toolbar. Action ids are from the app's
+/// `TOOLBAR_ACTIONS` catalog; an unknown id is skipped at render time (so a config
+/// written by a newer/older build never breaks the bar). The fixed affordances
+/// (wordmark, tab strip, the tab-adjacent "+", and the window caption cluster) are
+/// NOT part of this list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolbarConfig {
+    /// Actions in the LEFT group (titlebar flow, after the "+"), left→right order.
+    pub left: Vec<String>,
+    /// Actions in the RIGHT cluster (pinned by the settings gear), left→right (the
+    /// LAST id renders nearest the gear).
+    pub right: Vec<String>,
+    /// Actions parked in the overflow "⋯" menu instead of taking a bar slot.
+    pub menu: Vec<String>,
+    /// Show the overflow "⋯" menu button when [`menu`](Self::menu) is non-empty.
+    /// Default `true`; turn off to hide the overflow button entirely (parked
+    /// actions stay reachable via the command palette / keybindings).
+    pub show_overflow: bool,
+}
+
+impl ToolbarConfig {
+    /// The shipped default LEFT group (titlebar flow, after the "+"): view-toggle,
+    /// equalize, shell-switcher — exactly where they were before the toolbar
+    /// became customizable.
+    pub fn default_left() -> Vec<String> {
+        ["view_mode", "equalize_panes", "shell_switcher"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// The shipped default RIGHT cluster: just the script launcher, pinned next to
+    /// the settings gear.
+    pub fn default_right() -> Vec<String> {
+        vec!["script_launcher".to_string()]
+    }
+}
+
+impl Default for ToolbarConfig {
+    fn default() -> Self {
+        ToolbarConfig {
+            left: ToolbarConfig::default_left(),
+            right: ToolbarConfig::default_right(),
+            menu: Vec::new(),
+            show_overflow: true,
         }
     }
 }
@@ -667,6 +892,10 @@ pub struct Config {
     /// set `false` to hide it and reclaim the row for the terminal grid.
     #[serde(default = "default_true")]
     pub show_status_bar: bool,
+    /// Customizable top-bar quick-action toolbar (right cluster, by the gear). See
+    /// [`ToolbarConfig`]; edited in Settings → Toolbar.
+    #[serde(default)]
+    pub toolbar: ToolbarConfig,
     /// GPU backend the renderer requests at startup. [`GraphicsBackend::Auto`]
     /// (default) keeps the platform-smart choice (DX12 on Windows, Vulkan when
     /// window transparency is on; wgpu default elsewhere). Set an explicit
@@ -730,6 +959,23 @@ pub struct Config {
     /// with no `[reporting]` table loads with reporting fully off.
     #[serde(default)]
     pub reporting: ReportingConfig,
+    /// Persisted size of the Settings sub-window, in logical points, so a user's
+    /// resize sticks across launches. `None` (default, and for older configs
+    /// without the field) = use the built-in default size. Clamped to a sane
+    /// floor/ceiling on use so a malformed value can never spawn an unusable
+    /// window.
+    #[serde(default)]
+    pub settings_win_w: Option<f32>,
+    #[serde(default)]
+    pub settings_win_h: Option<f32>,
+    /// Persisted top-left POSITION of the Settings sub-window, in logical points,
+    /// so a user's move sticks across launches. `None` (default) = no saved
+    /// position yet, so the window opens centered over the app. Clamped to the
+    /// live screen on use so a stale off-screen value can never hide the window.
+    #[serde(default)]
+    pub settings_win_x: Option<f32>,
+    #[serde(default)]
+    pub settings_win_y: Option<f32>,
 }
 
 /// serde default for boolean fields that should default to `true` when absent
@@ -773,6 +1019,7 @@ impl Default for Config {
             startup_panel: true,
             link_pane_dividers: false,
             show_status_bar: true,
+            toolbar: ToolbarConfig::default(),
             graphics_backend: GraphicsBackend::default(),
             graphics_gpu: GpuPreference::default(),
             shell: None,
@@ -782,6 +1029,10 @@ impl Default for Config {
             paste_warn_multiline: true,
             history_capture_enabled: true,
             reporting: ReportingConfig::default(),
+            settings_win_w: None,
+            settings_win_h: None,
+            settings_win_x: None,
+            settings_win_y: None,
         }
     }
 }
@@ -1066,6 +1317,104 @@ mod tests {
         assert_eq!(c.theme, "itasha-corp");
         assert_eq!(c.scrollback_lines, 10_000);
         assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn effects_motion_defaults_and_backward_compat() {
+        // New EffectsConfig defaults: the master animation switch is ON at full
+        // intensity (reproducing the shipped feel) and every motion overlay is
+        // OFF — the master toggle changes nothing until a user opts an effect in.
+        let d = EffectsConfig::default();
+        assert!(d.animations_enabled);
+        assert_eq!(d.animation_intensity, 1.0);
+        assert!(!d.flicker && !d.vhs_tracking && !d.wired_ambient);
+        assert!(!d.cursor_trail && !d.boot_glitch);
+        // The cursor-trail intensity defaults mid-high so a freshly-enabled trail
+        // is visible at once (tunable either way by the Motion slider).
+        assert_eq!(d.cursor_trail_intensity, 0.6);
+
+        // An OLD config written before the Motion fields existed (only the
+        // original four effect keys) MUST still deserialize: the struct-level
+        // `#[serde(default)]` fills every missing field from Default, never a
+        // parse error. This is the load-compat guarantee the reorg depends on.
+        let old: EffectsConfig = toml::from_str(
+            "crt_scanlines = true\nscanline_darkness = 0.7\n\
+             chromatic_aberration_enabled = false\nchromatic_aberration = 0.0\n",
+        )
+        .expect("legacy effects config without motion fields must load");
+        assert!(old.crt_scanlines);
+        assert_eq!(old.scanline_darkness, 0.7);
+        assert!(old.animations_enabled, "missing master switch defaults ON");
+        assert_eq!(old.animation_intensity, 1.0);
+        assert!(!old.boot_glitch, "missing motion effect defaults OFF");
+        assert_eq!(
+            old.cursor_trail_intensity, 0.6,
+            "missing cursor-trail intensity defaults to the mid-high band"
+        );
+        assert_eq!(
+            old.mesh_brightness, 1.0,
+            "missing mesh brightness defaults to the shipped 1.0 (no visual change)"
+        );
+
+        // Clamped accessors keep a malformed / out-of-band value inside its
+        // (widened) design range before it can reach a painter.
+        let wild = EffectsConfig {
+            animation_intensity: 9.0,
+            flicker_strength: 5.0,
+            mesh_density: -3.0,
+            mesh_brightness: 9.0,
+            cursor_trail_intensity: 9.0,
+            mesh_speed: 9.0,
+            vhs_intensity: 5.0,
+            ..EffectsConfig::default()
+        };
+        assert_eq!(wild.clamped_animation_intensity(), 2.0);
+        assert_eq!(wild.clamped_flicker_strength(), 1.0);
+        assert_eq!(wild.clamped_mesh_density(), 0.0);
+        assert_eq!(wild.clamped_mesh_brightness(), 3.0);
+        assert_eq!(wild.clamped_cursor_trail_intensity(), 2.0);
+        // Out-of-band high inputs clamp to each band's ceiling — proves the clamp
+        // is load-bearing (kills the "remove clamp" mutant on the new accessors).
+        assert_eq!(wild.clamped_mesh_speed(), 2.0);
+        assert_eq!(wild.clamped_vhs_intensity(), 1.0);
+    }
+
+    #[test]
+    fn motion_defaults_are_exact_and_in_band_values_pass_through() {
+        // Pin the EXACT default of every Motion knob — the shipped feel is these
+        // numbers, and a silent drift (e.g. a default bumped to 0/1) would change
+        // the out-of-box look. Asserting the concrete value (not just "non-zero")
+        // is what proves the default is the intended one.
+        assert_eq!(default_animation_intensity(), 1.0);
+        assert_eq!(default_flicker_strength(), 0.06);
+        assert_eq!(default_mesh_density(), 0.4);
+        assert_eq!(default_mesh_brightness(), 1.0);
+        assert_eq!(default_mesh_speed(), 1.0);
+        assert_eq!(default_vhs_intensity(), 0.5);
+        assert_eq!(default_cursor_trail_intensity(), 0.6);
+
+        // A value already INSIDE each band must pass through UNCHANGED — the
+        // clamp only touches out-of-range inputs. This is the half the `wild`
+        // (out-of-band) test can't see: it proves the accessor returns the real
+        // input mid-band, not a constant, so the slider actually drives the
+        // effect across its whole range.
+        let mid = EffectsConfig {
+            animation_intensity: 1.5,
+            flicker_strength: 0.5,
+            mesh_density: 1.2,
+            mesh_brightness: 1.5,
+            mesh_speed: 1.5,
+            vhs_intensity: 0.7,
+            cursor_trail_intensity: 1.0,
+            ..EffectsConfig::default()
+        };
+        assert_eq!(mid.clamped_animation_intensity(), 1.5);
+        assert_eq!(mid.clamped_flicker_strength(), 0.5);
+        assert_eq!(mid.clamped_mesh_density(), 1.2);
+        assert_eq!(mid.clamped_mesh_brightness(), 1.5);
+        assert_eq!(mid.clamped_mesh_speed(), 1.5);
+        assert_eq!(mid.clamped_vhs_intensity(), 0.7);
+        assert_eq!(mid.clamped_cursor_trail_intensity(), 1.0);
     }
 
     #[test]
@@ -2017,6 +2366,40 @@ mod tests {
             WindowMode::Vibrancy,
             "an explicit master-on config is never re-migrated"
         );
+    }
+
+    #[test]
+    fn toolbar_config_defaults_when_absent_and_round_trips() {
+        let p = std::path::PathBuf::from("cfg.toml");
+        // An EXISTING config predating the feature (no `[toolbar]` table) loads the
+        // shipped defaults — never broken by the new field (serde-default merge).
+        // The default keeps view/equalize/shell on the LEFT and pins ONLY the
+        // script launcher on the RIGHT (by the gear).
+        let c = Config::from_toml("", &p).unwrap();
+        assert_eq!(c.toolbar, ToolbarConfig::default());
+        assert_eq!(
+            c.toolbar.left,
+            vec!["view_mode", "equalize_panes", "shell_switcher"]
+        );
+        assert_eq!(c.toolbar.right, vec!["script_launcher"]);
+        assert!(c.toolbar.show_overflow);
+        assert!(c.toolbar.menu.is_empty());
+
+        // A PARTIAL `[toolbar]` (only `right`) fills the other fields from defaults.
+        let partial = Config::from_toml("[toolbar]\nright = [\"view_mode\"]\n", &p).unwrap();
+        assert_eq!(partial.toolbar.right, vec!["view_mode"]);
+        assert!(partial.toolbar.show_overflow); // default true, not clobbered
+        assert!(partial.toolbar.menu.is_empty());
+
+        // A fully-customized toolbar round-trips through TOML unchanged.
+        let mut custom = Config::default();
+        custom.toolbar.left = vec!["view_mode".into()];
+        custom.toolbar.right = vec!["script_launcher".into(), "shell_switcher".into()];
+        custom.toolbar.menu = vec!["equalize_panes".into()];
+        custom.toolbar.show_overflow = false;
+        let toml = toml::to_string(&custom).expect("serialize");
+        let back = Config::from_toml(&toml, &p).unwrap();
+        assert_eq!(back.toolbar, custom.toolbar);
     }
 
     #[cfg(unix)]

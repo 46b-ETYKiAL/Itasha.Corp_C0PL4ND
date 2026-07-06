@@ -134,6 +134,30 @@ pub fn build_default_grid(panes: &[PaneId]) -> egui_tiles::Tree<Pane> {
     egui_tiles::Tree::new("c0pl4nd-grid", root, tiles)
 }
 
+/// Rebuild the layout as a UNIFORM auto-grid of every pane — equal-sized cells
+/// arranged in a balanced grid (egui_tiles picks the column count from the pane
+/// count), preserving visual pane order. This is what the "make panes
+/// symmetrical" button uses: unlike [`equalize_pane_shares`] — which only
+/// equalises shares WITHIN each existing Linear split, so a nested / asymmetric
+/// arrangement (e.g. one pane beside a column of three) stays visually uneven —
+/// a Grid container lays every pane out in equal cells regardless of the prior
+/// structure. Returns `None` (leave the tree unchanged) for a 0/1-pane tree,
+/// which has nothing to gridify. Panes carry only their [`PaneId`], so rebuilding
+/// preserves every attached terminal (keyed by id in `self.terms`).
+pub fn rebuild_as_uniform_grid(tree: &egui_tiles::Tree<Pane>) -> Option<egui_tiles::Tree<Pane>> {
+    let panes = panes_in_visual_order(tree);
+    if panes.len() < 2 {
+        return None;
+    }
+    let mut tiles = egui_tiles::Tiles::default();
+    let ids: Vec<TileId> = panes
+        .iter()
+        .map(|p| tiles.insert_pane(Pane::new(*p)))
+        .collect();
+    let root = tiles.insert_grid_tile(ids);
+    Some(egui_tiles::Tree::new("c0pl4nd-grid", root, tiles))
+}
+
 /// Find the `TileId` of the leaf pane whose `pane_id` matches, if present.
 pub fn tile_of_pane(tree: &egui_tiles::Tree<Pane>, pane_id: PaneId) -> Option<TileId> {
     tree.tiles.iter().find_map(|(id, tile)| match tile {
@@ -342,6 +366,33 @@ impl egui_tiles::Behavior<Pane> for GridBehavior<'_> {
         4.0
     }
 
+    /// The seam between panes is NEGATIVE SPACE, not a painted line.
+    ///
+    /// egui_tiles' default idle `resize_stroke` fills the whole `gap_width` with
+    /// `tab_bar_color` = `visuals.extreme_bg_color` (the OPAQUE theme background),
+    /// so the divider read as a hard dark bar that stayed solid no matter the
+    /// window opacity/tint — the reported "dividers seem unaffected by tint or
+    /// transparency" bug. Returning `Stroke::NONE` for the idle state paints
+    /// NOTHING in the gap, so the translucent central-fill / desktop tint shows
+    /// straight through it, exactly like the pane bodies. This is correct by
+    /// construction across opaque, transparent, and tinted modes (the kitty
+    /// `draw_minimal_borders` / i3 "gaps show the surface" model) — the seam can
+    /// never be more opaque than the panes because it is never painted. Pane
+    /// separation is carried by each pane's own translucency-folded bezel border
+    /// (see `render_pane_body`).
+    ///
+    /// Hovering/Dragging keep the default widget stroke: the resize handle is a
+    /// transient INTERACTION affordance that should reappear at full strength
+    /// while the user is actually grabbing it (VS Code's `sash.hoverBorder`
+    /// reveal-on-interaction), so it is deliberately NOT folded down.
+    fn resize_stroke(&self, style: &egui::Style, state: egui_tiles::ResizeState) -> egui::Stroke {
+        match state {
+            egui_tiles::ResizeState::Idle => egui::Stroke::NONE,
+            egui_tiles::ResizeState::Hovering => style.visuals.widgets.hovered.fg_stroke,
+            egui_tiles::ResizeState::Dragging => style.visuals.widgets.active.fg_stroke,
+        }
+    }
+
     fn retain_pane(&mut self, pane: &Pane) -> bool {
         !self.close_requests.contains(&pane.pane_id)
     }
@@ -420,6 +471,46 @@ mod tests {
             !equalize_pane_shares(&mut tree),
             "a single-pane tree has no Linear split to equalise"
         );
+    }
+
+    /// "Make symmetrical" rebuilds ANY layout — including a nested / asymmetric one
+    /// (one pane beside a column of two) — into a single UNIFORM Grid container
+    /// holding every pane, so all cells are equal regardless of the prior
+    /// structure. This is the fix for "clicked symmetrical but panes stayed uneven"
+    /// (which `equalize_pane_shares` could not fix — it only balances WITHIN each
+    /// Linear split, leaving the asymmetric nesting).
+    #[test]
+    fn rebuild_as_uniform_grid_gridifies_every_pane() {
+        let mut tiles = egui_tiles::Tiles::default();
+        let a = tiles.insert_pane(Pane::new(PaneId(0)));
+        let b = tiles.insert_pane(Pane::new(PaneId(1)));
+        let c = tiles.insert_pane(Pane::new(PaneId(2)));
+        let col = tiles.insert_vertical_tile(vec![b, c]);
+        let root = tiles.insert_horizontal_tile(vec![a, col]);
+        let tree = egui_tiles::Tree::new("t", root, tiles);
+
+        let grid = rebuild_as_uniform_grid(&tree).expect("2+ panes gridify");
+        assert_eq!(count_panes(&grid), 3, "every pane preserved");
+        let root = grid.root.expect("grid has a root");
+        assert!(
+            matches!(
+                grid.tiles.get(root),
+                Some(egui_tiles::Tile::Container(egui_tiles::Container::Grid(_)))
+            ),
+            "the rebuilt root must be a uniform Grid container"
+        );
+        assert_eq!(
+            panes_in_visual_order(&grid),
+            vec![PaneId(0), PaneId(1), PaneId(2)],
+            "pane order is preserved"
+        );
+    }
+
+    /// A 0/1-pane tree has nothing to gridify → `None` (leave it unchanged).
+    #[test]
+    fn rebuild_as_uniform_grid_is_none_for_single_pane() {
+        assert!(rebuild_as_uniform_grid(&build_default_grid(&[PaneId(0)])).is_none());
+        assert!(rebuild_as_uniform_grid(&build_default_grid(&[])).is_none());
     }
 
     #[test]

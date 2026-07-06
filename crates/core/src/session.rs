@@ -57,6 +57,22 @@ pub struct Session {
     reader_thread: Option<JoinHandle<()>>,
 }
 
+/// Safety timeout for a synchronized-output (`?2026`) hold: if a TUI opens a
+/// synchronized update and never closes it (a crash, or a buggy app), the reader
+/// forces a repaint after this long so the screen can never freeze. 150 ms is the
+/// de-facto convention (kitty/WezTerm/foot use a comparable ceiling) — long enough
+/// to batch a normal full-screen redraw into one frame, short enough that a
+/// missing "end" is imperceptible.
+const SYNC_OUTPUT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Whether a synchronized-output (`?2026`) hold that began `elapsed` ago is still
+/// within the safety-timeout window — `true` = keep holding the repaint, `false`
+/// = force a repaint (the update ran past the timeout, so we render anyway rather
+/// than risk a frozen screen). Pure so the boundary is unit-testable exactly.
+fn sync_hold_active(elapsed: std::time::Duration) -> bool {
+    elapsed < SYNC_OUTPUT_TIMEOUT
+}
+
 /// Spawn the PTY-reader thread: drain `reader` in ≤64 KiB chunks, parse each
 /// chunk into `terminal`, fire the UI-wake callback once per chunk, and clear
 /// `alive` on EOF (child exited) or a read error.
@@ -100,12 +116,40 @@ fn spawn_reader_thread<R: Read + Send + 'static>(
             // lifetime (zero per-read allocation).
             const READ_BUF: usize = 64 * 1024;
             let mut buf = vec![0u8; READ_BUF];
+            // Synchronized-output (?2026) hold state: when a TUI opens a
+            // synchronized update we suppress the per-chunk repaint so the UI
+            // never samples a half-drawn frame and spends ONE repaint on the
+            // completed frame instead of one per chunk. `sync_since` is when the
+            // current hold began, so the safety timeout can force a repaint if the
+            // matching "end" never arrives (a crashed/buggy TUI).
+            let mut sync_since: Option<std::time::Instant> = None;
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break, // EOF: child exited
                     Ok(n) => {
-                        if let Ok(mut term) = terminal.lock() {
+                        // Parse the chunk and read the synchronized-output flag
+                        // under the SAME lock (one acquisition per chunk).
+                        let sync = if let Ok(mut term) = terminal.lock() {
                             term.advance(&buf[..n]);
+                            term.sync_output()
+                        } else {
+                            false
+                        };
+                        // Hold the repaint while a synchronized update is open —
+                        // unless it has been open past the safety timeout, in which
+                        // case repaint anyway so a TUI that never closes its update
+                        // can't freeze the screen. On the frame that CLOSES the
+                        // update (`sync` back to false) we fall through and repaint
+                        // the finished frame exactly once.
+                        if sync {
+                            let now = std::time::Instant::now();
+                            let since = *sync_since.get_or_insert(now);
+                            if sync_hold_active(now.duration_since(since)) {
+                                continue; // still within the update — hold this repaint
+                            }
+                            sync_since = Some(now); // timed out: repaint + re-arm
+                        } else {
+                            sync_since = None;
                         }
                         // Wake the UI so it repaints the new output, then sleeps
                         // again. Clone the callback OUT of the lock so it is never
@@ -249,6 +293,34 @@ impl Session {
     /// ```
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
+    }
+
+    /// The OS process id of this session's child shell, if still known. Used by
+    /// the app to assign the child to a `KILL_ON_JOB_CLOSE` job object so no shell
+    /// (or its descendants) can outlive the app, even on a hard exit or crash.
+    pub fn child_pid(&self) -> Option<u32> {
+        self.pty.child_pid()
+    }
+
+    /// Kill this session's child shell WITHOUT dropping the session — a fast,
+    /// non-blocking `TerminateProcess`. Used by the app's fast-close path to
+    /// terminate every pane's shell in parallel BEFORE `std::process::exit(0)`:
+    /// exit runs no destructors, so the per-pane `ClosePseudoConsole` (which
+    /// BLOCKS until the attached child exits — the sequential close latency) never
+    /// fires, yet no shell is orphaned because it was killed here. Idempotent; a
+    /// no-op on an already-dead child. `Session`/`PtyProcess` `Drop` remain the
+    /// backstop for the non-fast-exit paths.
+    pub fn kill_child(&mut self) {
+        self.pty.kill();
+    }
+
+    /// Non-blocking check of whether the child shell has exited (`true`) or is
+    /// still running (`false`). Polls the child PROCESS directly, so it reflects a
+    /// [`kill_child`](Self::kill_child) promptly — the reliable "was the shell
+    /// reaped?" signal (the reader-thread `is_alive` flag lags because a ConPTY
+    /// output pipe does not EOF promptly on a killed client).
+    pub fn child_exited(&mut self) -> bool {
+        self.pty.try_wait().is_some()
     }
 
     /// Render the current grid to text (used by the headless smoke test).
@@ -427,6 +499,139 @@ mod tests {
         assert!(
             text.contains(&last_token),
             "the final line {last_token:?} of a large burst must reach the grid"
+        );
+    }
+
+    /// Synchronized output (`?2026`): while a TUI has an update open, the reader
+    /// must HOLD the per-chunk repaint and fire exactly ONE wake on the closing
+    /// `?2026l` — so a full-screen redraw batches into a single frame instead of
+    /// one repaint per chunk (tear-free + far fewer repaints). The held content
+    /// still reaches the grid (parsing is never gated, only the repaint).
+    #[test]
+    fn synchronized_output_batches_repaints_until_end() {
+        use std::sync::atomic::AtomicUsize;
+
+        /// A reader that returns one pre-split segment per `read()`, EOF after —
+        /// so `?2026h`, the held content, and `?2026l` land in SEPARATE reads (the
+        /// multi-chunk path the hold logic gates on).
+        struct SegReader {
+            segs: Vec<Vec<u8>>,
+            i: usize,
+        }
+        impl Read for SegReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.i >= self.segs.len() {
+                    return Ok(0);
+                }
+                let s = &self.segs[self.i];
+                self.i += 1;
+                let n = s.len().min(buf.len());
+                buf[..n].copy_from_slice(&s[..n]);
+                Ok(n)
+            }
+        }
+
+        let segs = vec![
+            b"\x1b[?2026h".to_vec(),  // BEGIN synchronized update
+            b"line one\r\n".to_vec(), // content — held (no repaint)
+            b"line two\r\n".to_vec(), // more content — held
+            b"\x1b[?2026l".to_vec(),  // END — one repaint of the finished frame
+        ];
+        let terminal = Arc::new(Mutex::new(Terminal::new(24, 80)));
+        let alive = Arc::new(AtomicBool::new(true));
+        let wake: Arc<Mutex<Option<WakeFn>>> = Arc::new(Mutex::new(None));
+        let wakes = Arc::new(AtomicUsize::new(0));
+        {
+            let w = Arc::clone(&wakes);
+            *wake.lock().unwrap() = Some(Arc::new(move || {
+                w.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        let handle = spawn_reader_thread(
+            SegReader { segs, i: 0 },
+            Arc::clone(&terminal),
+            Arc::clone(&alive),
+            Arc::clone(&wake),
+        )
+        .expect("spawn reader thread");
+        handle.join().expect("reader thread joins on EOF");
+
+        // 4 chunks fed; the 3 inside the synchronized update are held, so only the
+        // closing `?2026l` wakes → exactly ONE repaint (was 4 before this wiring).
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            1,
+            "a synchronized update must batch to a single repaint"
+        );
+        // Parsing is NOT gated — the held content is on the grid once the frame lands.
+        let text = terminal.lock().unwrap().grid().to_text();
+        assert!(
+            text.contains("line one") && text.contains("line two"),
+            "held content still reaches the grid: {text:?}"
+        );
+    }
+
+    /// The synchronized-output hold window boundary is exact: still holding just
+    /// under the timeout, released AT the timeout and beyond (a `<`, not `<=`, so
+    /// a run-past-timeout update repaints rather than freezing).
+    #[test]
+    fn sync_hold_active_boundary_is_exact() {
+        assert!(
+            sync_hold_active(Duration::ZERO),
+            "a just-begun hold is active (repaint suppressed)"
+        );
+        assert!(
+            sync_hold_active(SYNC_OUTPUT_TIMEOUT - Duration::from_millis(1)),
+            "just under the timeout still holds"
+        );
+        assert!(
+            !sync_hold_active(SYNC_OUTPUT_TIMEOUT),
+            "at EXACTLY the timeout the hold releases → force a repaint"
+        );
+        assert!(
+            !sync_hold_active(SYNC_OUTPUT_TIMEOUT + Duration::from_millis(1)),
+            "past the timeout releases → force a repaint"
+        );
+    }
+
+    /// A live session reports a real child PID (never None / 0 / 1), and
+    /// `kill_child` actually reaps the shell — the fast-close no-orphan guarantee.
+    /// Real-PTY, serialized via the shared lock. Termination is observed via
+    /// `child_exited` (a direct child-PROCESS `try_wait`), NOT the reader
+    /// `is_alive` flag: a ConPTY output pipe does not EOF promptly on a killed
+    /// client, so `is_alive` lags, whereas `try_wait` reflects the kill at once.
+    #[test]
+    fn session_child_pid_is_real_and_kill_child_reaps_the_shell() {
+        let _lock = REAL_PTY_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        #[cfg(windows)]
+        let mut session = Session::spawn_program("cmd.exe", &[], 24, 80).expect("spawn");
+        #[cfg(not(windows))]
+        let mut session = Session::spawn_program("/bin/sh", &["-i"], 24, 80).expect("spawn");
+
+        // child_pid: a live session reports a real OS pid (never None/0/1).
+        let pid = session.child_pid().expect("a live session has a child pid");
+        assert!(
+            pid > 1,
+            "a real shell pid is a normal OS pid, not 0/1: {pid}"
+        );
+
+        // The shell is running BEFORE the kill (catches a `child_exited -> true`).
+        assert!(
+            !session.child_exited(),
+            "the interactive shell is running before kill_child"
+        );
+
+        // kill_child must terminate it (catches the no-op mutant): the child
+        // process exits within a bounded poll. `try_wait` polls the process, so
+        // this is deterministic despite the lagging ConPTY output pipe.
+        session.kill_child();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !session.child_exited() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            session.child_exited(),
+            "kill_child must terminate the shell so no orphan survives"
         );
     }
 

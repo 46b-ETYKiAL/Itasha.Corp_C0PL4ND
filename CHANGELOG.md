@@ -8,6 +8,205 @@ Full per-release artifacts (signed binaries, SBOMs, provenance) are on the
 [GitHub Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases)
 page.
 
+## [0.4.14] - 2026-07-03
+
+### Fixed — rendering
+
+- **Terminal-grid glyph garble eliminated.** Intermittently on some NVIDIA DX12
+  drivers the grid text rendered as garbled or blank glyphs — a DX12 font-atlas
+  `write_texture`→sample hazard (wgpu#1306 / #6829, DX12-only). Two-part fix: an
+  atlas-warmup GPU fence that guarantees the font atlas is uploaded and resident
+  before the grid draws (including across the off-thread system-font swap), and —
+  the definitive fix — **Vulkan is now the default GPU backend on Windows**, which
+  is immune to the hazard. DX12 remains one setting away (Settings → Window →
+  Graphics backend, or `WGPU_BACKEND=dx12`) for anyone who hits a Vulkan
+  overlay-layer issue.
+- **"Make panes symmetrical" now produces an even grid.** It rebuilds the layout
+  into a uniform grid for any pane count, instead of only rebalancing shares
+  within existing splits (which left a nested/asymmetric layout uneven).
+
+### Added — customizable toolbar
+
+- **Settings → Toolbar.** The top-bar quick-action buttons (view-toggle,
+  equalize, shell-switcher, script-launcher) are now fully customizable: place
+  each on the LEFT (after the +), on the RIGHT (next to the settings gear), or in
+  an overflow "…" menu — or hide it — and reorder within a zone. The script
+  launcher now sits on the right by the gear by default.
+
+### Changed — performance
+
+- **Instant multi-pane close.** Closing the window no longer stalls while shells
+  tear down: every pane's shell is killed in one pass and the blocking
+  `ClosePseudoConsole` teardown is skipped on exit, with a Windows Job Object
+  (`KILL_ON_JOB_CLOSE`) guaranteeing no orphaned `conhost`/`cmd` processes.
+- Font-zoom (Ctrl+scroll) config writes are now debounced into a single write,
+  and terminal synchronized-output (DEC `?2026`) is honored so full-screen TUIs
+  repaint without tearing.
+
+### Fixed — window transparency & tint
+
+- **Transparency now covers the whole window.** The titlebar and status bar were
+  opaque even with transparency on, so only the pane backgrounds went
+  see-through. They now fold in the same opacity as the panes, so the entire
+  window — chrome included — is translucent.
+- **The color tint no longer discolors text or the Settings window.** It was a
+  full-window overlay painted over everything; it is now a single wash on the
+  background layer that shows through the panes, gaps, and top-bar buttons
+  uniformly, while the terminal text and the (opaque) Settings window stay their
+  true colors.
+- **Opacity can go fully transparent.** The opacity slider floored at 15%; it now
+  runs the whole 0–100% range for a much more see-through background (the text
+  stays readable at its own opacity).
+- **Top-bar buttons fit the bar again.** Once the titlebar went translucent, every
+  control kept its own opaque background and read as a floating chip. The chrome
+  buttons are now flat — no idle background, with a subtle fill only on hover or
+  press — the standard for a translucent titlebar (Windows Terminal, VS Code,
+  macOS vibrancy, libadwaita `.flat`), so they sit on the bar instead of over it.
+- **Pane dividers now respect transparency and tint.** The seams between split
+  terminals were painted as opaque bars that stayed solid regardless of the
+  window opacity/tint. The divider is now negative space — the gap shows the same
+  translucent, tinted background as the panes — and each pane's border folds in
+  the window opacity, so a focused pane still reads clearly while the seams blend
+  into the see-through window.
+- **No more doubled window buttons (Windows).** With transparency on, the OS drew
+  its own native minimize/maximize/close over the app's custom ones — a second,
+  offset set. The native minimize/maximize are now suppressed at window creation
+  and the native close button is removed, so only the app's own controls show.
+  Alt+F4 and the taskbar "Close window" still close the window as usual.
+- **The maximize button now reflects the window state.** It showed the same
+  "maximize" square whether the window was maximized or not; it now switches to a
+  "restore" glyph while maximized, matching the standard caption-button behavior.
+- **Restoring from maximized returns to a normal, centered window.** Un-maximizing
+  used to snap the window to nearly the full monitor size (so you had to shrink it
+  by hand to move it); it now restores to your last un-maximized size — or a sane
+  default on first use — and re-centers on the monitor.
+
+### Changed — settings layout
+
+- **The Settings window is clearer to read and use.** Every on/off row is now a
+  real checkbox instead of click-to-toggle text (it was not obvious the labels
+  were clickable), and the longer sections are split into labelled sub-groups —
+  each with a heading, a one-line description, and a divider — so related options
+  (Theme, Transparency & tint, Interface scale, Shell & scrollback, Clipboard,
+  window Layout, Graphics) group together instead of running into one list.
+- **Every settings tab now lines up the same way.** All pages — including Privacy,
+  which previously used a different, looser layout — share one three-column grid
+  (label · control · reset), so labels, controls, and the ↺ revert buttons align
+  consistently as you move between tabs.
+- **The Settings window is resizable, and remembers its size and position.** Drag
+  any edge to resize it or the title area to move it; both the size and the
+  position are saved and restored on the next launch. It also no longer gets
+  shifted or clipped when the main window is maximized.
+- **Settings now opens centered.** The first time you open it (before you've moved
+  it), it appears dead center over the app instead of tucked into the top-left
+  corner; after that it reopens wherever you last left it.
+
+### Added — window management
+
+- **The main window resizes from every edge and corner.** The frameless window
+  gave no way to drag-resize it before. You can now grab any edge or corner: the
+  right/bottom edges grow the window in place, and the left/top edges (and their
+  corners) move the opposite side so the window grows toward your pointer. A
+  minimum size keeps it from collapsing, and the size is remembered across
+  launches.
+- **The app name is now a window drag-handle.** Dragging the two-tone "C0PL4ND"
+  wordmark in the top-left used to highlight the text; it now moves the window
+  like the rest of the titlebar (double-click still maximizes / restores), while
+  still showing the name in its brand colors.
+
+### Changed — tabs & CRT effect
+
+- **The CRT scanline effect is calmer.** It used to sweep a bright white bar down
+  each pane, which read as a distracting flash. The crisp scanlines stay, but the
+  whole field now drifts down slowly for a gentle CRT shimmer (matching the SCR1B3
+  editor's effect) instead of the bright rolling bar.
+- **Tab overflow now uses ‹ › step arrows instead of a scrollbar.** When you have
+  more tabs than fit, chevron buttons appear on either side of the strip and step
+  the active tab to the previous/next one, scrolling it into view — clearer than
+  a thin horizontal scrollbar.
+- **Hovering a tab previews its terminal.** Rest the pointer on a tab to see the
+  last few lines of that pane's output in a small popup, so you can tell inactive
+  panes apart without clicking into each one.
+
+### Added — motion & visual effects (SCR1B3 parity)
+
+- **A new "Motion" settings category** collects every animation and retro
+  post-effect in one place, mirroring the SCR1B3 editor: a master **"Enable
+  animations"** switch (turn it off for a fully static UI) with an animation-speed
+  slider, plus the CRT scanlines and chromatic-aberration controls (moved here
+  from Appearance) and the new effects below. Everything is gated behind the
+  master switch and off by default, so the shipped look is unchanged until you opt
+  in.
+- **New optional CRT/ambient effects ported from SCR1B3:** a subtle screen
+  **flicker**, **VHS tracking lines** that sweep down the window, an animated
+  **wired node-mesh** ambient background (with a density slider), a **cursor
+  ghost-trail** that echoes the terminal cursor as it moves, and a one-shot
+  **boot-glitch** sweep on launch. All are GPU-free, honor reduced-motion, and are
+  off by default.
+
+### Changed — window controls & settings organization
+
+- **Window buttons now light up on hover like SCR1B3's.** The minimize and
+  maximize/restore buttons brighten on hover and the close button turns
+  Windows-standard red with a white ✕, so C0PL4ND and SCR1B3 share one
+  window-control language. The resting look is unchanged (flat, translucent).
+- **Settings categories match SCR1B3's order and naming.** "Font" is now "Fonts",
+  the new "Motion" category sits between Toolbar and Keybindings, and Updates now
+  comes before Privacy — so the two apps' Settings read the same way.
+
+### Added — bundled fonts (SCR1B3 parity)
+
+- **C0PL4ND now ships SCR1B3's full font set** — the monospace faces
+  (JetBrains Mono, Fira Mono, IBM Plex Mono, Source Code Pro, Space Mono, and more)
+  plus the lore/influence-inspired display faces (Michroma, Syncopate, Wallpoet,
+  Zen Dots, Chakra Petch, Rajdhani, Teko, Major Mono Display, Doto, Saira) and a
+  Japanese fallback. Every face is bundled (all-OFL/open-license) and picks in
+  Settings → Fonts → Family regardless of what's installed on the machine, so both
+  apps offer the same typography.
+
+### Changed — visual-effect polish
+
+- **CRT scanlines now read as SCR1B3's clean drifting lines** rather than a shifting
+  shadow-film — the dark bands were thinned so distinct lines slide down the pane.
+- **The animation-speed slider now visibly governs every motion effect.** It scales
+  the drift clock of the scanlines, wired mesh, VHS tracking, and flicker (from
+  frozen at 0 to full speed at 1); the cursor trail and boot sweep keep their
+  event-anchored timing.
+- **The wired node-mesh is now actually visible** on every pane (it previously hid
+  behind opaque pane backgrounds), and raising the density visibly thickens the web.
+- **The cursor ghost-trail is bolder and gains an intensity slider** — tune it from
+  a faint flick to a pronounced comet tail (Motion → Cursor-trail intensity).
+- **Tab step-arrows light up on hover** and the tab strip's horizontal scrollbar is
+  hidden (the ‹ › arrows handle overflow), and the right-side top-bar buttons now
+  sit at a uniform spacing so no pair looks squished.
+
+### Changed — motion range & live preview
+
+- **The motion sliders now reach much further.** Animation speed goes up to 2×
+  (above 1× only accelerates the drift effects — the UI fades stay snappy), the
+  screen flicker and node-mesh density each run their full range, and the
+  cursor-trail intensity extends to a long, unmistakable comet tail. The shipped
+  defaults are unchanged.
+- **Motion effects now preview live while Settings is open.** The flicker, VHS
+  lines, wired mesh, and cursor trail used to switch off entirely whenever a
+  centered panel (Settings, command palette, paste confirm) was open — so tuning a
+  Motion slider looked like it did nothing until you closed Settings. They now
+  paint everywhere *except* the open panel, so you see the effect change on the
+  terminal in real time while the panel itself stays clean.
+
+### Added — appearance controls
+
+- **Node-mesh brightness slider (Motion).** A new brightness control sits next to
+  the mesh density: dim the wired lattice toward invisible or brighten it so it
+  clearly pops, independent of how many nodes it draws.
+- **The app logo now tints with the theme.** The "4ND" half of the two-tone
+  C0PL4ND wordmark follows the active theme's accent (the "C0PL" half stays the
+  fixed brand purple), so the top-bar logo picks up the palette you pick. On a
+  theme without an accent it keeps the original brand green.
+- **Theme up/down step arrows.** Small ⏶/⏷ buttons next to the theme picker step
+  through the built-in themes without opening the dropdown — the same quick-step
+  pattern as the tab arrows.
+
 ## [0.4.13] - 2026-06-30
 
 ### Added — macOS and ARM64 builds

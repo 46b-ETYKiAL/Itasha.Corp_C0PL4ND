@@ -48,13 +48,60 @@ use update_engine::updater::{LaunchKind, UpdateState, Updater};
 /// [`render_sections`].
 const CATEGORIES: &[&str] = &[
     "Appearance",
-    "Font",
+    "Fonts",
     "Cursor",
     "Terminal",
     "Window",
+    "Toolbar",
+    "Motion",
     "Keybindings",
-    "Privacy",
     "Updates",
+    "Privacy",
+];
+
+/// Cross-category search labels for the **Appearance** section. Kept as a named
+/// const so the CRT/scanline/chromatic terms that MOVED to the Motion section are
+/// provably absent here (a stale label would resurrect a phantom empty Appearance
+/// section and hide the moved control from a full-name search).
+const APPEARANCE_SEARCH_LABELS: &[&str] = &[
+    "theme",
+    "transparency",
+    "mode",
+    "opacity",
+    "glass",
+    "mica",
+    "vibrancy",
+    "tint",
+    "acrylic",
+    "ui scale",
+    "zoom",
+    "accessibility",
+];
+
+/// Cross-category search labels for the **Motion** section. Each entry is the
+/// canonical label of exactly one Motion row (see the `row_visible(q, …)` calls),
+/// so any query that reveals the section via a label also reveals its row — no
+/// phantom empty section, and every moved control (CRT scanlines, scanline
+/// darkness, chromatic aberration) is reachable by its full name. Shared with the
+/// `motion_section_is_cross_category_searchable` test so the invariant is checked
+/// against the PRODUCTION labels, not an inline copy.
+const MOTION_SEARCH_LABELS: &[&str] = &[
+    "enable animations",
+    "animation speed",
+    "crt scanlines",
+    "scanline darkness",
+    "chromatic aberration",
+    "wired mesh background",
+    "mesh density",
+    "mesh brightness",
+    "mesh movement",
+    "vhs tracking",
+    "vhs intensity",
+    "screen flicker",
+    "flicker strength",
+    "cursor trail",
+    "cursor trail intensity",
+    "boot glitch",
 ];
 
 /// The release channels the Updates section offers. Mirrors the channels the
@@ -78,13 +125,13 @@ const UPDATE_CHANNELS: &[&str] = &["stable", "beta", "nightly"];
 const SETTINGS_DEFAULT_W: f32 = 760.0;
 /// Default window HEIGHT (px), before the screen-fit clamp.
 const SETTINGS_DEFAULT_H: f32 = 560.0;
-/// Hard cap on the inner CONTENT width (nav + pane). Slightly under the window
-/// inner width so the content fills it without ever driving it wider.
-const SETTINGS_CONTENT_W: f32 = 740.0;
-/// Hard cap on the right-hand content PANE width (after the nav + separator).
-const SETTINGS_PANE_W: f32 = 556.0;
 /// Fixed width of the left category nav column.
 const SETTINGS_NAV_W: f32 = 170.0;
+/// Minimum window WIDTH (px) the user may shrink the resizable settings window
+/// to. Below this the nav + content pane collide, so the resize handle stops.
+const SETTINGS_MIN_W: f32 = 560.0;
+/// Minimum window HEIGHT (px) for the resizable settings window.
+const SETTINGS_MIN_H: f32 = 400.0;
 
 /// The terminal color themes that ship in `assets/themes/` (file stems). The
 /// theme combo offers these built-ins; a free text field below it accepts any
@@ -136,6 +183,11 @@ pub struct Outcome {
     /// The user toggled the Incognito switch this frame, to the contained value.
     /// `None` when unchanged. Runtime-only (not a config field).
     pub set_incognito: Option<bool>,
+    /// The settings window's on-screen rect this frame (`None` if it did not
+    /// render). The host excludes this rect from the whole-window motion overlays
+    /// so a live Motion-setting preview shows on the terminal without the mesh /
+    /// flicker washing over the settings panel itself.
+    pub window_rect: Option<egui::Rect>,
 }
 
 /// Whether a category section should render: its own tab when not searching, or
@@ -334,6 +386,7 @@ pub fn show(
     open: &mut bool,
     colors: ChromeColors,
     incognito: bool,
+    place_now: bool,
 ) -> Outcome {
     let mut changed = false;
     let mut keep_open = *open;
@@ -374,23 +427,61 @@ pub fn show(
     // cause of the "settings can't be dragged" report. `.default_pos` places it
     // once, then the title bar drags freely.
     //
-    // #26 root-cause: an `egui::Window` is AUTO/content-sized by default, and its
-    // Area grows to the widest child's desired size. A filling `Slider` / the
-    // search box reports `available_width()` / `f32::INFINITY` every frame, so the
-    // window ballooned to the screen edge ("much too wide + blank right gutter").
-    // The cure is a snug, screen-clamped EXPLICIT size PLUS a hard Area bound:
-    // `.fixed_size(default_size)` fixes the inner content, and `.constrain_to(rect)`
-    // bounds the floating Area itself (fixed_size alone does NOT — the Area still
-    // auto-expands to the viewport, painting the frame full-width behind a snug
-    // content column, which IS the reported blank gutter). Together they hold a
-    // stable, centred ~760px window on every page; a long page scrolls INTERNALLY
-    // via the content `ScrollArea` (height is fixed; the scroll-area fills it).
-    // Screen-clamped so a small display never spawns an off-screen window.
-    let screen = ctx.content_rect();
-    let def_w = SETTINGS_DEFAULT_W.min(screen.width() - 24.0);
-    let def_h = SETTINGS_DEFAULT_H.min(screen.height() - 24.0);
+    // Initial window size: the user's last resized size (persisted in the config
+    // TOML), else the built-in default. Each dimension is clamped to a sane floor
+    // (`SETTINGS_MIN_*`) and to the live screen (minus a 24px margin) so a
+    // malformed persisted value or a tiny display can never spawn an unusable or
+    // off-screen window. A non-finite persisted value is ignored. The window is
+    // now user-resizable (see the builder below); a filling child no longer
+    // balloons it because the content `ScrollArea` uses `auto_shrink([false,
+    // false])` — it fills the width it is GIVEN rather than demanding its own.
+    // Full window rect, read robustly: `viewport_rect()` is the whole inner
+    // window, but on some frames it can read empty — fall back to the input-layer
+    // screen rect, which is populated directly from the windowing backend. This is
+    // the size/position reference for the window below.
+    let screen = {
+        let vr = ctx.viewport_rect();
+        if vr.width() > 1.0 && vr.height() > 1.0 {
+            vr
+        } else {
+            // Paranoia fallback for a not-yet-sized viewport: a sane default rect
+            // from the origin. The clamps below keep the window on-screen once the
+            // real viewport size arrives.
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 720.0))
+        }
+    };
+    let screen_max_w = (screen.width() - 24.0).max(SETTINGS_MIN_W);
+    let screen_max_h = (screen.height() - 24.0).max(SETTINGS_MIN_H);
+    let want_w = config
+        .settings_win_w
+        .filter(|v| v.is_finite())
+        .unwrap_or(SETTINGS_DEFAULT_W);
+    let want_h = config
+        .settings_win_h
+        .filter(|v| v.is_finite())
+        .unwrap_or(SETTINGS_DEFAULT_H);
+    let def_w = want_w.clamp(SETTINGS_MIN_W, screen_max_w);
+    let def_h = want_h.clamp(SETTINGS_MIN_H, screen_max_h);
     let default_size = egui::vec2(def_w, def_h);
-    let default_pos = screen.center() - default_size * 0.5;
+
+    // Target top-left for a forced placement: the saved position (a prior move) if
+    // both coordinates are present + finite, else CENTERED over the window. Both
+    // are clamped to the live screen so a stale off-screen value can never hide the
+    // window. This is applied via `current_pos` ONLY on the open frame (`place_now`)
+    // — deterministic, so it never depends on `default_pos` timing.
+    let centered = screen.center() - default_size * 0.5;
+    let saved_pos = match (config.settings_win_x, config.settings_win_y) {
+        (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Some(egui::pos2(x, y)),
+        _ => None,
+    };
+    let target_pos = saved_pos.unwrap_or(centered);
+    // Keep it on-screen: clamp so the whole window stays within the viewport.
+    let max_x = (screen.right() - def_w).max(screen.left());
+    let max_y = (screen.bottom() - def_h).max(screen.top());
+    let target_pos = egui::pos2(
+        target_pos.x.clamp(screen.left(), max_x),
+        target_pos.y.clamp(screen.top(), max_y),
+    );
 
     // Esc dismisses settings (in addition to the title-bar ✕ and the in-content
     // Close button) — the conventional overlay-dismiss key.
@@ -407,46 +498,55 @@ pub fn show(
     // and (b) reads as low-contrast on the dark custom frame. The in-content
     // button + Esc are the single, obvious dismiss path (the "two close buttons"
     // report). Closing flows through `keep_open` → `*open` exactly as before.
-    egui::Window::new("settings")
+    let mut win = egui::Window::new("settings");
+    // Force the position on the open frame ONLY (`place_now`): `current_pos` pins
+    // the window this frame, egui then remembers it, and on later frames we stop
+    // pinning so the user can freely drag it. This is what makes the first open
+    // land centered (or at the saved spot) deterministically.
+    if place_now {
+        win = win.current_pos(target_pos);
+    }
+    let win_resp = win
         // No egui title bar: it rendered a SECOND, redundant top bar (a centered
         // lowercase "settings") above the in-content header that carries the
         // "Settings" heading + the ✕ close button. The in-content header is the
         // single titlebar; dragging still works via egui's window-frame drag.
         .title_bar(false)
         .collapsible(false)
-        // FIXED size (#26 root-cause fix). A `resizable` egui `Window` auto-GROWS
-        // its width to the widest child's desired size, and a fill-width child
-        // (the header's `right_to_left` close row, a filling `Slider`, the search
-        // box) reports `available_width`/`INFINITY` — so the window balloons to the
-        // screen edge ("much too wide + blank right gutter"). Clamping the inner
-        // content `Ui` (`set_max_width`) does NOT stop this, because the Resize
-        // widget measures the child's UNCLAMPED desired width. A FIXED window size
-        // is the robust cure: the window holds a snug, stable width on every page,
-        // and a long page scrolls INTERNALLY via the content `ScrollArea` (height
-        // is fixed and the scroll-area fills it). `min`'d to the live screen so a
-        // tiny display never spawns an off-screen window.
-        .fixed_size(default_size)
-        .constrain_to(egui::Rect::from_center_size(screen.center(), default_size))
+        // USER-RESIZABLE with a persisted size. `default_size` seeds the window
+        // the first time it appears (from the persisted-or-default size computed
+        // above); thereafter egui remembers the user's drag within the session and
+        // the write-back below persists it across restarts. `min_size` stops the
+        // user from shrinking it until the nav + content pane collide. The old
+        // ballooning failure mode (a filling child demanding near-infinite width)
+        // is prevented at the source: the content `ScrollArea` uses
+        // `auto_shrink([false, false])`, so it fills the width the window gives it
+        // rather than reporting its own desired width back up to the Resize widget.
+        .resizable(true)
+        .default_size(default_size)
+        .min_size(egui::vec2(SETTINGS_MIN_W, SETTINGS_MIN_H))
+        // Constrain to the WHOLE screen (keep the window on-screen), NOT to a
+        // default_size box re-centered every frame. The latter re-pinned the
+        // window to the live screen centre each frame, so maximizing the MAIN
+        // window (which moves `screen.center()`) yanked the settings Area to the
+        // new centre while its content had been laid out at the old position —
+        // the reported "contents get moved and cut off when maximized". Bounding
+        // to the full screen keeps it visible without forcing a re-centre.
+        .constrain_to(screen)
         .movable(true)
-        .default_pos(default_pos)
         .frame(egui::Frame::window(&ctx.global_style()).fill(colors.panel))
         .show(ctx, |ui| {
-            // ---- Width discipline (#26 root-cause fix) ----
-            // egui sizes this window to its content. Any child that returns
-            // `available_width()` (a `horizontal` row) or `f32::INFINITY` (a
-            // filling slider / the search box) as its desired size would demand a
-            // near-infinite width and balloon the whole window to the screen edge
-            // — the reported "much too wide + blank gutter on the right" bug, and
-            // a DIFFERENT amount per page. Clamping to `available_width()` does
-            // NOT fix it, because once the window has ballooned `available_width()`
-            // IS that inflated width. The robust fix (proven on the sibling SCR1B3
-            // editor) is a FIXED content-width budget: clamp the content `Ui` to a
-            // const cap so no page can demand more than the budget. The window
-            // then holds a snug, stable width identical on every page, and any
-            // overflow goes to the vertical ScrollArea, never to horizontal
-            // growth. `.min(available_width())` lets a deliberately-shrunk window
-            // still track its smaller inner width without overflowing.
-            let content_w = ui.available_width().min(SETTINGS_CONTENT_W);
+            // ---- Width discipline ----
+            // The content fills the width the (now user-resizable) window gives
+            // it. The old ballooning failure mode — a filling child reporting
+            // `available_width()`/`INFINITY` as its desired size and driving the
+            // window ever wider — is prevented at the source by the content
+            // `ScrollArea`'s `auto_shrink([false, false])` below: it consumes the
+            // width it is given rather than demanding its own. So `available_width`
+            // here is a real, bounded number (the window's inner width), and using
+            // it lets a grown window put the extra space to work instead of
+            // stranding it in a right-hand gutter.
+            let content_w = ui.available_width();
             ui.set_max_width(content_w);
             // In-content header: title + an unmissable Close ✕. The egui
             // title-bar ✕ can read as low-contrast against the dark custom
@@ -487,16 +587,13 @@ pub fn show(
 
                 // ---- Searchable, internally-scrolling content pane ----
                 ui.vertical(|ui| {
-                    // Clamp the content pane to a fixed budget (capped by the
-                    // width left after the nav + separator). This makes the pane
-                    // width identical on every page (the grids below size to THIS
-                    // width, not to their own desired width), and gives the search
-                    // box a finite width to fill. A const cap (NOT raw
-                    // `available_width()`) is what stops a filling slider / the
-                    // search box from demanding near-infinite width and ballooning
-                    // the window — the same root-cause fix as the content clamp
-                    // above, one level down.
-                    let pane_w = ui.available_width().min(SETTINGS_PANE_W);
+                    // The content pane fills the width left after the nav +
+                    // separator. The grids below size to THIS width (not to their
+                    // own desired width), and the search box gets a finite width to
+                    // fill. Ballooning is prevented at the source by the content
+                    // `ScrollArea`'s `auto_shrink([false, false])`, so raw
+                    // `available_width()` is a real bounded number here.
+                    let pane_w = ui.available_width();
                     ui.set_max_width(pane_w);
                     ui.horizontal(|ui| {
                         ui.label(egui_phosphor::thin::MAGNIFYING_GLASS);
@@ -541,6 +638,40 @@ pub fn show(
         keep_open = false;
     }
 
+    // Persist a user resize/move so the window reopens at the size + position they
+    // left it. Only write when the pointer is UP (the drag has settled). The SIZE
+    // dead-band is deliberately larger than the window frame margin so the
+    // outer-rect/inner-size difference never re-arms a write on a plain reopen; the
+    // POSITION dead-band is small (position is stable when not dragged). Writing
+    // either updates all four fields so size + position stay coherent.
+    if !place_now {
+        if let Some(win_resp) = &win_resp {
+            let rect = win_resp.response.rect;
+            let sz = rect.size();
+            let pos = rect.min;
+            let pointer_up = ctx.input(|i| !i.pointer.any_down());
+            let base_w = config.settings_win_w.unwrap_or(SETTINGS_DEFAULT_W);
+            let base_h = config.settings_win_h.unwrap_or(SETTINGS_DEFAULT_H);
+            let base_x = config.settings_win_x.unwrap_or(pos.x);
+            let base_y = config.settings_win_y.unwrap_or(pos.y);
+            const SIZE_DEAD_BAND: f32 = 12.0;
+            const POS_DEAD_BAND: f32 = 4.0;
+            let all_finite =
+                sz.x.is_finite() && sz.y.is_finite() && pos.x.is_finite() && pos.y.is_finite();
+            let size_moved =
+                (sz.x - base_w).abs() > SIZE_DEAD_BAND || (sz.y - base_h).abs() > SIZE_DEAD_BAND;
+            let pos_moved =
+                (pos.x - base_x).abs() > POS_DEAD_BAND || (pos.y - base_y).abs() > POS_DEAD_BAND;
+            if pointer_up && all_finite && (size_moved || pos_moved) {
+                config.settings_win_w = Some(sz.x);
+                config.settings_win_h = Some(sz.y);
+                config.settings_win_x = Some(pos.x);
+                config.settings_win_y = Some(pos.y);
+                changed = true;
+            }
+        }
+    }
+
     ctx.data_mut(|d| {
         d.insert_temp(cat_id, category);
         d.insert_temp(q_id, query);
@@ -552,6 +683,230 @@ pub fn show(
         theme_changed: changed && config.theme != theme_before,
         clear_history,
         set_incognito,
+        window_rect: win_resp.as_ref().map(|r| r.response.rect),
+    }
+}
+
+/// A deferred toolbar edit, applied AFTER the render loop so an immutable
+/// render-borrow of a zone list never overlaps the mutable edit.
+enum ToolbarEdit {
+    /// Move the item at `idx` earlier (left/up) within its zone.
+    Up(super::chrome_toolbar::Zone, usize),
+    /// Move the item at `idx` later (right/down) within its zone.
+    Down(super::chrome_toolbar::Zone, usize),
+    /// Move `id` to a different zone (or Hidden).
+    MoveTo(String, super::chrome_toolbar::Zone),
+}
+
+/// Settings → Toolbar: place each quick-action button in a zone — LEFT (after the
+/// "+"), RIGHT (next to the settings gear), or the overflow "⋯" menu — or hide it;
+/// reorder within a zone; and reset. Returns whether `config.toolbar` changed.
+fn toolbar_settings_section(ui: &mut egui::Ui, config: &mut Config) -> bool {
+    use super::chrome_toolbar::{self as tb, Zone};
+    let mut changed = false;
+    ui.heading("Toolbar");
+    help(
+        ui,
+        "Choose where each quick-action button lives in the top bar: on the LEFT \
+         (after the +), on the RIGHT (next to the settings gear), or parked in an \
+         overflow menu. Use the arrows to reorder within a zone, the X to remove a \
+         button, and the dots menu to move it to another zone.",
+    );
+
+    // One deferred edit per frame (the user clicks a single control), applied
+    // after every list has rendered so no render-borrow overlaps the mutation.
+    let mut edit: Option<ToolbarEdit> = None;
+
+    toolbar_zone_list(
+        ui,
+        "Left of the gear (after +)",
+        &config.toolbar.left,
+        Zone::Left,
+        &mut edit,
+    );
+    ui.add_space(8.0);
+    toolbar_zone_list(
+        ui,
+        "Right (next to the gear)",
+        &config.toolbar.right,
+        Zone::Right,
+        &mut edit,
+    );
+
+    ui.add_space(8.0);
+    changed |= ui
+        .checkbox(
+            &mut config.toolbar.show_overflow,
+            "Show the overflow menu button when its menu has actions",
+        )
+        .changed();
+    toolbar_zone_list(
+        ui,
+        "Overflow menu",
+        &config.toolbar.menu,
+        Zone::Menu,
+        &mut edit,
+    );
+
+    // Hidden pool — actions currently shown nowhere, each with a "show on ▾" menu.
+    let hidden = tb::hidden_actions(
+        &config.toolbar.left,
+        &config.toolbar.right,
+        &config.toolbar.menu,
+    );
+    if !hidden.is_empty() {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Hidden (not shown)").strong());
+        for &id in &hidden {
+            ui.horizontal(|ui| {
+                toolbar_place_menu(ui, id, None, &mut edit);
+                ui.label(tb::action_label(id).unwrap_or(id));
+            });
+        }
+    }
+
+    ui.add_space(10.0);
+    if ui
+        .button("Reset toolbar to defaults")
+        .on_hover_text("Restore the default button placement (script launcher on the right, the rest on the left).")
+        .clicked()
+    {
+        config.toolbar = c0pl4nd_core::config::ToolbarConfig::default();
+        changed = true;
+    }
+
+    if let Some(e) = edit {
+        changed |= apply_toolbar_edit(config, e);
+    }
+    changed
+}
+
+/// Render one zone's action list: each row is `▲ ▼ ⋯move  Label`. Sets `*edit` on
+/// a click (applied by the caller after every list has rendered). Zone-agnostic.
+fn toolbar_zone_list(
+    ui: &mut egui::Ui,
+    title: &str,
+    list: &[String],
+    zone: super::chrome_toolbar::Zone,
+    edit: &mut Option<ToolbarEdit>,
+) {
+    ui.label(egui::RichText::new(title).strong());
+    if list.is_empty() {
+        ui.weak("   — none —");
+        return;
+    }
+    let n = list.len();
+    for (i, id) in list.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(i > 0, |ui| {
+                if tb_icon_button(ui, egui_phosphor::thin::CARET_UP, "Move earlier (left)")
+                    .clicked()
+                {
+                    *edit = Some(ToolbarEdit::Up(zone, i));
+                }
+            });
+            ui.add_enabled_ui(i + 1 < n, |ui| {
+                if tb_icon_button(ui, egui_phosphor::thin::CARET_DOWN, "Move later (right)")
+                    .clicked()
+                {
+                    *edit = Some(ToolbarEdit::Down(zone, i));
+                }
+            });
+            // Remove this button from the bar (moves it to the Hidden pool, whence
+            // it can be re-added) — the visible X remove affordance.
+            if tb_icon_button(ui, egui_phosphor::thin::X, "Remove from the bar").clicked() {
+                *edit = Some(ToolbarEdit::MoveTo(
+                    id.clone(),
+                    super::chrome_toolbar::Zone::Hidden,
+                ));
+            }
+            toolbar_place_menu(ui, id, Some(zone), edit);
+            ui.label(super::chrome_toolbar::action_label(id).unwrap_or(id));
+        });
+    }
+}
+
+/// A "move to zone" (⋯) menu for a toolbar-editor row. `current` is the action's
+/// present zone (`None` = a hidden action). Offers every OTHER zone (+ Hide for a
+/// shown action). Sets `*edit` on selection.
+fn toolbar_place_menu(
+    ui: &mut egui::Ui,
+    id: &str,
+    current: Option<super::chrome_toolbar::Zone>,
+    edit: &mut Option<ToolbarEdit>,
+) {
+    use super::chrome_toolbar::Zone;
+    // Zone moves only (Left / Right / Overflow); removal is the row's X button.
+    let targets = [
+        (Zone::Left, "Move to left"),
+        (Zone::Right, "Move to right"),
+        (Zone::Menu, "Move to overflow menu"),
+    ];
+    let hover = if current.is_none() {
+        "Add this button to the bar"
+    } else {
+        "Move this button to another zone"
+    };
+    ui.menu_button(
+        egui::RichText::new(egui_phosphor::thin::DOTS_THREE).size(14.0),
+        |ui| {
+            for (tz, label) in targets {
+                if current == Some(tz) {
+                    continue; // already in this zone
+                }
+                // A hidden action is being ADDED — say so instead of "Move to".
+                let text = if current.is_none() {
+                    match tz {
+                        Zone::Left => "Add to the left",
+                        Zone::Right => "Add to the right",
+                        Zone::Menu => "Add to the overflow menu",
+                        Zone::Hidden => label,
+                    }
+                } else {
+                    label
+                };
+                if ui.button(text).clicked() {
+                    *edit = Some(ToolbarEdit::MoveTo(id.to_string(), tz));
+                    ui.close_kind(egui::UiKind::Menu);
+                }
+            }
+        },
+    )
+    .response
+    .on_hover_text(hover);
+}
+
+/// A compact Phosphor-glyph button for the toolbar editor (loaded icon font, not a
+/// raw Unicode arrow — those render as tofu in the UI font).
+fn tb_icon_button(ui: &mut egui::Ui, glyph: &str, hover: &str) -> egui::Response {
+    ui.button(egui::RichText::new(glyph).size(14.0))
+        .on_hover_text(hover)
+}
+
+/// Apply a single deferred toolbar edit to the live config. Returns whether it
+/// changed anything.
+fn apply_toolbar_edit(config: &mut Config, edit: ToolbarEdit) -> bool {
+    use super::chrome_toolbar::{self as tb, Zone};
+    match edit {
+        ToolbarEdit::Up(z, i) => match z {
+            Zone::Left => tb::move_up(&mut config.toolbar.left, i),
+            Zone::Right => tb::move_up(&mut config.toolbar.right, i),
+            Zone::Menu => tb::move_up(&mut config.toolbar.menu, i),
+            Zone::Hidden => false,
+        },
+        ToolbarEdit::Down(z, i) => match z {
+            Zone::Left => tb::move_down(&mut config.toolbar.left, i),
+            Zone::Right => tb::move_down(&mut config.toolbar.right, i),
+            Zone::Menu => tb::move_down(&mut config.toolbar.menu, i),
+            Zone::Hidden => false,
+        },
+        ToolbarEdit::MoveTo(id, target) => tb::move_to_zone(
+            &mut config.toolbar.left,
+            &mut config.toolbar.right,
+            &mut config.toolbar.menu,
+            target,
+            &id,
+        ),
     }
 }
 
@@ -590,32 +945,31 @@ fn render_sections(
             .min_col_width(140.0) // SCR1B3-parity column floor
     };
 
+    // Sub-group header WITHIN a section: a strong label, a muted one-line
+    // description, and a divider rule — the SCR1B3 settings idiom that breaks a
+    // long section into scannable, clearly-titled blocks with visible dividers
+    // (the "divider lines, clear headings, descriptions" the user asked for).
+    // Skipped while a search query is active: search flattens to the matching
+    // rows, so decorative sub-headers (which don't themselves match) would just
+    // leave empty titled blocks.
+    let group = |ui: &mut egui::Ui, label: &str, desc: &str| {
+        if !q.is_empty() {
+            return;
+        }
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new(label).strong());
+        if !desc.is_empty() {
+            ui.label(egui::RichText::new(desc).weak().small());
+        }
+        ui.separator();
+    };
+
     // ---------------------------------------------------------------- Appearance
-    if section_visible(
-        sel,
-        q,
-        "Appearance",
-        &[
-            "theme",
-            "transparency",
-            "mode",
-            "opacity",
-            "glass",
-            "mica",
-            "vibrancy",
-            "tint",
-            "acrylic",
-            "scanlines",
-            "scanline darkness",
-            "chromatic aberration",
-            "ui scale",
-            "zoom",
-            "accessibility",
-        ],
-    ) {
+    if section_visible(sel, q, "Appearance", APPEARANCE_SEARCH_LABELS) {
         ui.heading("Appearance");
-        help(ui, "Colors, transparency, and CRT post-effects.");
-        grid("appearance_grid").show(ui, |ui| {
+        help(ui, "Colors and window transparency.");
+        group(ui, "Theme", "The terminal colour palette.");
+        grid("appearance_theme").show(ui, |ui| {
             if row_visible(q, "theme color") {
                 ui.label("Theme")
                     .on_hover_text("Terminal color theme — a file stem under the themes dir.");
@@ -629,6 +983,31 @@ fn render_sections(
                                     .changed();
                             }
                         });
+                    // Up/down step arrows: cycle through the built-ins without
+                    // opening the dropdown. `delta` wraps around the list; a
+                    // custom (non-built-in) theme name steps onto the first/last
+                    // built-in so the arrows always have a defined landing spot.
+                    let mut step = |delta: isize| {
+                        let n = BUILTIN_THEMES.len() as isize;
+                        let cur = BUILTIN_THEMES.iter().position(|t| *t == config.theme);
+                        let next = match cur {
+                            Some(i) => (i as isize + delta).rem_euclid(n),
+                            None if delta > 0 => 0,
+                            None => n - 1,
+                        };
+                        config.theme = BUILTIN_THEMES[next as usize].to_string();
+                        changed = true;
+                    };
+                    if ui
+                        .small_button("⏶")
+                        .on_hover_text("Previous theme")
+                        .clicked()
+                    {
+                        step(-1);
+                    }
+                    if ui.small_button("⏷").on_hover_text("Next theme").clicked() {
+                        step(1);
+                    }
                 });
                 changed |= reset_to_default(ui, &mut config.theme, &def.theme);
                 ui.end_row();
@@ -648,7 +1027,15 @@ fn render_sections(
                 ui.label(""); // no ↺ on the alias field (it edits the same `theme`)
                 ui.end_row();
             }
+        });
 
+        group(
+            ui,
+            "Transparency & tint",
+            "Make the window see-through, choose the OS blur backend, and wash it \
+             with a colour.",
+        );
+        grid("appearance_transparency").show(ui, |ui| {
             // ---- Transparency / glass (SCR1B3-parity model) ----
             // Master on/off switch for the whole transparency system. Off by
             // default: a solid window is fast and never leaves a DWM ghost on
@@ -656,10 +1043,8 @@ fn render_sections(
             // a native-blur backend (glass/mica/vibrancy) on/off needs a window
             // re-init, so that part takes effect on restart (labelled below).
             if row_visible(q, "transparency master enable glass") {
-                ui.label("Transparency")
-                    .on_hover_text("Master switch for the whole transparency system.");
                 changed |= ui
-                    .toggle_value(
+                    .checkbox(
                         &mut config.transparency_enabled,
                         "Enable window transparency",
                     )
@@ -669,6 +1054,7 @@ fn render_sections(
                          glass / mica / vibrancy.",
                     )
                     .changed();
+                ui.label(""); // empty control column — checkbox carries the label
                 changed |= reset_to_default(
                     ui,
                     &mut config.transparency_enabled,
@@ -677,79 +1063,82 @@ fn render_sections(
                 ui.end_row();
             }
 
+            // Each dependent row is THREE direct grid cells (label · control · ↺)
+            // exactly like every other section — NOT one `add_enabled_ui` wrapping
+            // all three, which collapsed the row into a single column-1 cell and
+            // left columns 2/3 empty (the reported "Transparency & tint isn't
+            // aligned in columns"). The control cell greys out when disabled; the
+            // label + reset stay put so the columns line up on every row.
             if row_visible(q, "transparency mode glass mica vibrancy") {
-                ui.add_enabled_ui(config.transparency_enabled, |ui| {
-                    ui.label("Mode").on_hover_text(
-                        "Opaque · Transparent (portable) · Glass/Mica/Vibrancy \
-                         (OS blur — applies on restart).",
-                    );
-                    ui.horizontal(|ui| {
-                        let wmodes = [
-                            (WindowMode::Opaque, "opaque"),
-                            (WindowMode::Transparent, "transparent"),
-                            (WindowMode::Glass, "glass / acrylic"),
-                            (WindowMode::Mica, "mica (Win11)"),
-                            (WindowMode::Vibrancy, "vibrancy (macOS)"),
-                        ];
-                        egui::ComboBox::from_id_salt("c0pl4nd-window-mode")
-                            .selected_text(
-                                wmodes
-                                    .iter()
-                                    .find(|(m, _)| *m == config.window_mode)
-                                    .map(|(_, s)| *s)
-                                    .unwrap_or("opaque"),
-                            )
-                            .show_ui(ui, |ui| {
-                                for (m, label) in wmodes {
-                                    changed |= ui
-                                        .selectable_value(&mut config.window_mode, m, label)
-                                        .changed();
-                                }
-                            })
-                            .response
-                            .on_hover_text(
-                                "Transparent applies live; Glass/Mica/Vibrancy switch \
-                                 the OS blur backend and apply on restart.",
-                            );
-                        changed |= reset_to_default(ui, &mut config.window_mode, &def.window_mode);
-                    });
+                let en = config.transparency_enabled;
+                ui.label("Mode").on_hover_text(
+                    "Opaque · Transparent (portable) · Glass/Mica/Vibrancy \
+                     (OS blur — applies on restart).",
+                );
+                ui.add_enabled_ui(en, |ui| {
+                    let wmodes = [
+                        (WindowMode::Opaque, "opaque"),
+                        (WindowMode::Transparent, "transparent"),
+                        (WindowMode::Glass, "glass / acrylic"),
+                        (WindowMode::Mica, "mica (Win11)"),
+                        (WindowMode::Vibrancy, "vibrancy (macOS)"),
+                    ];
+                    egui::ComboBox::from_id_salt("c0pl4nd-window-mode")
+                        .selected_text(
+                            wmodes
+                                .iter()
+                                .find(|(m, _)| *m == config.window_mode)
+                                .map(|(_, s)| *s)
+                                .unwrap_or("opaque"),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (m, label) in wmodes {
+                                changed |= ui
+                                    .selectable_value(&mut config.window_mode, m, label)
+                                    .changed();
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "Transparent applies live; Glass/Mica/Vibrancy switch \
+                             the OS blur backend and apply on restart.",
+                        );
                 });
+                changed |= reset_to_default(ui, &mut config.window_mode, &def.window_mode);
                 ui.end_row();
             }
 
             if row_visible(q, "opacity transparency") {
-                ui.add_enabled_ui(
-                    config.transparency_enabled && config.window_mode.is_translucent(),
-                    |ui| {
-                        ui.label("Opacity").on_hover_text(
-                            "Surface opacity for every translucent mode (Glass / \
-                             Mica / Vibrancy / Transparent) — below 100% the \
-                             desktop / blur shows through, and the slider tunes how \
-                             see-through the terminal is across its full range.",
-                        );
-                        changed |= ui
-                            .add(
-                                egui::Slider::new(&mut config.opacity, 0.15..=1.0)
-                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                                    .custom_parser(|s| {
-                                        s.trim_end_matches('%')
-                                            .trim()
-                                            .parse::<f64>()
-                                            .ok()
-                                            .map(|v| v / 100.0)
-                                    }),
-                            )
-                            .changed();
-                        changed |= reset_to_default(ui, &mut config.opacity, &def.opacity);
-                    },
+                let en = config.transparency_enabled && config.window_mode.is_translucent();
+                ui.label("Opacity").on_hover_text(
+                    "Surface opacity for every translucent mode (Glass / Mica / \
+                     Vibrancy / Transparent) — below 100% the desktop / blur shows \
+                     through, and the slider tunes how see-through the terminal is \
+                     across its full range.",
                 );
+                changed |= ui
+                    .add_enabled(
+                        en,
+                        egui::Slider::new(&mut config.opacity, 0.0..=1.0)
+                            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                            .custom_parser(|s| {
+                                s.trim_end_matches('%')
+                                    .trim()
+                                    .parse::<f64>()
+                                    .ok()
+                                    .map(|v| v / 100.0)
+                            }),
+                    )
+                    .changed();
+                changed |= reset_to_default(ui, &mut config.opacity, &def.opacity);
                 ui.end_row();
             }
 
             if row_visible(q, "tint color overlay wash picker") {
-                ui.add_enabled_ui(config.transparency_enabled, |ui| {
-                    ui.label("Tint color")
-                        .on_hover_text("Color washed over the window (strength below).");
+                let en = config.transparency_enabled;
+                ui.label("Tint color")
+                    .on_hover_text("Color washed over the window (strength below).");
+                ui.add_enabled_ui(en, |ui| {
                     ui.horizontal(|ui| {
                         // A real color PICKER (swatch button → palette popup) over
                         // the `#RRGGBB` config string, instead of raw hex entry.
@@ -763,34 +1152,41 @@ fn render_sections(
                         }
                         // Compact hex readout so the exact value is visible/copyable.
                         ui.monospace(&config.tint);
-                        changed |= reset_to_default(ui, &mut config.tint, &def.tint);
                     });
                 });
+                changed |= reset_to_default(ui, &mut config.tint, &def.tint);
                 ui.end_row();
             }
 
             if row_visible(q, "tint strength wash overlay") {
-                ui.add_enabled_ui(config.transparency_enabled, |ui| {
-                    ui.label("Tint strength")
-                        .on_hover_text("0% = no tint .. 100% = strong color wash.");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut config.tint_strength, 0.0..=1.0)
-                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                                .custom_parser(|s| {
-                                    s.trim_end_matches('%')
-                                        .trim()
-                                        .parse::<f64>()
-                                        .ok()
-                                        .map(|v| v / 100.0)
-                                }),
-                        )
-                        .changed();
-                    changed |= reset_to_default(ui, &mut config.tint_strength, &def.tint_strength);
-                });
+                let en = config.transparency_enabled;
+                ui.label("Tint strength")
+                    .on_hover_text("0% = no tint .. 100% = strong color wash.");
+                changed |= ui
+                    .add_enabled(
+                        en,
+                        egui::Slider::new(&mut config.tint_strength, 0.0..=1.0)
+                            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                            .custom_parser(|s| {
+                                s.trim_end_matches('%')
+                                    .trim()
+                                    .parse::<f64>()
+                                    .ok()
+                                    .map(|v| v / 100.0)
+                            }),
+                    )
+                    .changed();
+                changed |= reset_to_default(ui, &mut config.tint_strength, &def.tint_strength);
                 ui.end_row();
             }
+        });
 
+        group(
+            ui,
+            "Interface scale",
+            "Accessibility zoom for the whole interface, saved across launches.",
+        );
+        grid("appearance_scale").show(ui, |ui| {
             // ---- UI scale (F2-3): persisted accessibility zoom for the UI ----
             // Placed AFTER opacity + tint so the existing slider-order assertions
             // in egui_settings.rs (opacity = slider 0, tint = slider 1) hold.
@@ -810,91 +1206,6 @@ fn render_sections(
                 changed |= reset_to_default(ui, &mut config.ui_scale, &def.ui_scale);
                 ui.end_row();
             }
-
-            if row_visible(q, "crt scanlines") {
-                ui.label("CRT scanlines");
-                changed |= ui
-                    .toggle_value(&mut config.effects.crt_scanlines, "Animated scan lines")
-                    .on_hover_text(
-                        "Dark scan-line bands with a rolling refresh sweep. \
-                         Auto-disabled under reduced-motion / battery-save.",
-                    )
-                    .changed();
-                changed |= reset_to_default(
-                    ui,
-                    &mut config.effects.crt_scanlines,
-                    &def.effects.crt_scanlines,
-                );
-                ui.end_row();
-            }
-
-            if row_visible(q, "scanline darkness") {
-                ui.label("Scanline darkness");
-                let on = config.effects.crt_scanlines;
-                changed |= ui
-                    .add_enabled(
-                        on,
-                        egui::Slider::new(&mut config.effects.scanline_darkness, 0.0..=1.0)
-                            .text("darkness"),
-                    )
-                    .on_hover_text("How dark the scan-line troughs read. Enable scan lines first.")
-                    .changed();
-                changed |= reset_to_default(
-                    ui,
-                    &mut config.effects.scanline_darkness,
-                    &def.effects.scanline_darkness,
-                );
-                ui.end_row();
-            }
-
-            if row_visible(q, "chromatic aberration") {
-                ui.label("Chromatic aberration");
-                // The checkbox + the intensity slider share ONE grid cell (col 2),
-                // stacked vertically. Keeping them in a single column is what makes
-                // this a 3-column row like every other one: a filling `Slider` in
-                // its OWN (4th) column has no width budget to fill against, so it
-                // ballooned the grid -- and with it the whole window -- past the
-                // close button (the residual "still too wide" overflow). Inside a
-                // bounded col-2 cell the slider fills only the column, exactly like
-                // the Opacity / UI-scale rows.
-                ui.vertical(|ui| {
-                    // Explicit ON/OFF checkbox (issue #28): the intensity slider
-                    // alone read as "broken" when it sat at 0. On first enable,
-                    // default the intensity to a visible value so the effect shows.
-                    let was_enabled = config.effects.chromatic_aberration_enabled;
-                    if ui
-                        .checkbox(
-                            &mut config.effects.chromatic_aberration_enabled,
-                            "RGB split",
-                        )
-                        .on_hover_text("Pure-channel red/blue fringing behind the text.")
-                        .changed()
-                    {
-                        changed = true;
-                        if config.effects.chromatic_aberration_enabled
-                            && !was_enabled
-                            && config.effects.chromatic_aberration <= 0.0
-                        {
-                            config.effects.chromatic_aberration =
-                                c0pl4nd_core::config::DEFAULT_CHROMATIC_INTENSITY;
-                        }
-                    }
-                    let on = config.effects.chromatic_aberration_enabled;
-                    changed |= ui
-                        .add_enabled(
-                            on,
-                            egui::Slider::new(&mut config.effects.chromatic_aberration, 0.1..=1.5)
-                                .text("intensity"),
-                        )
-                        .changed();
-                });
-                changed |= reset_to_default(
-                    ui,
-                    &mut config.effects.chromatic_aberration,
-                    &def.effects.chromatic_aberration,
-                );
-                ui.end_row();
-            }
         });
         group_gap(ui);
     }
@@ -903,10 +1214,17 @@ fn render_sections(
     if section_visible(
         sel,
         q,
-        "Font",
-        &["family", "size", "line height", "ligatures", "fallback"],
+        "Fonts",
+        &[
+            "font",
+            "family",
+            "size",
+            "line height",
+            "ligatures",
+            "fallback",
+        ],
     ) {
-        ui.heading("Font");
+        ui.heading("Fonts");
         help(ui, "Typeface, size, and text shaping.");
         grid("font_grid").show(ui, |ui| {
             if row_visible(q, "family typeface") {
@@ -962,19 +1280,25 @@ fn render_sections(
             }
 
             if row_visible(q, "ligatures shaping") {
-                ui.label("Ligatures");
                 // DISABLED: the egui native text painter draws the grid glyph-by-
                 // glyph (strict monospace cell fidelity) and does NOT run a shaping
                 // engine (HarfBuzz / cosmic-text), so programming ligatures can't
                 // be formed. Shown greyed with an honest tooltip rather than as a
                 // dead toggle that silently does nothing.
                 ui.add_enabled_ui(false, |ui| {
-                    ui.toggle_value(&mut config.ligatures, "Programming ligatures (->, !=)")
+                    // Label kept short (the "->/!=" examples live in the tooltip) so
+                    // this checkbox-left row does not widen the Fonts grid past the
+                    // shared settings-window width — the equal-width-on-every-page
+                    // invariant (see `every_settings_page_has_the_same_window_width`).
+                    ui.checkbox(&mut config.ligatures, "Programming ligatures")
                         .on_hover_text(
                             "Not available: the GPU text renderer draws strict \
-                             monospace cells and does not do glyph shaping.",
+                             monospace cells and does not do glyph shaping — so \
+                             programming ligatures (-> ligature, != ligature) can't \
+                             be formed.",
                         );
                 });
+                ui.label("");
                 ui.end_row();
             }
 
@@ -1057,10 +1381,10 @@ fn render_sections(
             }
 
             if row_visible(q, "blink") {
-                ui.label("Blink");
                 changed |= ui
-                    .toggle_value(&mut config.cursor.blink, "Blink the cursor")
+                    .checkbox(&mut config.cursor.blink, "Blink the cursor")
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(ui, &mut config.cursor.blink, &def.cursor.blink);
                 ui.end_row();
             }
@@ -1083,7 +1407,12 @@ fn render_sections(
     ) {
         ui.heading("Terminal");
         help(ui, "Scrollback, shell, and clipboard behavior.");
-        grid("terminal_grid").show(ui, |ui| {
+        group(
+            ui,
+            "Shell & scrollback",
+            "Which shell launches and how much history each pane keeps.",
+        );
+        grid("terminal_shell").show(ui, |ui| {
             if row_visible(q, "scrollback lines history") {
                 ui.label("Scrollback").on_hover_text(
                     "History lines kept per pane. Applies on restart — a pane's \
@@ -1103,17 +1432,17 @@ fn render_sections(
             }
 
             if row_visible(q, "startup panel neofetch logo") {
-                ui.label("Startup panel");
                 // DISABLED: the neofetch-style launch splash is not drawn by the
                 // egui shell (only the legacy winit shell rendered it). Greyed
                 // with an honest tooltip rather than a dead toggle that silently
                 // does nothing — matching the ligatures / copy-on-select rows.
                 ui.add_enabled_ui(false, |ui| {
-                    ui.toggle_value(&mut config.startup_panel, "Show logo + system info")
+                    ui.checkbox(&mut config.startup_panel, "Show logo + system info")
                         .on_hover_text(
                             "Not available: the launch splash is not drawn in this shell yet.",
                         );
                 });
+                ui.label("");
                 ui.end_row();
             }
 
@@ -1139,33 +1468,36 @@ fn render_sections(
                 changed |= reset_to_default(ui, &mut config.shell, &def.shell);
                 ui.end_row();
             }
+        });
 
+        group(ui, "Clipboard", "Copy-on-select and paste safety.");
+        grid("terminal_clipboard").show(ui, |ui| {
             if row_visible(q, "copy on select clipboard") {
-                ui.label("Copy on select");
                 // Live again: mouse text-selection now exists in the egui shell
                 // (drag to select), so the drag-end can auto-copy. When OFF the
                 // selection is still made (and Ctrl/Cmd+Shift+C copies on demand);
                 // when ON the selection is copied to the clipboard on release.
                 changed |= ui
-                    .toggle_value(&mut config.copy_on_select, "X11-style auto-copy")
+                    .checkbox(&mut config.copy_on_select, "Copy on select")
                     .on_hover_text(
-                        "Copy a mouse selection to the clipboard automatically when \
-                         the drag is released.",
+                        "X11-style: copy a mouse selection to the clipboard \
+                         automatically when the drag is released.",
                     )
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(ui, &mut config.copy_on_select, &def.copy_on_select);
                 ui.end_row();
             }
 
             if row_visible(q, "paste warn multiline newline security") {
-                ui.label("Multi-line paste");
                 changed |= ui
-                    .toggle_value(
+                    .checkbox(
                         &mut config.paste_warn_multiline,
                         "Warn before multi-line paste",
                     )
                     .on_hover_text("Security: a pasted newline can run a shell command instantly.")
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(
                     ui,
                     &mut config.paste_warn_multiline,
@@ -1203,7 +1535,12 @@ fn render_sections(
             "Inner padding and the initial grid size. Live size/position is \
              remembered automatically.",
         );
-        grid("window_grid").show(ui, |ui| {
+        group(
+            ui,
+            "Layout",
+            "Padding, split-pane dividers, and the status bar.",
+        );
+        grid("window_layout").show(ui, |ui| {
             if row_visible(q, "padding inner margin") {
                 ui.label("Padding")
                     .on_hover_text("Inner inset between the pane edge and the terminal grid.");
@@ -1220,33 +1557,40 @@ fn render_sections(
             }
 
             if row_visible(q, "panes dividers linked symmetrical equal split") {
-                ui.label("Linked dividers");
                 changed |= ui
-                    .toggle_value(&mut config.link_pane_dividers, "Keep panes equal")
+                    .checkbox(&mut config.link_pane_dividers, "Keep panes equal")
                     .on_hover_text(
                         "Hold split-pane dividers at equal positions so every pane \
                          stays the same size. The top-bar symmetrical button equalises \
                          once regardless of this setting.",
                     )
                     .changed();
+                ui.label("");
                 changed |=
                     reset_to_default(ui, &mut config.link_pane_dividers, &def.link_pane_dividers);
                 ui.end_row();
             }
 
             if row_visible(q, "status bar bottom hide show") {
-                ui.label("Status bar");
                 changed |= ui
-                    .toggle_value(&mut config.show_status_bar, "Show bottom status bar")
+                    .checkbox(&mut config.show_status_bar, "Show bottom status bar")
                     .on_hover_text(
                         "The bottom bar (pane count + hints). Turn off to reclaim the \
                          row for the terminal grid.",
                     )
                     .changed();
+                ui.label("");
                 changed |= reset_to_default(ui, &mut config.show_status_bar, &def.show_status_bar);
                 ui.end_row();
             }
+        });
 
+        group(
+            ui,
+            "Graphics",
+            "GPU backend and adapter — change only if glyphs render garbled.",
+        );
+        grid("window_graphics").show(ui, |ui| {
             if row_visible(q, "graphics backend gpu renderer dx12 vulkan gl") {
                 ui.label("Graphics backend");
                 let backends = [
@@ -1316,7 +1660,15 @@ fn render_sections(
                 changed |= reset_to_default(ui, &mut config.graphics_gpu, &def.graphics_gpu);
                 ui.end_row();
             }
+        });
 
+        group(
+            ui,
+            "Initial grid size",
+            "Legacy columns/rows — this shell sizes the window in pixels and \
+             remembers it, so these are inactive.",
+        );
+        grid("window_initial_size").show(ui, |ui| {
             // Initial terminal grid width at launch. The live window size is
             // remembered separately (geometry persistence), so this is the
             // first-launch / no-saved-geometry size; it takes effect on restart.
@@ -1358,6 +1710,394 @@ fn render_sections(
                          the window edge).",
                     );
                 });
+                ui.end_row();
+            }
+        });
+        group_gap(ui);
+    }
+
+    // ------------------------------------------------------------------- Toolbar
+    if section_visible(
+        sel,
+        q,
+        "Toolbar",
+        &[
+            "toolbar",
+            "buttons",
+            "quick actions",
+            "top bar",
+            "overflow",
+            "reorder",
+        ],
+    ) {
+        changed |= toolbar_settings_section(ui, config);
+        group_gap(ui);
+    }
+
+    // ---------------------------------------------------------------------- Motion
+    if section_visible(sel, q, "Motion", MOTION_SEARCH_LABELS) {
+        ui.heading("Motion");
+        help(
+            ui,
+            "Interface animation and retro CRT post-effects. Turn the master \
+             switch off for a fully static UI; every effect below is gated behind \
+             it and off by default.",
+        );
+        grid("motion_master").show(ui, |ui| {
+            if row_visible(q, "enable animations") {
+                changed |= ui
+                    .checkbox(&mut config.effects.animations_enabled, "Enable animations")
+                    .on_hover_text(
+                        "Master switch. When off, transitions are instant (no fades) \
+                         and every motion effect below is suppressed — idle frames \
+                         cost the same as plain egui.",
+                    )
+                    .changed();
+                ui.label("");
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.animations_enabled,
+                    &def.effects.animations_enabled,
+                );
+                ui.end_row();
+            }
+
+            let on = config.effects.animations_enabled;
+
+            if row_visible(q, "animation speed") {
+                ui.label("Animation speed").on_hover_text(
+                    "Scale the motion-effect speed. 0 freezes every transition; 1 is \
+                     the shipped feel; up to 2 runs the drift effects (mesh / VHS / \
+                     flicker) at double-rate. Above 1 only speeds the effects — the \
+                     UI fades stay snappy.",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on,
+                        egui::Slider::new(&mut config.effects.animation_intensity, 0.0..=2.0),
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.animation_intensity,
+                    &def.effects.animation_intensity,
+                );
+                ui.end_row();
+            }
+        });
+
+        let on = config.effects.animations_enabled;
+
+        group(
+            ui,
+            "CRT screen",
+            "Scan lines, RGB split, and brightness flicker.",
+        );
+        grid("motion_crt").show(ui, |ui| {
+            if row_visible(q, "crt scanlines") {
+                changed |= ui
+                    .add_enabled(
+                        on,
+                        egui::Checkbox::new(&mut config.effects.crt_scanlines, "CRT scan lines"),
+                    )
+                    .on_hover_text(
+                        "Dark scan-line bands drifting slowly down the panes for a \
+                         calm retro CRT look. Auto-disabled under reduced-motion.",
+                    )
+                    .changed();
+                ui.label("");
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.crt_scanlines,
+                    &def.effects.crt_scanlines,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "scanline darkness") {
+                ui.label("Scanline darkness");
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.crt_scanlines,
+                        egui::Slider::new(&mut config.effects.scanline_darkness, 0.0..=1.0)
+                            .text("darkness"),
+                    )
+                    .on_hover_text("How dark the scan-line troughs read. Enable scan lines first.")
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.scanline_darkness,
+                    &def.effects.scanline_darkness,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "chromatic aberration") {
+                // Explicit ON/OFF checkbox in col 1 (checkbox-left), the intensity
+                // slider in col 2. The intensity slider alone read as "broken" when
+                // it sat at 0, so on first enable we default it to a visible value.
+                let was_enabled = config.effects.chromatic_aberration_enabled;
+                if ui
+                    .add_enabled(
+                        on,
+                        egui::Checkbox::new(
+                            &mut config.effects.chromatic_aberration_enabled,
+                            "Chromatic aberration",
+                        ),
+                    )
+                    .on_hover_text("Pure-channel red/blue fringing behind the text (RGB split).")
+                    .changed()
+                {
+                    changed = true;
+                    if config.effects.chromatic_aberration_enabled
+                        && !was_enabled
+                        && config.effects.chromatic_aberration <= 0.0
+                    {
+                        config.effects.chromatic_aberration =
+                            c0pl4nd_core::config::DEFAULT_CHROMATIC_INTENSITY;
+                    }
+                }
+                let ca_on = on && config.effects.chromatic_aberration_enabled;
+                changed |= ui
+                    .add_enabled(
+                        ca_on,
+                        egui::Slider::new(&mut config.effects.chromatic_aberration, 0.1..=1.5)
+                            .text("intensity"),
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.chromatic_aberration,
+                    &def.effects.chromatic_aberration,
+                );
+                ui.end_row();
+            }
+        });
+
+        group(
+            ui,
+            "Ambient node-mesh",
+            "The animated \"Wired\" lattice drawn behind the panes.",
+        );
+        grid("motion_mesh").show(ui, |ui| {
+            if row_visible(q, "wired mesh background") {
+                changed |= ui
+                    .add_enabled(
+                        on,
+                        egui::Checkbox::new(
+                            &mut config.effects.wired_ambient,
+                            "Node-mesh background",
+                        ),
+                    )
+                    .on_hover_text(
+                        "An animated node-mesh ambient background drawn BEHIND the \
+                         panes (a calm \"Wired\" field). Shows through when the window \
+                         uses a translucent mode; hidden behind fully-opaque panes.",
+                    )
+                    .changed();
+                ui.label("");
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.wired_ambient,
+                    &def.effects.wired_ambient,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "mesh density") {
+                ui.label("Mesh density");
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.wired_ambient,
+                        egui::Slider::new(&mut config.effects.mesh_density, 0.0..=2.0)
+                            .text("density"),
+                    )
+                    .on_hover_text(
+                        "How many nodes the wired-mesh background draws (sparse to dense).",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.mesh_density,
+                    &def.effects.mesh_density,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "mesh brightness") {
+                ui.label("Mesh brightness");
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.wired_ambient,
+                        egui::Slider::new(&mut config.effects.mesh_brightness, 0.0..=3.0)
+                            .text("brightness"),
+                    )
+                    .on_hover_text(
+                        "How bright the wired-mesh lattice reads — dim it toward \
+                         invisible or brighten it to clearly pop. 1 is the default.",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.mesh_brightness,
+                    &def.effects.mesh_brightness,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "mesh movement") {
+                ui.label("Mesh movement").on_hover_text(
+                    "How fast the node lattice drifts. 0 holds a still frame; 1 is \
+                     the shipped drift; up to 2 is a brisk, roaming field.",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.wired_ambient,
+                        egui::Slider::new(&mut config.effects.mesh_speed, 0.0..=2.0)
+                            .text("movement"),
+                    )
+                    .changed();
+                changed |=
+                    reset_to_default(ui, &mut config.effects.mesh_speed, &def.effects.mesh_speed);
+                ui.end_row();
+            }
+        });
+
+        group(
+            ui,
+            "Tape & motion accents",
+            "VHS tracking, the cursor ghost-trail, and the boot sweep.",
+        );
+        grid("motion_accents").show(ui, |ui| {
+            if row_visible(q, "vhs tracking") {
+                changed |= ui
+                    .add_enabled(
+                        on,
+                        egui::Checkbox::new(&mut config.effects.vhs_tracking, "VHS tracking lines"),
+                    )
+                    .on_hover_text(
+                        "Faint bright bands sweep down the window like analogue tape \
+                         tracking error.",
+                    )
+                    .changed();
+                ui.label("");
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.vhs_tracking,
+                    &def.effects.vhs_tracking,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "vhs intensity") {
+                ui.label("VHS intensity").on_hover_text(
+                    "How bright the VHS tracking bands read — from a faint whisper \
+                     to a bold, unmistakable sweep.",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.vhs_tracking,
+                        egui::Slider::new(&mut config.effects.vhs_intensity, 0.0..=1.0)
+                            .text("intensity"),
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.vhs_intensity,
+                    &def.effects.vhs_intensity,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "screen flicker") {
+                changed |= ui
+                    .add_enabled(
+                        on,
+                        egui::Checkbox::new(&mut config.effects.flicker, "Brightness flicker"),
+                    )
+                    .on_hover_text("Subtle CRT-style brightness flicker over the whole window.")
+                    .changed();
+                ui.label("");
+                changed |= reset_to_default(ui, &mut config.effects.flicker, &def.effects.flicker);
+                ui.end_row();
+            }
+
+            if row_visible(q, "flicker strength") {
+                ui.label("Flicker strength");
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.flicker,
+                        egui::Slider::new(&mut config.effects.flicker_strength, 0.0..=1.0)
+                            .text("strength"),
+                    )
+                    .on_hover_text(
+                        "How strong the screen flicker is. Even at max the wash stays \
+                         short of a full-black strobe (comfort guard).",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.flicker_strength,
+                    &def.effects.flicker_strength,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "cursor trail") {
+                changed |= ui
+                    .add_enabled(
+                        on,
+                        egui::Checkbox::new(&mut config.effects.cursor_trail, "Cursor ghost-trail"),
+                    )
+                    .on_hover_text("A fading echo follows the focused terminal cursor as it moves.")
+                    .changed();
+                ui.label("");
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.cursor_trail,
+                    &def.effects.cursor_trail,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "cursor trail intensity") {
+                ui.label("Cursor-trail intensity");
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.cursor_trail,
+                        egui::Slider::new(&mut config.effects.cursor_trail_intensity, 0.0..=2.0)
+                            .text("intensity"),
+                    )
+                    .on_hover_text(
+                        "How bold and long the cursor ghost-trail is — from a faint \
+                         flick to a pronounced comet tail. Up to 2 for a long, \
+                         unmistakable tail.",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.cursor_trail_intensity,
+                    &def.effects.cursor_trail_intensity,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "boot glitch") {
+                changed |= ui
+                    .add_enabled(
+                        on,
+                        egui::Checkbox::new(&mut config.effects.boot_glitch, "Boot glitch sweep"),
+                    )
+                    .on_hover_text(
+                        "A one-shot glitch sweep plays for a moment when the app launches.",
+                    )
+                    .changed();
+                ui.label("");
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.boot_glitch,
+                    &def.effects.boot_glitch,
+                );
                 ui.end_row();
             }
         });
@@ -1672,110 +2412,140 @@ fn render_sections(
              connection is the opt-in update check. Command history is kept in \
              memory only (never written to disk).",
         );
-        ui.add_space(6.0);
 
-        changed |= ui
-            .toggle_value(
-                &mut config.history_capture_enabled,
-                "Record command history",
-            )
-            .on_hover_text(
-                "Capture typed commands for the Ctrl+Shift+P palette + the history \
-                 sidebar. Passwords typed at prompts are never captured (they are \
-                 not echoed); inline secrets like --password=… / API_KEY=… are \
-                 redacted. Turn off for a no-history posture.",
-            )
-            .changed();
-        changed |= reset_to_default(
+        // ---- Command history (grid-aligned, matching every other section) ----
+        group(
             ui,
-            &mut config.history_capture_enabled,
-            &def.history_capture_enabled,
+            "Command history",
+            "Kept in memory only — never written to disk.",
         );
+        grid("privacy_history").show(ui, |ui| {
+            if row_visible(q, "record command history capture") {
+                changed |= ui
+                    .checkbox(
+                        &mut config.history_capture_enabled,
+                        "Record command history",
+                    )
+                    .on_hover_text(
+                        "Capture typed commands for the Ctrl+Shift+P palette + the \
+                         history sidebar. Passwords typed at prompts are never captured \
+                         (they are not echoed); inline secrets like --password=… / \
+                         API_KEY=… are redacted. Turn off for a no-history posture.",
+                    )
+                    .changed();
+                ui.label("");
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.history_capture_enabled,
+                    &def.history_capture_enabled,
+                );
+                ui.end_row();
+            }
 
-        ui.add_space(10.0);
-        ui.separator();
-        ui.add_space(6.0);
+            if row_visible(q, "incognito secret session no history") {
+                // Incognito is RUNTIME state (never persisted) owned by the host;
+                // reflect it and report a toggle back via `set_incognito`.
+                let mut inc = incognito;
+                if ui
+                    .checkbox(&mut inc, "No history this session")
+                    .on_hover_text(
+                        "Stop recording command history for THIS session and clear \
+                         what is already recorded. Resets to off on the next launch.",
+                    )
+                    .changed()
+                {
+                    *set_incognito = Some(inc);
+                }
+                ui.label(""); // empty control column
+                ui.label(""); // runtime state — no ↺ revert column
+                ui.end_row();
+            }
+        });
+
+        // ---- Clear data (grid-aligned action rows) ----
+        let status_id = egui::Id::new("c0pl4nd_clear_ui_state_status");
+        group(
+            ui,
+            "Clear data",
+            "One-click erase of in-memory and older on-disk state.",
+        );
+        grid("privacy_clear").show(ui, |ui| {
+            if row_visible(q, "clear command history erase now") {
+                ui.label("Command history");
+                if ui
+                    .button("Clear now")
+                    .on_hover_text("Erase (zeroize) every recorded command immediately.")
+                    .clicked()
+                {
+                    *clear_history = true;
+                }
+                ui.label(""); // action row — no ↺ column
+                ui.end_row();
+            }
+
+            if row_visible(q, "clear saved window ui state") {
+                // Delete eframe's persisted `app.ron` (window/UI state). Even
+                // though C0PL4ND no longer persists egui Memory (privacy F1 —
+                // `C0pl4ndApp::persist_egui_memory` returns false), a file written
+                // by an OLDER build may still hold typed find/palette undo history,
+                // so give the user an explicit one-click erase. Window geometry is
+                // unaffected: it lives in the config TOML, not app.ron.
+                ui.label("Window/UI state");
+                ui.vertical(|ui| {
+                    if ui
+                        .button("Clear saved state")
+                        .on_hover_text(
+                            "Delete the on-disk app.ron that older builds used to \
+                             persist window/UI state (and, in those builds, typed \
+                             find/palette undo history). Your window size/position \
+                             are kept (stored separately).",
+                        )
+                        .clicked()
+                    {
+                        let msg = clear_saved_ui_state();
+                        ui.ctx().data_mut(|d| d.insert_temp(status_id, msg));
+                    }
+                    if let Some(msg) = ui.ctx().data(|d| d.get_temp::<String>(status_id)) {
+                        ui.add(egui::Label::new(egui::RichText::new(msg).weak().small()).wrap());
+                    }
+                });
+                ui.label(""); // action row — no ↺ column
+                ui.end_row();
+            }
+        });
 
         // ---- W1TN3SS opt-in crash/error/issue reporting (default OFF) ----
-        ui.heading("Report a crash or issue");
-        help(
+        group(
             ui,
-            "Reporting is OPT-IN and OFF by default. Nothing is ever sent without \
-             your per-report consent, and every report is shown to you — editable \
-             — before it leaves. No accounts, no identifiers, no tracking. Reports \
-             go only to the project's own self-hosted endpoint (none is configured \
-             by default, so a default build sends nothing).",
+            "Report a crash or issue",
+            "Opt-in and OFF by default — nothing is sent without your per-report \
+             consent, and every report is shown to you (editable) before it leaves.",
         );
-        ui.add_space(6.0);
-        ui.label("Crash reports");
-        // Equal-weight 3-way selector (Off / Ask each time / Always) — no
-        // pre-ticked default-on path; the Off radio is first + selected by
-        // default. Mirrors the proven consent shape.
-        changed |= reporting_mode_selector(
-            ui,
-            "crash_reports_mode",
-            &mut config.reporting.streams.crash_reports,
-        );
-        ui.add_space(6.0);
-        ui.label("Manual issue reports");
-        changed |= reporting_mode_selector(
-            ui,
-            "manual_issues_mode",
-            &mut config.reporting.streams.manual_issues,
-        );
-
-        ui.add_space(10.0);
-        ui.separator();
-        ui.add_space(6.0);
-
-        // Incognito is RUNTIME state (never persisted) owned by the host; reflect
-        // it and report a toggle back via `set_incognito`.
-        let mut inc = incognito;
-        if ui
-            .toggle_value(&mut inc, "Incognito session (no history)")
-            .on_hover_text(
-                "Stop recording command history for THIS session and clear what is \
-                 already recorded. Resets to off on the next launch.",
-            )
-            .changed()
-        {
-            *set_incognito = Some(inc);
-        }
-
-        ui.add_space(6.0);
-
-        if ui
-            .button("Clear command history now")
-            .on_hover_text("Erase (zeroize) every recorded command immediately.")
-            .clicked()
-        {
-            *clear_history = true;
-        }
-
-        ui.add_space(6.0);
-
-        // Delete eframe's persisted `app.ron` (window/UI state). Even though
-        // C0PL4ND no longer persists egui Memory (privacy F1 —
-        // `C0pl4ndApp::persist_egui_memory` returns false), a file written by an
-        // OLDER build may still hold typed find/palette undo history, so give the
-        // user an explicit one-click erase. Window geometry is unaffected: it
-        // lives in the config TOML + eframe's native window state, not app.ron.
-        let status_id = egui::Id::new("c0pl4nd_clear_ui_state_status");
-        if ui
-            .button("Clear saved window/UI state")
-            .on_hover_text(
-                "Delete the on-disk app.ron that older builds used to persist \
-                 window/UI state (and, in those builds, typed find/palette undo \
-                 history). Your window size/position are kept (stored separately).",
-            )
-            .clicked()
-        {
-            let msg = clear_saved_ui_state();
-            ui.ctx().data_mut(|d| d.insert_temp(status_id, msg));
-        }
-        if let Some(msg) = ui.ctx().data(|d| d.get_temp::<String>(status_id)) {
-            ui.add(egui::Label::new(egui::RichText::new(msg).weak().small()).wrap());
-        }
+        grid("privacy_reporting").show(ui, |ui| {
+            // Equal-weight 3-way selectors (Off / Ask each time / Always) — no
+            // pre-ticked default-on path; the Off radio is first + selected by
+            // default. Mirrors the proven consent shape.
+            if row_visible(q, "crash reports") {
+                ui.label("Crash reports");
+                changed |= reporting_mode_selector(
+                    ui,
+                    "crash_reports_mode",
+                    &mut config.reporting.streams.crash_reports,
+                );
+                ui.label(""); // selector carries its own state — no ↺ column
+                ui.end_row();
+            }
+            if row_visible(q, "manual issue reports") {
+                ui.label("Manual issues");
+                changed |= reporting_mode_selector(
+                    ui,
+                    "manual_issues_mode",
+                    &mut config.reporting.streams.manual_issues,
+                );
+                ui.label("");
+                ui.end_row();
+            }
+        });
 
         group_gap(ui);
     }
@@ -1979,6 +2749,54 @@ mod tests {
             CATEGORIES.contains(&"Updates"),
             "Updates must be a left-nav category so its rows are reachable"
         );
+    }
+
+    #[test]
+    fn motion_and_fonts_are_navigable_categories() {
+        // The renamed "Fonts" tab and the new "Motion" tab (which now owns the
+        // CRT / chromatic / animation controls) must both be reachable from the
+        // left nav; the old "Font" name must be gone.
+        assert!(
+            CATEGORIES.contains(&"Motion"),
+            "Motion must be a left-nav category so its effect rows are reachable"
+        );
+        assert!(
+            CATEGORIES.contains(&"Fonts"),
+            "the Font section was renamed to Fonts for SCR1B3 parity"
+        );
+        assert!(
+            !CATEGORIES.contains(&"Font"),
+            "the old singular 'Font' category name must not linger"
+        );
+    }
+
+    #[test]
+    fn motion_section_is_cross_category_searchable() {
+        // The controls that MOVED from Appearance to Motion must be reachable by
+        // their FULL names from any tab via the PRODUCTION label set — and must no
+        // longer resolve to Appearance (whose stale CRT labels were removed). This
+        // asserts against the real `MOTION_SEARCH_LABELS`/`APPEARANCE_SEARCH_LABELS`
+        // consts, so it would fail if a moved label were dropped or left behind.
+        for term in [
+            "crt scanlines",
+            "scanline darkness",
+            "chromatic aberration",
+            "cursor trail",
+        ] {
+            assert!(
+                section_visible("Appearance", term, "Motion", MOTION_SEARCH_LABELS),
+                "'{term}' must reveal the Motion section that now owns it"
+            );
+            assert!(
+                !section_visible("Motion", term, "Appearance", APPEARANCE_SEARCH_LABELS),
+                "'{term}' must NOT resurrect a phantom empty Appearance section"
+            );
+        }
+        // Every Motion search label must correspond to a Motion row (its canonical
+        // `row_visible` label), so a query can never reveal the section with no
+        // matching row. The row labels ARE the search labels by construction.
+        assert!(MOTION_SEARCH_LABELS.contains(&"chromatic aberration"));
+        assert!(MOTION_SEARCH_LABELS.contains(&"cursor trail"));
     }
 
     #[test]
