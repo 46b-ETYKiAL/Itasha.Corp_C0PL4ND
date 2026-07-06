@@ -198,9 +198,9 @@ fn clicking_the_font_size_slider_changes_the_live_config() {
     let mut h = harness(&app);
 
     open_settings(&mut h);
-    select_category(&mut h, "Font");
+    select_category(&mut h, "Fonts");
 
-    // The Font section renders the Size slider first; click its track.
+    // The Fonts section renders the Size slider first; click its track.
     h.get_all_by_role(egui::accesskit::Role::Slider)
         .next()
         .expect("Font section must render a size slider")

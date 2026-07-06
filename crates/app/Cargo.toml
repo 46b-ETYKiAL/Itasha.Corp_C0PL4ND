@@ -129,6 +129,12 @@ egui_kittest = { version = "0.34", features = ["wgpu", "snapshot", "eframe"] }
 # dir — so it is available to the round-trip tests without a dev-dep entry.
 minisign = "0.9"
 
+# Proves every BUNDLED font face actually parses with the SAME glyph crate epaint
+# uses (already in the lock graph transitively via epaint), so a bad/variable face
+# can never panic epaint's atlas build when the user selects it. VERIFY-only in a
+# test; the app never imports it directly. Pinned to the version epaint pulls.
+ab_glyph = "=0.2.32"
+
 # Round-trip test for the persisted layout snapshot. eframe serializes its
 # `Storage` values as RON (the format that supports egui_tiles' integer tile-id
 # map keys, which JSON cannot), so the snapshot round-trip test must use the same

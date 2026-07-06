@@ -48,14 +48,57 @@ use update_engine::updater::{LaunchKind, UpdateState, Updater};
 /// [`render_sections`].
 const CATEGORIES: &[&str] = &[
     "Appearance",
-    "Font",
+    "Fonts",
     "Cursor",
     "Terminal",
     "Window",
     "Toolbar",
+    "Motion",
     "Keybindings",
-    "Privacy",
     "Updates",
+    "Privacy",
+];
+
+/// Cross-category search labels for the **Appearance** section. Kept as a named
+/// const so the CRT/scanline/chromatic terms that MOVED to the Motion section are
+/// provably absent here (a stale label would resurrect a phantom empty Appearance
+/// section and hide the moved control from a full-name search).
+const APPEARANCE_SEARCH_LABELS: &[&str] = &[
+    "theme",
+    "transparency",
+    "mode",
+    "opacity",
+    "glass",
+    "mica",
+    "vibrancy",
+    "tint",
+    "acrylic",
+    "ui scale",
+    "zoom",
+    "accessibility",
+];
+
+/// Cross-category search labels for the **Motion** section. Each entry is the
+/// canonical label of exactly one Motion row (see the `row_visible(q, …)` calls),
+/// so any query that reveals the section via a label also reveals its row — no
+/// phantom empty section, and every moved control (CRT scanlines, scanline
+/// darkness, chromatic aberration) is reachable by its full name. Shared with the
+/// `motion_section_is_cross_category_searchable` test so the invariant is checked
+/// against the PRODUCTION labels, not an inline copy.
+const MOTION_SEARCH_LABELS: &[&str] = &[
+    "enable animations",
+    "animation speed",
+    "crt scanlines",
+    "scanline darkness",
+    "chromatic aberration",
+    "wired mesh background",
+    "mesh density",
+    "vhs tracking",
+    "screen flicker",
+    "flicker strength",
+    "cursor trail",
+    "cursor trail intensity",
+    "boot glitch",
 ];
 
 /// The release channels the Updates section offers. Mirrors the channels the
@@ -137,6 +180,11 @@ pub struct Outcome {
     /// The user toggled the Incognito switch this frame, to the contained value.
     /// `None` when unchanged. Runtime-only (not a config field).
     pub set_incognito: Option<bool>,
+    /// The settings window's on-screen rect this frame (`None` if it did not
+    /// render). The host excludes this rect from the whole-window motion overlays
+    /// so a live Motion-setting preview shows on the terminal without the mesh /
+    /// flicker washing over the settings panel itself.
+    pub window_rect: Option<egui::Rect>,
 }
 
 /// Whether a category section should render: its own tab when not searching, or
@@ -632,6 +680,7 @@ pub fn show(
         theme_changed: changed && config.theme != theme_before,
         clear_history,
         set_incognito,
+        window_rect: win_resp.as_ref().map(|r| r.response.rect),
     }
 }
 
@@ -913,30 +962,9 @@ fn render_sections(
     };
 
     // ---------------------------------------------------------------- Appearance
-    if section_visible(
-        sel,
-        q,
-        "Appearance",
-        &[
-            "theme",
-            "transparency",
-            "mode",
-            "opacity",
-            "glass",
-            "mica",
-            "vibrancy",
-            "tint",
-            "acrylic",
-            "scanlines",
-            "scanline darkness",
-            "chromatic aberration",
-            "ui scale",
-            "zoom",
-            "accessibility",
-        ],
-    ) {
+    if section_visible(sel, q, "Appearance", APPEARANCE_SEARCH_LABELS) {
         ui.heading("Appearance");
-        help(ui, "Colors, transparency, and CRT post-effects.");
+        help(ui, "Colors and window transparency.");
         group(ui, "Theme", "The terminal colour palette.");
         grid("appearance_theme").show(ui, |ui| {
             if row_visible(q, "theme color") {
@@ -952,6 +980,31 @@ fn render_sections(
                                     .changed();
                             }
                         });
+                    // Up/down step arrows: cycle through the built-ins without
+                    // opening the dropdown. `delta` wraps around the list; a
+                    // custom (non-built-in) theme name steps onto the first/last
+                    // built-in so the arrows always have a defined landing spot.
+                    let mut step = |delta: isize| {
+                        let n = BUILTIN_THEMES.len() as isize;
+                        let cur = BUILTIN_THEMES.iter().position(|t| *t == config.theme);
+                        let next = match cur {
+                            Some(i) => (i as isize + delta).rem_euclid(n),
+                            None if delta > 0 => 0,
+                            None => n - 1,
+                        };
+                        config.theme = BUILTIN_THEMES[next as usize].to_string();
+                        changed = true;
+                    };
+                    if ui
+                        .small_button("⏶")
+                        .on_hover_text("Previous theme")
+                        .clicked()
+                    {
+                        step(-1);
+                    }
+                    if ui.small_button("⏷").on_hover_text("Next theme").clicked() {
+                        step(1);
+                    }
                 });
                 changed |= reset_to_default(ui, &mut config.theme, &def.theme);
                 ui.end_row();
@@ -1152,98 +1205,6 @@ fn render_sections(
                 ui.end_row();
             }
         });
-
-        group(
-            ui,
-            "CRT effects",
-            "Retro post-processing drawn behind the terminal text.",
-        );
-        grid("appearance_effects").show(ui, |ui| {
-            if row_visible(q, "crt scanlines") {
-                ui.label("CRT scanlines");
-                changed |= ui
-                    .checkbox(&mut config.effects.crt_scanlines, "Animated scan lines")
-                    .on_hover_text(
-                        "Dark scan-line bands with a rolling refresh sweep. \
-                         Auto-disabled under reduced-motion / battery-save.",
-                    )
-                    .changed();
-                changed |= reset_to_default(
-                    ui,
-                    &mut config.effects.crt_scanlines,
-                    &def.effects.crt_scanlines,
-                );
-                ui.end_row();
-            }
-
-            if row_visible(q, "scanline darkness") {
-                ui.label("Scanline darkness");
-                let on = config.effects.crt_scanlines;
-                changed |= ui
-                    .add_enabled(
-                        on,
-                        egui::Slider::new(&mut config.effects.scanline_darkness, 0.0..=1.0)
-                            .text("darkness"),
-                    )
-                    .on_hover_text("How dark the scan-line troughs read. Enable scan lines first.")
-                    .changed();
-                changed |= reset_to_default(
-                    ui,
-                    &mut config.effects.scanline_darkness,
-                    &def.effects.scanline_darkness,
-                );
-                ui.end_row();
-            }
-
-            if row_visible(q, "chromatic aberration") {
-                ui.label("Chromatic aberration");
-                // The checkbox + the intensity slider share ONE grid cell (col 2),
-                // stacked vertically. Keeping them in a single column is what makes
-                // this a 3-column row like every other one: a filling `Slider` in
-                // its OWN (4th) column has no width budget to fill against, so it
-                // ballooned the grid -- and with it the whole window -- past the
-                // close button (the residual "still too wide" overflow). Inside a
-                // bounded col-2 cell the slider fills only the column, exactly like
-                // the Opacity / UI-scale rows.
-                ui.vertical(|ui| {
-                    // Explicit ON/OFF checkbox (issue #28): the intensity slider
-                    // alone read as "broken" when it sat at 0. On first enable,
-                    // default the intensity to a visible value so the effect shows.
-                    let was_enabled = config.effects.chromatic_aberration_enabled;
-                    if ui
-                        .checkbox(
-                            &mut config.effects.chromatic_aberration_enabled,
-                            "RGB split",
-                        )
-                        .on_hover_text("Pure-channel red/blue fringing behind the text.")
-                        .changed()
-                    {
-                        changed = true;
-                        if config.effects.chromatic_aberration_enabled
-                            && !was_enabled
-                            && config.effects.chromatic_aberration <= 0.0
-                        {
-                            config.effects.chromatic_aberration =
-                                c0pl4nd_core::config::DEFAULT_CHROMATIC_INTENSITY;
-                        }
-                    }
-                    let on = config.effects.chromatic_aberration_enabled;
-                    changed |= ui
-                        .add_enabled(
-                            on,
-                            egui::Slider::new(&mut config.effects.chromatic_aberration, 0.1..=1.5)
-                                .text("intensity"),
-                        )
-                        .changed();
-                });
-                changed |= reset_to_default(
-                    ui,
-                    &mut config.effects.chromatic_aberration,
-                    &def.effects.chromatic_aberration,
-                );
-                ui.end_row();
-            }
-        });
         group_gap(ui);
     }
 
@@ -1251,10 +1212,17 @@ fn render_sections(
     if section_visible(
         sel,
         q,
-        "Font",
-        &["family", "size", "line height", "ligatures", "fallback"],
+        "Fonts",
+        &[
+            "font",
+            "family",
+            "size",
+            "line height",
+            "ligatures",
+            "fallback",
+        ],
     ) {
-        ui.heading("Font");
+        ui.heading("Fonts");
         help(ui, "Typeface, size, and text shaping.");
         grid("font_grid").show(ui, |ui| {
             if row_visible(q, "family typeface") {
@@ -1755,6 +1723,326 @@ fn render_sections(
         ],
     ) {
         changed |= toolbar_settings_section(ui, config);
+        group_gap(ui);
+    }
+
+    // ---------------------------------------------------------------------- Motion
+    if section_visible(sel, q, "Motion", MOTION_SEARCH_LABELS) {
+        ui.heading("Motion");
+        help(
+            ui,
+            "Interface animation and retro CRT post-effects. Turn the master \
+             switch off for a fully static UI; every effect below is gated behind \
+             it and off by default.",
+        );
+        grid("motion_grid").show(ui, |ui| {
+            if row_visible(q, "enable animations") {
+                ui.label("Animations");
+                changed |= ui
+                    .checkbox(&mut config.effects.animations_enabled, "Enable animations")
+                    .on_hover_text(
+                        "Master switch. When off, transitions are instant (no fades) \
+                         and every motion effect below is suppressed — idle frames \
+                         cost the same as plain egui.",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.animations_enabled,
+                    &def.effects.animations_enabled,
+                );
+                ui.end_row();
+            }
+
+            let on = config.effects.animations_enabled;
+
+            if row_visible(q, "animation speed") {
+                ui.label("Animation speed").on_hover_text(
+                    "Scale the motion-effect speed. 0 freezes every transition; 1 is \
+                     the shipped feel; up to 2 runs the drift effects (mesh / VHS / \
+                     flicker) at double-rate. Above 1 only speeds the effects — the \
+                     UI fades stay snappy.",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on,
+                        egui::Slider::new(&mut config.effects.animation_intensity, 0.0..=2.0),
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.animation_intensity,
+                    &def.effects.animation_intensity,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "crt scanlines") {
+                ui.label("CRT scanlines");
+                changed |= ui
+                    .add_enabled(
+                        on,
+                        egui::Checkbox::new(
+                            &mut config.effects.crt_scanlines,
+                            "Animated scan lines",
+                        ),
+                    )
+                    .on_hover_text(
+                        "Dark scan-line bands drifting slowly down the panes for a \
+                         calm retro CRT look. Auto-disabled under reduced-motion.",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.crt_scanlines,
+                    &def.effects.crt_scanlines,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "scanline darkness") {
+                ui.label("Scanline darkness");
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.crt_scanlines,
+                        egui::Slider::new(&mut config.effects.scanline_darkness, 0.0..=1.0)
+                            .text("darkness"),
+                    )
+                    .on_hover_text("How dark the scan-line troughs read. Enable scan lines first.")
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.scanline_darkness,
+                    &def.effects.scanline_darkness,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "chromatic aberration") {
+                ui.label("Chromatic aberration");
+                // The checkbox + the intensity slider share ONE grid cell (col 2),
+                // stacked vertically, so this stays a 3-column row like every other
+                // one (a filling `Slider` in its own 4th column has no width budget
+                // and balloons the grid past the close button).
+                ui.vertical(|ui| {
+                    // Explicit ON/OFF checkbox: the intensity slider alone read as
+                    // "broken" when it sat at 0. On first enable, default the
+                    // intensity to a visible value so the effect shows.
+                    let was_enabled = config.effects.chromatic_aberration_enabled;
+                    if ui
+                        .add_enabled(
+                            on,
+                            egui::Checkbox::new(
+                                &mut config.effects.chromatic_aberration_enabled,
+                                "RGB split",
+                            ),
+                        )
+                        .on_hover_text("Pure-channel red/blue fringing behind the text.")
+                        .changed()
+                    {
+                        changed = true;
+                        if config.effects.chromatic_aberration_enabled
+                            && !was_enabled
+                            && config.effects.chromatic_aberration <= 0.0
+                        {
+                            config.effects.chromatic_aberration =
+                                c0pl4nd_core::config::DEFAULT_CHROMATIC_INTENSITY;
+                        }
+                    }
+                    let ca_on = on && config.effects.chromatic_aberration_enabled;
+                    changed |= ui
+                        .add_enabled(
+                            ca_on,
+                            egui::Slider::new(&mut config.effects.chromatic_aberration, 0.1..=1.5)
+                                .text("intensity"),
+                        )
+                        .changed();
+                });
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.chromatic_aberration,
+                    &def.effects.chromatic_aberration,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "wired mesh background") {
+                ui.label("Wired mesh");
+                changed |= ui
+                    .add_enabled(
+                        on,
+                        egui::Checkbox::new(
+                            &mut config.effects.wired_ambient,
+                            "Node-mesh background",
+                        ),
+                    )
+                    .on_hover_text(
+                        "An animated node-mesh ambient background drawn BEHIND the \
+                         panes (a calm \"Wired\" field). Shows through when the window \
+                         uses a translucent mode; hidden behind fully-opaque panes.",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.wired_ambient,
+                    &def.effects.wired_ambient,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "mesh density") {
+                ui.label("Mesh density");
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.wired_ambient,
+                        egui::Slider::new(&mut config.effects.mesh_density, 0.0..=2.0)
+                            .text("density"),
+                    )
+                    .on_hover_text(
+                        "How many nodes the wired-mesh background draws (sparse to dense).",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.mesh_density,
+                    &def.effects.mesh_density,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "mesh brightness") {
+                ui.label("Mesh brightness");
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.wired_ambient,
+                        egui::Slider::new(&mut config.effects.mesh_brightness, 0.0..=3.0)
+                            .text("brightness"),
+                    )
+                    .on_hover_text(
+                        "How bright the wired-mesh lattice reads — dim it toward \
+                         invisible or brighten it to clearly pop. 1 is the default.",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.mesh_brightness,
+                    &def.effects.mesh_brightness,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "vhs tracking") {
+                ui.label("VHS tracking");
+                changed |= ui
+                    .add_enabled(
+                        on,
+                        egui::Checkbox::new(&mut config.effects.vhs_tracking, "Tracking lines"),
+                    )
+                    .on_hover_text(
+                        "Faint bright bands sweep down the window like analogue tape \
+                         tracking error.",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.vhs_tracking,
+                    &def.effects.vhs_tracking,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "screen flicker") {
+                ui.label("Screen flicker");
+                changed |= ui
+                    .add_enabled(
+                        on,
+                        egui::Checkbox::new(&mut config.effects.flicker, "Brightness flicker"),
+                    )
+                    .on_hover_text("Subtle CRT-style brightness flicker over the whole window.")
+                    .changed();
+                changed |= reset_to_default(ui, &mut config.effects.flicker, &def.effects.flicker);
+                ui.end_row();
+            }
+
+            if row_visible(q, "flicker strength") {
+                ui.label("Flicker strength");
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.flicker,
+                        egui::Slider::new(&mut config.effects.flicker_strength, 0.0..=1.0)
+                            .text("strength"),
+                    )
+                    .on_hover_text(
+                        "How strong the screen flicker is. Even at max the wash stays \
+                         short of a full-black strobe (comfort guard).",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.flicker_strength,
+                    &def.effects.flicker_strength,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "cursor trail") {
+                ui.label("Cursor trail");
+                changed |= ui
+                    .add_enabled(
+                        on,
+                        egui::Checkbox::new(&mut config.effects.cursor_trail, "Ghost-trail"),
+                    )
+                    .on_hover_text("A fading echo follows the focused terminal cursor as it moves.")
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.cursor_trail,
+                    &def.effects.cursor_trail,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "cursor trail intensity") {
+                ui.label("Cursor-trail intensity");
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.cursor_trail,
+                        egui::Slider::new(&mut config.effects.cursor_trail_intensity, 0.0..=2.0)
+                            .text("intensity"),
+                    )
+                    .on_hover_text(
+                        "How bold and long the cursor ghost-trail is — from a faint \
+                         flick to a pronounced comet tail. Up to 2 for a long, \
+                         unmistakable tail.",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.cursor_trail_intensity,
+                    &def.effects.cursor_trail_intensity,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "boot glitch") {
+                ui.label("Boot glitch");
+                changed |= ui
+                    .add_enabled(
+                        on,
+                        egui::Checkbox::new(&mut config.effects.boot_glitch, "Startup sweep"),
+                    )
+                    .on_hover_text(
+                        "A one-shot glitch sweep plays for a moment when the app launches.",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.boot_glitch,
+                    &def.effects.boot_glitch,
+                );
+                ui.end_row();
+            }
+        });
         group_gap(ui);
     }
 
@@ -2407,6 +2695,54 @@ mod tests {
             CATEGORIES.contains(&"Updates"),
             "Updates must be a left-nav category so its rows are reachable"
         );
+    }
+
+    #[test]
+    fn motion_and_fonts_are_navigable_categories() {
+        // The renamed "Fonts" tab and the new "Motion" tab (which now owns the
+        // CRT / chromatic / animation controls) must both be reachable from the
+        // left nav; the old "Font" name must be gone.
+        assert!(
+            CATEGORIES.contains(&"Motion"),
+            "Motion must be a left-nav category so its effect rows are reachable"
+        );
+        assert!(
+            CATEGORIES.contains(&"Fonts"),
+            "the Font section was renamed to Fonts for SCR1B3 parity"
+        );
+        assert!(
+            !CATEGORIES.contains(&"Font"),
+            "the old singular 'Font' category name must not linger"
+        );
+    }
+
+    #[test]
+    fn motion_section_is_cross_category_searchable() {
+        // The controls that MOVED from Appearance to Motion must be reachable by
+        // their FULL names from any tab via the PRODUCTION label set — and must no
+        // longer resolve to Appearance (whose stale CRT labels were removed). This
+        // asserts against the real `MOTION_SEARCH_LABELS`/`APPEARANCE_SEARCH_LABELS`
+        // consts, so it would fail if a moved label were dropped or left behind.
+        for term in [
+            "crt scanlines",
+            "scanline darkness",
+            "chromatic aberration",
+            "cursor trail",
+        ] {
+            assert!(
+                section_visible("Appearance", term, "Motion", MOTION_SEARCH_LABELS),
+                "'{term}' must reveal the Motion section that now owns it"
+            );
+            assert!(
+                !section_visible("Motion", term, "Appearance", APPEARANCE_SEARCH_LABELS),
+                "'{term}' must NOT resurrect a phantom empty Appearance section"
+            );
+        }
+        // Every Motion search label must correspond to a Motion row (its canonical
+        // `row_visible` label), so a query can never reveal the section with no
+        // matching row. The row labels ARE the search labels by construction.
+        assert!(MOTION_SEARCH_LABELS.contains(&"chromatic aberration"));
+        assert!(MOTION_SEARCH_LABELS.contains(&"cursor trail"));
     }
 
     #[test]

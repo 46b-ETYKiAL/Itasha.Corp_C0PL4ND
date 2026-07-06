@@ -128,6 +128,85 @@ page.
   last few lines of that pane's output in a small popup, so you can tell inactive
   panes apart without clicking into each one.
 
+### Added — motion & visual effects (SCR1B3 parity)
+
+- **A new "Motion" settings category** collects every animation and retro
+  post-effect in one place, mirroring the SCR1B3 editor: a master **"Enable
+  animations"** switch (turn it off for a fully static UI) with an animation-speed
+  slider, plus the CRT scanlines and chromatic-aberration controls (moved here
+  from Appearance) and the new effects below. Everything is gated behind the
+  master switch and off by default, so the shipped look is unchanged until you opt
+  in.
+- **New optional CRT/ambient effects ported from SCR1B3:** a subtle screen
+  **flicker**, **VHS tracking lines** that sweep down the window, an animated
+  **wired node-mesh** ambient background (with a density slider), a **cursor
+  ghost-trail** that echoes the terminal cursor as it moves, and a one-shot
+  **boot-glitch** sweep on launch. All are GPU-free, honor reduced-motion, and are
+  off by default.
+
+### Changed — window controls & settings organization
+
+- **Window buttons now light up on hover like SCR1B3's.** The minimize and
+  maximize/restore buttons brighten on hover and the close button turns
+  Windows-standard red with a white ✕, so C0PL4ND and SCR1B3 share one
+  window-control language. The resting look is unchanged (flat, translucent).
+- **Settings categories match SCR1B3's order and naming.** "Font" is now "Fonts",
+  the new "Motion" category sits between Toolbar and Keybindings, and Updates now
+  comes before Privacy — so the two apps' Settings read the same way.
+
+### Added — bundled fonts (SCR1B3 parity)
+
+- **C0PL4ND now ships SCR1B3's full font set** — the monospace faces
+  (JetBrains Mono, Fira Mono, IBM Plex Mono, Source Code Pro, Space Mono, and more)
+  plus the lore/influence-inspired display faces (Michroma, Syncopate, Wallpoet,
+  Zen Dots, Chakra Petch, Rajdhani, Teko, Major Mono Display, Doto, Saira) and a
+  Japanese fallback. Every face is bundled (all-OFL/open-license) and picks in
+  Settings → Fonts → Family regardless of what's installed on the machine, so both
+  apps offer the same typography.
+
+### Changed — visual-effect polish
+
+- **CRT scanlines now read as SCR1B3's clean drifting lines** rather than a shifting
+  shadow-film — the dark bands were thinned so distinct lines slide down the pane.
+- **The animation-speed slider now visibly governs every motion effect.** It scales
+  the drift clock of the scanlines, wired mesh, VHS tracking, and flicker (from
+  frozen at 0 to full speed at 1); the cursor trail and boot sweep keep their
+  event-anchored timing.
+- **The wired node-mesh is now actually visible** on every pane (it previously hid
+  behind opaque pane backgrounds), and raising the density visibly thickens the web.
+- **The cursor ghost-trail is bolder and gains an intensity slider** — tune it from
+  a faint flick to a pronounced comet tail (Motion → Cursor-trail intensity).
+- **Tab step-arrows light up on hover** and the tab strip's horizontal scrollbar is
+  hidden (the ‹ › arrows handle overflow), and the right-side top-bar buttons now
+  sit at a uniform spacing so no pair looks squished.
+
+### Changed — motion range & live preview
+
+- **The motion sliders now reach much further.** Animation speed goes up to 2×
+  (above 1× only accelerates the drift effects — the UI fades stay snappy), the
+  screen flicker and node-mesh density each run their full range, and the
+  cursor-trail intensity extends to a long, unmistakable comet tail. The shipped
+  defaults are unchanged.
+- **Motion effects now preview live while Settings is open.** The flicker, VHS
+  lines, wired mesh, and cursor trail used to switch off entirely whenever a
+  centered panel (Settings, command palette, paste confirm) was open — so tuning a
+  Motion slider looked like it did nothing until you closed Settings. They now
+  paint everywhere *except* the open panel, so you see the effect change on the
+  terminal in real time while the panel itself stays clean.
+
+### Added — appearance controls
+
+- **Node-mesh brightness slider (Motion).** A new brightness control sits next to
+  the mesh density: dim the wired lattice toward invisible or brighten it so it
+  clearly pops, independent of how many nodes it draws.
+- **The app logo now tints with the theme.** The "4ND" half of the two-tone
+  C0PL4ND wordmark follows the active theme's accent (the "C0PL" half stays the
+  fixed brand purple), so the top-bar logo picks up the palette you pick. On a
+  theme without an accent it keeps the original brand green.
+- **Theme up/down step arrows.** Small ⏶/⏷ buttons next to the theme picker step
+  through the built-in themes without opening the dropdown — the same quick-step
+  pattern as the tab arrows.
+
 ## [0.4.13] - 2026-06-30
 
 ### Added — macOS and ARM64 builds

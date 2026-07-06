@@ -122,16 +122,6 @@ fn script_menu_label(cmd: &str) -> String {
     cmd.to_string()
 }
 
-/// The horizontal slot width (logical px) a customizable toolbar action occupies
-/// in the right cluster. The two menu actions carry a `▾` (and, for scripts, a
-/// wider glyph), so they need more room than the single-glyph toggle buttons.
-fn toolbar_item_width(id: &str) -> f32 {
-    match id {
-        "shell_switcher" | "script_launcher" => 52.0,
-        _ => 32.0,
-    }
-}
-
 /// The last `n` non-blank lines of `text`, joined with '\n' — the tail of a
 /// pane's visible terminal grid for the tab hover preview (#15). Trailing blank
 /// rows (the unused bottom of the grid) are dropped first so the preview shows
@@ -150,8 +140,10 @@ impl C0pl4ndApp {
     /// Paint the titlebar (wordmark + tab strip + caption controls). Returns the
     /// actions the host should apply this frame. `colors` carries the
     /// theme-derived chrome palette so the tab text / caption glyphs / accents
-    /// follow the active terminal theme (the two-tone C0PL4ND wordmark keeps its
-    /// fixed brand accent — the brand identity).
+    /// follow the active terminal theme. The two-tone C0PL4ND wordmark keeps its
+    /// fixed purple structural anchor ("C0PL" — the recognizable brand identity)
+    /// while its "4ND" live tone tints with the theme accent, so the logo picks
+    /// up the active palette without losing the brand's two-tone signature.
     pub(super) fn titlebar_and_tabs(
         &self,
         ui: &mut egui::Ui,
@@ -169,8 +161,12 @@ impl C0pl4ndApp {
                 font_id: egui::FontId::proportional(16.0),
                 ..Default::default()
             };
+            // "C0PL" = fixed purple structural anchor (constant brand identity);
+            // "4ND" = the theme's live accent, so the wordmark tints with the
+            // active terminal theme. On a theme that omits a selection colour the
+            // accent falls back to brand green — the original two-tone look.
             job.append("C0PL", 0.0, fmt(brand::PURPLE));
-            job.append("4ND", 0.0, fmt(brand::GREEN));
+            job.append("4ND", 0.0, fmt(colors.accent));
             // `.selectable(false)` is load-bearing: egui labels are text-selectable
             // by default (`style.interaction.selectable_labels`), so a drag on the
             // wordmark began a TEXT SELECTION (the reported "it highlights the app
@@ -239,30 +235,68 @@ impl C0pl4ndApp {
                 .and_then(|i| tabs.get(i - 1))
                 .map(|(p, _)| *p);
             let next_target = cur.and_then(|i| tabs.get(i + 1)).map(|(p, _)| *p);
+            // A tab step-arrow ‹ / › that speaks the SAME hover language as the
+            // caption cluster (the reference treatment below): the chevron rests at
+            // a mid-tone — brighter than the old flat `muted`, which read as
+            // barely-there — and brightens to `colors.fg` under the pointer, while
+            // the flatten_chrome_buttons veil fills the frame on hover (so it is
+            // obviously interactive). A DISABLED arrow (no prev/next tab) stays a
+            // dim, frameless, inert chevron. The rect is pre-computed from the flow
+            // cursor so `rect_contains_pointer` can recolour the glyph BEFORE the
+            // `Button` paints — exactly as the caption loop does — which a plain
+            // flow `Button` cannot (its text colour is fixed at construction).
+            // Returns whether the (enabled) arrow was clicked this frame.
+            let step_arrow =
+                move |ui: &mut egui::Ui, glyph: &str, enabled: bool, hover: &str| -> bool {
+                    let row = ui.max_rect();
+                    let (w, h) = (22.0_f32, 26.0_f32);
+                    let x0 = ui.cursor().min.x;
+                    let cy = row.center().y;
+                    let rect = egui::Rect::from_min_max(
+                        egui::pos2(x0, cy - h / 2.0),
+                        egui::pos2(x0 + w, cy + h / 2.0),
+                    );
+                    if !enabled {
+                        ui.put(
+                            rect,
+                            egui::Button::new(RichText::new(glyph).size(15.0).color(colors.muted))
+                                .frame(false),
+                        );
+                        return false;
+                    }
+                    let hovered = ui.rect_contains_pointer(rect);
+                    let glyph_col = if hovered {
+                        colors.fg
+                    } else {
+                        // Resting tone: `muted` is 0.55 toward bg; 0.35 keeps the arrow
+                        // clearly present without competing with the focused tab.
+                        colors.fg.lerp_to_gamma(colors.bg, 0.35)
+                    };
+                    ui.put(
+                        rect,
+                        egui::Button::new(RichText::new(glyph).size(15.0).color(glyph_col)),
+                    )
+                    .on_hover_text(hover)
+                    .clicked()
+                };
             // LEFT chevron — only when the strip overflowed last frame; disabled at
             // the first tab.
-            if show_left_arrow {
-                let left = ui
-                    .add_enabled(
-                        prev_target.is_some(),
-                        egui::Button::new(
-                            RichText::new(icon::CARET_LEFT)
-                                .size(14.0)
-                                .color(colors.muted),
-                        )
-                        .frame(false),
-                    )
-                    .on_hover_text("previous tab");
-                if left.clicked() {
-                    actions.focus_tab = prev_target;
-                    ui.ctx().data_mut(|d| d.insert_temp(follow_id, true));
-                }
+            if show_left_arrow
+                && step_arrow(ui, icon::CARET_LEFT, prev_target.is_some(), "previous tab")
+            {
+                actions.focus_tab = prev_target;
+                ui.ctx().data_mut(|d| d.insert_temp(follow_id, true));
             }
             let tabs_max_w = tab_strip_max_width(ui.available_width());
             let strip_out = egui::ScrollArea::horizontal()
                 .id_salt("tab_strip")
                 .max_width(tabs_max_w)
                 .auto_shrink([true, false])
+                // The ‹ › step-arrows (above/below) now own overflow navigation, so
+                // the thin horizontal scrollbar is pure visual noise in the top bar.
+                // Hide it entirely — `scroll_to_me` (arrow-driven scroll-into-view)
+                // works independently of the bar's visibility.
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     for (pane_id, title) in tabs {
                         let selected = pane_id == self.focused_pane;
@@ -387,22 +421,9 @@ impl C0pl4ndApp {
             let overflowing = strip_out.content_size.x > strip_out.inner_rect.width() + 0.5;
             ui.ctx()
                 .data_mut(|d| d.insert_temp(overflow_id, overflowing));
-            if overflowing {
-                let right = ui
-                    .add_enabled(
-                        next_target.is_some(),
-                        egui::Button::new(
-                            RichText::new(icon::CARET_RIGHT)
-                                .size(14.0)
-                                .color(colors.muted),
-                        )
-                        .frame(false),
-                    )
-                    .on_hover_text("next tab");
-                if right.clicked() {
-                    actions.focus_tab = next_target;
-                    ui.ctx().data_mut(|d| d.insert_temp(follow_id, true));
-                }
+            if overflowing && step_arrow(ui, icon::CARET_RIGHT, next_target.is_some(), "next tab") {
+                actions.focus_tab = next_target;
+                ui.ctx().data_mut(|d| d.insert_temp(follow_id, true));
             }
 
             // Single "+" new-terminal button: opens a new pane and lets the host
@@ -461,29 +482,62 @@ impl C0pl4ndApp {
             } else {
                 (icon::SQUARE, "maximize")
             };
-            let specs: [(&str, &str, super::WindowCmd, bool); 4] = [
-                (icon::X, "close", super::WindowCmd::Close, false),
+            // 5th field = `is_close`: only the ✕ takes the Windows close-red hover
+            // treatment. It's a distinct flag (not `cmd == Close`) because the gear
+            // ALSO carries `WindowCmd::Close` as a placeholder — keying on the cmd
+            // would paint the settings button red too.
+            let specs: [(&str, &str, super::WindowCmd, bool, bool); 4] = [
+                (icon::X, "close", super::WindowCmd::Close, false, true),
                 (
                     max_glyph,
                     max_hover,
                     super::WindowCmd::ToggleMaximize,
                     false,
+                    false,
                 ),
-                (icon::MINUS, "minimize", super::WindowCmd::Minimize, false),
-                (icon::GEAR, "settings", super::WindowCmd::Close, true), // gear → settings
+                (
+                    icon::MINUS,
+                    "minimize",
+                    super::WindowCmd::Minimize,
+                    false,
+                    false,
+                ),
+                (icon::GEAR, "settings", super::WindowCmd::Close, true, false), // gear → settings
             ];
             let mut right_x = right_edge;
-            for (glyph, hover, cmd, is_gear) in specs {
+            for (glyph, hover, cmd, is_gear, is_close) in specs {
                 let rect = egui::Rect::from_min_max(
                     egui::pos2(right_x - bw, cy - bh / 2.0),
                     egui::pos2(right_x, cy + bh / 2.0),
                 );
-                let resp = ui
-                    .put(
-                        rect,
-                        egui::Button::new(RichText::new(glyph).size(16.0).color(colors.muted)),
-                    )
-                    .on_hover_text(hover);
+                // Hover treatment ported from SCR1B3's caption cluster so the two
+                // apps share one window-control language: on hover the min / max /
+                // restore / settings glyph brightens to the light foreground over
+                // the flat veil `flatten_chrome_buttons` already paints, while the
+                // CLOSE button fills Windows-standard close-red (#E81123) with a
+                // white glyph. Pre-checking `rect_contains_pointer` lets us style the
+                // `Button` BEFORE it paints — the fill is set ONLY on the hovered
+                // frame, so the resting state stays flat/translucent (no always-on
+                // opaque chip is reintroduced through the bar wash). Close-red is
+                // theme-independent by design (Windows convention in both themes).
+                let hovered = ui.rect_contains_pointer(rect);
+                let glyph_col = if hovered {
+                    if is_close {
+                        egui::Color32::WHITE
+                    } else {
+                        colors.fg
+                    }
+                } else {
+                    colors.muted
+                };
+                let mut button =
+                    egui::Button::new(RichText::new(glyph).size(16.0).color(glyph_col));
+                if hovered && is_close {
+                    // Overrides the flat veil `flatten_chrome_buttons` set on
+                    // `widgets.hovered` (Button::fill wins over `weak_bg_fill`).
+                    button = button.fill(egui::Color32::from_rgb(0xE8, 0x11, 0x23));
+                }
+                let resp = ui.put(rect, button).on_hover_text(hover);
                 // Accessible label (for screen readers AND the `get_by_label`
                 // interaction tests) — the visible content is a glyph, so the
                 // semantic name must be set explicitly.
@@ -512,12 +566,16 @@ impl C0pl4ndApp {
     /// Render the user-configurable quick-action cluster (`config.toolbar.right`)
     /// pinned to the right of the titlebar, laid out RIGHT-TO-LEFT starting at
     /// `right_x` (the settings gear's left edge) so `right.last()` sits nearest the
-    /// gear. Each item is absolute-placed in its own child ui (via `scope_builder`)
-    /// for the same reason the caption cluster is — the non-justified row cannot
-    /// right-align in flow. An unknown id, or an item whose action is not currently
-    /// applicable (e.g. `equalize_panes` outside grid view), is skipped and takes
-    /// no slot. When `menu` is non-empty and `show_overflow` is on, an overflow
-    /// "⋯" button is placed at the LEFT end (farthest from the gear).
+    /// gear. Every item shares ONE right-anchored child ui (a single `scope_builder`
+    /// with a `right_to_left` layout) for the same reason the caption cluster is
+    /// absolute-placed — the non-justified row cannot right-align in flow — but a
+    /// single uniform `item_spacing.x` now gives every button the SAME inter-button
+    /// gap regardless of its content width (previously each item sat in its own
+    /// fixed-width slot, which visually pinched the single-glyph toggles). An unknown
+    /// id, or an item whose action is not currently applicable (e.g. `equalize_panes`
+    /// outside grid view), is skipped and takes no slot. When `menu` is non-empty and
+    /// `show_overflow` is on, an overflow "⋯" button is placed at the LEFT end
+    /// (farthest from the gear).
     fn render_toolbar_cluster(
         &self,
         ui: &mut egui::Ui,
@@ -527,43 +585,67 @@ impl C0pl4ndApp {
         actions: &mut ChromeActions,
         colors: ChromeColors,
     ) {
-        let mut cx = right_x;
-        // right.last() nearest the gear → iterate in reverse, sweeping leftward.
-        for id in self.config.toolbar.right.iter().rev() {
-            if !self.toolbar_action_applicable(id) {
-                continue;
-            }
-            let w = toolbar_item_width(id);
-            let rect = egui::Rect::from_min_max(
-                egui::pos2(cx - w, cy - bh / 2.0),
-                egui::pos2(cx, cy + bh / 2.0),
-            );
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(rect)
-                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
-                |ui| self.render_toolbar_item(ui, id, actions, colors),
-            );
-            cx -= w + 2.0;
-        }
-        // Overflow "⋯" menu at the left end of the cluster (parked actions).
-        if self.config.toolbar.show_overflow
+        // One UNIFORM inter-button gap for the whole cluster. Previously each item
+        // sat in its own fixed-width slot (32 px toggles / 52 px menus) with the
+        // button right-anchored inside, so the single-glyph toggles (view-toggle +
+        // equalize) ended up visually pinched while the wider ▾ menu buttons had
+        // roomier gaps — the reported "squished split/layout pair". Laying every
+        // item out in ONE right-anchored flow with a single `item_spacing.x` makes
+        // the gap identical regardless of a button's content width.
+        const RIGHT_CLUSTER_GAP: f32 = 6.0;
+        let show_overflow = self.config.toolbar.show_overflow
             && self
                 .config
                 .toolbar
                 .menu
                 .iter()
-                .any(|id| self.toolbar_action_applicable(id))
-        {
-            let w = 32.0_f32;
-            let rect = egui::Rect::from_min_max(
-                egui::pos2(cx - w, cy - bh / 2.0),
+                .any(|id| self.toolbar_action_applicable(id));
+        let any_item = show_overflow
+            || self
+                .config
+                .toolbar
+                .right
+                .iter()
+                .any(|id| self.toolbar_action_applicable(id));
+        if !any_item {
+            return;
+        }
+        // Every item gets an IDENTICAL fixed slot and its button is centered-and-
+        // justified to FILL that slot, so the whole right cluster is a row of
+        // uniform-pitch icon buttons with a constant gap between each. There is no
+        // per-glyph width measurement to get wrong: the previous measured-slot
+        // attempt mis-sized the phosphor menu glyphs, so the shell / script buttons
+        // overflowed their slots and collided. A uniform slot + a uniform gap is
+        // overlap-proof by construction (each button is exactly `SLOT_W` wide, and
+        // the next slot starts a full `SLOT_W + RIGHT_CLUSTER_GAP` to the left).
+        const SLOT_W: f32 = 30.0;
+        let slot_at = |cx: f32| {
+            egui::Rect::from_min_max(
+                egui::pos2(cx - SLOT_W, cy - bh / 2.0),
                 egui::pos2(cx, cy + bh / 2.0),
-            );
+            )
+        };
+        let slot_layout = egui::Layout::centered_and_justified(egui::Direction::LeftToRight);
+        let mut cx = right_x;
+        // right.last() sits nearest the gear, so iterate `.rev()` and march left.
+        for id in self.config.toolbar.right.iter().rev() {
+            if !self.toolbar_action_applicable(id) {
+                continue;
+            }
             ui.scope_builder(
                 egui::UiBuilder::new()
-                    .max_rect(rect)
-                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                    .max_rect(slot_at(cx))
+                    .layout(slot_layout),
+                |ui| self.render_toolbar_item(ui, id, actions, colors),
+            );
+            cx -= SLOT_W + RIGHT_CLUSTER_GAP;
+        }
+        // Overflow "⋯" lands at the LEFT end of the cluster (farthest from the gear).
+        if show_overflow {
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(slot_at(cx))
+                    .layout(slot_layout),
                 |ui| self.render_toolbar_overflow(ui, actions, colors),
             );
         }
@@ -631,8 +713,14 @@ impl C0pl4ndApp {
                 }
             }
             "shell_switcher" => {
+                // Single-glyph icon (no "▾"), size + colour matched to the toggle
+                // buttons, so every right-cluster item is a uniform icon button (the
+                // wider "▾" label is what overflowed the slot and collided). The
+                // menu still opens on click; the tooltip conveys the affordance.
                 let menu = ui.menu_button(
-                    RichText::new(format!("{} ▾", icon::TERMINAL_WINDOW)).size(13.0),
+                    RichText::new(icon::TERMINAL_WINDOW)
+                        .size(16.0)
+                        .color(colors.muted),
                     |ui| self.toolbar_shell_menu(ui, actions),
                 );
                 menu.response.widget_info(|| {
@@ -643,7 +731,7 @@ impl C0pl4ndApp {
             }
             "script_launcher" => {
                 let scripts = ui.menu_button(
-                    RichText::new(format!("{} ▾", icon::SCROLL)).size(13.0),
+                    RichText::new(icon::SCROLL).size(16.0).color(colors.muted),
                     |ui| self.toolbar_script_menu(ui, actions),
                 );
                 scripts.response.widget_info(|| {

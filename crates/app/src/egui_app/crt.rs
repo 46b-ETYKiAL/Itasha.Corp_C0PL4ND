@@ -24,10 +24,12 @@
 /// resolvable at any scale factor. ~3 physical px = a believable tube pitch.
 pub(crate) const CRT_SCANLINE_PERIOD_PHYS_PX: f32 = 3.0;
 /// Fraction of each period painted as the DARK band (the rest is the lit gap).
-/// Real CRT shaders darken the *trough region* by ~40-70%, not a 1px sliver —
-/// a wide band is what reads as a line. 0.66 = a 2-px-dark / 1-px-lit feel at a
-/// 3-physical-px period.
-pub(crate) const CRT_SCANLINE_DUTY: f32 = 0.66;
+/// SCR1B3 parity (issue: "the scan lines don't move nice compared to Scribe"):
+/// a THIN dark line on a lit gap (≈1/3 duty) reads as distinct lines sweeping
+/// down, whereas the old 0.66 (2-dark / 1-lit) painted a mostly-dark field whose
+/// drift looked like a shifting shadow-film rather than moving lines. 0.34 = a
+/// ~1-px-dark / 2-px-lit feel at a 3-physical-px period — SCR1B3's clean shimmer.
+pub(crate) const CRT_SCANLINE_DUTY: f32 = 0.34;
 /// The dark-band alpha (0..=255) at the maximum configured darkness (1.0). The
 /// effective alpha is `scanline_darkness * THIS` so the config slider tunes
 /// trough darkness. The default darkness (0.4) lands at alpha 96 (~38% darken)

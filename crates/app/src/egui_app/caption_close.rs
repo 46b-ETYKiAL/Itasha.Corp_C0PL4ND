@@ -45,8 +45,12 @@ pub(crate) fn set_main_hwnd(hwnd: isize) {
     imp::set_main_hwnd(hwnd);
 }
 
-/// No-op on non-Windows platforms.
+/// No-op on non-Windows platforms. The sole caller (in `mod.rs`) is itself
+/// `#[cfg(windows)]`-gated because it reads the Win32 raw window handle, so this
+/// stub is never called off-Windows — `allow(dead_code)` keeps the symmetric
+/// no-op API surface without tripping the `-D warnings` CI build.
 #[cfg(not(windows))]
+#[allow(dead_code)]
 pub(crate) fn set_main_hwnd(_hwnd: isize) {}
 
 /// Clear the residual `WS_SYSMENU` bit so DWM stops drawing the native close

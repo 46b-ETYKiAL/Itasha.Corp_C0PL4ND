@@ -24,12 +24,14 @@ pub mod grid;
 pub mod hyperlink;
 pub mod job_object;
 mod layout_state;
+mod motion_fx;
 pub mod pane_term;
 mod search_ui;
 mod settings;
 pub mod shells;
 mod theme;
 pub(crate) use crt::*;
+pub(crate) use motion_fx::*;
 mod grid_interaction;
 pub(crate) use grid_interaction::*;
 mod config_load;
@@ -139,6 +141,13 @@ pub struct C0pl4ndApp {
     pub(crate) applied_ui_scale: f32,
     /// Whether the settings window is open.
     pub(crate) settings_open: bool,
+    /// The union bounding rect of whichever centered chrome panels (Settings
+    /// window, command palette, multi-line-paste confirm) are open THIS frame,
+    /// captured as each draws (before the whole-window motion-overlay block runs).
+    /// The overlays paint AROUND this rect so a Motion setting previews live on the
+    /// terminal WHILE the panel stays clean (no mesh/flicker washing over it).
+    /// Reset to `None` each frame before the panels draw. `None` = no panel open.
+    pub(crate) overlay_exclude_rect: Option<egui::Rect>,
     /// Recently-run commands, surfaced by the command palette for quick
     /// find/run. Captured best-effort from typed input (committed on Enter).
     pub(crate) cmd_history: c0pl4nd_core::command_history::CommandHistory,
@@ -260,6 +269,17 @@ pub struct C0pl4ndApp {
     /// shrink by hand. `None` until the first un-maximized frame — the restore
     /// then falls back to the first-run default size.
     pub(crate) restore_size: Option<egui::Vec2>,
+    /// Fading echoes of the focused terminal cursor's recent cell rects (screen
+    /// coords) + their birth-times, feeding the optional cursor ghost-trail
+    /// motion overlay ([`paint_cursor_trail`]). Bounded to a few dozen entries;
+    /// pruned each frame once an echo outlives its fade. Empty (and unused) when
+    /// the `cursor_trail` effect is off — never persisted.
+    pub(crate) cursor_trail: std::collections::VecDeque<(egui::Rect, f64)>,
+    /// The egui clock time (seconds) of the first rendered frame, captured once
+    /// so the one-shot boot-glitch overlay measures its sweep from the first
+    /// frame the user actually sees — not from context creation (which may
+    /// predate the window by the atlas-warmup cost, hiding the sweep entirely).
+    pub(crate) first_frame_time: Option<f64>,
     /// True on the first frame the Settings window opens (a closed→open edge),
     /// so `settings::show` FORCES the window to its saved-or-centered position
     /// that frame instead of trusting egui's `default_pos` (which read a
@@ -574,6 +594,7 @@ impl C0pl4ndApp {
             applied_font_family: String::new(),
             applied_ui_scale: f32::NAN,
             settings_open: false,
+            overlay_exclude_rect: None,
             cmd_history: c0pl4nd_core::command_history::CommandHistory::default(),
             input_line: String::new(),
             pending_paste: None,
@@ -601,6 +622,8 @@ impl C0pl4ndApp {
             last_update_notice: None,
             last_window_cmd: None,
             restore_size: None,
+            cursor_trail: std::collections::VecDeque::new(),
+            first_frame_time: None,
             settings_place_pending: false,
             settings_was_open: false,
             live_window: false,
@@ -2229,6 +2252,31 @@ impl C0pl4ndApp {
                     cursor_rect,
                 });
             });
+            // Feed the cursor ghost-trail motion overlay: push a new echo only
+            // when the focused cursor CELL actually moved (so a blinking-but-still
+            // cursor doesn't stack dozens of coincident echoes), and only while the
+            // effect is enabled AND motion is not reduced. Bounded to 24 echoes;
+            // stale ones are pruned at the paint site each frame. The `else` clears
+            // the deque the instant the effect (or motion) is turned off, so no
+            // stale echoes linger to pop back on re-enable.
+            if self.config.effects.animations_enabled
+                && self.config.effects.cursor_trail
+                && !c0pl4nd_core::reduced_motion::reduced_motion()
+            {
+                let now = ui.ctx().input(|i| i.time);
+                let moved = self
+                    .cursor_trail
+                    .back()
+                    .is_none_or(|(r, _)| r.min.distance(cursor_rect.min) > 0.5);
+                if moved {
+                    self.cursor_trail.push_back((cursor_rect, now));
+                    while self.cursor_trail.len() > 24 {
+                        self.cursor_trail.pop_front();
+                    }
+                }
+            } else if !self.cursor_trail.is_empty() {
+                self.cursor_trail.clear();
+            }
         }
         // Record a Ctrl-clicked URL (the browser open already fired in-render);
         // most-recent-wins, observable for the interaction test.
@@ -2379,6 +2427,19 @@ impl C0pl4ndApp {
     /// `self`'s borrow), then live-applies any change: persist the config to
     /// disk, reload the terminal color theme when the theme stem changed (so the
     /// live panes repaint, not just the chrome), and re-apply the egui Visuals.
+    /// Union `r` into [`Self::overlay_exclude_rect`] — the bounding rect of the
+    /// open centered chrome panels this frame, which the whole-window motion
+    /// overlays paint AROUND. Reset to `None` each frame before the panels draw;
+    /// each open panel calls this after it renders. No-op when `r` is `None`.
+    fn note_overlay_rect(&mut self, r: Option<egui::Rect>) {
+        if let Some(r) = r {
+            self.overlay_exclude_rect = Some(match self.overlay_exclude_rect {
+                Some(existing) => existing.union(r),
+                None => r,
+            });
+        }
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.settings_open;
         // Theme-derived palette so the settings window fill + headings follow
@@ -2397,6 +2458,10 @@ impl C0pl4ndApp {
             place_now,
         );
         self.settings_open = open;
+        // Record the window rect so the whole-window motion overlays exclude it
+        // this frame — a live Motion-setting preview shows on the terminal without
+        // washing over the settings panel (the overlay block reads this below).
+        self.note_overlay_rect(outcome.window_rect);
 
         // Privacy-section actions (runtime, not config): handle before the
         // config-changed persistence below.
@@ -2562,7 +2627,7 @@ impl C0pl4ndApp {
 
         let mut do_send = false;
         let mut do_cancel = false;
-        egui::Window::new("Paste multiple lines?")
+        let win = egui::Window::new("Paste multiple lines?")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -2587,6 +2652,8 @@ impl C0pl4ndApp {
                     }
                 });
             });
+        // Exclude the confirm modal from the whole-window motion overlays this frame.
+        self.note_overlay_rect(win.map(|w| w.response.rect));
         if do_send {
             self.confirm_pending_paste();
         } else if do_cancel {
@@ -3018,7 +3085,7 @@ impl C0pl4ndApp {
         let query = &mut self.palette_query;
         let mut clicked: Option<usize> = None;
 
-        egui::Window::new("Command palette")
+        let win = egui::Window::new("Command palette")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
@@ -3054,6 +3121,8 @@ impl C0pl4ndApp {
                 ui.separator();
                 ui.weak("Up/Down select · Enter run · Esc close");
             });
+        // Exclude the palette from the whole-window motion overlays this frame.
+        self.note_overlay_rect(win.map(|w| w.response.rect));
 
         if let Some(i) = clicked {
             self.palette_sel = i;
@@ -3289,6 +3358,36 @@ impl C0pl4ndApp {
         if self.live_window && ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::F4)) {
             self.prepare_shutdown();
             std::process::exit(0);
+        }
+        // Motion master switch (SCR1B3 parity): scale egui's global animation time
+        // by the configured intensity, or zero it for a fully static UI when
+        // animations are disabled OR the user requested reduced motion (env or OS).
+        // Cheap; applied every frame so a live Settings change (Motion → Enable
+        // animations / Animation speed) takes effect at once. `1.0/12.0` is egui's
+        // stock `Style::animation_time`, so the default (enabled, intensity 1.0, no
+        // reduced-motion) reproduces the shipped feel exactly, while a reduced-motion
+        // preference now makes egui's own chrome fades instant too — not just the
+        // overlays.
+        {
+            const EGUI_DEFAULT_ANIMATION_TIME: f32 = 1.0 / 12.0;
+            let fx = &self.config.effects;
+            let anim = if fx.animations_enabled && !c0pl4nd_core::reduced_motion::reduced_motion() {
+                // The intensity band now extends to 2.0 to let the motion OVERLAYS run
+                // at up to double-rate, but the egui-chrome factor is capped at 1.0 so
+                // a >1.0 speed only accelerates the effects — it never LENGTHENS the UI
+                // fades (a >1.0 multiplier here would make menus/tooltips feel sluggish).
+                EGUI_DEFAULT_ANIMATION_TIME * fx.clamped_animation_intensity().min(1.0)
+            } else {
+                0.0
+            };
+            ctx.style_mut(|s| s.animation_time = anim);
+        }
+        // Capture the first rendered-frame clock so the one-shot boot-glitch
+        // overlay measures its sweep from the first frame the user actually sees,
+        // not from context creation (which predates the window by the atlas-warmup
+        // cost and would hide the sweep).
+        if self.first_frame_time.is_none() {
+            self.first_frame_time = Some(ctx.input(|i| i.time));
         }
         // Ensure the chrome fonts (incl. the `phosphor-fill` family) are
         // installed before any widget references them — `new()` does this for
@@ -4216,6 +4315,12 @@ impl C0pl4ndApp {
             }
         }
 
+        // Reset the motion-overlay exclude rect each frame; each centered panel
+        // drawn below records its rect (via `note_overlay_rect`) so the overlay
+        // block further down paints AROUND whatever is open this frame. A closed
+        // panel therefore clears the exclusion automatically.
+        self.overlay_exclude_rect = None;
+
         // 4) the (opaque) settings window, if open. Detect the closed→open edge so
         //    `settings_window` can force the window to its saved-or-centered
         //    position on that first frame.
@@ -4255,6 +4360,98 @@ impl C0pl4ndApp {
         //     open, so the default (opted-out) experience is untouched.
         self.render_crash_consent(ctx);
         self.render_report_issue(ctx);
+
+        // Whole-window motion overlays (SCR1B3 parity): flicker / VHS-tracking /
+        // wired-mesh ambient / cursor ghost-trail / boot-glitch, each painted once
+        // per frame at the Context layer (Background for the ambient mesh so it
+        // sits BEHIND the panes, Foreground for the rest so they wash OVER the
+        // composited view). Gated behind the master `animations_enabled` switch AND
+        // each per-effect toggle, suppressed under reduced-motion (env or OS) and
+        // in the headless harness (`live_window == false`) so tests stay
+        // deterministic. Any active animated overlay drives a per-frame repaint so
+        // its motion keeps advancing without a free-running timer.
+        // Exclude whichever centered chrome surface is open (Settings window,
+        // command palette, multi-line-paste confirm) from the whole-window overlays,
+        // rather than suppressing them entirely: the Foreground effects otherwise
+        // wash OVER those opaque panels — the reported "the mesh overlays the settings
+        // menu" — but suppressing them meant a Motion setting only took visible effect
+        // AFTER Settings closed ("made me think they weren't working"). Painting the
+        // effects everywhere EXCEPT the panel rect gives a live terminal-area preview
+        // while keeping the panel clean. The panel rect was captured earlier THIS
+        // frame (`overlay_exclude_rect`, set as each panel drew above) and is padded
+        // so the effect doesn't crowd the panel edge.
+        let exclude = self
+            .overlay_exclude_rect
+            .map(|r| r.expand(8.0).intersect(ctx.content_rect()));
+        if self.live_window
+            && self.config.effects.animations_enabled
+            && !c0pl4nd_core::reduced_motion::reduced_motion()
+        {
+            let fx = self.config.effects;
+            let t = ctx.input(|i| i.time);
+            // The Animation-speed slider (`animation_intensity`) governs how fast
+            // the continuous drift overlays move: a SCALED clock `ts = t * speed`
+            // is fed to the scanline-style drift effects (mesh / VHS / flicker) so
+            // the slider is visibly effective — at 0 they freeze, at 1 they run at
+            // the shipped rate. The event-driven cursor trail and the one-shot boot
+            // sweep keep the REAL clock (their timing anchors to cursor movement /
+            // the first frame, not a drift phase, so scaling would corrupt them).
+            let speed = fx.clamped_animation_intensity() as f64;
+            let ts = t * speed;
+            let mut animating = false;
+            if fx.wired_ambient {
+                let accent = theme::ChromeColors::from_theme(&self.theme).accent;
+                paint_wired_mesh(
+                    ctx,
+                    fx.clamped_mesh_density(),
+                    fx.clamped_mesh_brightness(),
+                    accent,
+                    ts,
+                    exclude,
+                );
+                animating |= speed > 0.0;
+            }
+            if fx.vhs_tracking {
+                paint_vhs_tracking(ctx, ts, exclude);
+                animating |= speed > 0.0;
+            }
+            if fx.flicker {
+                paint_flicker(ctx, fx.clamped_flicker_strength(), ts, exclude);
+                animating |= speed > 0.0;
+            }
+            if fx.cursor_trail {
+                // The trail intensity scales BOTH opacity and lifetime; prune with
+                // the SAME lifetime the painter fades over so the deque can't grow
+                // while the cursor sits still (the fresh-echo push only happens on
+                // cursor movement).
+                let trail_intensity = fx.clamped_cursor_trail_intensity();
+                let life = cursor_trail_life(trail_intensity);
+                while self
+                    .cursor_trail
+                    .front()
+                    .is_some_and(|(_, born)| t - born > life)
+                {
+                    self.cursor_trail.pop_front();
+                }
+                let accent = theme::ChromeColors::from_theme(&self.theme).accent;
+                paint_cursor_trail(ctx, &self.cursor_trail, accent, t, trail_intensity, exclude);
+                if !self.cursor_trail.is_empty() {
+                    animating = true;
+                }
+            }
+            if fx.boot_glitch {
+                if let Some(t0) = self.first_frame_time {
+                    let elapsed = t - t0;
+                    paint_boot_glitch(ctx, elapsed);
+                    if (0.0..=0.55).contains(&elapsed) {
+                        animating = true;
+                    }
+                }
+            }
+            if animating {
+                ctx.request_repaint();
+            }
+        }
 
         // Window color-tint recap: it is a SINGLE background-layer wash
         // (`paint_background_tint`, painted early above), behind every translucent
@@ -4390,7 +4587,17 @@ impl C0pl4ndApp {
     /// frame-scheduling contract — the single biggest perceived-latency / battery
     /// lever — shared with the renderer crate.
     fn frame_policy(&self) -> c0pl4nd_renderer::FramePolicy {
-        if self.config.effects.crt_scanlines && !c0pl4nd_core::reduced_motion::reduced_motion() {
+        // Continuous redraw only while the scanline drift is actually MOVING: the
+        // effect is on, reduced-motion is off, the master animation switch is on,
+        // AND the Animation-speed slider is above zero. When the drift is frozen
+        // (any of those false) the bands are a static texture and OnDamage keeps
+        // the terminal off the vsync treadmill (battery / perceived-latency lever).
+        let fx = &self.config.effects;
+        let scanline_animating = fx.crt_scanlines
+            && fx.animations_enabled
+            && fx.clamped_animation_intensity() > 0.0
+            && !c0pl4nd_core::reduced_motion::reduced_motion();
+        if scanline_animating {
             c0pl4nd_renderer::FramePolicy::Continuous
         } else {
             c0pl4nd_renderer::FramePolicy::OnDamage
@@ -4952,13 +5159,19 @@ fn paint_grid_native(
         // animation repaint. This makes the "Auto-disabled under reduced-motion"
         // promise the settings UI already shows actually true.
         let reduce = c0pl4nd_core::reduced_motion::reduced_motion();
-        let t = if reduce {
-            0.0
+        // Freeze the scanline drift (static texture, bands still painted) under
+        // reduced-motion OR when the master animation switch is off; otherwise the
+        // drift clock is scaled by the Animation-speed slider so the same slider
+        // that governs the whole-window overlays also governs the scanline shimmer.
+        let speed = effects.clamped_animation_intensity();
+        let animate = !reduce && effects.animations_enabled && speed > 0.0;
+        let t = if animate {
+            painter.ctx().input(|i| i.time) as f32 * speed
         } else {
-            painter.ctx().input(|i| i.time) as f32
+            0.0
         };
         paint_crt_scanlines(painter, rect, ppp, t, effects.scanline_darkness);
-        if !reduce {
+        if animate {
             painter.ctx().request_repaint();
         }
     }

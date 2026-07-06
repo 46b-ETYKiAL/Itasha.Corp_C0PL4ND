@@ -29,6 +29,195 @@ pub const BUILTIN_MONOSPACE_LABEL: &str = "(built-in monospace)";
 /// The Fallback dropdown's "no fallback in this slot" choice.
 pub const NONE_LABEL: &str = "(none)";
 
+// ── Bundled fonts ───────────────────────────────────────────────────────────
+//
+// C0PL4ND enumerates the machine's INSTALLED monospace families via `fontdb`,
+// so which faces are offered depends on the OS. The sibling editor SCR1B3 instead
+// SHIPS its typefaces IN the binary via `include_bytes!`, so the same faces —
+// including the lore/influence-inspired brand DISPLAY faces (Wallpoet, Michroma,
+// Zen Dots, …) — are available on every machine. This block brings that identical
+// OFL/Apache set into C0PL4ND as always-available, selectable Family choices that
+// render in the terminal grid + chrome regardless of what the OS has installed.
+//
+// The `.ttf` files (and each family's OFL/LICENSE file — license compliance) live
+// under `crates/app/assets/fonts/<Family>/`; the paths below are relative to THIS
+// source file (`crates/app/src/egui_app/fonts.rs`), i.e. `../../assets/fonts/…`.
+
+/// A compile-time-embedded font face bundled INTO the binary. Unlike a system
+/// family enumerated via `fontdb`, a bundled face is selectable + renders on
+/// EVERY machine — its resolution never touches `fontdb` or the OS font set.
+pub struct BundledFont {
+    /// Family name shown in Settings → Fonts → Family (and stored in config).
+    pub display: &'static str,
+    /// The egui `font_data` key this face registers under — namespaced so it can
+    /// never collide with a `fontdb`-loaded system face key ([`font_data_key`]).
+    pub key: &'static str,
+    /// The raw `.ttf` bytes, embedded at compile time.
+    pub bytes: &'static [u8],
+}
+
+/// Terse constructor for a [`BundledFont`] entry: `bundled!(display, key, path)`.
+/// `key` is namespaced under `c0pl4nd-bundled::` (compile-time `concat!`) and the
+/// bytes are `include_bytes!`-embedded (path relative to this file). The
+/// `&[u8; N] → &[u8]` unsizing happens at the struct-field coercion site.
+macro_rules! bundled {
+    ($display:literal, $key:literal, $path:literal) => {
+        BundledFont {
+            display: $display,
+            key: concat!("c0pl4nd-bundled::", $key),
+            bytes: include_bytes!($path),
+        }
+    };
+}
+
+/// The bundled selectable families, in curated order — the monospace CODING faces
+/// first (so the picker leads with terminal-appropriate faces), then the brand
+/// DISPLAY / accent faces. Mirrors SCR1B3's `FONT_FAMILIES` set + display names so
+/// both apps offer the identical typefaces. Noto Sans JP is intentionally NOT here
+/// — it is wired as an always-on JP FALLBACK (see [`NOTO_SANS_JP_SUBSET`]), matching
+/// SCR1B3, not as a body-text choice.
+///
+/// Display / variable faces (Wallpoet, Michroma, Zen Dots, and the variable-axis
+/// files Doto / Red Hat Mono / Teko / Saira / Spline Sans Mono) are NOT monospace,
+/// which is fine for an opt-in terminal font CHOICE — the built-in monospace stays
+/// the default. egui 0.34's `ab_glyph` backend has no variable-axis selection, so a
+/// variable `.ttf` loads its DEFAULT named instance (identical to how SCR1B3 embeds
+/// them) — no special handling needed, none skipped.
+pub const BUNDLED_FONTS: &[BundledFont] = &[
+    // Monospace coding faces.
+    bundled!(
+        "JetBrains Mono",
+        "JetBrainsMono",
+        "../../assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf"
+    ),
+    bundled!(
+        "IBM Plex Mono",
+        "IBMPlexMono",
+        "../../assets/fonts/IBMPlexMono/IBMPlexMono-Regular.ttf"
+    ),
+    bundled!(
+        "Fira Mono",
+        "FiraMono",
+        "../../assets/fonts/FiraMono/FiraMono-Regular.ttf"
+    ),
+    bundled!(
+        "Space Mono",
+        "SpaceMono",
+        "../../assets/fonts/SpaceMono/SpaceMono-Regular.ttf"
+    ),
+    bundled!(
+        "Cousine",
+        "Cousine",
+        "../../assets/fonts/Cousine/Cousine-Regular.ttf"
+    ),
+    bundled!(
+        "Source Code Pro",
+        "SourceCodePro",
+        "../../assets/fonts/SourceCodePro/SourceCodePro-Regular.ttf"
+    ),
+    bundled!(
+        "B612 Mono",
+        "B612Mono",
+        "../../assets/fonts/B612Mono/B612Mono-Regular.ttf"
+    ),
+    bundled!(
+        "Share Tech Mono",
+        "ShareTechMono",
+        "../../assets/fonts/ShareTechMono/ShareTechMono-Regular.ttf"
+    ),
+    bundled!(
+        "VT323",
+        "VT323",
+        "../../assets/fonts/VT323/VT323-Regular.ttf"
+    ),
+    // Variable-axis monospace (default instance loaded — see doc above).
+    bundled!(
+        "Red Hat Mono",
+        "RedHatMono",
+        "../../assets/fonts/RedHatMono/RedHatMono[wght].ttf"
+    ),
+    bundled!(
+        "Spline Sans Mono",
+        "SplineSansMono",
+        "../../assets/fonts/SplineSansMono/SplineSansMono[wght].ttf"
+    ),
+    // Brand DISPLAY / accent faces (proportional — opt-in terminal choice).
+    bundled!(
+        "Doto",
+        "Doto",
+        "../../assets/fonts/Doto/Doto[ROND,wght].ttf"
+    ),
+    bundled!(
+        "Major Mono Display",
+        "MajorMonoDisplay",
+        "../../assets/fonts/MajorMonoDisplay/MajorMonoDisplay-Regular.ttf"
+    ),
+    bundled!(
+        "Chakra Petch",
+        "ChakraPetch",
+        "../../assets/fonts/ChakraPetch/ChakraPetch-Regular.ttf"
+    ),
+    bundled!(
+        "Wallpoet",
+        "Wallpoet",
+        "../../assets/fonts/Wallpoet/Wallpoet-Regular.ttf"
+    ),
+    bundled!(
+        "Michroma",
+        "Michroma",
+        "../../assets/fonts/Michroma/Michroma-Regular.ttf"
+    ),
+    bundled!("Teko", "Teko", "../../assets/fonts/Teko/Teko[wght].ttf"),
+    bundled!(
+        "Rajdhani",
+        "Rajdhani",
+        "../../assets/fonts/Rajdhani/Rajdhani-Regular.ttf"
+    ),
+    bundled!(
+        "Saira",
+        "Saira",
+        "../../assets/fonts/Saira/Saira[wdth,wght].ttf"
+    ),
+    bundled!(
+        "Zen Dots",
+        "ZenDots",
+        "../../assets/fonts/ZenDots/ZenDots-Regular.ttf"
+    ),
+    bundled!(
+        "Syncopate",
+        "Syncopate",
+        "../../assets/fonts/Syncopate/Syncopate-Regular.ttf"
+    ),
+];
+
+/// The bundled Noto Sans JP subset, wired as an always-on JP FALLBACK (mirrors
+/// SCR1B3) by [`super::font_setup::base_font_definitions`] so Japanese glyphs
+/// render out of the box on every machine — even one with no system CJK font —
+/// WITHOUT a `fontdb` enumeration. Appended last (lowest priority), it supplies
+/// only the glyphs the primary + OS-CJK faces lack.
+pub const NOTO_SANS_JP_SUBSET: &[u8] =
+    include_bytes!("../../assets/fonts/NotoSansJP/NotoSansJP-Subset.ttf");
+
+/// The fixed egui `font_data` key the bundled JP fallback registers under.
+pub const BUNDLED_JP_FALLBACK_KEY: &str = "c0pl4nd-bundled-jp";
+
+/// Look up a bundled face by its display name (case-insensitive), returning both
+/// its embedded bytes and its namespaced egui key, or `None` when `family` is not
+/// a bundled face. This NEVER touches `fontdb`, so a bundled family is selectable
+/// and renders regardless of installed system fonts.
+pub fn bundled_face(family: &str) -> Option<&'static BundledFont> {
+    let want = family.trim();
+    BUNDLED_FONTS
+        .iter()
+        .find(|b| b.display.eq_ignore_ascii_case(want))
+}
+
+/// The bundled family display names, in curated order — offered in the Family /
+/// Fallback dropdowns right after the built-in label.
+pub fn bundled_family_displays() -> impl Iterator<Item = &'static str> {
+    BUNDLED_FONTS.iter().map(|b| b.display)
+}
+
 /// Process-wide cache of the installed monospace family list. Enumeration loads
 /// and parses the whole system font set (100s of ms with hundreds of fonts), so
 /// it runs at most ONCE per process — never per frame.
@@ -51,8 +240,35 @@ pub fn monospace_family_choices() -> &'static [String] {
             // is first when present); display that.
             .filter_map(|f| f.families.first().map(|(name, _)| name.clone()))
             .collect();
-        normalize_family_list(installed)
+        with_bundled_families(normalize_family_list(installed))
     })
+}
+
+/// Splice the always-available bundled families into a [`normalize_family_list`]
+/// output: the built-in label stays first, the bundled families follow (curated
+/// order, guaranteed present on any machine), then the installed system families —
+/// minus any whose name duplicates a bundled face (so a box that ALSO has, e.g.,
+/// JetBrains Mono installed shows it once, as the bundled entry). Pure (no
+/// `fontdb`, no egui) so the "built-in first, then bundled, then system" contract
+/// is unit-testable without a system font DB.
+pub fn with_bundled_families(normalized: Vec<String>) -> Vec<String> {
+    let mut iter = normalized.into_iter();
+    let mut out: Vec<String> = Vec::new();
+    // The built-in label is always first in a normalized list; keep it leading.
+    if let Some(first) = iter.next() {
+        out.push(first);
+    }
+    for display in bundled_family_displays() {
+        out.push(display.to_string());
+    }
+    // Append the remaining (system) families, dropping any that a bundled face
+    // already covers so the same name never appears twice.
+    for name in iter {
+        if bundled_face(&name).is_none() {
+            out.push(name);
+        }
+    }
+    out
 }
 
 /// Pure helper: take a raw list of monospace family names, prepend the built-in
@@ -199,6 +415,19 @@ pub fn build_font_definitions(
     // priority order (primary, then fallbacks).
     let mut prepend_keys: Vec<String> = Vec::new();
     for name in &wanted {
+        // Bundled faces resolve WITHOUT `fontdb`, so a bundled family is
+        // selectable and renders on every machine regardless of installed system
+        // fonts. Check the bundled registry first; only fall through to the system
+        // font DB for a name the bundle does not carry.
+        if let Some(bf) = bundled_face(name) {
+            base.font_data.insert(
+                bf.key.to_string(),
+                egui::FontData::from_static(bf.bytes).into(),
+            );
+            prepend_keys.push(bf.key.to_string());
+            tracing::debug!(font = %name, "loaded bundled monospace font face");
+            continue;
+        }
         if let Some((bytes, index)) = face_bytes_for_family(db, name) {
             let key = font_data_key(name);
             // Preserve the .ttc face index — a collection face at a non-zero index
@@ -353,13 +582,17 @@ mod tests {
     fn build_definitions_prepends_a_real_installed_monospace_when_available() {
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
-        // Find any installed monospace family to use as the primary.
+        // Find any installed monospace family to use as the primary — but NOT one
+        // that a bundled face shadows (a bundled-named system font resolves via the
+        // bundled path under a different key, which this system-path test does not
+        // exercise). This keeps the assertion about the `font_data_key` system path.
         let Some(fam) = db
             .faces()
-            .find(|f| f.monospaced)
-            .and_then(|f| f.families.first().map(|(n, _)| n.clone()))
+            .filter(|f| f.monospaced)
+            .filter_map(|f| f.families.first().map(|(n, _)| n.clone()))
+            .find(|n| bundled_face(n).is_none())
         else {
-            // No monospace font installed on this box — nothing to assert.
+            // No non-bundled monospace font installed on this box — nothing to assert.
             return;
         };
         let base = egui::FontDefinitions::default();
@@ -432,5 +665,173 @@ mod tests {
             !loaded,
             "an uninstalled family loads nothing even when repeated"
         );
+    }
+
+    #[test]
+    fn every_bundled_font_has_bytes_and_a_distinct_namespaced_key() {
+        assert!(!BUNDLED_FONTS.is_empty(), "the bundle ships faces");
+        let mut keys = std::collections::HashSet::new();
+        for bf in BUNDLED_FONTS {
+            assert!(
+                !bf.display.trim().is_empty(),
+                "every bundled face has a display name"
+            );
+            // A real .ttf is far larger than this; guards against an empty or
+            // truncated include_bytes! (a wrong relative path would not compile,
+            // but a zero-byte file would).
+            assert!(
+                bf.bytes.len() > 1024,
+                "bundled face {} carries real font bytes ({} bytes)",
+                bf.display,
+                bf.bytes.len()
+            );
+            assert!(
+                bf.key.starts_with("c0pl4nd-bundled::"),
+                "bundled face {} uses the bundled key namespace",
+                bf.display
+            );
+            assert!(
+                keys.insert(bf.key),
+                "bundled face keys are unique ({} collided)",
+                bf.key
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_jp_fallback_bytes_are_present() {
+        // The always-on JP fallback (wired in base_font_definitions) must carry
+        // real bytes so Japanese glyphs render without a system CJK font.
+        assert!(
+            NOTO_SANS_JP_SUBSET.len() > 1024,
+            "the bundled Noto Sans JP subset carries real font bytes"
+        );
+        assert_eq!(BUNDLED_JP_FALLBACK_KEY, "c0pl4nd-bundled-jp");
+    }
+
+    /// Every bundled face — including the 5 VARIABLE fonts (Doto/RedHatMono/Saira/
+    /// SplineSansMono/Teko) and the JP fallback — MUST parse with `ab_glyph`, the
+    /// exact glyph crate epaint builds its atlas with. epaint `panic!`s ("Error
+    /// parsing … font") when a selected family's bytes fail to parse, so a face that
+    /// only *registers* but cannot be parsed would crash the app the moment the user
+    /// picks it — a class the registration-only tests cannot catch. Asserting a
+    /// successful `FontRef` parse here proves that selection path is panic-free.
+    #[test]
+    fn every_bundled_face_parses_with_ab_glyph() {
+        use ab_glyph::FontRef;
+        for bf in BUNDLED_FONTS {
+            assert!(
+                FontRef::try_from_slice(bf.bytes).is_ok(),
+                "bundled face {} ({}) must parse with ab_glyph so epaint never \
+                 panics when it is selected",
+                bf.display,
+                bf.key
+            );
+        }
+        assert!(
+            FontRef::try_from_slice(NOTO_SANS_JP_SUBSET).is_ok(),
+            "the bundled JP fallback must parse with ab_glyph"
+        );
+    }
+
+    #[test]
+    fn bundled_face_resolves_case_insensitively_and_trims() {
+        // A bundled family is found regardless of the config's casing/whitespace.
+        assert!(bundled_face("JetBrains Mono").is_some());
+        assert!(bundled_face("  jetbrains mono  ").is_some());
+        assert!(bundled_face("WALLPOET").is_some());
+        // A non-bundled (system) name does not resolve as bundled.
+        assert!(bundled_face("Cascadia Code").is_none());
+        assert!(bundled_face("").is_none());
+    }
+
+    #[test]
+    fn with_bundled_families_orders_builtin_then_bundled_then_system() {
+        // A normalized list is [builtin, ...sorted system]; splicing must keep the
+        // builtin first, put every bundled family next, then the system families.
+        let normalized =
+            normalize_family_list(vec!["Cascadia Code".into(), "Some Odd Mono".into()]);
+        let out = with_bundled_families(normalized);
+        assert_eq!(
+            out.first().map(String::as_str),
+            Some(BUILTIN_MONOSPACE_LABEL),
+            "built-in label stays first"
+        );
+        // Every bundled display name is present.
+        for d in bundled_family_displays() {
+            assert!(
+                out.iter().any(|x| x == d),
+                "bundled family {d} appears in the choice list"
+            );
+        }
+        // The bundled block immediately follows the built-in label, before system.
+        let first_bundled = out
+            .iter()
+            .position(|x| x == "JetBrains Mono")
+            .expect("bundled family present");
+        let system_pos = out
+            .iter()
+            .position(|x| x == "Cascadia Code")
+            .expect("system family present");
+        assert!(
+            first_bundled < system_pos,
+            "bundled families precede system families"
+        );
+    }
+
+    #[test]
+    fn with_bundled_families_dedupes_a_system_name_that_matches_a_bundled_face() {
+        // If the machine ALSO has a bundled-named family installed, it must appear
+        // once (as the bundled entry), not twice.
+        let normalized = normalize_family_list(vec!["JetBrains Mono".into()]);
+        let out = with_bundled_families(normalized);
+        let count = out
+            .iter()
+            .filter(|x| x.as_str() == "JetBrains Mono")
+            .count();
+        assert_eq!(count, 1, "a bundled-named system family is not duplicated");
+    }
+
+    /// The load-bearing guarantee: a bundled family renders even with an EMPTY
+    /// `fontdb` (i.e. a machine with no matching system font). Selecting it must
+    /// register its bytes and prepend it to Monospace — proving bundled resolution
+    /// does NOT depend on system enumeration.
+    #[test]
+    fn build_definitions_loads_a_bundled_family_without_any_system_font() {
+        let db = fontdb::Database::new(); // no system faces loaded
+        let base = egui::FontDefinitions::default();
+        let (defs, loaded) = build_font_definitions(base, &db, "Wallpoet", &[]);
+        assert!(loaded, "a bundled family loads even with an empty font DB");
+        let key = bundled_face("Wallpoet").expect("bundled").key;
+        let mono = defs
+            .families
+            .get(&egui::FontFamily::Monospace)
+            .expect("monospace family exists");
+        assert_eq!(
+            mono.first().map(String::as_str),
+            Some(key),
+            "the chosen bundled family is prepended to the FRONT of Monospace"
+        );
+        assert!(
+            defs.font_data.contains_key(key),
+            "the bundled family's bytes are registered under its key"
+        );
+    }
+
+    #[test]
+    fn build_definitions_loads_a_variable_axis_bundled_family() {
+        // Variable fonts (Doto[ROND,wght], Saira[wdth,wght], …) load their default
+        // instance via from_static — no named-instance handling, mirroring SCR1B3.
+        let db = fontdb::Database::new();
+        let base = egui::FontDefinitions::default();
+        let (defs, loaded) = build_font_definitions(base, &db, "Saira", &["Doto".to_string()]);
+        assert!(loaded, "variable-axis bundled families load");
+        for fam in ["Saira", "Doto"] {
+            let key = bundled_face(fam).expect("bundled").key;
+            assert!(
+                defs.font_data.contains_key(key),
+                "variable-axis family {fam} registered its default instance"
+            );
+        }
     }
 }

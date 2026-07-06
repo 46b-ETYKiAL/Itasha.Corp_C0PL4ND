@@ -38,6 +38,24 @@ pub(crate) fn base_font_definitions() -> egui::FontDefinitions {
             mono.push("phosphor".to_owned());
         }
     }
+    // Bundled JP fallback: register the embedded Noto Sans JP subset and append it
+    // to BOTH families (mirrors the sibling editor SCR1B3) so Japanese glyphs
+    // render out of the box on every machine — even one with no system CJK font —
+    // WITHOUT a `fontdb` enumeration. Because it lives in the icon-only BASE, it
+    // covers the default (built-in mono) path AND every custom-font stack layered
+    // on top. Appended LAST, it is the lowest-priority fallback (used only for
+    // glyphs the primary + OS-CJK faces lack). The subset is small, so shipping it
+    // in the binary costs little while guaranteeing JP never tofus.
+    fonts.font_data.insert(
+        fonts::BUNDLED_JP_FALLBACK_KEY.to_owned(),
+        egui::FontData::from_static(fonts::NOTO_SANS_JP_SUBSET).into(),
+    );
+    for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
+        let list = fonts.families.entry(family).or_default();
+        if !list.iter().any(|k| k == fonts::BUNDLED_JP_FALLBACK_KEY) {
+            list.push(fonts::BUNDLED_JP_FALLBACK_KEY.to_owned());
+        }
+    }
     fonts
 }
 

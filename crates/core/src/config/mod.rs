@@ -495,6 +495,92 @@ pub struct EffectsConfig {
     /// Chromatic-aberration intensity (0.0 = off). Only applied when
     /// [`EffectsConfig::chromatic_aberration_enabled`] is `true`.
     pub chromatic_aberration: f32,
+
+    // ---- Motion / animation (SCR1B3 parity) --------------------------------
+    /// Master switch for the whole animation + motion-effect system. When
+    /// `false`, egui's animation time is zeroed (instant transitions, a fully
+    /// static UI) and every motion overlay below is suppressed regardless of its
+    /// own toggle. Default ON — preserves the current animated feel; a user who
+    /// wants a static surface flips this off.
+    #[serde(default = "default_animations_enabled")]
+    pub animations_enabled: bool,
+    /// 0.0..=1.0 scale applied to egui's global animation time when
+    /// [`animations_enabled`](Self::animations_enabled) is on. 1.0 = egui's
+    /// default speed (the shipped feel); lower slows fades/collapses.
+    #[serde(default = "default_animation_intensity")]
+    pub animation_intensity: f32,
+    /// Subtle full-window CRT-style brightness flicker. OFF by default; gated
+    /// behind the master switch.
+    #[serde(default)]
+    pub flicker: bool,
+    /// Flicker strength (0.0 = none .. capped at 0.20 for accessibility).
+    #[serde(default = "default_flicker_strength")]
+    pub flicker_strength: f32,
+    /// VHS-style horizontal tracking lines drifting down the window. OFF by
+    /// default.
+    #[serde(default)]
+    pub vhs_tracking: bool,
+    /// Animated wired node-mesh ambient background (Lain "Wired" feel), drawn at
+    /// Background order behind the panes. OFF by default.
+    #[serde(default)]
+    pub wired_ambient: bool,
+    /// Node-mesh density (0.0 = sparse .. 2.0 = dense, clamped). Drives the node
+    /// count of the wired-ambient background.
+    #[serde(default = "default_mesh_density")]
+    pub mesh_density: f32,
+    /// Node-mesh brightness (0.0 = invisible .. 1.0 = shipped .. 3.0 = bold,
+    /// clamped). Scales the lattice link + node-dot opacity so the mesh can be
+    /// dimmed toward nothing or brightened to clearly pop. Only applied when
+    /// [`wired_ambient`](Self::wired_ambient) is on.
+    #[serde(default = "default_mesh_brightness")]
+    pub mesh_brightness: f32,
+    /// Cursor ghost-trail: a fading echo follows the focused terminal cursor as
+    /// it moves. OFF by default.
+    #[serde(default)]
+    pub cursor_trail: bool,
+    /// Cursor ghost-trail intensity (0.0 = faint/short .. 1.0 = bold/long,
+    /// clamped). Scales both the echo opacity and how long each echo lingers, so
+    /// the trail can be tuned from a barely-there whisper to a pronounced comet
+    /// tail. Only applied when [`cursor_trail`](Self::cursor_trail) is on.
+    #[serde(default = "default_cursor_trail_intensity")]
+    pub cursor_trail_intensity: f32,
+    /// One-shot boot "glitch" sweep on the first frames after launch. OFF by
+    /// default; self-terminates.
+    #[serde(default)]
+    pub boot_glitch: bool,
+}
+
+/// Default master-animation switch — ON, preserving the shipped animated feel.
+pub fn default_animations_enabled() -> bool {
+    true
+}
+
+/// Default animation-intensity — 1.0 = egui's stock animation speed (no change
+/// to the current feel until the user tunes it down).
+pub fn default_animation_intensity() -> f32 {
+    1.0
+}
+
+/// Default flicker strength — barely perceptible.
+pub fn default_flicker_strength() -> f32 {
+    0.06
+}
+
+/// Default node-mesh density — a calm, sparse field.
+pub fn default_mesh_density() -> f32 {
+    0.4
+}
+
+/// Default node-mesh brightness — 1.0 = the shipped lattice opacity (no change
+/// to the current look until the user brightens or dims it).
+pub fn default_mesh_brightness() -> f32 {
+    1.0
+}
+
+/// Default cursor-trail intensity — a clearly-visible-but-tasteful comet tail
+/// (mid-high so the trail reads at once when first enabled, tunable either way).
+pub fn default_cursor_trail_intensity() -> f32 {
+    0.6
 }
 
 /// Default scanline darkness — strong enough to read as scan lines (not a flat
@@ -517,6 +603,17 @@ impl Default for EffectsConfig {
             scanline_darkness: DEFAULT_SCANLINE_DARKNESS,
             chromatic_aberration_enabled: false,
             chromatic_aberration: 0.0,
+            animations_enabled: default_animations_enabled(),
+            animation_intensity: default_animation_intensity(),
+            flicker: false,
+            flicker_strength: default_flicker_strength(),
+            vhs_tracking: false,
+            wired_ambient: false,
+            mesh_density: default_mesh_density(),
+            mesh_brightness: default_mesh_brightness(),
+            cursor_trail: false,
+            cursor_trail_intensity: default_cursor_trail_intensity(),
+            boot_glitch: false,
         }
     }
 }
@@ -531,6 +628,44 @@ impl EffectsConfig {
         } else {
             0.0
         }
+    }
+
+    /// Animation-intensity clamped to `0.0..=2.0`. 1.0 is egui's stock feel; the
+    /// band extends to 2.0 so the Motion → Animation-speed slider can drive the
+    /// continuous drift overlays (mesh / VHS / flicker) up to double-rate. The
+    /// egui-chrome consumer separately caps the factor at 1.0 (see `mod.rs`) so a
+    /// >1.0 speed only accelerates the effects, never lengthens the UI fades.
+    pub fn clamped_animation_intensity(&self) -> f32 {
+        self.animation_intensity.clamp(0.0, 2.0)
+    }
+
+    /// Flicker strength clamped to `0.0..=1.0`. The old `0.20` ceiling read as a
+    /// barely-there shimmer; 1.0 lets the flicker reach a clearly-visible CRT
+    /// wobble. The painter's own alpha math keeps even the max well short of a
+    /// full-black strobe (photosensitivity guard), so the band is safe to widen.
+    pub fn clamped_flicker_strength(&self) -> f32 {
+        self.flicker_strength.clamp(0.0, 1.0)
+    }
+
+    /// Node-mesh density clamped to `0.0..=2.0` so the mesh can go from a calm
+    /// field to a busy web (the painter caps the node count for the O(n²) pass).
+    pub fn clamped_mesh_density(&self) -> f32 {
+        self.mesh_density.clamp(0.0, 2.0)
+    }
+
+    /// Node-mesh brightness clamped to `0.0..=3.0`. 1.0 is the shipped alpha;
+    /// below 1.0 dims the lattice toward invisible, above 1.0 brightens it so a
+    /// user who finds the default mesh too dim can make it clearly pop. Scales the
+    /// link + dot alpha in the painter.
+    pub fn clamped_mesh_brightness(&self) -> f32 {
+        self.mesh_brightness.clamp(0.0, 3.0)
+    }
+
+    /// Cursor-trail intensity clamped to `0.0..=2.0` so the echo opacity /
+    /// lifetime can reach a pronounced comet tail while a malformed config still
+    /// can't drive it out of band.
+    pub fn clamped_cursor_trail_intensity(&self) -> f32 {
+        self.cursor_trail_intensity.clamp(0.0, 2.0)
     }
 }
 
@@ -1145,6 +1280,60 @@ mod tests {
         assert_eq!(c.theme, "itasha-corp");
         assert_eq!(c.scrollback_lines, 10_000);
         assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn effects_motion_defaults_and_backward_compat() {
+        // New EffectsConfig defaults: the master animation switch is ON at full
+        // intensity (reproducing the shipped feel) and every motion overlay is
+        // OFF — the master toggle changes nothing until a user opts an effect in.
+        let d = EffectsConfig::default();
+        assert!(d.animations_enabled);
+        assert_eq!(d.animation_intensity, 1.0);
+        assert!(!d.flicker && !d.vhs_tracking && !d.wired_ambient);
+        assert!(!d.cursor_trail && !d.boot_glitch);
+        // The cursor-trail intensity defaults mid-high so a freshly-enabled trail
+        // is visible at once (tunable either way by the Motion slider).
+        assert_eq!(d.cursor_trail_intensity, 0.6);
+
+        // An OLD config written before the Motion fields existed (only the
+        // original four effect keys) MUST still deserialize: the struct-level
+        // `#[serde(default)]` fills every missing field from Default, never a
+        // parse error. This is the load-compat guarantee the reorg depends on.
+        let old: EffectsConfig = toml::from_str(
+            "crt_scanlines = true\nscanline_darkness = 0.7\n\
+             chromatic_aberration_enabled = false\nchromatic_aberration = 0.0\n",
+        )
+        .expect("legacy effects config without motion fields must load");
+        assert!(old.crt_scanlines);
+        assert_eq!(old.scanline_darkness, 0.7);
+        assert!(old.animations_enabled, "missing master switch defaults ON");
+        assert_eq!(old.animation_intensity, 1.0);
+        assert!(!old.boot_glitch, "missing motion effect defaults OFF");
+        assert_eq!(
+            old.cursor_trail_intensity, 0.6,
+            "missing cursor-trail intensity defaults to the mid-high band"
+        );
+        assert_eq!(
+            old.mesh_brightness, 1.0,
+            "missing mesh brightness defaults to the shipped 1.0 (no visual change)"
+        );
+
+        // Clamped accessors keep a malformed / out-of-band value inside its
+        // (widened) design range before it can reach a painter.
+        let wild = EffectsConfig {
+            animation_intensity: 9.0,
+            flicker_strength: 5.0,
+            mesh_density: -3.0,
+            mesh_brightness: 9.0,
+            cursor_trail_intensity: 9.0,
+            ..EffectsConfig::default()
+        };
+        assert_eq!(wild.clamped_animation_intensity(), 2.0);
+        assert_eq!(wild.clamped_flicker_strength(), 1.0);
+        assert_eq!(wild.clamped_mesh_density(), 0.0);
+        assert_eq!(wild.clamped_mesh_brightness(), 3.0);
+        assert_eq!(wild.clamped_cursor_trail_intensity(), 2.0);
     }
 
     #[test]
