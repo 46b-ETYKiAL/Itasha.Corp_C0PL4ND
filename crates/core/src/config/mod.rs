@@ -1337,6 +1337,38 @@ mod tests {
     }
 
     #[test]
+    fn motion_defaults_are_exact_and_in_band_values_pass_through() {
+        // Pin the EXACT default of every Motion knob — the shipped feel is these
+        // numbers, and a silent drift (e.g. a default bumped to 0/1) would change
+        // the out-of-box look. Asserting the concrete value (not just "non-zero")
+        // is what proves the default is the intended one.
+        assert_eq!(default_animation_intensity(), 1.0);
+        assert_eq!(default_flicker_strength(), 0.06);
+        assert_eq!(default_mesh_density(), 0.4);
+        assert_eq!(default_mesh_brightness(), 1.0);
+        assert_eq!(default_cursor_trail_intensity(), 0.6);
+
+        // A value already INSIDE each band must pass through UNCHANGED — the
+        // clamp only touches out-of-range inputs. This is the half the `wild`
+        // (out-of-band) test can't see: it proves the accessor returns the real
+        // input mid-band, not a constant, so the slider actually drives the
+        // effect across its whole range.
+        let mid = EffectsConfig {
+            animation_intensity: 1.5,
+            flicker_strength: 0.5,
+            mesh_density: 1.2,
+            mesh_brightness: 1.5,
+            cursor_trail_intensity: 1.0,
+            ..EffectsConfig::default()
+        };
+        assert_eq!(mid.clamped_animation_intensity(), 1.5);
+        assert_eq!(mid.clamped_flicker_strength(), 0.5);
+        assert_eq!(mid.clamped_mesh_density(), 1.2);
+        assert_eq!(mid.clamped_mesh_brightness(), 1.5);
+        assert_eq!(mid.clamped_cursor_trail_intensity(), 1.0);
+    }
+
+    #[test]
     fn graphics_backend_defaults_to_auto_and_round_trips() {
         let p = std::path::Path::new("config.toml");
         // Default is Auto (the platform-smart choice), and a missing key parses
