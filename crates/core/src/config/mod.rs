@@ -492,6 +492,13 @@ pub struct EffectsConfig {
     /// rather than a flat grey film.
     #[serde(default = "default_scanline_darkness")]
     pub scanline_darkness: f32,
+    /// CRT scanline drift-speed multiplier (0.25 = quarter-speed .. 3.0 =
+    /// triple-speed, clamped). Scales the rolling scan-band drift clock so the
+    /// default `1.0` reproduces the current shipped drift EXACTLY and higher
+    /// values roll faster. Independent of [`scanline_darkness`], which tunes only
+    /// the trough depth. Inert until [`crt_scanlines`](Self::crt_scanlines) is on.
+    #[serde(default = "default_scanline_speed")]
+    pub scanline_speed: f32,
     /// Explicit chromatic-aberration ON/OFF toggle. Distinct from
     /// [`EffectsConfig::chromatic_aberration`] (the intensity) so the UI is a
     /// checkbox + an enabled-gated intensity slider rather than a single
@@ -510,9 +517,14 @@ pub struct EffectsConfig {
     /// wants a static surface flips this off.
     #[serde(default = "default_animations_enabled")]
     pub animations_enabled: bool,
-    /// 0.0..=1.0 scale applied to egui's global animation time when
+    /// UI transition speed: scale applied to egui's global animation time
+    /// (the CHROME transitions — hover fades, panel/collapsible expand-collapse,
+    /// combobox/menu fades, and value-change lerps) when
     /// [`animations_enabled`](Self::animations_enabled) is on. 1.0 = egui's
-    /// default speed (the shipped feel); lower slows fades/collapses.
+    /// default transition time (the shipped feel); 0 makes transitions instant
+    /// and 2 doubles them. Does NOT control the retro visual effects (flicker /
+    /// VHS / mesh / scanline drift) — those have their own per-effect speed
+    /// multipliers below.
     #[serde(default = "default_animation_intensity")]
     pub animation_intensity: f32,
     /// Subtle full-window CRT-style brightness flicker. OFF by default; gated
@@ -522,6 +534,13 @@ pub struct EffectsConfig {
     /// Flicker strength (0.0 = none .. capped at 0.20 for accessibility).
     #[serde(default = "default_flicker_strength")]
     pub flicker_strength: f32,
+    /// Flicker cadence multiplier (0.25 = quarter-speed .. 3.0 = triple-speed,
+    /// clamped). Scales the flicker's time input so the default `1.0` reproduces
+    /// the current shipped cadence EXACTLY and higher values flicker faster.
+    /// Independent of [`flicker_strength`](Self::flicker_strength), which tunes
+    /// only the depth. Inert until [`flicker`](Self::flicker) is on.
+    #[serde(default = "default_flicker_speed")]
+    pub flicker_speed: f32,
     /// VHS-style horizontal tracking lines drifting down the window. OFF by
     /// default.
     #[serde(default)]
@@ -531,6 +550,14 @@ pub struct EffectsConfig {
     /// [`vhs_tracking`](Self::vhs_tracking) is on.
     #[serde(default = "default_vhs_intensity")]
     pub vhs_intensity: f32,
+    /// VHS tracking-line drift multiplier (0.25 = quarter-speed .. 3.0 =
+    /// triple-speed, clamped). Scales BOTH tracking-band drift speeds
+    /// proportionally so the default `1.0` reproduces the current shipped drift
+    /// EXACTLY and higher values sweep faster. Independent of
+    /// [`vhs_intensity`](Self::vhs_intensity), which tunes only the band
+    /// brightness. Inert until [`vhs_tracking`](Self::vhs_tracking) is on.
+    #[serde(default = "default_vhs_speed")]
+    pub vhs_speed: f32,
     /// Animated wired node-mesh ambient background (Lain "Wired" feel), drawn at
     /// Background order behind the panes. OFF by default.
     #[serde(default)]
@@ -611,6 +638,25 @@ pub fn default_vhs_intensity() -> f32 {
     0.5
 }
 
+/// Default flicker cadence multiplier — `1.0` reproduces the current shipped
+/// flicker rate exactly, so the field changes nothing until the user tunes it.
+pub fn default_flicker_speed() -> f32 {
+    1.0
+}
+
+/// Default VHS tracking-drift multiplier — `1.0` reproduces the current shipped
+/// drift speeds exactly, so the field changes nothing until the user tunes it.
+pub fn default_vhs_speed() -> f32 {
+    1.0
+}
+
+/// Default CRT scanline drift-speed multiplier — `1.0` reproduces the current
+/// shipped roll rate exactly, so the field changes nothing until the user
+/// tunes it.
+pub fn default_scanline_speed() -> f32 {
+    1.0
+}
+
 /// Default scanline darkness — strong enough to read as scan lines (not a flat
 /// dimming film). Free function so `#[serde(default = ...)]` can name it.
 pub fn default_scanline_darkness() -> f32 {
@@ -629,14 +675,17 @@ impl Default for EffectsConfig {
         EffectsConfig {
             crt_scanlines: false,
             scanline_darkness: DEFAULT_SCANLINE_DARKNESS,
+            scanline_speed: default_scanline_speed(),
             chromatic_aberration_enabled: false,
             chromatic_aberration: 0.0,
             animations_enabled: default_animations_enabled(),
             animation_intensity: default_animation_intensity(),
             flicker: false,
             flicker_strength: default_flicker_strength(),
+            flicker_speed: default_flicker_speed(),
             vhs_tracking: false,
             vhs_intensity: default_vhs_intensity(),
+            vhs_speed: default_vhs_speed(),
             wired_ambient: false,
             mesh_density: default_mesh_density(),
             mesh_brightness: default_mesh_brightness(),
@@ -660,13 +709,34 @@ impl EffectsConfig {
         }
     }
 
-    /// Animation-intensity clamped to `0.0..=2.0`. 1.0 is egui's stock feel; the
-    /// band extends to 2.0 so the Motion → Animation-speed slider can drive the
-    /// continuous drift overlays (mesh / VHS / flicker) up to double-rate. The
-    /// egui-chrome consumer separately caps the factor at 1.0 (see `mod.rs`) so a
-    /// >1.0 speed only accelerates the effects, never lengthens the UI fades.
+    /// UI-transition-speed factor clamped to `0.0..=2.0`, applied ONLY to egui's
+    /// global chrome-transition time (hover fades, panel/collapsible expand-
+    /// collapse, value-change lerps). 1.0 is egui's stock feel; 0 makes chrome
+    /// transitions instant and 2.0 doubles them. It no longer drives the retro
+    /// visual effects — flicker / VHS / mesh / scanline drift each carry their
+    /// own per-effect speed multiplier below.
     pub fn clamped_animation_intensity(&self) -> f32 {
         self.animation_intensity.clamp(0.0, 2.0)
+    }
+
+    /// Flicker cadence multiplier clamped to its design band (0.25..=3.0). At the
+    /// default `1.0` the flicker runs at the current shipped cadence exactly; the
+    /// 0.25 floor forbids a frozen-but-enabled flicker.
+    pub fn clamped_flicker_speed(&self) -> f32 {
+        self.flicker_speed.clamp(0.25, 3.0)
+    }
+
+    /// VHS tracking-drift multiplier clamped to its design band (0.25..=3.0). At
+    /// the default `1.0` the tracking bands drift at the current shipped speeds.
+    pub fn clamped_vhs_speed(&self) -> f32 {
+        self.vhs_speed.clamp(0.25, 3.0)
+    }
+
+    /// CRT scanline drift-speed multiplier clamped to its design band
+    /// (0.25..=3.0). At the default `1.0` the scan bands roll at the current
+    /// shipped rate.
+    pub fn clamped_scanline_speed(&self) -> f32 {
+        self.scanline_speed.clamp(0.25, 3.0)
     }
 
     /// Flicker strength clamped to `0.0..=1.0`. The old `0.20` ceiling read as a
@@ -1516,6 +1586,76 @@ mod tests {
         assert_eq!(mid.clamped_mesh_speed(), 1.5);
         assert_eq!(mid.clamped_vhs_intensity(), 0.7);
         assert_eq!(mid.clamped_cursor_trail_intensity(), 1.0);
+    }
+
+    #[test]
+    fn per_effect_speeds_default_to_one_and_clamp_to_their_band() {
+        // The per-effect drift-speed multipliers default to 1.0 so the resting
+        // look is byte-for-byte unchanged (1.0 reproduces the current shipped
+        // cadence for flicker, VHS drift, and scanline roll). Each clamps to the
+        // 0.25..=3.0 band so a hand-edited TOML can't drive a seizure-fast — nor a
+        // frozen-but-enabled — animation.
+        let d = EffectsConfig::default();
+        assert_eq!(d.flicker_speed, 1.0, "flicker_speed default is 1.0");
+        assert_eq!(d.vhs_speed, 1.0, "vhs_speed default is 1.0");
+        assert_eq!(d.scanline_speed, 1.0, "scanline_speed default is 1.0");
+        assert_eq!(default_flicker_speed(), 1.0);
+        assert_eq!(default_vhs_speed(), 1.0);
+        assert_eq!(default_scanline_speed(), 1.0);
+        assert_eq!(d.clamped_flicker_speed(), 1.0);
+        assert_eq!(d.clamped_vhs_speed(), 1.0);
+        assert_eq!(d.clamped_scanline_speed(), 1.0);
+
+        // Above-band values clamp to the 3.0 ceiling.
+        let hi = EffectsConfig {
+            flicker_speed: 42.0,
+            vhs_speed: 9.0,
+            scanline_speed: 5.0,
+            ..EffectsConfig::default()
+        };
+        assert_eq!(hi.clamped_flicker_speed(), 3.0, "flicker ceiling 3.0");
+        assert_eq!(hi.clamped_vhs_speed(), 3.0, "vhs ceiling 3.0");
+        assert_eq!(hi.clamped_scanline_speed(), 3.0, "scanline ceiling 3.0");
+
+        // Below-band (incl. zero / negative) values clamp UP to the 0.25 floor so
+        // a frozen-but-enabled animation is impossible.
+        let lo = EffectsConfig {
+            flicker_speed: 0.0,
+            vhs_speed: -3.0,
+            scanline_speed: 0.1,
+            ..EffectsConfig::default()
+        };
+        assert_eq!(lo.clamped_flicker_speed(), 0.25, "flicker floor 0.25");
+        assert_eq!(lo.clamped_vhs_speed(), 0.25, "vhs floor 0.25");
+        assert_eq!(lo.clamped_scanline_speed(), 0.25, "scanline floor 0.25");
+
+        // An in-band value passes through untouched (proves the accessor returns
+        // the real input, not a constant — the slider drives its whole range).
+        let mid = EffectsConfig {
+            flicker_speed: 1.5,
+            vhs_speed: 2.0,
+            scanline_speed: 0.5,
+            ..EffectsConfig::default()
+        };
+        assert_eq!(mid.clamped_flicker_speed(), 1.5);
+        assert_eq!(mid.clamped_vhs_speed(), 2.0);
+        assert_eq!(mid.clamped_scanline_speed(), 0.5);
+
+        // Serde backfill: a config that predates these fields loads with the 1.0
+        // default (no visual change on upgrade — the whole point of the inert
+        // defaults, so NO schema_version bump / migration is required).
+        let old: EffectsConfig =
+            toml::from_str("crt_scanlines = true\nflicker = true\nvhs_tracking = true\n")
+                .expect("legacy effects config without the speed fields must load");
+        assert_eq!(
+            old.flicker_speed, 1.0,
+            "absent flicker_speed backfills to 1.0"
+        );
+        assert_eq!(old.vhs_speed, 1.0, "absent vhs_speed backfills to 1.0");
+        assert_eq!(
+            old.scanline_speed, 1.0,
+            "absent scanline_speed backfills to 1.0"
+        );
     }
 
     #[test]

@@ -87,18 +87,21 @@ const APPEARANCE_SEARCH_LABELS: &[&str] = &[
 /// against the PRODUCTION labels, not an inline copy.
 const MOTION_SEARCH_LABELS: &[&str] = &[
     "enable animations",
-    "animation speed",
+    "animation speed ui transition",
     "crt scanlines",
     "scanline darkness",
+    "scanline drift speed",
     "chromatic aberration",
     "wired mesh background",
     "mesh density",
     "mesh brightness",
-    "mesh movement",
+    "mesh drift speed movement",
     "vhs tracking",
     "vhs intensity",
+    "vhs drift speed",
     "screen flicker",
     "flicker strength",
+    "flicker speed",
     "cursor trail",
     "cursor trail intensity",
     "boot glitch",
@@ -1801,12 +1804,14 @@ fn render_sections(
 
             let on = config.effects.animations_enabled;
 
-            if row_visible(q, "animation speed") {
-                ui.label("Animation speed").on_hover_text(
-                    "Scale the motion-effect speed. 0 freezes every transition; 1 is \
-                     the shipped feel; up to 2 runs the drift effects (mesh / VHS / \
-                     flicker) at double-rate. Above 1 only speeds the effects — the \
-                     UI fades stay snappy.",
+            if row_visible(q, "animation speed ui transition") {
+                ui.label("UI transition speed").on_hover_text(
+                    "Scale how long the UI's CHROME transitions take — hover fades, \
+                     panel and collapsible expand/collapse, combobox/menu fades, and \
+                     value-change lerps. 0 makes every transition instant; 1 is egui's \
+                     full transition time and 2 is double that. This does NOT control \
+                     the retro visual effects (flicker / VHS / mesh / scanline drift) \
+                     — those have their own per-effect speed sliders below.",
                 );
                 changed |= ui
                     .add_enabled(
@@ -1865,6 +1870,26 @@ fn render_sections(
                     ui,
                     &mut config.effects.scanline_darkness,
                     &def.effects.scanline_darkness,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "scanline drift speed") {
+                ui.label("Scanline drift speed").on_hover_text(
+                    "How fast the scan bands roll down the panes. 1 is the standard \
+                     rate; lower is a slower, calmer roll and higher rolls faster. \
+                     Enable scan lines first.",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.crt_scanlines,
+                        egui::Slider::new(&mut config.effects.scanline_speed, 0.25..=3.0),
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.scanline_speed,
+                    &def.effects.scanline_speed,
                 );
                 ui.end_row();
             }
@@ -1982,8 +2007,8 @@ fn render_sections(
                 ui.end_row();
             }
 
-            if row_visible(q, "mesh movement") {
-                ui.label("Mesh movement").on_hover_text(
+            if row_visible(q, "mesh drift speed movement") {
+                ui.label("Mesh drift speed").on_hover_text(
                     "How fast the node lattice drifts. 0 holds a still frame; 1 is \
                      the shipped drift; up to 2 is a brisk, roaming field.",
                 );
@@ -2046,6 +2071,23 @@ fn render_sections(
                 ui.end_row();
             }
 
+            if row_visible(q, "vhs drift speed") {
+                ui.label("VHS drift speed").on_hover_text(
+                    "How fast the VHS tracking bands sweep down the window. 1 is the \
+                     standard rate; lower drifts more slowly and higher sweeps faster. \
+                     Independent of the intensity.",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.vhs_tracking,
+                        egui::Slider::new(&mut config.effects.vhs_speed, 0.25..=3.0),
+                    )
+                    .changed();
+                changed |=
+                    reset_to_default(ui, &mut config.effects.vhs_speed, &def.effects.vhs_speed);
+                ui.end_row();
+            }
+
             if row_visible(q, "screen flicker") {
                 changed |= ui
                     .add_enabled(
@@ -2076,6 +2118,26 @@ fn render_sections(
                     ui,
                     &mut config.effects.flicker_strength,
                     &def.effects.flicker_strength,
+                );
+                ui.end_row();
+            }
+
+            if row_visible(q, "flicker speed") {
+                ui.label("Flicker speed").on_hover_text(
+                    "How fast the screen flicker pulses. 1 is the standard cadence; \
+                     lower is a slower shimmer and higher flickers faster. Independent \
+                     of the strength.",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on && config.effects.flicker,
+                        egui::Slider::new(&mut config.effects.flicker_speed, 0.25..=3.0),
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.effects.flicker_speed,
+                    &def.effects.flicker_speed,
                 );
                 ui.end_row();
             }
