@@ -33,3 +33,11 @@ exclude_globs = [
     # mutation target on this runner. Correctness is pinned by its unit tests.
     "crates/core/src/win_process.rs",
 ]
+
+# `--in-diff` mode does not honour exclude_globs for a file that is inside
+# examine_globs, so also exclude the cfg(windows)-only shim by mutant name.
+# exclude_re matches the generated mutant description (function path), which is
+# the reliable filter for a single un-testable-on-Linux function.
+exclude_re = [
+    "no_console_window",
+]
