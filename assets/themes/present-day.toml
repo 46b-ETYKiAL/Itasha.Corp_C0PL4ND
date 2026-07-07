@@ -1,0 +1,33 @@
+# Present Day — ported from the SCR1B3 editor (Wave-4 line).
+# Serial Experiments Lain: a cool CRT-grey wash with a single sodium-amber
+# bleed accent (the bedroom lamp). Grey-dominant, Akira-red alarm-only.
+# SCR1B3 map palette translated onto C0PL4ND's ANSI-16 terminal schema.
+name = "Present Day"
+author = "Itasha.Corp"
+
+background = "#0c0d10"
+foreground = "#c4c2cc"
+cursor = "#c8a06a"
+cursor_text = "#0c0d10"
+selection_background = "#222530"
+selection_foreground = "#c4c2cc"
+
+[normal]
+black = "#141519"
+red = "#ff3b30"
+green = "#7ac48a"
+yellow = "#c8a06a"
+blue = "#8a8aa8"
+magenta = "#b47ad0"
+cyan = "#7ab0a8"
+white = "#c4c2cc"
+
+[bright]
+black = "#44454f"
+red = "#ff6a5c"
+green = "#9ad8a8"
+yellow = "#dcb884"
+blue = "#a8a8c4"
+magenta = "#cc9ae8"
+cyan = "#9accc4"
+white = "#dcdae4"

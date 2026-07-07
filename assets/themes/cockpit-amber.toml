@@ -1,0 +1,33 @@
+# Cockpit Amber — ported from the SCR1B3 editor (Wave-4 line).
+# Mecha cockpit interior: an HUD-amber system voice (documented opt-in — mecha
+# HUDs are intrinsically amber) with radar-green functions, Akira-red alarm-only.
+# SCR1B3 map palette translated onto C0PL4ND's ANSI-16 terminal schema.
+name = "Cockpit Amber"
+author = "Itasha.Corp"
+
+background = "#08090c"
+foreground = "#d4d8e0"
+cursor = "#f0a828"
+cursor_text = "#08090c"
+selection_background = "#1e2630"
+selection_foreground = "#d4d8e0"
+
+[normal]
+black = "#12151c"
+red = "#ff3b30"
+green = "#58c088"
+yellow = "#f0a828"
+blue = "#5a86c0"
+magenta = "#b481d0"
+cyan = "#48b8a8"
+white = "#d4d8e0"
+
+[bright]
+black = "#38424e"
+red = "#ff6a5c"
+green = "#82d4a4"
+yellow = "#ffc858"
+blue = "#82a8d8"
+magenta = "#d0a6ea"
+cyan = "#6cd4c4"
+white = "#e6eaf0"

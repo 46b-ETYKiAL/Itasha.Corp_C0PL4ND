@@ -1,0 +1,33 @@
+# Datamosh Haze — ported from the SCR1B3 editor (Wave-4 line).
+# antireal / 4nt1r34l: a faded analog haze — oxidised-teal system voice,
+# corrupted-magenta keyword bleed over a warm sepia-grey, Akira-red alarm-only.
+# SCR1B3 map palette translated onto C0PL4ND's ANSI-16 terminal schema.
+name = "Datamosh Haze"
+author = "Itasha.Corp"
+
+background = "#0c0a0a"
+foreground = "#cac0b4"
+cursor = "#4ab0a8"
+cursor_text = "#0c0a0a"
+selection_background = "#221c1a"
+selection_foreground = "#cac0b4"
+
+[normal]
+black = "#14110f"
+red = "#ff3b30"
+green = "#88b498"
+yellow = "#c49a78"
+blue = "#7a90b0"
+magenta = "#b86894"
+cyan = "#4ab0a8"
+white = "#cac0b4"
+
+[bright]
+black = "#3e362e"
+red = "#ff6a5c"
+green = "#a6d0b0"
+yellow = "#d8b898"
+blue = "#a0b4d0"
+magenta = "#d888b8"
+cyan = "#6cccc4"
+white = "#e2d8cc"

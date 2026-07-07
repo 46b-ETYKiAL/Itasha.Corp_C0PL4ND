@@ -1,0 +1,33 @@
+# Colony Drift — ported from the SCR1B3 editor (Wave-4 line).
+# Gundam UC Federation ops display: a Federation-blue system voice, armour-white
+# text, Char-red alarm-only, V-fin yellow constants.
+# SCR1B3 map palette translated onto C0PL4ND's ANSI-16 terminal schema.
+name = "Colony Drift"
+author = "Itasha.Corp"
+
+background = "#090b10"
+foreground = "#e0e4ec"
+cursor = "#2a78d8"
+cursor_text = "#090b10"
+selection_background = "#1c2430"
+selection_foreground = "#e0e4ec"
+
+[normal]
+black = "#11151e"
+red = "#d01828"
+green = "#6ac090"
+yellow = "#f0c828"
+blue = "#2a78d8"
+magenta = "#b481d0"
+cyan = "#4aa8d0"
+white = "#e0e4ec"
+
+[bright]
+black = "#364150"
+red = "#f0505c"
+green = "#92d8ac"
+yellow = "#ffde5c"
+blue = "#4a94ea"
+magenta = "#d0a6ea"
+cyan = "#72c4e4"
+white = "#eef0f6"

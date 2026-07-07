@@ -1,0 +1,33 @@
+# Nerv Magi — ported from the SCR1B3 editor (Wave-4 line).
+# Evangelion / NERV terminal: an Eva-green system voice on a pure-black void,
+# hazard amber-orange text, Akira-red alarm error.
+# SCR1B3 map palette translated onto C0PL4ND's ANSI-16 terminal schema.
+name = "Nerv Magi"
+author = "Itasha.Corp"
+
+background = "#000000"
+foreground = "#e8a030"
+cursor = "#7ae020"
+cursor_text = "#000000"
+selection_background = "#1a1408"
+selection_foreground = "#e8a030"
+
+[normal]
+black = "#0a0805"
+red = "#ff0040"
+green = "#7ae020"
+yellow = "#ffc400"
+blue = "#6a9ad0"
+magenta = "#c060c0"
+cyan = "#48c0a0"
+white = "#e0c890"
+
+[bright]
+black = "#4a3c18"
+red = "#ff4068"
+green = "#9cf04a"
+yellow = "#ffd84a"
+blue = "#92b6e4"
+magenta = "#e084e0"
+cyan = "#6cd4b8"
+white = "#f4e4c0"

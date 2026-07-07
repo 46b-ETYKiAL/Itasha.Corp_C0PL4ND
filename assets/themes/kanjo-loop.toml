@@ -1,0 +1,37 @@
+# Kanjo Loop — ported from the SCR1B3 editor (Wave-4 line).
+# 80s–2000s JDM daytime touge / sticker-bomb: lime underglow + candy-red +
+# underglow-pink over a warm asphalt-black.
+# BRAND DIVERGENCE from the SCR1B3 source: SCR1B3 promotes candy-red to the
+# system voice (a documented opt-in). C0PL4ND keeps candy-red ALARM-ONLY per the
+# house palette rule, so here the lime underglow is the system voice (cursor /
+# selection / accent) and candy-red stays in the red ANSI slot only.
+# SCR1B3 map palette translated onto C0PL4ND's ANSI-16 terminal schema.
+name = "Kanjo Loop"
+author = "Itasha.Corp"
+
+background = "#0b0a08"
+foreground = "#d8d4cc"
+cursor = "#28d860"
+cursor_text = "#0b0a08"
+selection_background = "#281c16"
+selection_foreground = "#d8d4cc"
+
+[normal]
+black = "#14110e"
+red = "#d8202e"
+green = "#28d860"
+yellow = "#f0a030"
+blue = "#6a9ad0"
+magenta = "#e84088"
+cyan = "#48c0a0"
+white = "#d8d4cc"
+
+[bright]
+black = "#3e342a"
+red = "#f0505c"
+green = "#5cec88"
+yellow = "#ffc058"
+blue = "#92b6e4"
+magenta = "#ff6aa4"
+cyan = "#6cd4b8"
+white = "#ece8e0"

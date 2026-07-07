@@ -1,0 +1,33 @@
+# Dialup Glow — ported from the SCR1B3 editor (Wave-4 line).
+# Late-90s dial-up CRT: a cool blue-green phosphor glow over a deep sea-black,
+# one teal system voice, Akira-red reserved for alarms.
+# SCR1B3 map palette translated onto C0PL4ND's ANSI-16 terminal schema.
+name = "Dialup Glow"
+author = "Itasha.Corp"
+
+background = "#04080a"
+foreground = "#b8d4d0"
+cursor = "#3ce0c0"
+cursor_text = "#04080a"
+selection_background = "#16242c"
+selection_foreground = "#b8d4d0"
+
+[normal]
+black = "#0a1014"
+red = "#ff3b30"
+green = "#88c49a"
+yellow = "#f2b33d"
+blue = "#5a8cd6"
+magenta = "#b47ad0"
+cyan = "#3ce0c0"
+white = "#b8d4d0"
+
+[bright]
+black = "#3a4e52"
+red = "#ff6a5c"
+green = "#a8d8b4"
+yellow = "#ffce6a"
+blue = "#82aae4"
+magenta = "#d0a2ea"
+cyan = "#66ecd4"
+white = "#dceeea"
