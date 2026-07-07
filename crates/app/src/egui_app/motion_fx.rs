@@ -92,8 +92,8 @@ fn fill_around(
 /// Subtle full-window brightness flicker (CRT-style). A translucent black wash
 /// whose alpha wanders via layered sines of `t` (deterministic — no RNG, so the
 /// reduced-motion resting frame is stable). `strength` (0..=1) scales the wash;
-/// even at 1.0 the alpha peaks near 90/255 (~35%), well short of a full-black
-/// strobe (photosensitivity guard). `Order::Foreground` so it modulates the
+/// even at 1.0 the alpha peaks near 18/255 (~7%) — a photosensitivity-comfort
+/// ceiling, well short of a full-black strobe. `Order::Foreground` so it modulates the
 /// whole composited view; `exclude` keeps an open panel clean.
 pub(crate) fn paint_flicker(ctx: &Context, strength: f32, t: f64, exclude: Option<Rect>) {
     let s = strength.clamp(0.0, 1.0);
@@ -101,7 +101,7 @@ pub(crate) fn paint_flicker(ctx: &Context, strength: f32, t: f64, exclude: Optio
         return;
     }
     let n = ((t * 17.0).sin() * 0.5 + (t * 53.0).sin() * 0.3 + (t * 97.0).sin() * 0.2).abs();
-    let a = (s * n as f32 * 90.0).round().clamp(0.0, 255.0) as u8;
+    let a = (s * n as f32 * 18.0).round().clamp(0.0, 255.0) as u8;
     if a == 0 {
         return;
     }

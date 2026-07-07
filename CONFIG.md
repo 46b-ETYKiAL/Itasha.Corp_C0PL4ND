@@ -87,7 +87,7 @@ Translucency is **opt-in** and **off by default** (a solid window). The master s
 ```toml
 transparency_enabled = false   # master on/off for the whole transparency system
 window_mode = "opaque"         # opaque | transparent | glass | mica | vibrancy
-tint = "#121212"               # #RRGGBB overlay painted when a translucent mode is active
+tint = "#08060d"               # #RRGGBB overlay painted when a translucent mode is active (brand-canon VOID BLACK)
 tint_strength = 0.0            # 0.0 (no tint) .. 1.0 (strong)
 ```
 
@@ -251,7 +251,7 @@ startup_panel = true          # neofetch-style splash on launch
 # Window translucency (opt-in; off by default)
 transparency_enabled = false
 window_mode = "opaque"        # opaque | transparent | glass | mica | vibrancy
-tint = "#121212"
+tint = "#08060d"
 tint_strength = 0.0
 
 # Shell / behaviour
