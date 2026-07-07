@@ -111,7 +111,15 @@ fn os_reduced_motion() -> bool {
     allow(dead_code)
 )]
 fn query_cmd(prog: &str, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new(prog).args(args).output().ok()?;
+    use crate::win_process::NoConsoleWindow;
+    // `no_console_window()` suppresses the console flash on Windows (the OS
+    // reduce-motion probe spawns `reg query`, a console program); no-op on the
+    // `defaults`/`gsettings` probes off Windows.
+    let out = std::process::Command::new(prog)
+        .args(args)
+        .no_console_window()
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -169,14 +177,14 @@ mod tests {
         let out = query_cmd("cmd", &["/C", "echo", "c0pl4nd_qc_ok"]);
         #[cfg(not(windows))]
         let out = query_cmd("echo", &["c0pl4nd_qc_ok"]);
-        // On a host missing even these, the contract is still "None, no panic";
-        // but where present, the captured stdout must contain the token.
-        if let Some(s) = out {
-            assert!(
-                s.contains("c0pl4nd_qc_ok"),
-                "captured stdout should contain the echoed token, got {s:?}"
-            );
-        }
+        // `cmd` (Windows) and `echo` (POSIX) are always present on every CI host
+        // we build on, so success MUST yield Some(stdout). Asserting Some — not a
+        // vacuous `if let` — is what kills the `query_cmd -> None` mutant.
+        let s = out.expect("a present echo command must return Some(stdout), not None");
+        assert!(
+            s.contains("c0pl4nd_qc_ok"),
+            "captured stdout should contain the echoed token, got {s:?}"
+        );
     }
 
     /// `query_cmd` returns `None` when the command exits non-zero — the

@@ -444,7 +444,11 @@ impl Updater {
                     super::update_state::record_applied_index_for_current_exe(idx);
                 }
                 if let Some(exe) = pre_swap_exe.as_ref() {
-                    match std::process::Command::new(exe).spawn() {
+                    use c0pl4nd_core::win_process::NoConsoleWindow;
+                    // Route the relaunch through the shared no-console-window
+                    // helper so the swapped-in binary is started without any
+                    // transient console (no-op off Windows).
+                    match std::process::Command::new(exe).no_console_window().spawn() {
                         Ok(_) => {}
                         Err(e) => {
                             // Relaunch of the swapped binary failed — restore the

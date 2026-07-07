@@ -46,6 +46,9 @@ pub fn restrict_to_owner(path: &Path) {
         }
         if let Ok(user) = std::env::var("USERNAME") {
             if !user.is_empty() {
+                use crate::win_process::NoConsoleWindow;
+                // `icacls` is a CONSOLE program; without `no_console_window()` the
+                // GUI-subsystem app flashes a console window each time this runs.
                 let _ = std::process::Command::new("icacls")
                     .arg(path)
                     .arg("/inheritance:r")
@@ -53,6 +56,7 @@ pub fn restrict_to_owner(path: &Path) {
                     .arg(format!("{user}:F"))
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
+                    .no_console_window()
                     .status();
             }
         }
