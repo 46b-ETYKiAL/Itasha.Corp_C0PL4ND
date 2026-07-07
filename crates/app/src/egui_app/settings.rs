@@ -124,9 +124,13 @@ const UPDATE_CHANNELS: &[&str] = &["stable", "beta", "nightly"];
 // holds a snug, stable width identical on every page. Sized to fit the 170px
 // left nav + a comfortable control pane (label + control + ↺ columns).
 
-/// Snug default window WIDTH (px), before the screen-fit clamp. Matches the
-/// sibling SCR1B3 editor's settings width for cross-app cohesion.
-const SETTINGS_DEFAULT_W: f32 = 760.0;
+/// Snug default window WIDTH (px), before the screen-fit clamp. Wide enough that
+/// EVERY category page's content fits without the resizable window having to grow
+/// to it — which is what keeps every page the SAME width (issue #26). The app-UI
+/// font now defaults to IBM Plex Mono (a monospace face, wider per glyph than a
+/// proportional UI font), so slider value read-outs and combo labels take more
+/// room; this default absorbs that so no single page balloons past the others.
+const SETTINGS_DEFAULT_W: f32 = 960.0;
 /// Default window HEIGHT (px), before the screen-fit clamp.
 const SETTINGS_DEFAULT_H: f32 = 560.0;
 /// Fixed width of the left category nav column.
@@ -1247,6 +1251,7 @@ fn render_sections(
         &[
             "font",
             "family",
+            "app ui font interface proportional",
             "size",
             "line height",
             "ligatures",
@@ -1257,9 +1262,11 @@ fn render_sections(
         help(ui, "Typeface, size, and text shaping.");
         grid("font_grid").show(ui, |ui| {
             if row_visible(q, "family typeface") {
-                ui.label("Family").on_hover_text(
-                    "Primary monospace typeface, picked from the fonts installed \
-                     on this system. Applies live.",
+                ui.label("Terminal font").on_hover_text(
+                    "Monospace typeface for the TERMINAL grid, picked from the fonts \
+                     installed on this system (plus the bundled faces). Separate from \
+                     the app-UI font below — changing one never changes the other. \
+                     Applies live.",
                 );
                 // The installed monospace families (enumerated once + cached) plus
                 // the built-in label. A ComboBox so the user picks a real font
@@ -1278,6 +1285,32 @@ fn render_sections(
                         }
                     });
                 changed |= reset_to_default(ui, &mut config.font.family, &def.font.family);
+                ui.end_row();
+            }
+
+            if row_visible(q, "app ui font interface proportional") {
+                ui.label("App UI font").on_hover_text(
+                    "Typeface for the whole app INTERFACE (settings, chrome, toolbar, \
+                     status bar, menus) — the proportional text everywhere EXCEPT the \
+                     terminal grid. Separate from the terminal font above, so the UI \
+                     swap never changes the terminal. \"System default\" keeps egui's \
+                     built-in UI font. Applies live.",
+                );
+                egui::ComboBox::from_id_salt("c0pl4nd-ui-font-family")
+                    .selected_text(config.font.ui_family.clone())
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for fam in super::fonts::ui_family_choices() {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut config.font.ui_family,
+                                    fam.to_string(),
+                                    fam,
+                                )
+                                .changed();
+                        }
+                    });
+                changed |= reset_to_default(ui, &mut config.font.ui_family, &def.font.ui_family);
                 ui.end_row();
             }
 

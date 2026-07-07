@@ -40,7 +40,10 @@ pub enum ConfigError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FontConfig {
-    /// Primary font family name.
+    /// Primary font family name — the TERMINAL grid typeface. Bound to egui's
+    /// `FontFamily::Monospace`; INDEPENDENT of [`ui_family`](Self::ui_family) (the
+    /// proportional UI font), so swapping the app-UI font never changes the
+    /// terminal font and vice-versa. Mirrors SCR1B3's editor/UI font split.
     pub family: String,
     /// Font size in points.
     pub size: f32,
@@ -48,6 +51,26 @@ pub struct FontConfig {
     pub line_height: f32,
     /// Ordered fallback families for glyphs the primary font lacks (CJK, etc.).
     pub fallback: Vec<String>,
+    /// App-UI font family (the proportional text EVERYWHERE except the terminal
+    /// grid): settings, chrome, toolbar, status bar, menus. One of the bundled
+    /// family display names, or "System default" to keep egui's built-in UI font.
+    /// Bound to `FontFamily::Proportional`, separate from [`family`](Self::family)
+    /// (the terminal/monospace font) so the UI-font swap never touches the terminal
+    /// surface. Default: "IBM Plex Mono". Mirrors SCR1B3's `ui_family`.
+    #[serde(default = "default_ui_family")]
+    pub ui_family: String,
+}
+
+/// The app-UI-font choice that keeps egui's built-in proportional font (i.e. does
+/// not swap the Proportional slot). Offered in Settings → Fonts → App UI font.
+pub const UI_FONT_SYSTEM_DEFAULT: &str = "System default";
+
+/// Default app-UI font family — IBM Plex Mono, so the whole app reads as one
+/// typeface (matching the terminal's default voice) out of the box. A bundled
+/// (OFL) face, so it renders on every machine. Named by `#[serde(default = ...)]`
+/// so an older config missing the key upgrades to this rather than an empty string.
+pub fn default_ui_family() -> String {
+    "IBM Plex Mono".to_string()
 }
 
 impl Default for FontConfig {
@@ -70,6 +93,7 @@ impl Default for FontConfig {
             size: 13.0,
             line_height: 20.0,
             fallback: vec!["Noto Sans JP".to_string(), "monospace".to_string()],
+            ui_family: default_ui_family(),
         }
     }
 }

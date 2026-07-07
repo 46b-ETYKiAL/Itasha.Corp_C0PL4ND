@@ -482,7 +482,10 @@ impl C0pl4ndApp {
         // `frame_tick` swaps in the custom stack via `set_fonts` when it arrives.
         // Done after the config load so `app.config.font` is the source of truth.
         if system_font_load_needed(&app.config.font) {
-            install_base_fonts(&cc.egui_ctx);
+            // Pass the UI font so the FIRST frame already paints the app UI in the
+            // configured proportional font (default IBM Plex Mono) while the custom
+            // terminal/monospace stack loads on the worker thread.
+            install_base_fonts(&cc.egui_ctx, &app.config.font.ui_family);
             app.pending_fonts = Some(spawn_system_font_load(&app.config.font));
         } else {
             install_chrome_fonts(&cc.egui_ctx, &app.config.font);
