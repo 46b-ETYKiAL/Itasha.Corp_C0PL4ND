@@ -91,7 +91,7 @@ pub(crate) fn window_clear_color(
 /// top end is a clearly-visible wash without fully hiding the background. Pure, so
 /// the mapping is unit-testable.
 pub(crate) fn tint_alpha(strength: f32) -> u8 {
-    (strength.clamp(0.0, 1.0) * 120.0).round() as u8
+    (strength.clamp(0.0, 1.0) * 90.0).round() as u8
 }
 
 /// Paint the window tint as a single colour wash on the BACKGROUND layer, EARLY —
@@ -300,11 +300,11 @@ mod tint_tests {
         // Off / clamped low.
         assert_eq!(tint_alpha(0.0), 0);
         assert_eq!(tint_alpha(-1.0), 0);
-        // Full strength = a clearly-visible (but not opaque) wash.
-        assert_eq!(tint_alpha(1.0), 120);
-        assert_eq!(tint_alpha(2.0), 120, "clamped above 1.0");
+        // Full strength = a clearly-visible (but not opaque) wash (~35% max).
+        assert_eq!(tint_alpha(1.0), 90);
+        assert_eq!(tint_alpha(2.0), 90, "clamped above 1.0");
         // Mid strength scales linearly.
-        assert_eq!(tint_alpha(0.5), 60);
+        assert_eq!(tint_alpha(0.5), 45);
     }
 
     #[test]

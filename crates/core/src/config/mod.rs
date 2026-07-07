@@ -815,12 +815,21 @@ impl Default for ReportingConfig {
     }
 }
 
-/// The default window tint color (`#RRGGBB`) — a near-black void wash matching
-/// the brand background. A free function so `#[serde(default = ...)]` can name
-/// it for the `tint` field.
+/// The default window tint color (`#RRGGBB`) — brand-canon VOID BLACK, a
+/// near-black, marginally violet-tinted void wash matching the brand background.
+/// A free function so `#[serde(default = ...)]` can name it for the `tint` field.
+///
+/// Superseded the earlier `#121212` default; a stored config still carrying the
+/// old `#121212` default is remapped to this value once by [`Config::migrate`]
+/// (v1 → v2), while any user-customised tint is left untouched.
 fn default_tint() -> String {
-    "#121212".to_string()
+    "#08060d".to_string()
 }
+
+/// The pre-v2 default window tint (`#121212`). A stored config whose tint is
+/// PROVABLY this old default is remapped to [`default_tint`] by the v1 → v2
+/// migration; any other value (a user's custom tint) is preserved verbatim.
+const LEGACY_DEFAULT_TINT: &str = "#121212";
 
 /// Current config schema version. Bumped whenever a one-time, version-gated
 /// migration is needed (see [`Config::migrate`]). A config written before schema
@@ -833,7 +842,12 @@ fn default_tint() -> String {
 ///   config keeps its appearance. This wraps the pre-existing
 ///   [`Config::migrate_legacy_transparency`] in a `schema_version < 1` gate — no
 ///   behaviour is lost; it simply runs once and is then recorded as migrated.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// - v2 (brand-canon default tint remap): a stored config whose `tint` is
+///   PROVABLY the old `#121212` default is remapped to the new `#08060d`
+///   (VOID BLACK) brand-canon default exactly once. A user's custom tint (any
+///   value ≠ `#121212`) is left UNTOUCHED — no silent clobber. Gated on
+///   `schema_version < 2`.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Top-level configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1164,6 +1178,10 @@ impl Config {
     /// v0 → v1 wraps the pre-existing [`Config::migrate_legacy_transparency`] so
     /// the legacy `opacity`/`acrylic` translucency promotion runs exactly once and
     /// is then recorded as migrated — no behaviour is lost.
+    ///
+    /// v1 → v2 remaps the tint ONLY when it is provably the old `#121212` default
+    /// to the new `#08060d` (VOID BLACK) brand-canon default; a user's custom tint
+    /// is preserved verbatim (no silent clobber).
     pub fn migrate(&mut self) -> bool {
         let original = self.schema_version;
         let mut changed = false;
@@ -1175,6 +1193,20 @@ impl Config {
         if self.schema_version < 1 {
             self.migrate_legacy_transparency();
             self.schema_version = 1;
+            changed = true;
+        }
+
+        // v1 → v2: remap the tint default to brand-canon VOID BLACK. Only a config
+        // whose tint is PROVABLY the old `#121212` default is remapped to
+        // `#08060d`; ANY user-customised tint (any value ≠ `#121212`) is left
+        // untouched — no silent clobber. One-shot: after this, `schema_version == 2`
+        // and the block is skipped, so a config that later sets `#121212`
+        // deliberately is never re-remapped.
+        if self.schema_version < 2 {
+            if self.tint == LEGACY_DEFAULT_TINT {
+                self.tint = default_tint();
+            }
+            self.schema_version = 2;
             changed = true;
         }
 
@@ -1776,7 +1808,10 @@ mod tests {
         assert!(!c.transparency_enabled, "transparency is opt-in (off)");
         assert_eq!(c.window_mode, WindowMode::Opaque);
         assert_eq!(c.tint_strength, 0.0, "no tint by default");
-        assert_eq!(c.tint, "#121212");
+        assert_eq!(
+            c.tint, "#08060d",
+            "fresh default tint is brand-canon VOID BLACK"
+        );
     }
 
     #[test]
@@ -2497,6 +2532,34 @@ mod tests {
         assert!(c2.transparency_enabled);
         assert_eq!(c2.window_mode, WindowMode::Glass);
         assert_eq!(c2.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn fresh_config_default_tint_is_void_black() {
+        // A brand-new config is born with the brand-canon VOID BLACK default tint.
+        let c = Config::default();
+        assert_eq!(c.tint, "#08060d");
+    }
+
+    #[test]
+    fn pre_v2_default_tint_migrates_to_void_black() {
+        // An EXISTING config (no `schema_version` → 0) still carrying the OLD
+        // `#121212` default tint is remapped to `#08060d` on load, then stamped at
+        // the current schema version.
+        let p = PathBuf::from("legacy-tint.toml");
+        let c = Config::from_toml("tint = \"#121212\"\n", &p).unwrap();
+        assert_eq!(c.tint, "#08060d", "old default tint remaps to VOID BLACK");
+        assert_eq!(c.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn pre_v2_custom_tint_is_preserved_verbatim() {
+        // A user's CUSTOM tint (any value ≠ the old `#121212` default) must survive
+        // the v1 → v2 migration untouched — no silent clobber.
+        let p = PathBuf::from("custom-tint.toml");
+        let c = Config::from_toml("tint = \"#445566\"\n", &p).unwrap();
+        assert_eq!(c.tint, "#445566", "a user's custom tint is never remapped");
+        assert_eq!(c.schema_version, CURRENT_SCHEMA_VERSION);
     }
 
     #[test]
