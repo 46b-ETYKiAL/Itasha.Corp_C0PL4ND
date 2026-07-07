@@ -247,8 +247,8 @@ mod tests {
     fn luminance_separates_light_and_dark() {
         assert!(is_light(Color32::WHITE));
         assert!(!is_light(Color32::BLACK));
-        // ghost-paper bg #f0eef5 is light; the void #121212 is dark.
-        assert!(is_light(Color32::from_rgb(0xf0, 0xee, 0xf5)));
+        // A near-white paper is light; the void #121212 is dark.
+        assert!(is_light(Color32::from_rgb(0xf5, 0xf2, 0xea)));
         assert!(!is_light(Color32::from_rgb(0x12, 0x12, 0x12)));
     }
 
