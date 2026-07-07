@@ -906,13 +906,16 @@ mod tests {
         // Registered + first in Proportional.
         assert!(defs.font_data.contains_key(key));
         assert_eq!(
-            defs.families[&egui::FontFamily::Proportional].first().map(String::as_str),
+            defs.families[&egui::FontFamily::Proportional]
+                .first()
+                .map(String::as_str),
             Some(key),
             "the chosen UI face must be first in Proportional"
         );
         // Monospace (terminal) is byte-for-byte unchanged.
         assert_eq!(
-            defs.families[&egui::FontFamily::Monospace], mono_before,
+            defs.families[&egui::FontFamily::Monospace],
+            mono_before,
             "a UI-font swap must NOT touch the terminal (Monospace) family"
         );
     }
@@ -924,7 +927,8 @@ mod tests {
             let prop_before = defs.families[&egui::FontFamily::Proportional].clone();
             apply_ui_font(&mut defs, choice);
             assert_eq!(
-                defs.families[&egui::FontFamily::Proportional], prop_before,
+                defs.families[&egui::FontFamily::Proportional],
+                prop_before,
                 "choice {choice:?} must keep egui's built-in proportional font"
             );
         }

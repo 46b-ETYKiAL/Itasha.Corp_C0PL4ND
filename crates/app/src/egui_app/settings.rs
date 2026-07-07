@@ -1076,8 +1076,7 @@ fn render_sections(
                     )
                     .changed();
                 ui.label(""); // checkbox carries its own label
-                changed |=
-                    reset_to_default(ui, &mut config.follow_os_theme, &def.follow_os_theme);
+                changed |= reset_to_default(ui, &mut config.follow_os_theme, &def.follow_os_theme);
                 ui.end_row();
             }
         });
@@ -1329,11 +1328,7 @@ fn render_sections(
                     .show_ui(ui, |ui| {
                         for fam in super::fonts::ui_family_choices() {
                             changed |= ui
-                                .selectable_value(
-                                    &mut config.font.ui_family,
-                                    fam.to_string(),
-                                    fam,
-                                )
+                                .selectable_value(&mut config.font.ui_family, fam.to_string(), fam)
                                 .changed();
                         }
                     });
@@ -2110,10 +2105,11 @@ fn render_sections(
                     .unwrap_or_else(c0pl4nd_core::Theme::builtin_void);
                 let accent = super::theme::ChromeColors::from_theme(&theme).accent;
                 let overridden = config.effects.mesh_color.is_some();
-                let start = config
-                    .effects
-                    .mesh_color
-                    .unwrap_or([accent.r(), accent.g(), accent.b()]);
+                let start =
+                    config
+                        .effects
+                        .mesh_color
+                        .unwrap_or([accent.r(), accent.g(), accent.b()]);
                 ui.add_enabled_ui(on && config.effects.wired_ambient, |ui| {
                     ui.horizontal(|ui| {
                         let mut rgb = start;

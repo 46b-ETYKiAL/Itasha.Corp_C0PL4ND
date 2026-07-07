@@ -427,10 +427,8 @@ impl C0pl4ndApp {
                         // opacity) it stays visible in transparency mode without ever
                         // reading as a hard opaque bar. Skipped after the last tab.
                         if i != last_tab {
-                            let (rect, _) = ui.allocate_exact_size(
-                                egui::vec2(5.0, 18.0),
-                                egui::Sense::hover(),
-                            );
+                            let (rect, _) =
+                                ui.allocate_exact_size(egui::vec2(5.0, 18.0), egui::Sense::hover());
                             ui.painter().vline(
                                 rect.center().x,
                                 rect.y_range(),
@@ -716,7 +714,8 @@ impl C0pl4ndApp {
                 // opaque-ish fill and only while the mode is on.
                 let active = in_tabs;
                 let glyph_col = if active { colors.accent } else { colors.muted };
-                let mut button = egui::Button::new(RichText::new(glyph).size(16.0).color(glyph_col));
+                let mut button =
+                    egui::Button::new(RichText::new(glyph).size(16.0).color(glyph_col));
                 if active {
                     button = button.fill(colors.accent.gamma_multiply(0.20));
                 }
