@@ -11,16 +11,13 @@
     <filter id="phos" x="-25%" y="-25%" width="150%" height="150%"><feGaussianBlur stdDeviation="6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
     <clipPath id="clip"><rect x="80" y="80" width="864" height="864" rx="176"/></clipPath>
   </defs>
-  <rect x="80" y="80" width="864" height="864" rx="176" fill="#08060d"/>
   <g clip-path="url(#clip)">
     <circle cx="512" cy="512" r="360" fill="url(#bloom)"/>
     <g stroke="#1ad6c0" stroke-width="3" opacity="0.15">
       <line x1="392" y1="392" x2="632" y2="392"/><line x1="392" y1="472" x2="632" y2="472"/><line x1="392" y1="552" x2="632" y2="552"/><line x1="392" y1="632" x2="632" y2="632"/>
       <line x1="392" y1="392" x2="392" y2="632"/><line x1="472" y1="392" x2="472" y2="632"/><line x1="552" y1="392" x2="552" y2="632"/><line x1="632" y1="392" x2="632" y2="632"/>
     </g>
-    <rect x="80" y="80" width="864" height="864" fill="url(#vig)"/>
   </g>
-  <rect x="80" y="80" width="864" height="864" rx="176" fill="none" stroke="#1ad6c0" stroke-width="10"/>
   <g stroke="#1ad6c0" fill="none">
     <circle cx="512" cy="512" r="372" stroke-width="6" opacity="0.85"/>
     <circle cx="512" cy="512" r="344" stroke-width="3" opacity="0.5"/>
