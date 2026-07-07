@@ -37,6 +37,12 @@ pub(crate) fn pane_bg_alpha(config: &c0pl4nd_core::Config) -> u8 {
     if !config.effective_translucent() {
         return 255;
     }
+    // Uniform-"dim" mode dims the WHOLE window at the OS layer (layered-window
+    // alpha), so its content is painted OPAQUE — the per-pixel pane alpha must stay
+    // 255 or the window would be double-dimmed (per-pixel × OS-layer).
+    if config.window_mode.is_uniform_dim() {
+        return 255;
+    }
     // The opacity slider drives the alpha directly in ALL translucent modes,
     // floored so the grid stays readable. No per-mode ceiling: the modes differ
     // by their DWM backdrop, not by a forced alpha cap (#41).
@@ -67,6 +73,15 @@ pub(crate) fn window_clear_color(
         return [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
     }
     match config.window_mode {
+        // Uniform "dim": the content is painted OPAQUE (solid theme background) and
+        // the OS layered-window alpha dims the whole composited window uniformly —
+        // so the clear colour is the theme background at FULL alpha, exactly like
+        // Opaque. (A per-pixel-transparent clear here would double-dim.)
+        c0pl4nd_core::config::WindowMode::Dim => {
+            let (r, g, b) =
+                c0pl4nd_core::theme::parse_hex(&theme.background).unwrap_or((0x12, 0x12, 0x12));
+            [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
+        }
         // Native blur backdrops want a fully transparent surface so the OS
         // composited blur shows through.
         c0pl4nd_core::config::WindowMode::Glass
@@ -213,9 +228,26 @@ pub(crate) fn apply_window_effect(
     cc: &eframe::CreationContext<'_>,
     mode: c0pl4nd_core::config::WindowMode,
     tint_hex: &str,
+    opacity: f32,
 ) {
-    let _ = (cc, tint_hex);
+    let _ = (cc, tint_hex, opacity);
     match mode {
+        // Uniform "dim": dim the WHOLE window (chrome + panes + text) by one alpha
+        // via the Win32 layered-window attribute — genuinely distinct from the
+        // per-pixel `Transparent` mode. Windows-only; elsewhere it degrades to the
+        // opaque surface (its `window_clear_color`/`pane_bg_alpha` are already
+        // opaque, so nothing shows through off-Windows — an honest no-op).
+        c0pl4nd_core::config::WindowMode::Dim => {
+            #[cfg(windows)]
+            {
+                use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(handle) = cc.window_handle() {
+                    if let RawWindowHandle::Win32(h) = handle.as_raw() {
+                        dim_imp::set_uniform_dim(h.hwnd.get(), opacity);
+                    }
+                }
+            }
+        }
         c0pl4nd_core::config::WindowMode::Glass => {
             #[cfg(windows)]
             {
@@ -264,6 +296,49 @@ pub(crate) fn apply_window_effect(
     }
 }
 
+/// Quarantined Win32 FFI for the uniform-"dim" transparency mode
+/// ([`c0pl4nd_core::config::WindowMode::Dim`]). Isolated behind
+/// `#![allow(unsafe_code)]` with `// SAFETY:` justifications, mirroring the other
+/// `#[cfg(windows)]` FFI islands (`caption_close::imp`, `job_object`).
+#[cfg(windows)]
+mod dim_imp {
+    #![allow(unsafe_code)]
+
+    use windows::Win32::Foundation::{COLORREF, HWND};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE, LWA_ALPHA,
+        WS_EX_LAYERED,
+    };
+
+    /// Dim the ENTIRE window (chrome + panes + text) by one alpha via the layered-
+    /// window attribute — the uniform "dim" mode, genuinely distinct from the
+    /// per-pixel `Transparent` mode. `opacity` (0..=1) → alpha, floored at ~5% so
+    /// the window can never become fully invisible / unclickable. Ensures
+    /// `WS_EX_LAYERED` first (required by `SetLayeredWindowAttributes`). Best-effort;
+    /// a null handle is a no-op.
+    pub(super) fn set_uniform_dim(hwnd: isize, opacity: f32) {
+        if hwnd == 0 {
+            return;
+        }
+        let h = HWND(hwnd as *mut core::ffi::c_void);
+        let alpha = (opacity.clamp(0.05, 1.0) * 255.0).round() as u8;
+        let layered = i64::from(WS_EX_LAYERED.0) as isize;
+        // SAFETY: `hwnd` is this process's live top-level window handle (from
+        // eframe's CreationContext); this only reads this window's own extended-
+        // style word.
+        let ex = unsafe { GetWindowLongPtrW(h, GWL_EXSTYLE) };
+        // SAFETY: rewrites this window's own extended-style word to add
+        // WS_EX_LAYERED (all other bits preserved) — the prerequisite for
+        // SetLayeredWindowAttributes.
+        unsafe {
+            SetWindowLongPtrW(h, GWL_EXSTYLE, ex | layered);
+        }
+        // SAFETY: sets this window's whole-window alpha (LWA_ALPHA); the colour key
+        // is unused for LWA_ALPHA so COLORREF(0) is inert.
+        let _ = unsafe { SetLayeredWindowAttributes(h, COLORREF(0), alpha, LWA_ALPHA) };
+    }
+}
+
 #[cfg(test)]
 mod tint_tests {
     use super::{flatten_chrome_buttons, fold_alpha, tint_alpha};
@@ -292,6 +367,43 @@ mod tint_tests {
             folded.a() > 0 && folded.a() < 255,
             "half opacity → translucent stroke (got alpha {})",
             folded.a()
+        );
+    }
+
+    #[test]
+    fn dim_mode_paints_opaque_content_transparent_mode_is_per_pixel() {
+        // The two see-through modes must be GENUINELY DISTINCT at the framebuffer:
+        // Dim paints OPAQUE content (the OS layered-window alpha dims the whole
+        // window uniformly), while Transparent folds the opacity into the per-pixel
+        // pane/clear alpha (widgets stay solid, gaps see through). Proven from the
+        // pure colour math without a window.
+        let mut config = c0pl4nd_core::Config {
+            transparency_enabled: true,
+            opacity: 0.4,
+            ..Default::default()
+        };
+        let theme = c0pl4nd_core::Theme::builtin_void();
+
+        config.window_mode = c0pl4nd_core::config::WindowMode::Dim;
+        assert_eq!(
+            super::pane_bg_alpha(&config),
+            255,
+            "Dim keeps per-pixel panes fully opaque (OS layer does the dimming)"
+        );
+        assert_eq!(
+            super::window_clear_color(&config, &theme)[3],
+            1.0,
+            "Dim clear colour is fully opaque"
+        );
+
+        config.window_mode = c0pl4nd_core::config::WindowMode::Transparent;
+        assert!(
+            super::pane_bg_alpha(&config) < 255,
+            "Transparent folds opacity into the per-pixel pane alpha"
+        );
+        assert!(
+            super::window_clear_color(&config, &theme)[3] < 1.0,
+            "Transparent clear colour is per-pixel translucent"
         );
     }
 

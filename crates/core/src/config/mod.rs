@@ -40,7 +40,10 @@ pub enum ConfigError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FontConfig {
-    /// Primary font family name.
+    /// Primary font family name — the TERMINAL grid typeface. Bound to egui's
+    /// `FontFamily::Monospace`; INDEPENDENT of [`ui_family`](Self::ui_family) (the
+    /// proportional UI font), so swapping the app-UI font never changes the
+    /// terminal font and vice-versa. Mirrors SCR1B3's editor/UI font split.
     pub family: String,
     /// Font size in points.
     pub size: f32,
@@ -48,6 +51,26 @@ pub struct FontConfig {
     pub line_height: f32,
     /// Ordered fallback families for glyphs the primary font lacks (CJK, etc.).
     pub fallback: Vec<String>,
+    /// App-UI font family (the proportional text EVERYWHERE except the terminal
+    /// grid): settings, chrome, toolbar, status bar, menus. One of the bundled
+    /// family display names, or "System default" to keep egui's built-in UI font.
+    /// Bound to `FontFamily::Proportional`, separate from [`family`](Self::family)
+    /// (the terminal/monospace font) so the UI-font swap never touches the terminal
+    /// surface. Default: "IBM Plex Mono". Mirrors SCR1B3's `ui_family`.
+    #[serde(default = "default_ui_family")]
+    pub ui_family: String,
+}
+
+/// The app-UI-font choice that keeps egui's built-in proportional font (i.e. does
+/// not swap the Proportional slot). Offered in Settings → Fonts → App UI font.
+pub const UI_FONT_SYSTEM_DEFAULT: &str = "System default";
+
+/// Default app-UI font family — IBM Plex Mono, so the whole app reads as one
+/// typeface (matching the terminal's default voice) out of the box. A bundled
+/// (OFL) face, so it renders on every machine. Named by `#[serde(default = ...)]`
+/// so an older config missing the key upgrades to this rather than an empty string.
+pub fn default_ui_family() -> String {
+    "IBM Plex Mono".to_string()
 }
 
 impl Default for FontConfig {
@@ -70,6 +93,7 @@ impl Default for FontConfig {
             size: 13.0,
             line_height: 20.0,
             fallback: vec!["Noto Sans JP".to_string(), "monospace".to_string()],
+            ui_family: default_ui_family(),
         }
     }
 }
@@ -398,6 +422,12 @@ pub enum WindowMode {
     #[default]
     Opaque,
     Transparent,
+    /// UNIFORM window opacity ("dim"): the whole window — chrome, panes, AND text —
+    /// is dimmed by a single alpha (Win32 `SetLayeredWindowAttributes`, `LWA_ALPHA`)
+    /// so the desktop shows through evenly. Genuinely distinct from `Transparent`
+    /// (per-pixel alpha: widgets/text stay opaque, only the gaps see through). The
+    /// window content is painted OPAQUE; the OS layer does the dimming.
+    Dim,
     Glass,
     Mica,
     Vibrancy,
@@ -407,6 +437,14 @@ impl WindowMode {
     /// Whether this mode wants a non-opaque surface.
     pub fn is_translucent(self) -> bool {
         !matches!(self, WindowMode::Opaque)
+    }
+
+    /// Whether this mode dims the window UNIFORMLY at the OS layer (Win32
+    /// layered-window alpha) rather than via a per-pixel-alpha framebuffer. Such a
+    /// mode paints its content OPAQUE (the OS layer supplies the see-through), so
+    /// the per-pixel pane/clear alpha must stay at 255 for it.
+    pub fn is_uniform_dim(self) -> bool {
+        matches!(self, WindowMode::Dim)
     }
 }
 
@@ -578,6 +616,14 @@ pub struct EffectsConfig {
     /// [`wired_ambient`](Self::wired_ambient) is on.
     #[serde(default = "default_mesh_speed")]
     pub mesh_speed: f32,
+    /// Optional node-mesh colour override as an `[r, g, b]` sRGB triple,
+    /// INDEPENDENT of the theme. `None` (default) = the wired-mesh lattice follows
+    /// the active theme's accent colour. `Some([r,g,b])` pins the mesh regardless
+    /// of theme; the Settings "Reset to theme" button clears it back to `None` so
+    /// the mesh follows the theme accent again. Mirrors the app-background-override
+    /// UX. An `[u8; 3]` (not a hex `String`) keeps `EffectsConfig: Copy`.
+    #[serde(default)]
+    pub mesh_color: Option<[u8; 3]>,
     /// Cursor ghost-trail: a fading echo follows the focused terminal cursor as
     /// it moves. OFF by default.
     #[serde(default)]
@@ -690,6 +736,7 @@ impl Default for EffectsConfig {
             mesh_density: default_mesh_density(),
             mesh_brightness: default_mesh_brightness(),
             mesh_speed: default_mesh_speed(),
+            mesh_color: None,
             cursor_trail: false,
             cursor_trail_intensity: default_cursor_trail_intensity(),
             boot_glitch: false,
@@ -931,6 +978,14 @@ pub struct Config {
     pub schema_version: u32,
     /// Name of the theme to load (matches a file stem in the themes dir).
     pub theme: String,
+    /// Automatically follow the OS dark/light appearance: when ON, the app tracks
+    /// the operating system's appearance setting and switches between a dark
+    /// (`itasha-corp`) and light (`ghost-paper`) theme to match, overriding the
+    /// [`theme`](Self::theme) selection while it is on. OFF by default (the
+    /// flagship dark brand theme is the zero-config look). Mirrors SCR1B3's
+    /// `follow_os_theme`.
+    #[serde(default)]
+    pub follow_os_theme: bool,
     /// Font configuration (family, size, line height, fallback chain).
     pub font: FontConfig,
     /// Persisted UI scale / accessibility zoom (F2-3): a multiplier applied to
@@ -1114,6 +1169,7 @@ impl Default for Config {
             // migrated forward on load.
             schema_version: CURRENT_SCHEMA_VERSION,
             theme: "itasha-corp".to_string(),
+            follow_os_theme: false,
             font: FontConfig::default(),
             ui_scale: default_ui_scale(),
             scrollback_lines: 10_000,
@@ -1911,6 +1967,26 @@ mod tests {
         assert!(WindowMode::Glass.is_translucent());
         assert!(WindowMode::Mica.is_translucent());
         assert!(WindowMode::Vibrancy.is_translucent());
+    }
+
+    #[test]
+    fn window_mode_is_uniform_dim_only_for_dim() {
+        // Kills the is_uniform_dim -> true / -> false mutants: Dim is the ONLY
+        // mode that dims uniformly at the OS layer; every other mode is opaque or
+        // per-pixel-alpha, so its content must stay per-pixel-opaque.
+        assert!(WindowMode::Dim.is_uniform_dim(), "Dim dims at the OS layer");
+        assert!(!WindowMode::Opaque.is_uniform_dim());
+        assert!(!WindowMode::Transparent.is_uniform_dim());
+        assert!(!WindowMode::Glass.is_uniform_dim());
+        assert!(!WindowMode::Mica.is_uniform_dim());
+        assert!(!WindowMode::Vibrancy.is_uniform_dim());
+    }
+
+    #[test]
+    fn default_ui_family_is_ibm_plex_mono() {
+        // Kills the default_ui_family -> String::new()/"xyzzy" mutants: the app-UI
+        // font MUST default to the bundled IBM Plex Mono out of the box.
+        assert_eq!(default_ui_family(), "IBM Plex Mono");
     }
 
     #[test]

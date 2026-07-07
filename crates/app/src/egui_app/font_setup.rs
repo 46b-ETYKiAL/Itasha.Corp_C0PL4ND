@@ -14,7 +14,7 @@ use super::fonts;
 /// instead of tofu), plus the SOLID `phosphor-fill` family used by a pinned
 /// tab's pin. This is the icon-only base; [`install_chrome_fonts`] layers the
 /// user's configured monospace family on top.
-pub(crate) fn base_font_definitions() -> egui::FontDefinitions {
+pub(crate) fn base_font_definitions(ui_family: &str) -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     // Thin = the default chrome icon weight (registered as "phosphor").
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Thin);
@@ -56,6 +56,11 @@ pub(crate) fn base_font_definitions() -> egui::FontDefinitions {
             list.push(fonts::BUNDLED_JP_FALLBACK_KEY.to_owned());
         }
     }
+    // Swap the app-UI (Proportional) font to the configured family (default IBM
+    // Plex Mono). Touches ONLY Proportional, so the terminal grid (Monospace) is
+    // never changed by a UI-font swap. "System default" leaves egui's built-in
+    // proportional font in place.
+    fonts::apply_ui_font(&mut fonts, ui_family);
     fonts
 }
 
@@ -77,7 +82,7 @@ pub(crate) fn install_chrome_fonts(ctx: &egui::Context, font: &c0pl4nd_core::con
     // Fast path: nothing custom to load (default config / built-in choice) — set
     // the icon base and skip the expensive system-font enumeration entirely.
     if !system_font_load_needed(font) {
-        ctx.set_fonts(base_font_definitions());
+        ctx.set_fonts(base_font_definitions(&font.ui_family));
         return;
     }
     // Custom family: the (100s-of-ms) system DB load runs synchronously here. The
@@ -98,8 +103,8 @@ pub(crate) fn system_font_load_needed(font: &c0pl4nd_core::config::FontConfig) -
 /// Install ONLY the built-in icon/base fonts (no system-DB enumeration), so the
 /// first frame paints immediately with the built-in monospace while the custom
 /// system fonts load on a worker thread (audit #3).
-pub(crate) fn install_base_fonts(ctx: &egui::Context) {
-    ctx.set_fonts(base_font_definitions());
+pub(crate) fn install_base_fonts(ctx: &egui::Context, ui_family: &str) {
+    ctx.set_fonts(base_font_definitions(ui_family));
 }
 
 /// Build the full [`egui::FontDefinitions`] for a custom font stack: enumerate
@@ -110,7 +115,7 @@ pub(crate) fn install_base_fonts(ctx: &egui::Context) {
 pub(crate) fn build_system_font_definitions(
     font: &c0pl4nd_core::config::FontConfig,
 ) -> egui::FontDefinitions {
-    let base = base_font_definitions();
+    let base = base_font_definitions(&font.ui_family);
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
     let (defs, _loaded) = fonts::build_font_definitions(base, &db, &font.family, &font.fallback);
@@ -154,5 +159,43 @@ pub(crate) fn font_apply_key(font: &c0pl4nd_core::config::FontConfig) -> String 
         key.push('\u{1f}'); // unit-separator: cannot appear in a family name
         key.push_str(f.trim());
     }
+    // The app-UI (Proportional) font is part of the installed font set, so a
+    // ui_family change must re-run `set_fonts`. A distinct separator (record-sep)
+    // keeps it unambiguous from the monospace family/fallback list above.
+    key.push('\u{1e}');
+    key.push_str(font.ui_family.trim());
     key
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::font_apply_key;
+    use c0pl4nd_core::config::FontConfig;
+
+    #[test]
+    fn font_apply_key_changes_when_ui_family_changes() {
+        // A UI-font change must produce a DIFFERENT apply key so the live
+        // frame-loop gate re-installs the fonts (otherwise the swap does nothing).
+        let a = FontConfig {
+            ui_family: "IBM Plex Mono".into(),
+            ..FontConfig::default()
+        };
+        let b = FontConfig {
+            ui_family: "System default".into(),
+            ..FontConfig::default()
+        };
+        assert_ne!(
+            font_apply_key(&a),
+            font_apply_key(&b),
+            "a ui_family change must change the apply key"
+        );
+        // Same config → same key (idempotent gate).
+        assert_eq!(font_apply_key(&a), font_apply_key(&a.clone()));
+        // The terminal family still participates too.
+        let c = FontConfig {
+            family: "Fira Mono".into(),
+            ..a.clone()
+        };
+        assert_ne!(font_apply_key(&a), font_apply_key(&c));
+    }
 }

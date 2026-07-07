@@ -1,35 +1,35 @@
-# Ghost Paper — light theme.
-# Inverts the flagship: ghost-paper hull, void-black ink. Accents are the
-# brand signal colors darkened so each clears 4.5:1 on the light surface
-# (printed-circuit schematic on cold white paper).
-# WCAG contrast (foreground on background): 17.51:1 (AAA, far exceeds 7:1).
+# Ghost Paper — light theme, aligned to the sibling SCR1B3 editor's `ghost-paper`
+# so both apps render the SAME colours for this theme name: warm-paper hull,
+# ink-grey text, one teal accent (system voice) shared with wired-noir. The ANSI
+# rows (terminal-only; SCR1B3 has none) derive from SCR1B3's ghost-paper palette.
+# WCAG contrast (foreground on background) meets AA for body text.
 name = "Ghost Paper"
 author = "Itasha.Corp"
 
-# base UI colors
-background = "#f0eef5"
-foreground = "#08060d"
-cursor = "#006d80"
-cursor_text = "#f0eef5"
-selection_background = "#c9bfe0"
-selection_foreground = "#08060d"
+# base UI colors — EXACTLY SCR1B3's ghost-paper paper / ink / teal.
+background = "#f5f2ea"
+foreground = "#181c22"
+cursor = "#0a8078"
+cursor_text = "#f5f2ea"
+selection_background = "#cfe3e0"
+selection_foreground = "#181c22"
 
-[normal]   # ANSI 0-7 — darkened brand accents, each >= 4.5:1 on ghost paper
-black = "#08060d"
-red = "#b00030"
-green = "#00734d"
-yellow = "#8a5a00"
-blue = "#0040b0"
-magenta = "#9010c0"
-cyan = "#006d80"
-white = "#5a5869"
+[normal]   # ANSI 0-7 — SCR1B3 ghost-paper palette (ink/red/green/amber/slate/…)
+black = "#181c22"
+red = "#c41e14"
+green = "#2a704a"
+yellow = "#a67012"
+blue = "#2a4a70"
+magenta = "#7a4a80"
+cyan = "#0a8078"
+white = "#5a606a"
 
-[bright]   # ANSI 8-15 — slightly deeper for emphasis while staying legible
-black = "#2a2833"
-red = "#8a0026"
-green = "#005a3c"
-yellow = "#6e4800"
-blue = "#003090"
-magenta = "#700a98"
-cyan = "#005666"
-white = "#3a3845"
+[bright]   # ANSI 8-15 — slightly deeper/steel variants, legible on warm paper
+black = "#304a5a"
+red = "#a01810"
+green = "#215c3c"
+yellow = "#8a5c0f"
+blue = "#22406a"
+magenta = "#6a3e70"
+cyan = "#0a6a63"
+white = "#7a8088"

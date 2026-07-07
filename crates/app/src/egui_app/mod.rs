@@ -490,7 +490,10 @@ impl C0pl4ndApp {
         // `frame_tick` swaps in the custom stack via `set_fonts` when it arrives.
         // Done after the config load so `app.config.font` is the source of truth.
         if system_font_load_needed(&app.config.font) {
-            install_base_fonts(&cc.egui_ctx);
+            // Pass the UI font so the FIRST frame already paints the app UI in the
+            // configured proportional font (default IBM Plex Mono) while the custom
+            // terminal/monospace stack loads on the worker thread.
+            install_base_fonts(&cc.egui_ctx, &app.config.font.ui_family);
             app.pending_fonts = Some(spawn_system_font_load(&app.config.font));
         } else {
             install_chrome_fonts(&cc.egui_ctx, &app.config.font);
@@ -502,7 +505,12 @@ impl C0pl4ndApp {
         // opaque window: no layered surface, so no DWM ghost-on-close risk.
         // Done after `bootstrap()` so `app.config` is the source of truth.
         if app.config.effective_translucent() {
-            apply_window_effect(cc, app.config.window_mode, &app.config.tint);
+            apply_window_effect(
+                cc,
+                app.config.window_mode,
+                &app.config.tint,
+                app.config.opacity,
+            );
         }
         // The residual native MIN/MAX caption buttons winit leaves on the
         // undecorated window (winit #2754) are suppressed at WINDOW CREATION via
@@ -2465,6 +2473,35 @@ impl C0pl4ndApp {
         }
     }
 
+    /// When `follow_os_theme` is on, track the OS dark/light appearance and swap
+    /// between the default dark (`itasha-corp`) and light (`ghost-paper`) themes to
+    /// match — overriding the manual theme selection while it is on. A no-op when
+    /// the toggle is off or the desired theme is already active. egui reports the
+    /// OS appearance via `ctx.system_theme()`; an unknown value keeps the dark
+    /// default. Mirrors SCR1B3's follow-OS behaviour.
+    fn follow_os_theme_tick(&mut self, ctx: &egui::Context) {
+        if !self.config.follow_os_theme {
+            return;
+        }
+        let desired = match ctx.system_theme() {
+            Some(egui::Theme::Light) => "ghost-paper",
+            _ => "itasha-corp",
+        };
+        if self.config.theme == desired {
+            return;
+        }
+        self.config.theme = desired.to_string();
+        let (theme, notice) = load_terminal_theme(&self.config);
+        self.theme = theme;
+        if let Some(notice) = notice {
+            self.toast = Some(notice);
+        }
+        for term in self.terms.values_mut() {
+            term.set_theme(self.theme.clone());
+        }
+        ctx.set_visuals(theme::visuals_from_theme(&self.theme));
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.settings_open;
         // Theme-derived palette so the settings window fill + headings follow
@@ -3384,6 +3421,9 @@ impl C0pl4ndApp {
             self.prepare_shutdown();
             std::process::exit(0);
         }
+        // Follow-OS dark/light (SCR1B3 parity): when enabled, track the OS
+        // appearance and swap between the default dark/light themes to match.
+        self.follow_os_theme_tick(ctx);
         // Motion master switch (SCR1B3 parity): scale egui's global animation time
         // by the configured UI-transition speed, or zero it for a fully static UI
         // when animations are disabled OR the user requested reduced motion (env or
@@ -4448,7 +4488,15 @@ impl C0pl4ndApp {
             // a drift phase, so scaling would corrupt them).
             let mut animating = false;
             if fx.wired_ambient {
-                let accent = theme::ChromeColors::from_theme(&self.theme).accent;
+                // The mesh colour follows the theme accent UNLESS the user pinned an
+                // explicit override in Settings (`effects.mesh_color`, a `#rrggbb`).
+                // "Reset to theme" clears the override back to None → accent again.
+                let accent = self
+                    .config
+                    .effects
+                    .mesh_color
+                    .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b))
+                    .unwrap_or_else(|| theme::ChromeColors::from_theme(&self.theme).accent);
                 // The Motion → Mesh-drift-speed slider (`mesh_speed`) scales the
                 // mesh's own drift clock: the node lattice can hold a static frame
                 // (0) or drift briskly (2) independently of the other effects.

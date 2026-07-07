@@ -65,6 +65,7 @@ const CATEGORIES: &[&str] = &[
 /// section and hide the moved control from a full-name search).
 const APPEARANCE_SEARCH_LABELS: &[&str] = &[
     "theme",
+    "follow os theme dark light auto system appearance",
     "transparency",
     "mode",
     "opacity",
@@ -96,6 +97,7 @@ const MOTION_SEARCH_LABELS: &[&str] = &[
     "mesh density",
     "mesh brightness",
     "mesh drift speed movement",
+    "mesh color colour node picker reset theme accent",
     "vhs tracking",
     "vhs intensity",
     "vhs drift speed",
@@ -123,9 +125,13 @@ const UPDATE_CHANNELS: &[&str] = &["stable", "beta", "nightly"];
 // holds a snug, stable width identical on every page. Sized to fit the 170px
 // left nav + a comfortable control pane (label + control + ↺ columns).
 
-/// Snug default window WIDTH (px), before the screen-fit clamp. Matches the
-/// sibling SCR1B3 editor's settings width for cross-app cohesion.
-const SETTINGS_DEFAULT_W: f32 = 760.0;
+/// Snug default window WIDTH (px), before the screen-fit clamp. Wide enough that
+/// EVERY category page's content fits without the resizable window having to grow
+/// to it — which is what keeps every page the SAME width (issue #26). The app-UI
+/// font now defaults to IBM Plex Mono (a monospace face, wider per glyph than a
+/// proportional UI font), so slider value read-outs and combo labels take more
+/// room; this default absorbs that so no single page balloons past the others.
+const SETTINGS_DEFAULT_W: f32 = 960.0;
 /// Default window HEIGHT (px), before the screen-fit clamp.
 const SETTINGS_DEFAULT_H: f32 = 560.0;
 /// Fixed width of the left category nav column.
@@ -983,15 +989,50 @@ fn render_sections(
     // ---------------------------------------------------------------- Appearance
     if section_visible(sel, q, "Appearance", APPEARANCE_SEARCH_LABELS) {
         ui.heading("Appearance");
-        help(ui, "Colors and window transparency.");
+        help(
+            ui,
+            "Theme, window transparency, and interface look. Changes apply live.",
+        );
         group(ui, "Theme", "The terminal colour palette.");
         grid("appearance_theme").show(ui, |ui| {
             if row_visible(q, "theme color") {
                 ui.label("Theme")
                     .on_hover_text("Terminal color theme — a file stem under the themes dir.");
                 ui.horizontal(|ui| {
+                    // Prev/next step: cycle through the built-ins without opening the
+                    // dropdown. `delta` wraps around the list; a custom (non-built-in)
+                    // theme name steps onto the first/last built-in so the arrows
+                    // always have a defined landing spot. Pure (captures nothing
+                    // mutable), so it doesn't hold a borrow across the ComboBox.
+                    let step_to = |cur: &str, delta: isize| -> String {
+                        let n = BUILTIN_THEMES.len() as isize;
+                        let idx = BUILTIN_THEMES.iter().position(|t| *t == cur);
+                        let next = match idx {
+                            Some(i) => (i as isize + delta).rem_euclid(n),
+                            None if delta > 0 => 0,
+                            None => n - 1,
+                        };
+                        BUILTIN_THEMES[next as usize].to_string()
+                    };
+                    // STATIONARY arrows: the left arrow, then a FIXED-WIDTH combo
+                    // showing the current name, then the right arrow. Because the
+                    // centre combo is a fixed width (its long selected_text is
+                    // truncated to fit, not grown), the flanking arrows sit at fixed
+                    // x positions and never shift with the theme name's length — the
+                    // reported "the arrows move depending on the name". The combo is
+                    // still the full-list picker; the arrows step it in place.
+                    if ui
+                        .small_button("◀")
+                        .on_hover_text("Previous theme")
+                        .clicked()
+                    {
+                        let next = step_to(&config.theme, -1);
+                        config.theme = next;
+                        changed = true;
+                    }
                     egui::ComboBox::from_id_salt("c0pl4nd-theme-picker")
                         .selected_text(config.theme.clone())
+                        .width(168.0) // fixed centre label between the fixed arrows
                         .show_ui(ui, |ui| {
                             for name in BUILTIN_THEMES {
                                 changed |= ui
@@ -999,30 +1040,10 @@ fn render_sections(
                                     .changed();
                             }
                         });
-                    // Up/down step arrows: cycle through the built-ins without
-                    // opening the dropdown. `delta` wraps around the list; a
-                    // custom (non-built-in) theme name steps onto the first/last
-                    // built-in so the arrows always have a defined landing spot.
-                    let mut step = |delta: isize| {
-                        let n = BUILTIN_THEMES.len() as isize;
-                        let cur = BUILTIN_THEMES.iter().position(|t| *t == config.theme);
-                        let next = match cur {
-                            Some(i) => (i as isize + delta).rem_euclid(n),
-                            None if delta > 0 => 0,
-                            None => n - 1,
-                        };
-                        config.theme = BUILTIN_THEMES[next as usize].to_string();
+                    if ui.small_button("▶").on_hover_text("Next theme").clicked() {
+                        let next = step_to(&config.theme, 1);
+                        config.theme = next;
                         changed = true;
-                    };
-                    if ui
-                        .small_button("⏶")
-                        .on_hover_text("Previous theme")
-                        .clicked()
-                    {
-                        step(-1);
-                    }
-                    if ui.small_button("⏷").on_hover_text("Next theme").clicked() {
-                        step(1);
                     }
                 });
                 changed |= reset_to_default(ui, &mut config.theme, &def.theme);
@@ -1041,6 +1062,21 @@ fn render_sections(
                     )
                     .changed();
                 ui.label(""); // no ↺ on the alias field (it edits the same `theme`)
+                ui.end_row();
+            }
+
+            if row_visible(q, "follow os theme dark light auto system appearance") {
+                changed |= ui
+                    .checkbox(&mut config.follow_os_theme, "Follow OS dark / light")
+                    .on_hover_text(
+                        "Automatically match the operating system's dark/light \
+                         appearance, switching between the default dark (itasha-corp) \
+                         and light (ghost-paper) themes. While on, it overrides the \
+                         theme picker above.",
+                    )
+                    .changed();
+                ui.label(""); // checkbox carries its own label
+                changed |= reset_to_default(ui, &mut config.follow_os_theme, &def.follow_os_theme);
                 ui.end_row();
             }
         });
@@ -1088,13 +1124,16 @@ fn render_sections(
             if row_visible(q, "transparency mode glass mica vibrancy") {
                 let en = config.transparency_enabled;
                 ui.label("Mode").on_hover_text(
-                    "Opaque · Transparent (portable) · Glass/Mica/Vibrancy \
-                     (OS blur — applies on restart).",
+                    "Opaque · Transparent (per-pixel: widgets stay solid, gaps see \
+                     through — applies live) · Dim (uniform: the whole window incl. \
+                     text dims by one alpha, Windows) · Glass/Mica/Vibrancy (OS \
+                     blur). Dim / Glass / Mica / Vibrancy apply on restart.",
                 );
                 ui.add_enabled_ui(en, |ui| {
                     let wmodes = [
                         (WindowMode::Opaque, "opaque"),
                         (WindowMode::Transparent, "transparent"),
+                        (WindowMode::Dim, "dim"),
                         (WindowMode::Glass, "glass / acrylic"),
                         (WindowMode::Mica, "mica (Win11)"),
                         (WindowMode::Vibrancy, "vibrancy (macOS)"),
@@ -1116,8 +1155,8 @@ fn render_sections(
                         })
                         .response
                         .on_hover_text(
-                            "Transparent applies live; Glass/Mica/Vibrancy switch \
-                             the OS blur backend and apply on restart.",
+                            "Transparent applies live; Dim / Glass / Mica / Vibrancy \
+                             switch the OS surface effect and apply on restart.",
                         );
                 });
                 changed |= reset_to_default(ui, &mut config.window_mode, &def.window_mode);
@@ -1234,6 +1273,7 @@ fn render_sections(
         &[
             "font",
             "family",
+            "app ui font interface proportional",
             "size",
             "line height",
             "ligatures",
@@ -1241,12 +1281,18 @@ fn render_sections(
         ],
     ) {
         ui.heading("Fonts");
-        help(ui, "Typeface, size, and text shaping.");
+        help(
+            ui,
+            "Terminal and app-UI font family, text size, and line height. The two \
+             fonts are independent — one never changes the other.",
+        );
         grid("font_grid").show(ui, |ui| {
             if row_visible(q, "family typeface") {
-                ui.label("Family").on_hover_text(
-                    "Primary monospace typeface, picked from the fonts installed \
-                     on this system. Applies live.",
+                ui.label("Terminal font").on_hover_text(
+                    "Monospace typeface for the TERMINAL grid, picked from the fonts \
+                     installed on this system (plus the bundled faces). Separate from \
+                     the app-UI font below — changing one never changes the other. \
+                     Applies live.",
                 );
                 // The installed monospace families (enumerated once + cached) plus
                 // the built-in label. A ComboBox so the user picks a real font
@@ -1265,6 +1311,28 @@ fn render_sections(
                         }
                     });
                 changed |= reset_to_default(ui, &mut config.font.family, &def.font.family);
+                ui.end_row();
+            }
+
+            if row_visible(q, "app ui font interface proportional") {
+                ui.label("App UI font").on_hover_text(
+                    "Typeface for the whole app INTERFACE (settings, chrome, toolbar, \
+                     status bar, menus) — the proportional text everywhere EXCEPT the \
+                     terminal grid. Separate from the terminal font above, so the UI \
+                     swap never changes the terminal. \"System default\" keeps egui's \
+                     built-in UI font. Applies live.",
+                );
+                egui::ComboBox::from_id_salt("c0pl4nd-ui-font-family")
+                    .selected_text(config.font.ui_family.clone())
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for fam in super::fonts::ui_family_choices() {
+                            changed |= ui
+                                .selectable_value(&mut config.font.ui_family, fam.to_string(), fam)
+                                .changed();
+                        }
+                    });
+                changed |= reset_to_default(ui, &mut config.font.ui_family, &def.font.ui_family);
                 ui.end_row();
             }
 
@@ -2021,6 +2089,52 @@ fn render_sections(
                     .changed();
                 changed |=
                     reset_to_default(ui, &mut config.effects.mesh_speed, &def.effects.mesh_speed);
+                ui.end_row();
+            }
+
+            if row_visible(q, "mesh color colour node picker reset theme accent") {
+                ui.label("Mesh color").on_hover_text(
+                    "Colour of the wired node-mesh lattice. By default it follows \
+                     the theme accent; pick a colour to pin it regardless of theme, \
+                     then \"Reset to theme\" to follow the theme accent again.",
+                );
+                // Effective swatch: the override if set, else the theme accent (what
+                // the mesh actually draws with when no override is present) so the
+                // picker opens on the current colour either way.
+                let theme = c0pl4nd_core::Theme::builtin_named(&config.theme)
+                    .unwrap_or_else(c0pl4nd_core::Theme::builtin_void);
+                let accent = super::theme::ChromeColors::from_theme(&theme).accent;
+                let overridden = config.effects.mesh_color.is_some();
+                let start =
+                    config
+                        .effects
+                        .mesh_color
+                        .unwrap_or([accent.r(), accent.g(), accent.b()]);
+                ui.add_enabled_ui(on && config.effects.wired_ambient, |ui| {
+                    ui.horizontal(|ui| {
+                        let mut rgb = start;
+                        if ui.color_edit_button_srgb(&mut rgb).changed() {
+                            config.effects.mesh_color = Some(rgb);
+                            changed = true;
+                        }
+                        // Once the colour differs from the theme default, offer the
+                        // "Reset to theme" revert (mirrors SCR1B3's "Follow theme");
+                        // otherwise a muted "following theme" note.
+                        if overridden {
+                            if ui
+                                .button("Reset to theme")
+                                .on_hover_text("Follow the theme accent colour again.")
+                                .clicked()
+                            {
+                                config.effects.mesh_color = None;
+                                changed = true;
+                            }
+                        } else {
+                            ui.label(egui::RichText::new("following theme").weak().small());
+                        }
+                    });
+                });
+                ui.label(""); // no ↺ column — "Reset to theme" IS the revert
                 ui.end_row();
             }
         });

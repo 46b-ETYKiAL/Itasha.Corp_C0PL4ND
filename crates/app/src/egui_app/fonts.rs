@@ -218,6 +218,49 @@ pub fn bundled_family_displays() -> impl Iterator<Item = &'static str> {
     BUNDLED_FONTS.iter().map(|b| b.display)
 }
 
+/// The app-UI-font choices for the Settings → Fonts → App UI font dropdown:
+/// "System default" (keep egui's built-in proportional font) first, then every
+/// bundled family display name. The stored config value is the display string.
+pub fn ui_family_choices() -> impl Iterator<Item = &'static str> {
+    std::iter::once(c0pl4nd_core::config::UI_FONT_SYSTEM_DEFAULT).chain(bundled_family_displays())
+}
+
+/// Whether `family` names the "keep egui's built-in proportional font" UI choice
+/// (the system-default label, or empty). Such a value swaps nothing.
+pub fn is_system_ui_family(family: &str) -> bool {
+    let f = family.trim();
+    f.is_empty() || f.eq_ignore_ascii_case(c0pl4nd_core::config::UI_FONT_SYSTEM_DEFAULT)
+}
+
+/// Apply the chosen app-UI font to `defs`: register the bundled face and PREPEND
+/// it to `FontFamily::Proportional`, so the whole app UI (settings / chrome /
+/// toolbar / status bar / menus) renders in it. The "System default" choice (or
+/// an unknown / non-bundled name) leaves egui's built-in proportional font
+/// untouched. Never a panic.
+///
+/// This is the UI-font half of the terminal/UI font SPLIT: it touches ONLY the
+/// `Proportional` family, so the terminal grid — bound to `Monospace` — is never
+/// affected by a UI-font swap (and the terminal-font swap, which touches only
+/// `Monospace`, never affects the UI). Mirrors SCR1B3's mechanism exactly.
+pub fn apply_ui_font(defs: &mut egui::FontDefinitions, ui_family: &str) {
+    if is_system_ui_family(ui_family) {
+        return;
+    }
+    let Some(bf) = bundled_face(ui_family) else {
+        return; // unknown / non-bundled → keep egui's built-in proportional font
+    };
+    defs.font_data.insert(
+        bf.key.to_string(),
+        egui::FontData::from_static(bf.bytes).into(),
+    );
+    let prop = defs
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default();
+    prop.retain(|k| k != bf.key); // never register the same key twice
+    prop.insert(0, bf.key.to_string());
+}
+
 /// Process-wide cache of the installed monospace family list. Enumeration loads
 /// and parses the whole system font set (100s of ms with hundreds of fonts), so
 /// it runs at most ONCE per process — never per frame.
@@ -849,5 +892,53 @@ mod tests {
                 "variable-axis family {fam} registered its default instance"
             );
         }
+    }
+
+    #[test]
+    fn apply_ui_font_prepends_a_bundled_face_to_proportional_only() {
+        // The UI-font swap must touch ONLY the Proportional family (the whole app
+        // UI) and leave the Monospace family (the terminal grid) untouched — the
+        // terminal/UI font SEPARATION that is task 10's core requirement.
+        let mut defs = egui::FontDefinitions::default();
+        let mono_before = defs.families[&egui::FontFamily::Monospace].clone();
+        apply_ui_font(&mut defs, "IBM Plex Mono");
+        let key = bundled_face("IBM Plex Mono").expect("bundled").key;
+        // Registered + first in Proportional.
+        assert!(defs.font_data.contains_key(key));
+        assert_eq!(
+            defs.families[&egui::FontFamily::Proportional]
+                .first()
+                .map(String::as_str),
+            Some(key),
+            "the chosen UI face must be first in Proportional"
+        );
+        // Monospace (terminal) is byte-for-byte unchanged.
+        assert_eq!(
+            defs.families[&egui::FontFamily::Monospace],
+            mono_before,
+            "a UI-font swap must NOT touch the terminal (Monospace) family"
+        );
+    }
+
+    #[test]
+    fn apply_ui_font_system_default_and_unknown_leave_proportional_unchanged() {
+        for choice in ["System default", "", "   ", "Not A Real Font"] {
+            let mut defs = egui::FontDefinitions::default();
+            let prop_before = defs.families[&egui::FontFamily::Proportional].clone();
+            apply_ui_font(&mut defs, choice);
+            assert_eq!(
+                defs.families[&egui::FontFamily::Proportional],
+                prop_before,
+                "choice {choice:?} must keep egui's built-in proportional font"
+            );
+        }
+    }
+
+    #[test]
+    fn ui_family_choices_lead_with_system_default_then_bundled() {
+        let choices: Vec<&str> = ui_family_choices().collect();
+        assert_eq!(choices.first().copied(), Some("System default"));
+        assert!(choices.contains(&"IBM Plex Mono"));
+        assert!(choices.contains(&"JetBrains Mono"));
     }
 }
