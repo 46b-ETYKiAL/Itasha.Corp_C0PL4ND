@@ -25,4 +25,11 @@ exclude_globs = [
     "crates/*/tests/**",
     "**/build.rs",
     "crates/core/src/term/tests.rs",
+    # Thin cfg(windows) OS-flag shim: its only real branch — applying
+    # CREATE_NO_WINDOW via CommandExt::creation_flags — is `#[cfg(windows)]`
+    # and is therefore NOT compiled on the Linux mutants runner, so no test can
+    # ever kill a mutant in it here (the non-Windows branch is a bare `self`).
+    # Same class as the render/entry-shell exclusions above: not a productive
+    # mutation target on this runner. Correctness is pinned by its unit tests.
+    "crates/core/src/win_process.rs",
 ]
