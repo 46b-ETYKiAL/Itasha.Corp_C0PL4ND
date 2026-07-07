@@ -53,6 +53,7 @@ mod window_effects;
 pub(crate) use window_effects::*;
 mod caption_close;
 mod font_setup;
+mod win_foreground;
 pub(crate) use font_setup::*;
 mod app_config;
 mod app_report_ui;
@@ -293,6 +294,13 @@ pub struct C0pl4ndApp {
     /// frame the user actually sees — not from context creation (which may
     /// predate the window by the atlas-warmup cost, hiding the sweep entirely).
     pub(crate) first_frame_time: Option<f64>,
+    /// One-shot latch for the first-launch foreground raise. The window can open
+    /// BEHIND other windows on Windows 11 (foreground-lock ignores the polite
+    /// `with_active`/`Focus` request), so on the FIRST rendered frame of a real
+    /// window we send `ViewportCommand::Focus` and run the `win_foreground`
+    /// AttachThreadInput backstop — then set this so it NEVER runs again (raising
+    /// on later frames would steal focus back from an app the user switched to).
+    pub(crate) foreground_done: bool,
     /// True on the first frame the Settings window opens (a closed→open edge),
     /// so `settings::show` FORCES the window to its saved-or-centered position
     /// that frame instead of trusting egui's `default_pos` (which read a
@@ -511,6 +519,9 @@ impl C0pl4ndApp {
             if let Ok(handle) = cc.window_handle() {
                 if let RawWindowHandle::Win32(w) = handle.as_raw() {
                     caption_close::set_main_hwnd(w.hwnd.get());
+                    // Prime the first-launch foreground raise with the SAME main
+                    // window handle; `frame_tick` fires it once on frame 1.
+                    win_foreground::set_main_hwnd(w.hwnd.get());
                 }
             }
         }
@@ -637,6 +648,7 @@ impl C0pl4ndApp {
             restore_size: None,
             cursor_trail: std::collections::VecDeque::new(),
             first_frame_time: None,
+            foreground_done: false,
             settings_place_pending: false,
             settings_was_open: false,
             live_window: false,
@@ -3400,6 +3412,19 @@ impl C0pl4ndApp {
         // cost and would hide the sweep).
         if self.first_frame_time.is_none() {
             self.first_frame_time = Some(ctx.input(|i| i.time));
+        }
+        // FIRST-LAUNCH FOREGROUND (once). A freshly-launched window can open
+        // BEHIND other windows on Windows 11: the OS foreground-lock ignores the
+        // polite `with_active(true)` (egui_main.rs) request. On the first frame of
+        // a REAL window we (a) ask egui/winit to focus us and (b) run the
+        // `win_foreground` AttachThreadInput backstop that beats the lock. Gated on
+        // `live_window` so the headless/offscreen test harnesses never issue it,
+        // and latched by `foreground_done` so it runs EXACTLY once — raising on
+        // later frames would yank focus back from an app the user switched to.
+        if self.live_window && !self.foreground_done {
+            self.foreground_done = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            win_foreground::force_foreground_main();
         }
         // Ensure the chrome fonts (incl. the `phosphor-fill` family) are
         // installed before any widget references them — `new()` does this for

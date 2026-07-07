@@ -119,6 +119,13 @@ fn main() -> eframe::Result<()> {
         .with_title("C0PL4ND")
         .with_decorations(false) // frameless — we draw our own titlebar
         .with_transparent(true) // required for rounded corners + acrylic blur
+        // Ask winit/the OS to make the window ACTIVE (focused + foreground) at
+        // creation so it does not open BEHIND other windows on first launch. This
+        // is the polite first request; the app additionally sends
+        // `ViewportCommand::Focus` and, on Windows 11 (foreground-lock), runs the
+        // `win_foreground` AttachThreadInput nudge ONCE on the first frame as a
+        // backstop (see `egui_app::win_foreground`).
+        .with_active(true)
         // Suppress the native min/max caption buttons at CREATION. winit leaves
         // WS_MINIMIZEBOX | WS_MAXIMIZEBOX set on an undecorated window (winit
         // #2754), and Win11 DWM draws native min/max caption buttons from those
