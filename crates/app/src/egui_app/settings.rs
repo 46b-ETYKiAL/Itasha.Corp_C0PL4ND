@@ -2702,6 +2702,185 @@ fn render_update_status(ui: &mut egui::Ui, updater: &Arc<Mutex<Updater>>) {
     }
 }
 
+/// Kick off the on-launch update CHECK on the SHARED in-app updater (the same
+/// instance the Settings → Updates page and the notification banner drive).
+/// Called once per launch by the app when the configured update mode opts in.
+/// Maps the persisted [`UpdateMode`] to the updater [`LaunchKind`]
+/// (`auto` → hands-free download+apply; `notify` → banner). `off`/`manual` never
+/// reach here. The check runs on a background thread; the banner reflects the
+/// result on subsequent frames. Sharing ONE `Updater` is what makes the banner
+/// and the Settings page a single state machine (no divergent second updater).
+pub fn start_launch_update_check(ctx: &egui::Context, mode: UpdateMode) {
+    let kind = match mode {
+        UpdateMode::Auto => LaunchKind::Auto,
+        UpdateMode::Notify => LaunchKind::Notify,
+        UpdateMode::Off | UpdateMode::Manual => return,
+    };
+    let updater = get_updater(ctx);
+    // Bind the guard to a local (not an if-let tail expression) so its temporary
+    // is dropped BEFORE `updater` at the end of the function (E0597).
+    let mut guard = match updater.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    guard.start_check(ctx, kind);
+}
+
+/// Render the PERSISTENT, dismissible update notification banner as a top panel
+/// when a newer release is available (or a one-click apply is in flight). A
+/// single **"Update now"** click drives the WHOLE verified flow — download →
+/// SHA-256/minisign verify → silent in-place `self-replace` → relaunch — with
+/// inline progress, never leaving the app. The banner shares the SAME [`Updater`]
+/// the Settings → Updates page uses, so both reflect one state machine.
+///
+/// No-op when the updater has nothing to surface or the user dismissed the
+/// banner for the current release. Mutations (start the one-click flow / dismiss
+/// / retry) are deferred past the state snapshot so the updater lock is never
+/// held across a mutating call — the same borrow discipline as
+/// [`render_update_status`]. Called from the app's frame layout, below the
+/// titlebar and above the terminal grid.
+///
+/// `#[allow(deprecated)]`: egui 0.34 deprecated the top-level
+/// `TopBottomPanel::…show(ctx, …)` form in favour of `show_inside`, but the app
+/// chrome (titlebar / status bar) still uses the top-level form; the banner
+/// matches that established convention rather than diverging.
+#[allow(deprecated)]
+pub(super) fn update_banner(ctx: &egui::Context) {
+    let updater = get_updater(ctx);
+    // Advance the state machine EVERY frame — the Settings page also polls, but
+    // only while it is open, so the banner must drive `poll` itself or a launch
+    // check would never progress Checking → Available (→ the one-click chain)
+    // while Settings is closed. `poll` is cheap and safe to call twice a frame
+    // (the second drain finds an empty channel).
+    if let Ok(mut u) = updater.lock() {
+        u.poll(ctx);
+    }
+    // Snapshot visibility + state under a short-lived lock so the render closure
+    // never holds the lock across the deferred mutating calls below.
+    let (visible, state) = match updater.lock() {
+        Ok(u) => (u.banner_visible(), u.state.clone()),
+        Err(_) => return,
+    };
+    if !visible {
+        return;
+    }
+
+    enum Act {
+        UpdateNow,
+        Dismiss,
+    }
+    let mut act: Option<Act> = None;
+
+    let accent = super::theme::brand::GREEN;
+    // A faint brand-accent wash so the strip reads as chrome, not an alarm
+    // (Akira-red is reserved for alarms; a routine update is not one).
+    let fill = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 40);
+    egui::TopBottomPanel::top("c0pl4nd_update_banner")
+        .frame(
+            egui::Frame::new()
+                .fill(fill)
+                .inner_margin(egui::Margin::symmetric(12, 8)),
+        )
+        .show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                match &state {
+                    UpdateState::Available(info) => {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "C0PL4ND v{} is available — you have v{}.",
+                                info.version,
+                                update_engine::updater::current_version()
+                            ))
+                            .color(accent)
+                            .strong(),
+                        );
+                        ui.add_space(8.0);
+                        if ui
+                            .button(egui::RichText::new("Update now").strong())
+                            .on_hover_text(
+                                "Download the verified release, check its SHA-256 + \
+                                 signature, install it in place, and relaunch — all in \
+                                 one click. Stays in-app; no browser.",
+                            )
+                            .clicked()
+                        {
+                            act = Some(Act::UpdateNow);
+                        }
+                        if ui
+                            .button("Dismiss")
+                            .on_hover_text("Hide this until the next update. You can still update from Settings → Updates.")
+                            .clicked()
+                        {
+                            act = Some(Act::Dismiss);
+                        }
+                    }
+                    UpdateState::Downloading { received, total } => {
+                        ui.label(
+                            egui::RichText::new("Updating — downloading and verifying…")
+                                .color(accent),
+                        );
+                        ui.add_space(8.0);
+                        let frac = if *total > 0 {
+                            *received as f32 / *total as f32
+                        } else {
+                            0.0
+                        };
+                        ui.add(
+                            egui::ProgressBar::new(frac)
+                                .show_percentage()
+                                .desired_width(180.0),
+                        );
+                    }
+                    UpdateState::ReadyToApply { version, .. } => {
+                        // With the one-click chain this arm is transient (the
+                        // download auto-applies); render a fallback button for the
+                        // rare non-chained arrival so the user is never stuck.
+                        ui.label(
+                            egui::RichText::new(format!("v{version} verified — installing…"))
+                                .color(accent),
+                        );
+                        ui.add_space(8.0);
+                        if ui.button("Restart to finish").clicked() {
+                            act = Some(Act::UpdateNow);
+                        }
+                    }
+                    UpdateState::Applied { version } => {
+                        ui.label(
+                            egui::RichText::new(format!("Updated to v{version} — restarting…"))
+                                .color(accent)
+                                .strong(),
+                        );
+                    }
+                    UpdateState::Failed(e) => {
+                        ui.label(
+                            egui::RichText::new(crate::user_error::update_failed_user_copy(e))
+                                .color(ui.visuals().error_fg_color),
+                        );
+                        ui.add_space(8.0);
+                        if ui.button("Try again").clicked() {
+                            // `update_now` re-checks from a Failed state.
+                            act = Some(Act::UpdateNow);
+                        }
+                        if ui.button("Dismiss").clicked() {
+                            act = Some(Act::Dismiss);
+                        }
+                    }
+                    // `banner_visible()` gates the quiet states out; render nothing.
+                    UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate => {}
+                }
+            });
+        });
+
+    if let Some(act) = act {
+        if let Ok(mut u) = updater.lock() {
+            match act {
+                Act::UpdateNow => u.update_now(ctx),
+                Act::Dismiss => u.dismiss_banner(),
+            }
+        }
+    }
+}
+
 /// Human label for a cursor style (used by the combo's selected-text + items).
 fn cursor_style_label(style: CursorStyle) -> &'static str {
     match style {

@@ -220,6 +220,15 @@ pub fn latest_version(channel: &str) -> Result<String> {
 /// Check `channel` for a newer release and return a one-line user notice when
 /// one exists, else `None`. Offline-graceful: a failed check returns `None`
 /// (never an error) so a launch check never blocks or alarms.
+///
+/// `#[allow(dead_code)]`: this browser-pointing launch notice is the LEGACY
+/// winit binary's (`c0pl4nd-legacy` / `main.rs`) on-launch check. The egui
+/// binary (`c0pl4nd` / `egui_main.rs`) now drives the SHARED in-app updater's
+/// one-click notification banner instead (`egui_app::start_launch_update_check`),
+/// so it no longer calls this — but `update.rs` is `mod update`-compiled into
+/// BOTH binaries, so this stays live for the legacy binary and is (correctly)
+/// unused in the egui one. Not error suppression — a genuinely per-binary path.
+#[allow(dead_code)]
 pub fn check_for_update(channel: &str) -> Option<String> {
     let latest = latest_version(channel).ok()?;
     if is_newer(&latest, current_version()) {

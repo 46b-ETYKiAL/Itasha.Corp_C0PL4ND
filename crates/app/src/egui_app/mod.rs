@@ -28,6 +28,19 @@ mod motion_fx;
 pub mod pane_term;
 mod search_ui;
 mod settings;
+/// Kick off the on-launch update CHECK on the shared in-app updater that drives
+/// the notification banner + Settings → Updates page. Exposed for the binary
+/// entry point (`egui_main`), which calls it exactly once at startup when the
+/// persisted update mode opts in (`notify`/`auto`) and the interval throttle
+/// says a check is due. Thin re-export of the settings-owned implementation so
+/// the updater's private types never leak out of `egui_app`.
+///
+/// `#[allow(unused_imports)]`: this re-export exists for the `c0pl4nd` egui
+/// BINARY (`egui_main`), which calls it once at startup. The `egui_kittest`
+/// integration-test binaries `#[path]`-include this module but never launch the
+/// on-launch check, so the re-export is (correctly) unused in those targets.
+#[allow(unused_imports)]
+pub use settings::start_launch_update_check;
 pub mod shells;
 mod theme;
 pub(crate) use crt::*;
@@ -4177,6 +4190,17 @@ impl C0pl4ndApp {
                 })
                 .inner
         };
+
+        // 1b) persistent, dismissible UPDATE NOTIFICATION BANNER. Rendered right
+        //     below the titlebar so a newer release surfaces a one-click "Update
+        //     now" strip that runs the WHOLE verified flow (download → verify →
+        //     silent self-replace → relaunch) inline — never leaving the app. It
+        //     shares the SAME `Updater` the Settings → Updates page drives, and it
+        //     polls that updater every frame so the on-launch check advances even
+        //     while Settings is closed. The panel only appears when an update is
+        //     actionable (or an apply is in flight) and not dismissed, so it costs
+        //     nothing in the common up-to-date case.
+        settings::update_banner(ctx);
 
         // 2) status bar (hidden in fullscreen — see the titlebar gate above — and
         //    hidden when the user turns it off in Settings, reclaiming the row for

@@ -182,29 +182,24 @@ fn main() -> eframe::Result<()> {
         "C0PL4ND",
         options,
         Box::new(|cc| {
-            let mut app = egui_app::C0pl4ndApp::new(cc);
-            // Launch update check. The ONE network call runs on a background
-            // thread so startup never blocks; the app polls the channel each
-            // frame and surfaces a found update as a toast. Runs by default —
-            // the default `notify` mode performs this on-launch check (as does
-            // `auto`), plus the legacy `check_on_launch` flag; `manual`/`off`
-            // suppress it. The check is throttled by `check_interval_hours`. The
-            // Updates settings page owns the richer in-app download/install
-            // flow; this launch path is the lightweight "newer version" notice.
-            let (should_check, channel) = launch_check_config();
+            let app = egui_app::C0pl4ndApp::new(cc);
+            // On-launch update check. Drives the SHARED in-app updater that powers
+            // the persistent, dismissible NOTIFICATION BANNER (and the Settings →
+            // Updates page): a found update surfaces a one-click "Update now" strip
+            // that runs the WHOLE verified flow in place — download → SHA-256 +
+            // minisign verify → silent `self-replace` → relaunch — never a browser
+            // hand-off. Runs by default: the `notify` mode performs this on-launch
+            // check (as does `auto`, which additionally auto-applies), plus the
+            // legacy `check_on_launch` flag; `manual`/`off` suppress it. Throttled
+            // by `check_interval_hours`. The check runs on a background thread
+            // inside the updater, so startup never blocks; the banner reflects the
+            // result on subsequent frames.
+            let (should_check, mode) = launch_check_config();
             if should_check {
-                let (tx, rx) = std::sync::mpsc::channel();
-                let ctx = cc.egui_ctx.clone();
-                std::thread::spawn(move || {
-                    if let Some(notice) = update::check_for_update(&channel) {
-                        let _ = tx.send(notice);
-                        ctx.request_repaint(); // wake the UI to show the toast
-                    }
-                    // Record the attempt (success OR failure) so the interval
-                    // throttle suppresses the next launch's check until due.
-                    update::record_check_now();
-                });
-                app.attach_update_check(rx);
+                egui_app::start_launch_update_check(&cc.egui_ctx, mode);
+                // Record the attempt (success OR failure) so the interval throttle
+                // suppresses the next launch's check until due.
+                update::record_check_now();
             }
             Ok(Box::new(app))
         }),
@@ -220,16 +215,18 @@ fn main() -> eframe::Result<()> {
     result
 }
 
-/// Decide whether to run the lightweight on-launch update check and which
-/// release channel to query. Reads the persisted config directly (the same
-/// load path the `c0pl4nd update` CLI subcommand uses) so the decision honours
-/// the canonical `[update] mode` (`notify`/`auto` check on launch) as well as
-/// the legacy `check_on_launch` flag, without depending on the host app's
-/// accessor. When no config file exists yet (first-ever launch) the canonical
-/// [`UpdateConfig`] default is used, so a brand-new user gets the same default
-/// (`notify`) behaviour as one whose config has already been written — no
-/// special-cased divergence.
-fn launch_check_config() -> (bool, String) {
+/// Decide whether to run the on-launch update check and which update MODE the
+/// shared in-app updater should run under. Reads the persisted config directly
+/// (the same load path the `c0pl4nd update` CLI subcommand uses) so the decision
+/// honours the canonical `[update] mode` (`notify`/`auto` check on launch) as
+/// well as the legacy `check_on_launch` flag, without depending on the host
+/// app's accessor. When no config file exists yet (first-ever launch) the
+/// canonical [`UpdateConfig`] default is used, so a brand-new user gets the same
+/// default (`notify`) behaviour as one whose config has already been written —
+/// no special-cased divergence. The returned mode maps to the updater's launch
+/// kind inside `egui_app::start_launch_update_check` (`auto` → hands-free
+/// download+apply; `notify` → one-click banner).
+fn launch_check_config() -> (bool, c0pl4nd_core::config::UpdateMode) {
     // The configured update settings (from the persisted config, or the canonical
     // default when no config exists yet). A check runs only when the mode opts in
     // (`notify`/`auto` or the legacy flag) AND the interval throttle says it is due
@@ -244,7 +241,7 @@ fn launch_check_config() -> (bool, String) {
         .map(|c| c.update)
         .unwrap_or_else(|| c0pl4nd_core::Config::default().update);
     let should_check = update.checks_on_launch() && update::check_due(update.check_interval_hours);
-    (should_check, update.channel)
+    (should_check, update.mode)
 }
 
 /// Whether the persisted config has window transparency enabled — read at launch
