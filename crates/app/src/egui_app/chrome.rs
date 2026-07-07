@@ -686,9 +686,20 @@ impl C0pl4ndApp {
                 } else {
                     (icon::GRID_FOUR, "switch to tabs view (one pane at a time)")
                 };
-                let btn = ui
-                    .button(RichText::new(glyph).size(16.0).color(colors.muted))
-                    .on_hover_text(hover);
+                // SCR1B3-parity toggled-ON treatment: a stateful toolbar button
+                // (here "tabs view" is the non-default active state) paints the
+                // theme accent at 20% alpha — `accent.gamma_multiply(0.20)`, the
+                // exact value SCR1B3's toolbar uses for a selected item — with the
+                // glyph in the full accent colour. Idle/hover stay transparent /
+                // veil-filled via `flatten_chrome_buttons`, so this is the ONLY
+                // opaque-ish fill and only while the mode is on.
+                let active = in_tabs;
+                let glyph_col = if active { colors.accent } else { colors.muted };
+                let mut button = egui::Button::new(RichText::new(glyph).size(16.0).color(glyph_col));
+                if active {
+                    button = button.fill(colors.accent.gamma_multiply(0.20));
+                }
+                let btn = ui.add(button).on_hover_text(hover);
                 btn.widget_info(|| {
                     egui::WidgetInfo::labeled(
                         egui::WidgetType::Button,
