@@ -74,7 +74,10 @@ mod tests {
             .no_console_window()
             .status()
             .expect("spawn true");
-        assert!(status.success(), "the wrapped command must still run cleanly");
+        assert!(
+            status.success(),
+            "the wrapped command must still run cleanly"
+        );
     }
 
     /// The flag constant is exactly `CREATE_NO_WINDOW` (0x0800_0000) — a wrong
