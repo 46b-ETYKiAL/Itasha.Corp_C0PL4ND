@@ -96,6 +96,7 @@ const MOTION_SEARCH_LABELS: &[&str] = &[
     "mesh density",
     "mesh brightness",
     "mesh drift speed movement",
+    "mesh color colour node picker reset theme accent",
     "vhs tracking",
     "vhs intensity",
     "vhs drift speed",
@@ -990,8 +991,40 @@ fn render_sections(
                 ui.label("Theme")
                     .on_hover_text("Terminal color theme — a file stem under the themes dir.");
                 ui.horizontal(|ui| {
+                    // Prev/next step: cycle through the built-ins without opening the
+                    // dropdown. `delta` wraps around the list; a custom (non-built-in)
+                    // theme name steps onto the first/last built-in so the arrows
+                    // always have a defined landing spot. Pure (captures nothing
+                    // mutable), so it doesn't hold a borrow across the ComboBox.
+                    let step_to = |cur: &str, delta: isize| -> String {
+                        let n = BUILTIN_THEMES.len() as isize;
+                        let idx = BUILTIN_THEMES.iter().position(|t| *t == cur);
+                        let next = match idx {
+                            Some(i) => (i as isize + delta).rem_euclid(n),
+                            None if delta > 0 => 0,
+                            None => n - 1,
+                        };
+                        BUILTIN_THEMES[next as usize].to_string()
+                    };
+                    // STATIONARY arrows: the left arrow, then a FIXED-WIDTH combo
+                    // showing the current name, then the right arrow. Because the
+                    // centre combo is a fixed width (its long selected_text is
+                    // truncated to fit, not grown), the flanking arrows sit at fixed
+                    // x positions and never shift with the theme name's length — the
+                    // reported "the arrows move depending on the name". The combo is
+                    // still the full-list picker; the arrows step it in place.
+                    if ui
+                        .small_button("◀")
+                        .on_hover_text("Previous theme")
+                        .clicked()
+                    {
+                        let next = step_to(&config.theme, -1);
+                        config.theme = next;
+                        changed = true;
+                    }
                     egui::ComboBox::from_id_salt("c0pl4nd-theme-picker")
                         .selected_text(config.theme.clone())
+                        .width(168.0) // fixed centre label between the fixed arrows
                         .show_ui(ui, |ui| {
                             for name in BUILTIN_THEMES {
                                 changed |= ui
@@ -999,30 +1032,10 @@ fn render_sections(
                                     .changed();
                             }
                         });
-                    // Up/down step arrows: cycle through the built-ins without
-                    // opening the dropdown. `delta` wraps around the list; a
-                    // custom (non-built-in) theme name steps onto the first/last
-                    // built-in so the arrows always have a defined landing spot.
-                    let mut step = |delta: isize| {
-                        let n = BUILTIN_THEMES.len() as isize;
-                        let cur = BUILTIN_THEMES.iter().position(|t| *t == config.theme);
-                        let next = match cur {
-                            Some(i) => (i as isize + delta).rem_euclid(n),
-                            None if delta > 0 => 0,
-                            None => n - 1,
-                        };
-                        config.theme = BUILTIN_THEMES[next as usize].to_string();
+                    if ui.small_button("▶").on_hover_text("Next theme").clicked() {
+                        let next = step_to(&config.theme, 1);
+                        config.theme = next;
                         changed = true;
-                    };
-                    if ui
-                        .small_button("⏶")
-                        .on_hover_text("Previous theme")
-                        .clicked()
-                    {
-                        step(-1);
-                    }
-                    if ui.small_button("⏷").on_hover_text("Next theme").clicked() {
-                        step(1);
                     }
                 });
                 changed |= reset_to_default(ui, &mut config.theme, &def.theme);
@@ -2021,6 +2034,51 @@ fn render_sections(
                     .changed();
                 changed |=
                     reset_to_default(ui, &mut config.effects.mesh_speed, &def.effects.mesh_speed);
+                ui.end_row();
+            }
+
+            if row_visible(q, "mesh color colour node picker reset theme accent") {
+                ui.label("Mesh color").on_hover_text(
+                    "Colour of the wired node-mesh lattice. By default it follows \
+                     the theme accent; pick a colour to pin it regardless of theme, \
+                     then \"Reset to theme\" to follow the theme accent again.",
+                );
+                // Effective swatch: the override if set, else the theme accent (what
+                // the mesh actually draws with when no override is present) so the
+                // picker opens on the current colour either way.
+                let theme = c0pl4nd_core::Theme::builtin_named(&config.theme)
+                    .unwrap_or_else(c0pl4nd_core::Theme::builtin_void);
+                let accent = super::theme::ChromeColors::from_theme(&theme).accent;
+                let overridden = config.effects.mesh_color.is_some();
+                let start = config
+                    .effects
+                    .mesh_color
+                    .unwrap_or([accent.r(), accent.g(), accent.b()]);
+                ui.add_enabled_ui(on && config.effects.wired_ambient, |ui| {
+                    ui.horizontal(|ui| {
+                        let mut rgb = start;
+                        if ui.color_edit_button_srgb(&mut rgb).changed() {
+                            config.effects.mesh_color = Some(rgb);
+                            changed = true;
+                        }
+                        // Once the colour differs from the theme default, offer the
+                        // "Reset to theme" revert (mirrors SCR1B3's "Follow theme");
+                        // otherwise a muted "following theme" note.
+                        if overridden {
+                            if ui
+                                .button("Reset to theme")
+                                .on_hover_text("Follow the theme accent colour again.")
+                                .clicked()
+                            {
+                                config.effects.mesh_color = None;
+                                changed = true;
+                            }
+                        } else {
+                            ui.label(egui::RichText::new("following theme").weak().small());
+                        }
+                    });
+                });
+                ui.label(""); // no ↺ column — "Reset to theme" IS the revert
                 ui.end_row();
             }
         });

@@ -4423,7 +4423,15 @@ impl C0pl4ndApp {
             // a drift phase, so scaling would corrupt them).
             let mut animating = false;
             if fx.wired_ambient {
-                let accent = theme::ChromeColors::from_theme(&self.theme).accent;
+                // The mesh colour follows the theme accent UNLESS the user pinned an
+                // explicit override in Settings (`effects.mesh_color`, a `#rrggbb`).
+                // "Reset to theme" clears the override back to None → accent again.
+                let accent = self
+                    .config
+                    .effects
+                    .mesh_color
+                    .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b))
+                    .unwrap_or_else(|| theme::ChromeColors::from_theme(&self.theme).accent);
                 // The Motion → Mesh-drift-speed slider (`mesh_speed`) scales the
                 // mesh's own drift clock: the node lattice can hold a static frame
                 // (0) or drift briskly (2) independently of the other effects.

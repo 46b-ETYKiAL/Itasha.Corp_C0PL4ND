@@ -578,6 +578,14 @@ pub struct EffectsConfig {
     /// [`wired_ambient`](Self::wired_ambient) is on.
     #[serde(default = "default_mesh_speed")]
     pub mesh_speed: f32,
+    /// Optional node-mesh colour override as an `[r, g, b]` sRGB triple,
+    /// INDEPENDENT of the theme. `None` (default) = the wired-mesh lattice follows
+    /// the active theme's accent colour. `Some([r,g,b])` pins the mesh regardless
+    /// of theme; the Settings "Reset to theme" button clears it back to `None` so
+    /// the mesh follows the theme accent again. Mirrors the app-background-override
+    /// UX. An `[u8; 3]` (not a hex `String`) keeps `EffectsConfig: Copy`.
+    #[serde(default)]
+    pub mesh_color: Option<[u8; 3]>,
     /// Cursor ghost-trail: a fading echo follows the focused terminal cursor as
     /// it moves. OFF by default.
     #[serde(default)]
@@ -690,6 +698,7 @@ impl Default for EffectsConfig {
             mesh_density: default_mesh_density(),
             mesh_brightness: default_mesh_brightness(),
             mesh_speed: default_mesh_speed(),
+            mesh_color: None,
             cursor_trail: false,
             cursor_trail_intensity: default_cursor_trail_intensity(),
             boot_glitch: false,
