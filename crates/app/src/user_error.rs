@@ -159,6 +159,25 @@ pub fn update_failed_user_copy(raw: &str) -> String {
         "The downloaded update couldn't be verified as authentic and was \
          discarded for your safety. Try again, or download from the official \
          GitHub releases page."
+    } else if r.contains("not writable")
+        || r.contains("access is denied")
+        || r.contains("permission denied")
+        || r.contains("os error 5")
+        || r.contains("run once elevated")
+        || r.contains("read-only")
+        || r.contains("readonly")
+    {
+        // permission / relocate: the install directory is owned by another
+        // account (Program Files, an admin-extracted folder, a read-only mount),
+        // so the in-place swap cannot write there. This is NOT a disk-space
+        // problem — telling the user to "free disk space" (the previous
+        // behaviour) is a dead-end. Give the real, actionable fix. Checked
+        // BEFORE the disk/unpack bucket so an access-denied `os error 5` (which
+        // also matches "install failed"/"write"/"create" below) lands here.
+        "C0PL4ND couldn't update itself because it's installed in a folder this \
+         account can't modify (for example Program Files). Move C0PL4ND to a \
+         folder you own — such as your user folder or Desktop — and try again, or \
+         run it once as administrator so the update can install."
     } else if r.contains("staging")
         || r.contains("install failed")
         || r.contains("extract")
@@ -171,7 +190,10 @@ pub fn update_failed_user_copy(raw: &str) -> String {
         || r.contains("archive")
         || r.contains("unpack")
     {
-        // disk / unpack: the update could not be staged, written, or unpacked.
+        // disk / unpack: the update could not be staged, written, or unpacked
+        // for a genuine storage reason (out of space, a broken archive). A
+        // permission failure is caught by the bucket ABOVE, so this copy's
+        // disk-space guidance is only shown when it is actually apt.
         "The update couldn't be saved or unpacked. Make sure there is free disk \
          space and try again, or download from the official GitHub releases page."
     } else if r.contains("download")
@@ -289,10 +311,33 @@ mod tests {
             assert_clean(&s);
         }
 
-        // disk / unpack
+        // permission / relocate (access-denied install dir — NOT disk space).
+        // This is the load-bearing fix: the running-exe swap failing with an
+        // access-denied `os error 5` (Program Files / admin-owned folder) must
+        // route to the actionable relocate/elevate copy, never "free disk space".
         for raw in [
-            "cannot create staging dir: os error 5",
-            "install failed: os error 5",
+            "install failed: Access is denied. (os error 5)",
+            "install location not writable: run once elevated or move the app",
+            "swap failed: permission denied",
+            "failed to create staging dir: The media is write protected (read-only)",
+        ] {
+            let s = update_failed_user_copy(raw);
+            assert!(
+                s.contains("account can't modify") && s.contains("administrator"),
+                "raw {raw:?} -> {s:?}"
+            );
+            assert!(
+                !s.contains("free disk space"),
+                "a permission failure must NOT be labelled a disk-space problem: {s:?}"
+            );
+            assert_clean(&s);
+        }
+
+        // disk / unpack — a GENUINE storage failure (out of space, corrupt
+        // archive), with no permission token, still lands in the disk bucket.
+        for raw in [
+            "cannot create staging dir: There is not enough space on the disk. (os error 112)",
+            "install failed: no space left on device",
             "failed to write extracted bytes: disk full",
             "failed to read tar entries: corrupt",
         ] {
