@@ -238,6 +238,10 @@ impl C0pl4ndApp {
                 .and_then(|i| tabs.get(i - 1))
                 .map(|(p, _)| *p);
             let next_target = cur.and_then(|i| tabs.get(i + 1)).map(|(p, _)| *p);
+            // Index of the last tab, so the between-tabs hairline divider is drawn
+            // AFTER every tab except the last (a boundary line between adjacent
+            // tabs, never a trailing rule before the "+").
+            let last_tab = tabs.len().saturating_sub(1);
             // A tab step-arrow ‹ / › that speaks the SAME hover language as the
             // caption cluster (the reference treatment below): the chevron rests at
             // a mid-tone — brighter than the old flat `muted`, which read as
@@ -301,7 +305,7 @@ impl C0pl4ndApp {
                 // works independently of the bar's visibility.
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
-                    for (pane_id, title) in tabs {
+                    for (i, (pane_id, title)) in tabs.into_iter().enumerate() {
                         let selected = pane_id == self.focused_pane;
                         let is_pinned = self.pinned.contains(&pane_id);
                         // Per-tab accessible labels. The pin/× glyph buttons AND the tab
@@ -415,7 +419,24 @@ impl C0pl4ndApp {
                                 }
                             }
                         });
-                        ui.separator();
+                        // Subtle 1px theme-tinted HAIRLINE between adjacent tabs — a
+                        // boundary line, NOT egui's spacing `separator()` (which adds
+                        // a wide gap). The theme foreground at ~16% alpha reads as a
+                        // faint rule in both light and dark themes, and because it
+                        // carries its OWN low alpha (not folded to zero by the window
+                        // opacity) it stays visible in transparency mode without ever
+                        // reading as a hard opaque bar. Skipped after the last tab.
+                        if i != last_tab {
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(5.0, 18.0),
+                                egui::Sense::hover(),
+                            );
+                            ui.painter().vline(
+                                rect.center().x,
+                                rect.y_range(),
+                                egui::Stroke::new(1.0, colors.fg.gamma_multiply(0.16)),
+                            );
+                        }
                     }
                 });
             // Record overflow for NEXT frame's left-arrow gate, and render the
