@@ -65,6 +65,7 @@ const CATEGORIES: &[&str] = &[
 /// section and hide the moved control from a full-name search).
 const APPEARANCE_SEARCH_LABELS: &[&str] = &[
     "theme",
+    "follow os theme dark light auto system appearance",
     "transparency",
     "mode",
     "opacity",
@@ -988,7 +989,10 @@ fn render_sections(
     // ---------------------------------------------------------------- Appearance
     if section_visible(sel, q, "Appearance", APPEARANCE_SEARCH_LABELS) {
         ui.heading("Appearance");
-        help(ui, "Colors and window transparency.");
+        help(
+            ui,
+            "Theme, window transparency, and interface look. Changes apply live.",
+        );
         group(ui, "Theme", "The terminal colour palette.");
         grid("appearance_theme").show(ui, |ui| {
             if row_visible(q, "theme color") {
@@ -1058,6 +1062,22 @@ fn render_sections(
                     )
                     .changed();
                 ui.label(""); // no ↺ on the alias field (it edits the same `theme`)
+                ui.end_row();
+            }
+
+            if row_visible(q, "follow os theme dark light auto system appearance") {
+                changed |= ui
+                    .checkbox(&mut config.follow_os_theme, "Follow OS dark / light")
+                    .on_hover_text(
+                        "Automatically match the operating system's dark/light \
+                         appearance, switching between the default dark (itasha-corp) \
+                         and light (ghost-paper) themes. While on, it overrides the \
+                         theme picker above.",
+                    )
+                    .changed();
+                ui.label(""); // checkbox carries its own label
+                changed |=
+                    reset_to_default(ui, &mut config.follow_os_theme, &def.follow_os_theme);
                 ui.end_row();
             }
         });
@@ -1262,7 +1282,11 @@ fn render_sections(
         ],
     ) {
         ui.heading("Fonts");
-        help(ui, "Typeface, size, and text shaping.");
+        help(
+            ui,
+            "Terminal and app-UI font family, text size, and line height. The two \
+             fonts are independent — one never changes the other.",
+        );
         grid("font_grid").show(ui, |ui| {
             if row_visible(q, "family typeface") {
                 ui.label("Terminal font").on_hover_text(

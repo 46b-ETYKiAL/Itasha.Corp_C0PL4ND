@@ -2461,6 +2461,35 @@ impl C0pl4ndApp {
         }
     }
 
+    /// When `follow_os_theme` is on, track the OS dark/light appearance and swap
+    /// between the default dark (`itasha-corp`) and light (`ghost-paper`) themes to
+    /// match — overriding the manual theme selection while it is on. A no-op when
+    /// the toggle is off or the desired theme is already active. egui reports the
+    /// OS appearance via `ctx.system_theme()`; an unknown value keeps the dark
+    /// default. Mirrors SCR1B3's follow-OS behaviour.
+    fn follow_os_theme_tick(&mut self, ctx: &egui::Context) {
+        if !self.config.follow_os_theme {
+            return;
+        }
+        let desired = match ctx.system_theme() {
+            Some(egui::Theme::Light) => "ghost-paper",
+            _ => "itasha-corp",
+        };
+        if self.config.theme == desired {
+            return;
+        }
+        self.config.theme = desired.to_string();
+        let (theme, notice) = load_terminal_theme(&self.config);
+        self.theme = theme;
+        if let Some(notice) = notice {
+            self.toast = Some(notice);
+        }
+        for term in self.terms.values_mut() {
+            term.set_theme(self.theme.clone());
+        }
+        ctx.set_visuals(theme::visuals_from_theme(&self.theme));
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.settings_open;
         // Theme-derived palette so the settings window fill + headings follow
@@ -3380,6 +3409,9 @@ impl C0pl4ndApp {
             self.prepare_shutdown();
             std::process::exit(0);
         }
+        // Follow-OS dark/light (SCR1B3 parity): when enabled, track the OS
+        // appearance and swap between the default dark/light themes to match.
+        self.follow_os_theme_tick(ctx);
         // Motion master switch (SCR1B3 parity): scale egui's global animation time
         // by the configured UI-transition speed, or zero it for a fully static UI
         // when animations are disabled OR the user requested reduced motion (env or

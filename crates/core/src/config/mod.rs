@@ -978,6 +978,14 @@ pub struct Config {
     pub schema_version: u32,
     /// Name of the theme to load (matches a file stem in the themes dir).
     pub theme: String,
+    /// Automatically follow the OS dark/light appearance: when ON, the app tracks
+    /// the operating system's appearance setting and switches between a dark
+    /// (`itasha-corp`) and light (`ghost-paper`) theme to match, overriding the
+    /// [`theme`](Self::theme) selection while it is on. OFF by default (the
+    /// flagship dark brand theme is the zero-config look). Mirrors SCR1B3's
+    /// `follow_os_theme`.
+    #[serde(default)]
+    pub follow_os_theme: bool,
     /// Font configuration (family, size, line height, fallback chain).
     pub font: FontConfig,
     /// Persisted UI scale / accessibility zoom (F2-3): a multiplier applied to
@@ -1161,6 +1169,7 @@ impl Default for Config {
             // migrated forward on load.
             schema_version: CURRENT_SCHEMA_VERSION,
             theme: "itasha-corp".to_string(),
+            follow_os_theme: false,
             font: FontConfig::default(),
             ui_scale: default_ui_scale(),
             scrollback_lines: 10_000,
