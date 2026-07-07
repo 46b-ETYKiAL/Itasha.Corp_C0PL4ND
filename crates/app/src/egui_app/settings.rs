@@ -1105,13 +1105,16 @@ fn render_sections(
             if row_visible(q, "transparency mode glass mica vibrancy") {
                 let en = config.transparency_enabled;
                 ui.label("Mode").on_hover_text(
-                    "Opaque · Transparent (portable) · Glass/Mica/Vibrancy \
-                     (OS blur — applies on restart).",
+                    "Opaque · Transparent (per-pixel: widgets stay solid, gaps see \
+                     through — applies live) · Dim (uniform: the whole window incl. \
+                     text dims by one alpha, Windows) · Glass/Mica/Vibrancy (OS \
+                     blur). Dim / Glass / Mica / Vibrancy apply on restart.",
                 );
                 ui.add_enabled_ui(en, |ui| {
                     let wmodes = [
                         (WindowMode::Opaque, "opaque"),
                         (WindowMode::Transparent, "transparent"),
+                        (WindowMode::Dim, "dim"),
                         (WindowMode::Glass, "glass / acrylic"),
                         (WindowMode::Mica, "mica (Win11)"),
                         (WindowMode::Vibrancy, "vibrancy (macOS)"),
@@ -1133,8 +1136,8 @@ fn render_sections(
                         })
                         .response
                         .on_hover_text(
-                            "Transparent applies live; Glass/Mica/Vibrancy switch \
-                             the OS blur backend and apply on restart.",
+                            "Transparent applies live; Dim / Glass / Mica / Vibrancy \
+                             switch the OS surface effect and apply on restart.",
                         );
                 });
                 changed |= reset_to_default(ui, &mut config.window_mode, &def.window_mode);

@@ -497,7 +497,12 @@ impl C0pl4ndApp {
         // opaque window: no layered surface, so no DWM ghost-on-close risk.
         // Done after `bootstrap()` so `app.config` is the source of truth.
         if app.config.effective_translucent() {
-            apply_window_effect(cc, app.config.window_mode, &app.config.tint);
+            apply_window_effect(
+                cc,
+                app.config.window_mode,
+                &app.config.tint,
+                app.config.opacity,
+            );
         }
         // The residual native MIN/MAX caption buttons winit leaves on the
         // undecorated window (winit #2754) are suppressed at WINDOW CREATION via

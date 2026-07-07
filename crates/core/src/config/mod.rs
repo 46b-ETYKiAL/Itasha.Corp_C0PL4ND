@@ -422,6 +422,12 @@ pub enum WindowMode {
     #[default]
     Opaque,
     Transparent,
+    /// UNIFORM window opacity ("dim"): the whole window — chrome, panes, AND text —
+    /// is dimmed by a single alpha (Win32 `SetLayeredWindowAttributes`, `LWA_ALPHA`)
+    /// so the desktop shows through evenly. Genuinely distinct from `Transparent`
+    /// (per-pixel alpha: widgets/text stay opaque, only the gaps see through). The
+    /// window content is painted OPAQUE; the OS layer does the dimming.
+    Dim,
     Glass,
     Mica,
     Vibrancy,
@@ -431,6 +437,14 @@ impl WindowMode {
     /// Whether this mode wants a non-opaque surface.
     pub fn is_translucent(self) -> bool {
         !matches!(self, WindowMode::Opaque)
+    }
+
+    /// Whether this mode dims the window UNIFORMLY at the OS layer (Win32
+    /// layered-window alpha) rather than via a per-pixel-alpha framebuffer. Such a
+    /// mode paints its content OPAQUE (the OS layer supplies the see-through), so
+    /// the per-pixel pane/clear alpha must stay at 255 for it.
+    pub fn is_uniform_dim(self) -> bool {
+        matches!(self, WindowMode::Dim)
     }
 }
 
