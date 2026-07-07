@@ -3360,23 +3360,22 @@ impl C0pl4ndApp {
             std::process::exit(0);
         }
         // Motion master switch (SCR1B3 parity): scale egui's global animation time
-        // by the configured intensity, or zero it for a fully static UI when
-        // animations are disabled OR the user requested reduced motion (env or OS).
-        // Cheap; applied every frame so a live Settings change (Motion → Enable
-        // animations / Animation speed) takes effect at once. `1.0/12.0` is egui's
-        // stock `Style::animation_time`, so the default (enabled, intensity 1.0, no
-        // reduced-motion) reproduces the shipped feel exactly, while a reduced-motion
-        // preference now makes egui's own chrome fades instant too — not just the
-        // overlays.
+        // by the configured UI-transition speed, or zero it for a fully static UI
+        // when animations are disabled OR the user requested reduced motion (env or
+        // OS). Cheap; applied every frame so a live Settings change (Motion → Enable
+        // animations / UI transition speed) takes effect at once. `1.0/12.0` is
+        // egui's stock `Style::animation_time`, so the default (enabled, intensity
+        // 1.0, no reduced-motion) reproduces the shipped feel exactly, while a
+        // reduced-motion preference makes egui's own chrome fades instant too. The
+        // `animation_intensity` factor now governs ONLY these chrome transitions —
+        // the retro overlays each carry their own per-effect drift-speed multiplier
+        // (see the overlay-painting block and the scanline painter below) — so the
+        // whole 0..=2 band applies straight to chrome (0 = instant, 2 = double).
         {
             const EGUI_DEFAULT_ANIMATION_TIME: f32 = 1.0 / 12.0;
             let fx = &self.config.effects;
             let anim = if fx.animations_enabled && !c0pl4nd_core::reduced_motion::reduced_motion() {
-                // The intensity band now extends to 2.0 to let the motion OVERLAYS run
-                // at up to double-rate, but the egui-chrome factor is capped at 1.0 so
-                // a >1.0 speed only accelerates the effects — it never LENGTHENS the UI
-                // fades (a >1.0 multiplier here would make menus/tooltips feel sluggish).
-                EGUI_DEFAULT_ANIMATION_TIME * fx.clamped_animation_intensity().min(1.0)
+                EGUI_DEFAULT_ANIMATION_TIME * fx.clamped_animation_intensity()
             } else {
                 0.0
             };
@@ -4389,41 +4388,50 @@ impl C0pl4ndApp {
         {
             let fx = self.config.effects;
             let t = ctx.input(|i| i.time);
-            // The Animation-speed slider (`animation_intensity`) governs how fast
-            // the continuous drift overlays move: a SCALED clock `ts = t * speed`
-            // is fed to the scanline-style drift effects (mesh / VHS / flicker) so
-            // the slider is visibly effective — at 0 they freeze, at 1 they run at
-            // the shipped rate. The event-driven cursor trail and the one-shot boot
-            // sweep keep the REAL clock (their timing anchors to cursor movement /
-            // the first frame, not a drift phase, so scaling would corrupt them).
-            let speed = fx.clamped_animation_intensity() as f64;
-            let ts = t * speed;
+            // Each continuous drift overlay now carries its OWN speed multiplier
+            // (SCR1B3 parity), decoupled from the UI-transition-speed slider
+            // (`animation_intensity`, which governs only egui's chrome fades). Each
+            // per-effect clock is `t * clamped_<effect>_speed`, so the default 1.0
+            // reproduces the shipped drift EXACTLY and higher values run that ONE
+            // effect faster without touching the others or the UI fades. The
+            // event-driven cursor trail and the one-shot boot sweep keep the REAL
+            // clock (their timing anchors to cursor movement / the first frame, not
+            // a drift phase, so scaling would corrupt them).
             let mut animating = false;
             if fx.wired_ambient {
                 let accent = theme::ChromeColors::from_theme(&self.theme).accent;
-                // The Motion → Mesh-movement slider (`mesh_speed`) scales the
-                // mesh's OWN drift clock ON TOP of the global animation speed, so
-                // the node lattice can hold a static frame (0) or drift briskly (2)
-                // independently of the other effects. `ts * mesh_move` = the
-                // per-mesh clock; at 0 the nodes stop moving.
+                // The Motion → Mesh-drift-speed slider (`mesh_speed`) scales the
+                // mesh's own drift clock: the node lattice can hold a static frame
+                // (0) or drift briskly (2) independently of the other effects.
+                // `t * mesh_move` = the per-mesh clock; at 0 the nodes stop moving.
                 let mesh_move = fx.clamped_mesh_speed() as f64;
                 paint_wired_mesh(
                     ctx,
                     fx.clamped_mesh_density(),
                     fx.clamped_mesh_brightness(),
                     accent,
-                    ts * mesh_move,
+                    t * mesh_move,
                     exclude,
                 );
-                animating |= speed > 0.0 && mesh_move > 0.0;
+                animating |= mesh_move > 0.0;
             }
             if fx.vhs_tracking {
-                paint_vhs_tracking(ctx, ts, fx.clamped_vhs_intensity(), exclude);
-                animating |= speed > 0.0;
+                paint_vhs_tracking(
+                    ctx,
+                    t * fx.clamped_vhs_speed() as f64,
+                    fx.clamped_vhs_intensity(),
+                    exclude,
+                );
+                animating = true;
             }
             if fx.flicker {
-                paint_flicker(ctx, fx.clamped_flicker_strength(), ts, exclude);
-                animating |= speed > 0.0;
+                paint_flicker(
+                    ctx,
+                    fx.clamped_flicker_strength(),
+                    t * fx.clamped_flicker_speed() as f64,
+                    exclude,
+                );
+                animating = true;
             }
             if fx.cursor_trail {
                 // The trail intensity scales BOTH opacity and lifetime; prune with
@@ -4594,14 +4602,15 @@ impl C0pl4ndApp {
     /// lever — shared with the renderer crate.
     fn frame_policy(&self) -> c0pl4nd_renderer::FramePolicy {
         // Continuous redraw only while the scanline drift is actually MOVING: the
-        // effect is on, reduced-motion is off, the master animation switch is on,
-        // AND the Animation-speed slider is above zero. When the drift is frozen
-        // (any of those false) the bands are a static texture and OnDamage keeps
-        // the terminal off the vsync treadmill (battery / perceived-latency lever).
+        // effect is on, reduced-motion is off, and the master animation switch is
+        // on. The scanline roll rate is the dedicated `scanline_speed` multiplier
+        // (clamped to a 0.25 floor, so an enabled+animating scanline always
+        // drifts); when any gate is false the bands are a static texture and
+        // OnDamage keeps the terminal off the vsync treadmill (battery /
+        // perceived-latency lever).
         let fx = &self.config.effects;
         let scanline_animating = fx.crt_scanlines
             && fx.animations_enabled
-            && fx.clamped_animation_intensity() > 0.0
             && !c0pl4nd_core::reduced_motion::reduced_motion();
         if scanline_animating {
             c0pl4nd_renderer::FramePolicy::Continuous
@@ -5167,10 +5176,12 @@ fn paint_grid_native(
         let reduce = c0pl4nd_core::reduced_motion::reduced_motion();
         // Freeze the scanline drift (static texture, bands still painted) under
         // reduced-motion OR when the master animation switch is off; otherwise the
-        // drift clock is scaled by the Animation-speed slider so the same slider
-        // that governs the whole-window overlays also governs the scanline shimmer.
-        let speed = effects.clamped_animation_intensity();
-        let animate = !reduce && effects.animations_enabled && speed > 0.0;
+        // drift clock is scaled by the dedicated `scanline_speed` multiplier (its
+        // own Motion → Scanline-drift-speed slider), so the scan bands roll at
+        // their configured rate independently of the other overlays and the
+        // UI-transition-speed slider. Default 1.0 reproduces the shipped roll.
+        let speed = effects.clamped_scanline_speed();
+        let animate = !reduce && effects.animations_enabled;
         let t = if animate {
             painter.ctx().input(|i| i.time) as f32 * speed
         } else {
