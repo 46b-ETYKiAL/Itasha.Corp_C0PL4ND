@@ -111,7 +111,15 @@ fn os_reduced_motion() -> bool {
     allow(dead_code)
 )]
 fn query_cmd(prog: &str, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new(prog).args(args).output().ok()?;
+    use crate::win_process::NoConsoleWindow;
+    // `no_console_window()` suppresses the console flash on Windows (the OS
+    // reduce-motion probe spawns `reg query`, a console program); no-op on the
+    // `defaults`/`gsettings` probes off Windows.
+    let out = std::process::Command::new(prog)
+        .args(args)
+        .no_console_window()
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }

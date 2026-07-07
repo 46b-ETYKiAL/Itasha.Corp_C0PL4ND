@@ -24,6 +24,7 @@ pub mod search;
 pub mod session;
 pub mod term;
 pub mod theme;
+pub mod win_process;
 
 pub use config::Config;
 pub use grid::{Cell, CellFlags, Color, Grid};
