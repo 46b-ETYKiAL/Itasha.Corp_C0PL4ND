@@ -1,8 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 1024 1024" role="img" aria-label="C0PL4ND app icon (small)">
   <title>C0PL4ND app icon - small tier</title>
   <desc>Small-size monochrome variant: void plate, teal keyline, one containment ring, and the bold phosphor-teal prompt chevron + cursor block. Fine seal chrome dropped for legibility at 16-48px.</desc>
-  <rect x="80" y="80" width="864" height="864" rx="176" fill="#08060d"/>
-  <rect x="80" y="80" width="864" height="864" rx="176" fill="none" stroke="#1ad6c0" stroke-width="12"/>
   <circle cx="512" cy="512" r="360" fill="none" stroke="#1ad6c0" stroke-width="6" opacity="0.7"/>
   <path d="M362 360 L556 512 L362 664" fill="none" stroke="#7af0e4" stroke-width="96" stroke-linecap="round" stroke-linejoin="round"/>
   <rect x="600" y="560" width="168" height="74" rx="12" fill="#7af0e4"/>
