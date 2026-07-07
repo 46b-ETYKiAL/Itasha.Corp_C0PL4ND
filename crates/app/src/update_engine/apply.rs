@@ -65,8 +65,60 @@ pub fn rollback(backup: &Path, target: &Path) -> io::Result<()> {
 /// Replace the *currently running* executable with `new` (already verified).
 /// Uses `self-replace` so it works while the binary is running, including the
 /// Windows locked-file case.
+///
+/// On Windows `self-replace` stages the swap ENTIRELY inside the running exe's
+/// own directory (it renames the running binary aside, `fs::copy`s the new one
+/// into the same directory, then renames it into place). Two consequences the
+/// caller relies on:
+///
+/// 1. The staging dir being on a DIFFERENT volume than the install dir is a
+///    non-issue for THIS primitive — the cross-volume hop is a `fs::copy`, never
+///    a `fs::rename`, so there is no `os error 17`.
+/// 2. The swap needs the INSTALL DIRECTORY to be writable by this account. When
+///    C0PL4ND lives in an admin-owned location (`C:\Program Files`, an
+///    admin-extracted folder, a read-only mount) the rename/copy fails with an
+///    access-denied `os error 5`. The caller MUST probe [`install_dir_writable`]
+///    up front and surface a precise "relocate / run once elevated" message
+///    rather than letting that access-denied error masquerade as "out of disk".
 pub fn replace_running_executable(new: &Path) -> io::Result<()> {
     self_replace::self_replace(new)
+}
+
+/// Behavioral probe: can this process CREATE (and delete) a file in `dir`?
+/// Creates a uniquely-named probe file and removes it. This is the SCR1B3
+/// `dir_writable` shape — a real write attempt, never a path-name heuristic
+/// (so it is correct for a Program Files install, a read-only mount, an
+/// admin-extracted folder, or an ACL that denies THIS account regardless of the
+/// directory's name). Returns `false` on any error (the dir does not exist, or
+/// the create is denied); `true` only when the probe file was actually written.
+pub fn dir_writable(dir: &Path) -> bool {
+    // A per-attempt unique name so two concurrent probes never collide.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let probe = dir.join(format!(".c0pl4nd-write-probe-{nanos}"));
+    match fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Whether the RUNNING executable's own directory is writable by this account —
+/// the precondition for the in-place `self-replace` swap. `None` current-exe /
+/// no-parent is treated as writable (`true`) so an unknown layout still ATTEMPTS
+/// the swap and surfaces the real OS error, rather than false-blocking.
+pub fn install_dir_writable() -> bool {
+    match std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|p| p.to_path_buf()))
+    {
+        Some(dir) => dir_writable(&dir),
+        None => true,
+    }
 }
 
 #[cfg(test)]
@@ -129,5 +181,67 @@ mod tests {
         let backup = dir.path().join("nope.bak");
         write(&target, b"x");
         assert!(rollback(&backup, &target).is_err());
+    }
+
+    #[test]
+    fn dir_writable_true_for_a_fresh_tempdir() {
+        // A freshly-created, owner-only temp dir is writable — the probe writes
+        // and removes its sentinel file and reports `true`.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(dir_writable(dir.path()));
+        // The probe must not leave its sentinel behind.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".c0pl4nd-write-probe")
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "probe file must be cleaned up");
+    }
+
+    #[test]
+    fn dir_writable_false_for_a_nonexistent_dir() {
+        // A directory that does not exist cannot be written to — no create, no
+        // panic, just `false` (the fail-closed default the caller relies on to
+        // route a non-writable install to the actionable "relocate" message).
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist-subdir");
+        assert!(!dir_writable(&missing));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dir_writable_false_for_the_windows_system_dir() {
+        // The load-bearing case behind the user's "couldn't be saved or unpacked"
+        // report: a system-owned directory this (non-elevated) account cannot
+        // write. `C:\Windows` is denied for a normal user, so the probe must
+        // return `false` — which is what routes the updater to the precise
+        // "move the app / run once elevated" copy instead of a wrong disk-space
+        // error. (Skipped implicitly if the test somehow runs elevated: an
+        // elevated writer would legitimately see `true`, so only assert the
+        // negative when we are NOT able to write — mirror the real gate.)
+        let sys = std::path::Path::new(r"C:\Windows");
+        // If we can actually write here (elevated CI), the probe is allowed to be
+        // true; otherwise it MUST be false. Either way it must never panic.
+        let can = dir_writable(sys);
+        let elevated_write = std::fs::File::create(sys.join(".c0pl4nd-probe-elev")).is_ok();
+        if elevated_write {
+            let _ = std::fs::remove_file(sys.join(".c0pl4nd-probe-elev"));
+        } else {
+            assert!(
+                !can,
+                "a non-elevated account must not be able to write C:\\Windows"
+            );
+        }
+    }
+
+    #[test]
+    fn install_dir_writable_never_panics() {
+        // Whatever the test runner's install layout, the probe resolves to a bool
+        // and never panics — the contract the apply-time gate depends on.
+        let _ = install_dir_writable();
     }
 }
