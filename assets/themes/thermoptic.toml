@@ -1,0 +1,34 @@
+# Thermoptic — ported from the SCR1B3 editor (Wave-4 line).
+# Early Ghost in the Shell (1995): thermo-optic-camouflage jade-green
+# refraction system voice over a deep bottle-green void; amber dive-readout
+# constants, Akira-red alarm-only.
+# SCR1B3 map palette translated onto C0PL4ND's ANSI-16 terminal schema.
+name = "Thermoptic"
+author = "Itasha.Corp"
+
+background = "#060a09"
+foreground = "#b0c8bc"
+cursor = "#4ed6a0"
+cursor_text = "#060a09"
+selection_background = "#16221e"
+selection_foreground = "#b0c8bc"
+
+[normal]
+black = "#0c1412"
+red = "#ff3b30"
+green = "#8ac0a8"
+yellow = "#e0a85a"
+blue = "#5aa8c4"
+magenta = "#b47ad0"
+cyan = "#4ed6a0"
+white = "#b0c8bc"
+
+[bright]
+black = "#364840"
+red = "#ff6a5c"
+green = "#a8d8c0"
+yellow = "#f0c47a"
+blue = "#82c0d8"
+magenta = "#d0a2ea"
+cyan = "#72ecc0"
+white = "#d4e6dc"

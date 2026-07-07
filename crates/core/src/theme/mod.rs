@@ -368,6 +368,58 @@ impl Theme {
             "shutoko-night",
             include_str!("../../../../assets/themes/shutoko-night.toml"),
         ),
+        // Wave-4 line — ported from the SCR1B3 editor's map-schema themes,
+        // translated onto C0PL4ND's ANSI-16 terminal schema for a cohesive
+        // Itasha.Corp product family. `kanjo-loop` keeps candy-red ALARM-ONLY
+        // (its voice is the lime underglow, diverging from SCR1B3's red-voice).
+        (
+            "dialup-glow",
+            include_str!("../../../../assets/themes/dialup-glow.toml"),
+        ),
+        (
+            "present-day",
+            include_str!("../../../../assets/themes/present-day.toml"),
+        ),
+        (
+            "thermoptic",
+            include_str!("../../../../assets/themes/thermoptic.toml"),
+        ),
+        (
+            "capsule-mono",
+            include_str!("../../../../assets/themes/capsule-mono.toml"),
+        ),
+        (
+            "jet-age",
+            include_str!("../../../../assets/themes/jet-age.toml"),
+        ),
+        (
+            "packet-trace",
+            include_str!("../../../../assets/themes/packet-trace.toml"),
+        ),
+        (
+            "cockpit-amber",
+            include_str!("../../../../assets/themes/cockpit-amber.toml"),
+        ),
+        (
+            "nerv-magi",
+            include_str!("../../../../assets/themes/nerv-magi.toml"),
+        ),
+        (
+            "colony-drift",
+            include_str!("../../../../assets/themes/colony-drift.toml"),
+        ),
+        (
+            "kanjo-loop",
+            include_str!("../../../../assets/themes/kanjo-loop.toml"),
+        ),
+        (
+            "yaksha-ink",
+            include_str!("../../../../assets/themes/yaksha-ink.toml"),
+        ),
+        (
+            "datamosh-haze",
+            include_str!("../../../../assets/themes/datamosh-haze.toml"),
+        ),
     ];
 
     /// Resolve a compiled-in theme by its config name. Returns `None` for an
@@ -412,6 +464,65 @@ mod tests {
             "distinct embedded themes must have distinct backgrounds"
         );
         assert!(Theme::builtin_named("no-such-theme").is_none());
+    }
+
+    /// The 12 SCR1B3 Wave-4 themes ported onto C0PL4ND's ANSI-16 schema (M8). The
+    /// catalog grows 23 → 35; each new name must parse+validate (so every ANSI
+    /// index resolves to a real hex, not the white fallback), and its `normal` and
+    /// `bright` rows must differ (a genuine two-intensity terminal palette, not a
+    /// degenerate single row).
+    #[test]
+    fn wave4_ported_themes_resolve_are_full_and_two_intensity() {
+        const WAVE4: &[&str] = &[
+            "dialup-glow",
+            "present-day",
+            "thermoptic",
+            "capsule-mono",
+            "jet-age",
+            "packet-trace",
+            "cockpit-amber",
+            "nerv-magi",
+            "colony-drift",
+            "kanjo-loop",
+            "yaksha-ink",
+            "datamosh-haze",
+        ];
+        for name in WAVE4 {
+            let t = Theme::builtin_named(name)
+                .unwrap_or_else(|| panic!("Wave-4 theme {name:?} must parse + validate"));
+            // Every ANSI index 0..16 resolves to the theme's own hex (validate()
+            // already proved each slot parses, so none hits the (255,255,255)
+            // bad-hex fallback): assert ansi(i) equals the parsed slot value.
+            for i in 0u8..16 {
+                let row = if i < 8 { &t.normal } else { &t.bright };
+                let slot = match i % 8 {
+                    0 => &row.black,
+                    1 => &row.red,
+                    2 => &row.green,
+                    3 => &row.yellow,
+                    4 => &row.blue,
+                    5 => &row.magenta,
+                    6 => &row.cyan,
+                    _ => &row.white,
+                };
+                assert_eq!(
+                    t.ansi(i),
+                    parse_hex(slot).unwrap(),
+                    "{name}: ansi({i}) must resolve to its own palette slot"
+                );
+            }
+            // A real two-intensity palette: the bright row is not a copy of normal.
+            assert_ne!(
+                t.normal, t.bright,
+                "{name}: bright row must differ from normal (two-intensity palette)"
+            );
+        }
+        // The catalog grew from 23 to 35 with the Wave-4 line.
+        assert_eq!(
+            Theme::EMBEDDED_THEMES.len(),
+            35,
+            "the embedded catalog must be 35 themes after the Wave-4 port"
+        );
     }
 
     #[test]

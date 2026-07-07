@@ -315,11 +315,30 @@ mod tests {
                 + (ab as f32 - bb as f32).abs())
                 / (255.0 * 3.0)
         };
-        for name in ["void", "ghost-paper"] {
+        // The two flagship polarities PLUS the 12 SCR1B3 Wave-4 ports (M8): the
+        // wordmark contrast guarantee (`ensure_readable_tone` on the theme's bright
+        // magenta/green) must hold for every newly-embedded theme too.
+        let wave4 = [
+            "dialup-glow",
+            "present-day",
+            "thermoptic",
+            "capsule-mono",
+            "jet-age",
+            "packet-trace",
+            "cockpit-amber",
+            "nerv-magi",
+            "colony-drift",
+            "kanjo-loop",
+            "yaksha-ink",
+            "datamosh-haze",
+        ];
+        for name in ["void", "ghost-paper"].iter().chain(wave4.iter()) {
+            let name = *name;
             let theme = if name == "void" {
                 c0pl4nd_core::Theme::builtin_void()
             } else {
-                c0pl4nd_core::Theme::builtin_named("ghost-paper").expect("ghost-paper embedded")
+                c0pl4nd_core::Theme::builtin_named(name)
+                    .unwrap_or_else(|| panic!("{name} embedded"))
             };
             let c = ChromeColors::from_theme(&theme);
             // Each tone clears the legibility floor against the titlebar surface…

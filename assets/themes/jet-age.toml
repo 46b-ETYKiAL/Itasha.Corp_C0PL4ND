@@ -1,0 +1,33 @@
+# Jet Age — ported from the SCR1B3 editor (Wave-4 line).
+# Space-age / Googie retro-futurism: an atomic-teal system voice over brushed
+# aluminium, sodium-orange used in an accent (keyword) role, Akira-red alarm-only.
+# SCR1B3 map palette translated onto C0PL4ND's ANSI-16 terminal schema.
+name = "Jet Age"
+author = "Itasha.Corp"
+
+background = "#0a0c0e"
+foreground = "#dce0e4"
+cursor = "#3ac8c0"
+cursor_text = "#0a0c0e"
+selection_background = "#222832"
+selection_foreground = "#dce0e4"
+
+[normal]
+black = "#141820"
+red = "#ff3b30"
+green = "#8ab0a8"
+yellow = "#e0c078"
+blue = "#5a9ad0"
+magenta = "#b481d0"
+cyan = "#3ac8c0"
+white = "#dce0e4"
+
+[bright]
+black = "#3a424c"
+red = "#ff6a5c"
+green = "#a8d0c4"
+yellow = "#f0d49a"
+blue = "#82b6e4"
+magenta = "#d0a6ea"
+cyan = "#5ce0d8"
+white = "#eef0f4"

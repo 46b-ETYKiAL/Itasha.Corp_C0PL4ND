@@ -1,0 +1,33 @@
+# Packet Trace — ported from the SCR1B3 editor (Wave-4 line).
+# Cybersecurity / Wireshark-dark: an acid-green system voice over a cold
+# capture-black, distinct alert-amber warnings + alarm-red errors.
+# SCR1B3 map palette translated onto C0PL4ND's ANSI-16 terminal schema.
+name = "Packet Trace"
+author = "Itasha.Corp"
+
+background = "#07090c"
+foreground = "#c0ccd4"
+cursor = "#5af0a0"
+cursor_text = "#07090c"
+selection_background = "#1a2230"
+selection_foreground = "#c0ccd4"
+
+[normal]
+black = "#0e1218"
+red = "#ff3b30"
+green = "#5af0a0"
+yellow = "#e0b45a"
+blue = "#6aa0e0"
+magenta = "#b481d0"
+cyan = "#48c8b0"
+white = "#c0ccd4"
+
+[bright]
+black = "#36424e"
+red = "#ff6a5c"
+green = "#88f4bc"
+yellow = "#f0cc82"
+blue = "#92b8ea"
+magenta = "#d0a6ea"
+cyan = "#6ce0cc"
+white = "#dce4ec"

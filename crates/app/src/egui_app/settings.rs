@@ -165,6 +165,19 @@ const BUILTIN_THEMES: &[&str] = &[
     "terminal-lock",
     "mecha-armour",
     "shutoko-night",
+    // Wave-4 line — ported from the SCR1B3 editor (map-schema → ANSI-16).
+    "dialup-glow",
+    "present-day",
+    "thermoptic",
+    "capsule-mono",
+    "jet-age",
+    "packet-trace",
+    "cockpit-amber",
+    "nerv-magi",
+    "colony-drift",
+    "kanjo-loop",
+    "yaksha-ink",
+    "datamosh-haze",
 ];
 
 /// What [`show`] reports back to the host after a frame.
@@ -1254,13 +1267,23 @@ fn render_sections(
 
             if row_visible(q, "size") {
                 ui.label("Size");
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut config.font.size, 8.0..=32.0)
-                            .suffix(" pt")
-                            .step_by(0.5),
-                    )
-                    .changed();
+                ui.horizontal(|ui| {
+                    if ui.small_button("−").on_hover_text("Smaller").clicked() {
+                        config.font.size = step_font_size(config.font.size, -1.0);
+                        changed = true;
+                    }
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut config.font.size, FONT_SIZE_RANGE)
+                                .suffix(" pt")
+                                .step_by(0.5),
+                        )
+                        .changed();
+                    if ui.small_button("+").on_hover_text("Larger").clicked() {
+                        config.font.size = step_font_size(config.font.size, 1.0);
+                        changed = true;
+                    }
+                });
                 changed |= reset_to_default(ui, &mut config.font.size, &def.font.size);
                 ui.end_row();
             }
@@ -1270,10 +1293,24 @@ fn render_sections(
                     "Row height for the primary font. Applies on restart — the grid \
                      cell metrics are derived at launch.",
                 );
-                changed |= ui
-                    .add(egui::Slider::new(&mut config.font.line_height, 12.0..=48.0).suffix(" px"))
-                    .on_hover_text("Applies on the next launch.")
-                    .changed();
+                ui.horizontal(|ui| {
+                    if ui.small_button("−").on_hover_text("Tighter").clicked() {
+                        config.font.line_height =
+                            step_line_height_px(config.font.line_height, -1.0);
+                        changed = true;
+                    }
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut config.font.line_height, LINE_HEIGHT_PX_RANGE)
+                                .suffix(" px"),
+                        )
+                        .on_hover_text("Applies on the next launch.")
+                        .changed();
+                    if ui.small_button("+").on_hover_text("Looser").clicked() {
+                        config.font.line_height = step_line_height_px(config.font.line_height, 1.0);
+                        changed = true;
+                    }
+                });
                 changed |=
                     reset_to_default(ui, &mut config.font.line_height, &def.font.line_height);
                 ui.end_row();
@@ -2674,6 +2711,28 @@ fn cursor_style_label(style: CursorStyle) -> &'static str {
     }
 }
 
+/// The font-size slider's bounds (points). The −/+ steppers and the slider share
+/// this band so a stepped value can never leave the slider's range.
+const FONT_SIZE_RANGE: std::ops::RangeInclusive<f32> = 8.0..=32.0;
+/// The line-height slider's bounds (PIXELS). C0PL4ND's line-height is a px cell
+/// advance (SCR1B3's is a unitless ratio) — the ± stepper mirrors SCR1B3's UI
+/// pattern but keeps C0PL4ND's px range and a ±1.0 px step.
+const LINE_HEIGHT_PX_RANGE: std::ops::RangeInclusive<f32> = 12.0..=48.0;
+
+/// Step the font size by `delta` points, re-clamped into [`FONT_SIZE_RANGE`] so a
+/// −/+ press can never push the value past the slider's bounds (mirrors SCR1B3's
+/// `(editor_size ± 1.0).clamp(8.0, 32.0)` stepper). Pure so it is unit-testable.
+fn step_font_size(size: f32, delta: f32) -> f32 {
+    (size + delta).clamp(*FONT_SIZE_RANGE.start(), *FONT_SIZE_RANGE.end())
+}
+
+/// Step the line height by `delta` PIXELS, re-clamped into [`LINE_HEIGHT_PX_RANGE`].
+/// C0PL4ND's line-height is px (not SCR1B3's ratio), so the step is ±1.0 px rather
+/// than SCR1B3's ±0.1 ratio — the UI pattern is ported, the unit/range are not.
+fn step_line_height_px(px: f32, delta: f32) -> f32 {
+    (px + delta).clamp(*LINE_HEIGHT_PX_RANGE.start(), *LINE_HEIGHT_PX_RANGE.end())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2733,6 +2792,31 @@ mod tests {
         assert!(row_visible("", "anything"));
         assert!(row_visible("opa", "Window opacity"));
         assert!(!row_visible("zzz", "Window opacity"));
+    }
+
+    #[test]
+    fn font_size_stepper_clamps_at_bounds() {
+        // Steps by ±1.0 pt within the band…
+        assert_eq!(step_font_size(13.0, 1.0), 14.0);
+        assert_eq!(step_font_size(13.0, -1.0), 12.0);
+        // …and re-clamps hard at both bounds so a −/+ press can never leave range.
+        assert_eq!(step_font_size(32.0, 1.0), 32.0, "clamps at the upper bound");
+        assert_eq!(step_font_size(8.0, -1.0), 8.0, "clamps at the lower bound");
+        // The stepper band matches the slider's declared range.
+        assert_eq!(*FONT_SIZE_RANGE.start(), 8.0);
+        assert_eq!(*FONT_SIZE_RANGE.end(), 32.0);
+    }
+
+    #[test]
+    fn line_height_px_stepper_steps_by_one_and_clamps() {
+        // C0PL4ND's line-height is PIXELS 12..=48 (not SCR1B3's ratio): the step is
+        // ±1.0 px, re-clamped at both px bounds.
+        assert_eq!(step_line_height_px(20.0, 1.0), 21.0);
+        assert_eq!(step_line_height_px(20.0, -1.0), 19.0);
+        assert_eq!(step_line_height_px(48.0, 1.0), 48.0, "clamps at 48 px");
+        assert_eq!(step_line_height_px(12.0, -1.0), 12.0, "clamps at 12 px");
+        assert_eq!(*LINE_HEIGHT_PX_RANGE.start(), 12.0);
+        assert_eq!(*LINE_HEIGHT_PX_RANGE.end(), 48.0);
     }
 
     #[test]

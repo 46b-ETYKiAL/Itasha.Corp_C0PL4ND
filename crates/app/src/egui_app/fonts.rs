@@ -735,6 +735,22 @@ mod tests {
     }
 
     #[test]
+    fn default_font_family_is_a_bundled_face() {
+        // M11 self-fix: the zero-config default font family MUST resolve to a
+        // BUNDLED face, or the default silently falls back to egui's built-in
+        // monospace on every machine that lacks the family (the latent bug the
+        // prior "Monaspace Neon" default carried — it is not bundled). This is the
+        // load-bearing regression guard for that class.
+        let default_family = c0pl4nd_core::Config::default().font.family;
+        assert!(
+            bundled_face(&default_family).is_some(),
+            "the default font family {default_family:?} must be a bundled face so \
+             the zero-config default renders in the intended typeface, not a \
+             silent egui-monospace fallback"
+        );
+    }
+
+    #[test]
     fn bundled_face_resolves_case_insensitively_and_trims() {
         // A bundled family is found regardless of the config's casing/whitespace.
         assert!(bundled_face("JetBrains Mono").is_some());

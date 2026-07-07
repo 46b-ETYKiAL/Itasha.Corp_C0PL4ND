@@ -1,0 +1,33 @@
+# Capsule Mono — ported from the SCR1B3 editor (Wave-4 line).
+# Akira, restrained read: a biolume-cyan system voice over a violet-black
+# hull, Kaneda candy-red reserved ALARM-ONLY (never the accent).
+# SCR1B3 map palette translated onto C0PL4ND's ANSI-16 terminal schema.
+name = "Capsule Mono"
+author = "Itasha.Corp"
+
+background = "#0a0708"
+foreground = "#e4d4c8"
+cursor = "#38b8c8"
+cursor_text = "#0a0708"
+selection_background = "#261826"
+selection_foreground = "#e4d4c8"
+
+[normal]
+black = "#16101a"
+red = "#ff2030"
+green = "#78b890"
+yellow = "#f0c44a"
+blue = "#5a86c0"
+magenta = "#c86496"
+cyan = "#38b8c8"
+white = "#e4d4c8"
+
+[bright]
+black = "#483646"
+red = "#ff5a68"
+green = "#90d0a0"
+yellow = "#ffd868"
+blue = "#82a8d8"
+magenta = "#e08cb4"
+cyan = "#5cd4e0"
+white = "#f4e8dc"

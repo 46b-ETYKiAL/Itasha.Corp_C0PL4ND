@@ -52,9 +52,15 @@ pub struct FontConfig {
 
 impl Default for FontConfig {
     fn default() -> Self {
-        // Monaspace Neon is the brand mono voice; fall back to any monospace.
+        // JetBrains Mono is the default mono voice — and, critically, it is a
+        // BUNDLED face (see the app crate's `fonts::BUNDLED_FONTS`), so the
+        // zero-config default renders in the intended typeface on every machine.
+        // The prior default ("Monaspace Neon") was NOT bundled, so `bundled_face`
+        // returned `None` and the default silently fell back to egui's built-in
+        // monospace — a latent default-font bug this fixes. An explicit user
+        // `font.family` is untouched (this is the serde default only).
         FontConfig {
-            family: "Monaspace Neon".to_string(),
+            family: "JetBrains Mono".to_string(),
             // 13 logical points — the industry-standard terminal grid size
             // (Windows Terminal / WezTerm sit at 12, VS Code's terminal at 14).
             // egui interprets a `FontId` size as LOGICAL points scaled by the
@@ -816,10 +822,29 @@ fn default_tint() -> String {
     "#121212".to_string()
 }
 
+/// Current config schema version. Bumped whenever a one-time, version-gated
+/// migration is needed (see [`Config::migrate`]). A config written before schema
+/// versioning existed deserializes with `schema_version == 0` (the serde default
+/// for a missing field) and is migrated up on load.
+///
+/// - v1 (legacy-transparency model promotion): the pre-modes `opacity < 1.0` /
+///   `acrylic = true` transparency signals are promoted to the
+///   `transparency_enabled` + `window_mode` model exactly once, so an existing
+///   config keeps its appearance. This wraps the pre-existing
+///   [`Config::migrate_legacy_transparency`] in a `schema_version < 1` gate — no
+///   behaviour is lost; it simply runs once and is then recorded as migrated.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
 /// Top-level configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// One-time-migration schema version. A fresh config is born at
+    /// [`CURRENT_SCHEMA_VERSION`]; an existing config written before versioning
+    /// loads as `0` (serde default for the missing field) and [`Config::migrate`]
+    /// brings it forward exactly once. NEVER hand-edit downward.
+    #[serde(default)]
+    pub schema_version: u32,
     /// Name of the theme to load (matches a file stem in the themes dir).
     pub theme: String,
     /// Font configuration (family, size, line height, fallback chain).
@@ -999,6 +1024,11 @@ fn default_ui_scale() -> f32 {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            // A FRESH config is born already at the current schema version, so
+            // `migrate` is a no-op for new users (no spurious first-run rewrite).
+            // Only an EXISTING file (which deserializes `schema_version` to 0) is
+            // migrated forward on load.
+            schema_version: CURRENT_SCHEMA_VERSION,
             theme: "itasha-corp".to_string(),
             font: FontConfig::default(),
             ui_scale: default_ui_scale(),
@@ -1070,7 +1100,7 @@ impl Config {
             path: path.to_path_buf(),
             message: e.to_string(),
         })?;
-        cfg.migrate_legacy_transparency();
+        cfg.migrate();
         cfg.clamp_values();
         cfg.validate()?;
         Ok(cfg)
@@ -1119,6 +1149,45 @@ impl Config {
     /// Mirrors SCR1B3's `WindowConfig::effective_translucent`.
     pub fn effective_translucent(&self) -> bool {
         self.transparency_enabled && self.window_mode.is_translucent()
+    }
+
+    /// Apply one-time, version-gated migrations in place. Returns `true` when
+    /// anything changed (the caller should then persist).
+    ///
+    /// **Why this exists.** Every field is `#[serde(default)]`, so a value STORED
+    /// in the user's file always wins over the source default. A good default
+    /// flipped on in a later release can therefore never reach a user whose config
+    /// predates the flip. Each step re-applies its intended baseline ONCE, then
+    /// bumps `schema_version`, so the user's own later deliberate changes are never
+    /// overridden again (the step won't re-run).
+    ///
+    /// v0 → v1 wraps the pre-existing [`Config::migrate_legacy_transparency`] so
+    /// the legacy `opacity`/`acrylic` translucency promotion runs exactly once and
+    /// is then recorded as migrated — no behaviour is lost.
+    pub fn migrate(&mut self) -> bool {
+        let original = self.schema_version;
+        let mut changed = false;
+
+        // v0 → v1: promote the pre-modes transparency signals to the
+        // master-toggle + mode model. One-shot: after this, `schema_version == 1`
+        // and the block is skipped, so a config that later sets the new model
+        // explicitly is never re-promoted.
+        if self.schema_version < 1 {
+            self.migrate_legacy_transparency();
+            self.schema_version = 1;
+            changed = true;
+        }
+
+        // Migration invariants (debug-only): it must never LOWER the version, and
+        // any config that started below the current schema must end exactly at it.
+        // A FORWARD-version config (`original > CURRENT`, e.g. a file written by a
+        // newer build then opened by an older one) is left untouched and
+        // legitimately stays ahead — so we must NOT assert an upper bound.
+        debug_assert!(self.schema_version >= original);
+        debug_assert!(
+            original >= CURRENT_SCHEMA_VERSION || self.schema_version == CURRENT_SCHEMA_VERSION
+        );
+        changed
     }
 
     /// Migrate the pre-modes transparency model to the new master-toggle + mode
@@ -2366,6 +2435,68 @@ mod tests {
             WindowMode::Vibrancy,
             "an explicit master-on config is never re-migrated"
         );
+    }
+
+    #[test]
+    fn fresh_config_is_born_at_current_schema_version() {
+        // A brand-new config is stamped at the current version so `migrate` is a
+        // no-op for new users (no spurious first-run rewrite).
+        let c = Config::default();
+        assert_eq!(c.schema_version, CURRENT_SCHEMA_VERSION);
+        // migrate() on a fresh config changes nothing and reports no change.
+        let mut c2 = Config::default();
+        assert!(!c2.migrate(), "a fresh config must not be migrated");
+        assert_eq!(c2.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn schema_version_round_trips() {
+        // A default config serialized then reloaded (which runs migrate) stays at
+        // the current version — the version survives a save/load cycle.
+        let p = PathBuf::from("cfg.toml");
+        let toml = toml::to_string(&Config::default()).expect("serialize");
+        let back = Config::from_toml(&toml, &p).expect("reload");
+        assert_eq!(back.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_is_a_noop_and_never_panics_on_a_forward_version_config() {
+        // A config written by a NEWER build (schema_version ahead of ours) opened
+        // by an older build must be left untouched, report no change, and — the
+        // load-bearing part — never trip the debug-only migration invariants.
+        let mut forward = Config {
+            schema_version: CURRENT_SCHEMA_VERSION + 5,
+            ..Config::default()
+        };
+        let changed = forward.migrate();
+        assert!(!changed, "a forward-version config must not be migrated");
+        assert_eq!(
+            forward.schema_version,
+            CURRENT_SCHEMA_VERSION + 5,
+            "a forward-version config legitimately stays ahead"
+        );
+    }
+
+    #[test]
+    fn legacy_transparency_still_fires_from_v0() {
+        // An EXISTING config with no `schema_version` (→ 0) that carries a legacy
+        // translucency signal (`opacity < 1.0`) must still be promoted to the
+        // master-toggle + mode model on load, and be stamped at v1 afterward — the
+        // v0→v1 step wraps the pre-existing transparency migration with no loss.
+        let p = PathBuf::from("legacy.toml");
+        let c = Config::from_toml("opacity = 0.8\n", &p).unwrap();
+        assert_eq!(c.schema_version, CURRENT_SCHEMA_VERSION);
+        assert!(
+            c.transparency_enabled,
+            "a legacy opacity<1.0 config must migrate transparency ON"
+        );
+        assert_eq!(c.window_mode, WindowMode::Transparent);
+
+        // The acrylic legacy signal likewise still promotes to Glass from v0.
+        let c2 = Config::from_toml("acrylic = true\n", &p).unwrap();
+        assert!(c2.transparency_enabled);
+        assert_eq!(c2.window_mode, WindowMode::Glass);
+        assert_eq!(c2.schema_version, CURRENT_SCHEMA_VERSION);
     }
 
     #[test]

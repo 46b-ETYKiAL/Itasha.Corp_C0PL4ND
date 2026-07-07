@@ -1,0 +1,33 @@
+# Yaksha Ink — ported from the SCR1B3 editor (Wave-4 line).
+# Gharliera: a near-monochrome bone-on-black ink wash with a single
+# bruised-magenta system voice, Akira-red alarm-only.
+# SCR1B3 map palette translated onto C0PL4ND's ANSI-16 terminal schema.
+name = "Yaksha Ink"
+author = "Itasha.Corp"
+
+background = "#08080a"
+foreground = "#e6e4e0"
+cursor = "#d6286e"
+cursor_text = "#08080a"
+selection_background = "#1e1e22"
+selection_foreground = "#e6e4e0"
+
+[normal]
+black = "#101012"
+red = "#ff3b30"
+green = "#7ab890"
+yellow = "#e0b45a"
+blue = "#8a8aa0"
+magenta = "#d6286e"
+cyan = "#5ab0a8"
+white = "#e6e4e0"
+
+[bright]
+black = "#38383e"
+red = "#ff6a5c"
+green = "#9cd0ac"
+yellow = "#f0cc82"
+blue = "#a8a8c0"
+magenta = "#f05a92"
+cyan = "#7cccc4"
+white = "#f2f0ec"
