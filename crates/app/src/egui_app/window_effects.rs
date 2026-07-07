@@ -377,9 +377,11 @@ mod tint_tests {
         // window uniformly), while Transparent folds the opacity into the per-pixel
         // pane/clear alpha (widgets stay solid, gaps see through). Proven from the
         // pure colour math without a window.
-        let mut config = c0pl4nd_core::Config::default();
-        config.transparency_enabled = true;
-        config.opacity = 0.4;
+        let mut config = c0pl4nd_core::Config {
+            transparency_enabled: true,
+            opacity: 0.4,
+            ..Default::default()
+        };
         let theme = c0pl4nd_core::Theme::builtin_void();
 
         config.window_mode = c0pl4nd_core::config::WindowMode::Dim;

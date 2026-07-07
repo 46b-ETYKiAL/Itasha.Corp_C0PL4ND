@@ -1970,6 +1970,26 @@ mod tests {
     }
 
     #[test]
+    fn window_mode_is_uniform_dim_only_for_dim() {
+        // Kills the is_uniform_dim -> true / -> false mutants: Dim is the ONLY
+        // mode that dims uniformly at the OS layer; every other mode is opaque or
+        // per-pixel-alpha, so its content must stay per-pixel-opaque.
+        assert!(WindowMode::Dim.is_uniform_dim(), "Dim dims at the OS layer");
+        assert!(!WindowMode::Opaque.is_uniform_dim());
+        assert!(!WindowMode::Transparent.is_uniform_dim());
+        assert!(!WindowMode::Glass.is_uniform_dim());
+        assert!(!WindowMode::Mica.is_uniform_dim());
+        assert!(!WindowMode::Vibrancy.is_uniform_dim());
+    }
+
+    #[test]
+    fn default_ui_family_is_ibm_plex_mono() {
+        // Kills the default_ui_family -> String::new()/"xyzzy" mutants: the app-UI
+        // font MUST default to the bundled IBM Plex Mono out of the box.
+        assert_eq!(default_ui_family(), "IBM Plex Mono");
+    }
+
+    #[test]
     fn effective_translucent_requires_master_and_translucent_mode() {
         // Default config: master off, mode opaque => not translucent.
         let mut c = Config::default();
