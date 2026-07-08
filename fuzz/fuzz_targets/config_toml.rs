@@ -12,12 +12,12 @@
 //! It drives the real public entry point `c0pl4nd_core::Config::from_toml`,
 //! which runs the full pipeline the on-disk path uses:
 //!   1. `toml::from_str` deserialisation (serde-default backfill of absent keys),
-//!   2. `migrate_legacy_transparency` (the acrylic/opacity → modes migration),
+//!   2. `migrate` (the schema-version-gated one-time transforms, e.g. tint remap),
 //!   3. `validate` (range + hex-color semantic checks).
 //!
 //! On any input that parses into a `Config`, it also exercises the derived
 //! accessors the render path consults — `effective_ui_scale` (the NaN/inf guard
-//! + clamp), `effective_translucent`, `effects.effective_chromatic`, and
+//! + clamp), `effects.effective_chromatic`, and
 //! `keybindings.validate` (the conflict/empty-combo scan) — so an arithmetic or
 //! slicing edge reachable only after a successful parse is still caught. It then
 //! round-trips through `to_toml` + re-parse to exercise the serialise path on a
@@ -46,7 +46,6 @@ fuzz_target!(|data: &[u8]| {
         // derived accessor the render/UI path consults, so any panic/overflow
         // reachable only after a successful parse is surfaced.
         let _ = cfg.effective_ui_scale(); // NaN/inf guard + 0.5..=3.0 clamp
-        let _ = cfg.effective_translucent(); // master-toggle + mode predicate
         let _ = cfg.effects.effective_chromatic(); // toggle-gated, floored
         let _ = cfg.keybindings.validate(); // conflict / empty-combo scan
         for (_name, combo) in cfg.keybindings.entries() {

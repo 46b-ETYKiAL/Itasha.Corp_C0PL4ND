@@ -408,46 +408,6 @@ impl Default for WindowConfig {
     }
 }
 
-/// Window translucency mode. `Opaque` is the default; the rest reveal what's
-/// behind the window to varying degrees. `Transparent` is the portable
-/// (cross-platform) reduced-alpha surface; `Glass`/`Mica`/`Vibrancy` request an
-/// OS blur backdrop (acrylic/mica on Windows, vibrancy on macOS) and degrade to
-/// the portable transparent surface where the API is absent (e.g. Linux).
-///
-/// Mirrors SCR1B3's `WindowMode` so the two sibling apps expose the same
-/// transparency vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum WindowMode {
-    #[default]
-    Opaque,
-    Transparent,
-    /// UNIFORM window opacity ("dim"): the whole window — chrome, panes, AND text —
-    /// is dimmed by a single alpha (Win32 `SetLayeredWindowAttributes`, `LWA_ALPHA`)
-    /// so the desktop shows through evenly. Genuinely distinct from `Transparent`
-    /// (per-pixel alpha: widgets/text stay opaque, only the gaps see through). The
-    /// window content is painted OPAQUE; the OS layer does the dimming.
-    Dim,
-    Glass,
-    Mica,
-    Vibrancy,
-}
-
-impl WindowMode {
-    /// Whether this mode wants a non-opaque surface.
-    pub fn is_translucent(self) -> bool {
-        !matches!(self, WindowMode::Opaque)
-    }
-
-    /// Whether this mode dims the window UNIFORMLY at the OS layer (Win32
-    /// layered-window alpha) rather than via a per-pixel-alpha framebuffer. Such a
-    /// mode paints its content OPAQUE (the OS layer supplies the see-through), so
-    /// the per-pixel pane/clear alpha must stay at 255 for it.
-    pub fn is_uniform_dim(self) -> bool {
-        matches!(self, WindowMode::Dim)
-    }
-}
-
 /// Which physical GPU the renderer prefers at startup, on a multi-GPU (hybrid /
 /// Optimus) machine. `Auto` (default) keeps the platform/eframe default
 /// (high-performance / discrete). `Integrated` forces the low-power integrated
@@ -953,17 +913,13 @@ const LEGACY_DEFAULT_TINT: &str = "#121212";
 /// versioning existed deserializes with `schema_version == 0` (the serde default
 /// for a missing field) and is migrated up on load.
 ///
-/// - v1 (legacy-transparency model promotion): the pre-modes `opacity < 1.0` /
-///   `acrylic = true` transparency signals are promoted to the
-///   `transparency_enabled` + `window_mode` model exactly once, so an existing
-///   config keeps its appearance. This wraps the pre-existing
-///   [`Config::migrate_legacy_transparency`] in a `schema_version < 1` gate — no
-///   behaviour is lost; it simply runs once and is then recorded as migrated.
 /// - v2 (brand-canon default tint remap): a stored config whose `tint` is
 ///   PROVABLY the old `#121212` default is remapped to the new `#08060d`
 ///   (VOID BLACK) brand-canon default exactly once. A user's custom tint (any
 ///   value ≠ `#121212`) is left UNTOUCHED — no silent clobber. Gated on
-///   `schema_version < 2`.
+///   `schema_version < 2`. (The earlier v1 legacy-transparency promotion was
+///   retired when the multi-mode transparency model collapsed to the single
+///   `opacity` model in v0.4.21; its former fields are now ignored on load.)
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Top-level configuration.
@@ -997,38 +953,15 @@ pub struct Config {
     pub ui_scale: f32,
     /// Number of scrollback lines retained per pane.
     pub scrollback_lines: usize,
-    /// Window opacity 0.0..=1.0. Below 1.0 the window is created translucent
-    /// (applies next launch); the desktop / acrylic backdrop shows through.
+    /// Window opacity 0.0..=1.0 — the SINGLE see-through control. The window is
+    /// always created transparent-capable (`with_transparent`); this slider folds
+    /// into the panel / resting-chrome fill alpha every frame. `0.0` = fully
+    /// see-through (only the glyph text remains over the desktop); `1.0` = the
+    /// panels paint fully opaque, so the window reads as a solid ("opaque")
+    /// surface. Live-applies — no relaunch.
     pub opacity: f32,
-    /// Opt-in Windows 11 acrylic/mica backdrop behind the translucent window.
-    /// Default off, so the default experience is a solid window. Applies next
-    /// launch. Honoured only when the GPU surface supports a non-opaque
-    /// composite-alpha mode; otherwise the window stays opaque (graceful
-    /// fallback).
-    ///
-    /// **Legacy field.** Superseded by [`Config::transparency_enabled`] +
-    /// [`Config::window_mode`]; retained for backward-compat so older config
-    /// files still parse and so `acrylic = true` migrates to
-    /// `transparency_enabled = true, window_mode = "glass"` on load.
-    #[serde(default)]
-    pub acrylic: bool,
-    /// Master on/off switch for the whole transparency system. When `false` the
-    /// window paints fully opaque regardless of [`Config::window_mode`] — a
-    /// fast, safe default that avoids the layered-window ghost-on-close failure
-    /// mode on Windows. Mirrors SCR1B3's `transparency_enabled`.
-    ///
-    /// Default OFF — translucency is opt-in. Existing configs that set
-    /// `opacity < 1.0` or `acrylic = true` are migrated to ON on load (see
-    /// [`Config::migrate_legacy_transparency`]) so their appearance is
-    /// preserved.
-    #[serde(default)]
-    pub transparency_enabled: bool,
-    /// The translucency mode applied when [`Config::transparency_enabled`] is
-    /// on. Mirrors SCR1B3's `window.mode`.
-    #[serde(default)]
-    pub window_mode: WindowMode,
     /// Tint color (`#RRGGBB`) painted over the window at
-    /// [`Config::tint_strength`] when a translucent mode is active. Mirrors
+    /// [`Config::tint_strength`] when the tint wash is enabled. Mirrors
     /// SCR1B3's `window.tint`.
     #[serde(default = "default_tint")]
     pub tint: String,
@@ -1185,9 +1118,6 @@ impl Default for Config {
             ui_scale: default_ui_scale(),
             scrollback_lines: 10_000,
             opacity: 1.0,
-            acrylic: false,
-            transparency_enabled: false,
-            window_mode: WindowMode::Opaque,
             tint: default_tint(),
             tint_strength: 0.0,
             tint_enabled: true,
@@ -1294,15 +1224,6 @@ impl Config {
         self.scrollback_lines = self.scrollback_lines.min(10_000_000);
     }
 
-    /// Whether translucency should actually be rendered: the master toggle is
-    /// on AND the chosen mode wants a non-opaque surface. This is the single
-    /// predicate every render path consults so the master switch is honoured
-    /// uniformly (surface request, the opacity pass, and the tint overlay).
-    /// Mirrors SCR1B3's `WindowConfig::effective_translucent`.
-    pub fn effective_translucent(&self) -> bool {
-        self.transparency_enabled && self.window_mode.is_translucent()
-    }
-
     /// Apply one-time, version-gated migrations in place. Returns `true` when
     /// anything changed (the caller should then persist).
     ///
@@ -1313,28 +1234,23 @@ impl Config {
     /// bumps `schema_version`, so the user's own later deliberate changes are never
     /// overridden again (the step won't re-run).
     ///
-    /// v0 → v1 wraps the pre-existing [`Config::migrate_legacy_transparency`] so
-    /// the legacy `opacity`/`acrylic` translucency promotion runs exactly once and
-    /// is then recorded as migrated — no behaviour is lost.
+    /// The legacy multi-mode transparency model (`transparency_enabled` +
+    /// `window_mode` + `acrylic`) was collapsed to the single always-transparent
+    /// `opacity` model (v0.4.21). Those keys are simply IGNORED on load (serde
+    /// drops unknown fields), so an on-disk config that still carries them loads
+    /// without error; the retained `opacity` value carries the see-through level
+    /// directly. Old opaque configs kept `opacity == 1.0` (the slider was gated
+    /// off unless transparency was enabled), so they load as a solid window.
     ///
-    /// v1 → v2 remaps the tint ONLY when it is provably the old `#121212` default
-    /// to the new `#08060d` (VOID BLACK) brand-canon default; a user's custom tint
-    /// is preserved verbatim (no silent clobber).
+    /// The remaining step remaps the tint ONLY when it is provably the old
+    /// `#121212` default to the new `#08060d` (VOID BLACK) brand-canon default; a
+    /// user's custom tint is preserved verbatim (no silent clobber).
     pub fn migrate(&mut self) -> bool {
         let original = self.schema_version;
         let mut changed = false;
 
-        // v0 → v1: promote the pre-modes transparency signals to the
-        // master-toggle + mode model. One-shot: after this, `schema_version == 1`
-        // and the block is skipped, so a config that later sets the new model
-        // explicitly is never re-promoted.
-        if self.schema_version < 1 {
-            self.migrate_legacy_transparency();
-            self.schema_version = 1;
-            changed = true;
-        }
-
-        // v1 → v2: remap the tint default to brand-canon VOID BLACK. Only a config
+        // Bring any config below the current schema forward to v2. The only
+        // surviving one-time transform is the brand-canon tint remap: a config
         // whose tint is PROVABLY the old `#121212` default is remapped to
         // `#08060d`; ANY user-customised tint (any value ≠ `#121212`) is left
         // untouched — no silent clobber. One-shot: after this, `schema_version == 2`
@@ -1358,31 +1274,6 @@ impl Config {
             original >= CURRENT_SCHEMA_VERSION || self.schema_version == CURRENT_SCHEMA_VERSION
         );
         changed
-    }
-
-    /// Migrate the pre-modes transparency model to the new master-toggle + mode
-    /// model so existing config files keep their appearance.
-    ///
-    /// Older c0pl4nd configs expressed transparency via the top-level
-    /// `opacity < 1.0` (translucent surface) and the `acrylic` bool (Win11
-    /// blur). When a loaded config carries no explicit new-model fields
-    /// (`transparency_enabled` is still its `false` default and `window_mode`
-    /// still `Opaque`) but DOES carry a legacy translucency signal, promote it:
-    /// `acrylic = true` → Glass; otherwise `opacity < 1.0` → Transparent. This
-    /// runs only when the new fields are at their defaults, so a config that
-    /// explicitly sets the new model is never overridden.
-    pub fn migrate_legacy_transparency(&mut self) {
-        // Only migrate when the user has NOT opted into the new model.
-        if self.transparency_enabled || self.window_mode != WindowMode::Opaque {
-            return;
-        }
-        if self.acrylic {
-            self.transparency_enabled = true;
-            self.window_mode = WindowMode::Glass;
-        } else if self.opacity < 1.0 {
-            self.transparency_enabled = true;
-            self.window_mode = WindowMode::Transparent;
-        }
     }
 
     /// Validate value ranges. Never panics; returns a descriptive error.
@@ -1970,29 +1861,7 @@ mod tests {
         assert_eq!(c.theme, "itasha-corp");
     }
 
-    // ---- Transparency modes (SCR1B3-parity model) ----
-
-    #[test]
-    fn window_mode_is_translucent_per_variant() {
-        assert!(!WindowMode::Opaque.is_translucent(), "opaque is solid");
-        assert!(WindowMode::Transparent.is_translucent());
-        assert!(WindowMode::Glass.is_translucent());
-        assert!(WindowMode::Mica.is_translucent());
-        assert!(WindowMode::Vibrancy.is_translucent());
-    }
-
-    #[test]
-    fn window_mode_is_uniform_dim_only_for_dim() {
-        // Kills the is_uniform_dim -> true / -> false mutants: Dim is the ONLY
-        // mode that dims uniformly at the OS layer; every other mode is opaque or
-        // per-pixel-alpha, so its content must stay per-pixel-opaque.
-        assert!(WindowMode::Dim.is_uniform_dim(), "Dim dims at the OS layer");
-        assert!(!WindowMode::Opaque.is_uniform_dim());
-        assert!(!WindowMode::Transparent.is_uniform_dim());
-        assert!(!WindowMode::Glass.is_uniform_dim());
-        assert!(!WindowMode::Mica.is_uniform_dim());
-        assert!(!WindowMode::Vibrancy.is_uniform_dim());
-    }
+    // ---- Transparency (single always-transparent opacity model, v0.4.21) ----
 
     #[test]
     fn default_ui_family_is_ibm_plex_mono() {
@@ -2002,39 +1871,11 @@ mod tests {
     }
 
     #[test]
-    fn effective_translucent_requires_master_and_translucent_mode() {
-        // Default config: master off, mode opaque => not translucent.
-        let mut c = Config::default();
-        assert!(!c.effective_translucent(), "default is fully opaque");
-
-        // Master on but mode still opaque => still not translucent.
-        c.transparency_enabled = true;
-        c.window_mode = WindowMode::Opaque;
-        assert!(
-            !c.effective_translucent(),
-            "an opaque mode is never translucent even with the master on"
-        );
-
-        // Master on AND a translucent mode => translucent.
-        c.window_mode = WindowMode::Glass;
-        assert!(
-            c.effective_translucent(),
-            "master + a translucent mode renders translucent"
-        );
-
-        // Master off overrides any mode (the safe-default kill switch).
-        c.transparency_enabled = false;
-        assert!(
-            !c.effective_translucent(),
-            "the master switch off forces opaque regardless of mode"
-        );
-    }
-
-    #[test]
-    fn transparency_defaults_are_opaque_and_untinted() {
+    fn transparency_defaults_to_solid_and_untinted() {
+        // The single-model default: opacity 1.0 (the window reads as a solid
+        // surface even though it is always transparent-capable) and no tint.
         let c = Config::default();
-        assert!(!c.transparency_enabled, "transparency is opt-in (off)");
-        assert_eq!(c.window_mode, WindowMode::Opaque);
+        assert_eq!(c.opacity, 1.0, "default opacity is solid (100%)");
         assert_eq!(c.tint_strength, 0.0, "no tint by default");
         assert_eq!(
             c.tint, "#08060d",
@@ -2043,50 +1884,20 @@ mod tests {
     }
 
     #[test]
-    fn legacy_acrylic_true_migrates_to_glass() {
-        // A pre-modes config with the old acrylic bool must keep its blurred
-        // look: acrylic = true => master ON + Glass mode.
-        let p = PathBuf::from("test.toml");
-        let c = Config::from_toml("acrylic = true\nopacity = 0.9\n", &p).unwrap();
-        assert!(c.transparency_enabled, "acrylic implied transparency");
-        assert_eq!(c.window_mode, WindowMode::Glass);
-        assert!(c.effective_translucent());
-    }
-
-    #[test]
-    fn legacy_low_opacity_migrates_to_transparent() {
-        // A pre-modes config with only opacity < 1.0 (no acrylic) must keep its
-        // see-through look: => master ON + Transparent mode.
-        let p = PathBuf::from("test.toml");
-        let c = Config::from_toml("opacity = 0.8\n", &p).unwrap();
-        assert!(c.transparency_enabled, "low opacity implied transparency");
-        assert_eq!(c.window_mode, WindowMode::Transparent);
-        assert!(c.effective_translucent());
-    }
-
-    #[test]
-    fn explicit_new_model_is_not_overridden_by_legacy_migration() {
-        // A config that explicitly sets a new-model window_mode wins, even if a
-        // legacy acrylic/opacity signal would imply a different mode. Migration
-        // runs only when the new fields are at their defaults.
+    fn legacy_transparency_keys_are_ignored_and_opacity_is_retained() {
+        // An on-disk config from the multi-mode era carries `transparency_enabled`,
+        // `window_mode`, and `acrylic` keys. Those fields no longer exist, so serde
+        // IGNORES them (no `deny_unknown_fields`) and the config loads without
+        // error; the retained `opacity` carries the see-through level directly.
         let p = PathBuf::from("test.toml");
         let c = Config::from_toml(
-            "acrylic = true\nopacity = 0.5\nwindow_mode = \"transparent\"\n",
+            "transparency_enabled = true\nwindow_mode = \"glass\"\nacrylic = true\nopacity = 0.8\n",
             &p,
         )
-        .unwrap();
-        assert_eq!(
-            c.window_mode,
-            WindowMode::Transparent,
-            "an explicit window_mode must survive legacy migration"
-        );
-        // The explicit mode is translucent, so it implies the master toggle on
-        // only if the user also set it; here transparency_enabled stayed at its
-        // false default and window_mode was explicit => migration is skipped and
-        // the master stays off (explicit model, not promoted).
+        .expect("a legacy multi-mode config must still load (unknown keys ignored)");
         assert!(
-            !c.transparency_enabled,
-            "explicit window_mode skips migration; master stays at its default"
+            (c.opacity - 0.8).abs() < f32::EPSILON,
+            "the retained opacity carries the see-through level"
         );
     }
 
@@ -2109,17 +1920,22 @@ mod tests {
     }
 
     #[test]
-    fn window_mode_round_trips_through_toml() {
+    fn opacity_and_tint_round_trip_through_toml() {
         let p = PathBuf::from("test.toml");
         let c = Config::from_toml(
-            "transparency_enabled = true\nwindow_mode = \"mica\"\ntint = \"#aabbcc\"\ntint_strength = 0.4\n",
+            "opacity = 0.4\ntint = \"#aabbcc\"\ntint_strength = 0.4\ntint_enabled = true\n",
             &p,
         )
         .unwrap();
-        assert_eq!(c.window_mode, WindowMode::Mica);
+        assert!((c.opacity - 0.4).abs() < f32::EPSILON);
         assert_eq!(c.tint, "#aabbcc");
         assert!((c.tint_strength - 0.4).abs() < f32::EPSILON);
-        assert!(c.effective_translucent());
+        assert!(c.tint_enabled);
+        // A round-trip (serialize → parse) preserves the values.
+        let toml = c.to_toml().unwrap();
+        let c2 = Config::from_toml(&toml, &p).unwrap();
+        assert!((c2.opacity - 0.4).abs() < f32::EPSILON);
+        assert_eq!(c2.tint, "#aabbcc");
     }
 
     // ---- Effects (CRT scanlines + chromatic aberration) ----
@@ -2574,8 +2390,6 @@ mod tests {
         let original = Config {
             theme: "ghost-paper".to_string(),
             opacity: 0.75,
-            transparency_enabled: true,
-            window_mode: WindowMode::Mica,
             tint: "#aabbcc".to_string(),
             tint_strength: 0.3,
             ligatures: true,
@@ -2676,31 +2490,6 @@ mod tests {
     }
 
     #[test]
-    fn migrate_legacy_transparency_is_noop_when_no_legacy_signal() {
-        // Fully-default opacity (1.0) + acrylic off + new fields at defaults:
-        // migration must change nothing (the early-return / no-signal path).
-        let mut c = Config::default();
-        c.migrate_legacy_transparency();
-        assert!(!c.transparency_enabled);
-        assert_eq!(c.window_mode, WindowMode::Opaque);
-        // And the explicit-new-model early return: transparency_enabled already
-        // true → migration leaves the chosen mode untouched.
-        let mut c2 = Config {
-            transparency_enabled: true,
-            window_mode: WindowMode::Vibrancy,
-            acrylic: true, // would imply Glass if migration ran
-            opacity: 0.2,
-            ..Config::default()
-        };
-        c2.migrate_legacy_transparency();
-        assert_eq!(
-            c2.window_mode,
-            WindowMode::Vibrancy,
-            "an explicit master-on config is never re-migrated"
-        );
-    }
-
-    #[test]
     fn fresh_config_is_born_at_current_schema_version() {
         // A brand-new config is stamped at the current version so `migrate` is a
         // no-op for new users (no spurious first-run rewrite).
@@ -2741,25 +2530,22 @@ mod tests {
     }
 
     #[test]
-    fn legacy_transparency_still_fires_from_v0() {
-        // An EXISTING config with no `schema_version` (→ 0) that carries a legacy
-        // translucency signal (`opacity < 1.0`) must still be promoted to the
-        // master-toggle + mode model on load, and be stamped at v1 afterward — the
-        // v0→v1 step wraps the pre-existing transparency migration with no loss.
+    fn legacy_v0_config_loads_and_stamps_current_schema() {
+        // An EXISTING config with no `schema_version` (→ 0) that still carries the
+        // retired legacy transparency keys must load without error (unknown keys are
+        // ignored), keep its `opacity` see-through level, and be stamped forward to
+        // the current schema version.
         let p = PathBuf::from("legacy.toml");
-        let c = Config::from_toml("opacity = 0.8\n", &p).unwrap();
+        let c = Config::from_toml(
+            "opacity = 0.8\ntransparency_enabled = true\nwindow_mode = \"glass\"\nacrylic = true\n",
+            &p,
+        )
+        .unwrap();
         assert_eq!(c.schema_version, CURRENT_SCHEMA_VERSION);
         assert!(
-            c.transparency_enabled,
-            "a legacy opacity<1.0 config must migrate transparency ON"
+            (c.opacity - 0.8).abs() < f32::EPSILON,
+            "the retained opacity carries the see-through level"
         );
-        assert_eq!(c.window_mode, WindowMode::Transparent);
-
-        // The acrylic legacy signal likewise still promotes to Glass from v0.
-        let c2 = Config::from_toml("acrylic = true\n", &p).unwrap();
-        assert!(c2.transparency_enabled);
-        assert_eq!(c2.window_mode, WindowMode::Glass);
-        assert_eq!(c2.schema_version, CURRENT_SCHEMA_VERSION);
     }
 
     #[test]
