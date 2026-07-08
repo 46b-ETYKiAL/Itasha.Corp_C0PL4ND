@@ -591,71 +591,20 @@ fn prepare_shutdown_kills_shells_without_dropping_panes_or_exiting() {
     // call process::exit (which would abort the test runner) and did NOT block.
 }
 
-// ---- Transparency clear-color (SCR1B3-parity model) ----
-
-fn cfg_mode(enabled: bool, mode: c0pl4nd_core::config::WindowMode) -> c0pl4nd_core::Config {
-    c0pl4nd_core::Config {
-        transparency_enabled: enabled,
-        window_mode: mode,
-        ..Default::default()
-    }
-}
+// ---- Transparency clear-color (single always-transparent opacity model) ----
 
 #[test]
-fn clear_color_is_opaque_when_transparency_off() {
-    // The default (master off) must clear to a SOLID surface (alpha 1.0) so
-    // the desktop never bleeds through — the safe, unchanged default.
-    let app = C0pl4ndApp::bootstrap();
-    let [_, _, _, a] = window_clear_color(&app.config, &app.theme);
-    assert_eq!(a, 1.0, "opaque window clears at full alpha");
-}
-
-#[test]
-fn clear_color_is_transparent_for_native_blur_modes() {
-    // Glass/Mica/Vibrancy want a fully transparent surface so the OS blur
-    // backdrop shows through.
-    let app = C0pl4ndApp::bootstrap();
-    for mode in [
-        c0pl4nd_core::config::WindowMode::Glass,
-        c0pl4nd_core::config::WindowMode::Mica,
-        c0pl4nd_core::config::WindowMode::Vibrancy,
-    ] {
-        let cfg = cfg_mode(true, mode);
-        let [_, _, _, a] = window_clear_color(&cfg, &app.theme);
-        assert_eq!(a, 0.0, "native-blur mode {mode:?} clears fully transparent");
-    }
-}
-
-#[test]
-fn clear_color_is_fully_transparent_for_transparent_mode_regardless_of_opacity() {
-    // SCR1B3-parity fix: the CLEAR is unconditionally [0,0,0,0] for the portable
-    // Transparent mode — the `opacity` slider is folded ONLY into the panel fills
-    // ([`pane_bg_alpha`]), never the clear. A non-zero clear compounded with the
-    // panel alpha (0.6 over 0.6 ≈ 0.84) and darkened the window to near-opaque
-    // black; a fully-transparent clear makes the panel alpha the sole determinant
-    // of see-through, matching the sibling app SCR1B3 that IS transparent on the
-    // same hardware.
-    let app = C0pl4ndApp::bootstrap();
-    let mut cfg = cfg_mode(true, c0pl4nd_core::config::WindowMode::Transparent);
-    for opacity in [1.0, 0.6, 0.01, 0.0] {
-        cfg.opacity = opacity;
-        let [_, _, _, a] = window_clear_color(&cfg, &app.theme);
-        assert_eq!(
-            a, 0.0,
-            "Transparent-mode clear is always fully transparent (opacity {opacity} → clear alpha {a}); \
-             the opacity slider drives the PANEL alpha, not the clear"
-        );
-    }
-}
-
-#[test]
-fn clear_color_master_off_overrides_a_translucent_mode() {
-    // A translucent mode with the MASTER toggle off must still clear opaque
-    // — the master switch is the single kill-switch every path consults.
-    let app = C0pl4ndApp::bootstrap();
-    let cfg = cfg_mode(false, c0pl4nd_core::config::WindowMode::Glass);
-    let [_, _, _, a] = window_clear_color(&cfg, &app.theme);
-    assert_eq!(a, 1.0, "master off forces an opaque clear even for Glass");
+fn clear_color_is_always_fully_transparent() {
+    // The window is always created transparent-capable, so the clear is
+    // unconditionally [0,0,0,0]: the opacity slider is folded ONLY into the panel
+    // fills ([`pane_bg_alpha`]) + resting chrome, never the clear. A non-zero
+    // clear compounded with the panel alpha (0.6 over 0.6 ≈ 0.84) and darkened the
+    // window to near-opaque black; a fully-transparent clear makes the panel alpha
+    // the sole determinant of see-through. At opacity 1.0 the opaque panels cover
+    // the transparent clear, so the window still reads as a solid surface.
+    let [_, _, _, a] = window_clear_color();
+    assert_eq!(a, 0.0, "the clear is always fully transparent");
+    assert_eq!(window_clear_color(), [0.0, 0.0, 0.0, 0.0]);
 }
 
 // ---- Line-height row pitch ----
@@ -892,117 +841,44 @@ fn scanline_field_drifts_with_time_and_wraps() {
     assert_eq!(scanline_drift(0.0, 1.0), 0.0);
 }
 
-// ---- Translucent pane background alpha (the transparency fix) ----
+// ---- Pane background alpha (single always-transparent opacity model) ----
 
 #[test]
-fn pane_bg_alpha_is_opaque_by_default_and_when_master_off() {
-    // The default (transparency off) paints the pane fill fully opaque so the
-    // desktop never bleeds through — the safe, unchanged default.
+fn pane_bg_alpha_is_solid_at_default_opacity() {
+    // The default opacity (1.0) paints the pane fill fully opaque so the window
+    // reads as a solid surface even though it is always transparent-capable.
     let app = C0pl4ndApp::bootstrap();
-    assert_eq!(
-        pane_bg_alpha(&app.config),
-        255,
-        "default pane fill is opaque"
-    );
-    // A translucent MODE with the master toggle off is still opaque.
-    let cfg = cfg_mode(false, c0pl4nd_core::config::WindowMode::Glass);
-    assert_eq!(pane_bg_alpha(&cfg), 255, "master off keeps the pane opaque");
+    assert_eq!(app.config.opacity, 1.0, "default opacity is 100%");
+    assert_eq!(pane_bg_alpha(&app.config), 255, "opacity 1.0 → solid fill");
 }
 
 #[test]
-fn pane_bg_alpha_folds_opacity_when_translucent() {
-    use c0pl4nd_core::config::WindowMode;
-    // Enabling transparency + a translucent mode makes the pane fill
-    // non-opaque, folding the opacity slider into the alpha so the OS blur /
-    // desktop shows through at the chosen strength (this is the lever that
-    // made transparency visibly "do something"). Use Transparent mode (no
-    // per-mode ceiling) so the slider value passes straight through.
-    let mut cfg = cfg_mode(true, WindowMode::Transparent);
-    cfg.opacity = 0.6;
-    let a = pane_bg_alpha(&cfg);
-    assert_eq!(
-        a,
-        (0.6 * 255.0_f32).round() as u8,
-        "alpha tracks the opacity slider"
-    );
-    assert!(a < 255, "a translucent pane fill must be non-opaque");
-    // The 0.05 floor (down from the old 0.30 dead band) is honoured so a
-    // near-zero opacity can't make the grid invisible (#27).
-    cfg.opacity = 0.0;
-    assert_eq!(
-        pane_bg_alpha(&cfg),
-        (TRANSLUCENT_ALPHA_FLOOR * 255.0_f32).round() as u8,
-        "alpha is clamped to the 0.05 floor"
-    );
-}
-
-#[test]
-fn opacity_slider_drives_fill_alpha_across_full_range_in_every_mode() {
-    use c0pl4nd_core::config::WindowMode;
-    // #41: the opacity slider must drive the pane-fill alpha across its FULL
-    // range in EVERY translucent mode — no per-mode ceiling. The old ceiling
-    // capped Glass at 0.35 etc., so the slider was a no-op above the cap and
-    // the terminal washed out. Now opacity 0.85 yields ~0.85*255 in every
-    // mode (the modes differ only by their DWM backdrop, not the fill alpha).
-    let want = (0.85_f32 * 255.0).round() as u8;
-    for mode in [
-        WindowMode::Glass,
-        WindowMode::Mica,
-        WindowMode::Vibrancy,
-        WindowMode::Transparent,
-    ] {
-        let mut cfg = cfg_mode(true, mode);
-        cfg.opacity = 0.85;
-        assert_eq!(
-            pane_bg_alpha(&cfg),
-            want,
-            "{mode:?}: opacity 0.85 must give ~217 fill alpha (slider drives \
-                 it, no ceiling) — was washed out / capped before #41"
-        );
-    }
-}
-
-#[test]
-fn opacity_slider_is_monotonic_in_a_native_blur_mode() {
-    use c0pl4nd_core::config::WindowMode;
-    // Moving the slider must visibly change the fill alpha in a DWM-blur mode
-    // (the user-reported "slider does nothing in Glass"): lower opacity →
-    // strictly lower alpha → more see-through. At opacity 1.0 the fill is
-    // fully opaque (255) — opacity 1.0 legitimately means "opaque"; the
-    // backdrop shows whenever opacity < 1.0.
-    let alpha = |o: f32| {
-        let mut cfg = cfg_mode(true, WindowMode::Glass);
-        cfg.opacity = o;
-        pane_bg_alpha(&cfg)
+fn pane_bg_alpha_folds_opacity_across_the_full_range() {
+    // The single Opacity slider drives the pane-fill alpha directly across its
+    // whole range — 1.0 → 255 (solid), 0.0 → 0 (fully see-through), monotonic in
+    // between. This is the one lever that makes the window transparent.
+    let mk = |o: f32| {
+        pane_bg_alpha(&c0pl4nd_core::Config {
+            opacity: o,
+            ..Default::default()
+        })
     };
-    assert_eq!(alpha(1.0), 255, "opacity 1.0 in Glass is opaque");
-    assert!(
-        alpha(0.5) < alpha(0.85) && alpha(0.85) < alpha(1.0),
-        "the opacity slider must change the Glass fill alpha monotonically"
+    assert_eq!(
+        mk(0.6),
+        (0.6 * 255.0_f32).round() as u8,
+        "alpha tracks opacity"
     );
-}
-
-#[test]
-fn opaque_pane_fill_is_byte_identical_regardless_of_mode() {
-    use c0pl4nd_core::config::WindowMode;
-    // The opaque path must be untouched: master-off, any mode, any opacity →
-    // a fully opaque 255 fill (premultiplied == unmultiplied at 255, so the
-    // rendered Color32 is byte-identical to the pre-change default).
-    for mode in [
-        WindowMode::Opaque,
-        WindowMode::Glass,
-        WindowMode::Mica,
-        WindowMode::Vibrancy,
-        WindowMode::Transparent,
-    ] {
-        let mut cfg = cfg_mode(false, mode); // master OFF
-        cfg.opacity = 0.2;
-        assert_eq!(
-            pane_bg_alpha(&cfg),
-            255,
-            "master-off {mode:?} stays fully opaque"
-        );
-    }
+    assert!(mk(0.6) < 255, "a translucent pane fill is non-opaque");
+    // The floor is 0.0 (no dead band), so opacity 0 is genuinely fully transparent.
+    assert_eq!(
+        mk(0.0),
+        (TRANSLUCENT_ALPHA_FLOOR * 255.0_f32).round() as u8,
+        "opacity 0.0 → fully transparent (floor 0.0)"
+    );
+    assert_eq!(mk(0.0), 0);
+    // Monotonic + reaches solid at the top.
+    assert!(mk(0.2) < mk(0.5) && mk(0.5) < mk(0.85) && mk(0.85) < mk(1.0));
+    assert_eq!(mk(1.0), 255, "opacity 1.0 is a solid fill");
 }
 
 // --- pure-function coverage (Wave H): the keyboard→PTY map, the UTF-8
@@ -1069,18 +945,6 @@ fn byte_to_col_counts_cell_width_to_the_byte_boundary() {
     assert_eq!(byte_to_col("日本", 99), 4);
     assert_eq!(byte_to_col("", 0), 0);
     assert_eq!(byte_to_col("abc", 0), 0);
-}
-
-// `tint_rgba` is `#[cfg(windows)]` (only Windows' acrylic backdrop takes a
-// tint), so this test must carry the SAME gate — otherwise it fails to compile
-// on macOS/Linux CI (`error[E0425]: cannot find function tint_rgba`), breaking
-// both the test build and `clippy --all-targets`.
-#[cfg(windows)]
-#[test]
-fn tint_rgba_parses_hex_and_appends_alpha() {
-    assert_eq!(tint_rgba("#1a2b3c", 160), Some((0x1a, 0x2b, 0x3c, 160)));
-    assert_eq!(tint_rgba("nothex", 0), None);
-    assert_eq!(tint_rgba("", 255), None);
 }
 
 #[test]

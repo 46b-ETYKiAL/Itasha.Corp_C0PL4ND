@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
-use c0pl4nd_core::config::{CursorStyle, GpuPreference, GraphicsBackend, UpdateMode, WindowMode};
+use c0pl4nd_core::config::{CursorStyle, GpuPreference, GraphicsBackend, UpdateMode};
 use c0pl4nd_core::Config;
 
 use super::theme::ChromeColors;
@@ -67,13 +67,8 @@ const APPEARANCE_SEARCH_LABELS: &[&str] = &[
     "theme",
     "follow os theme dark light auto system appearance",
     "transparency",
-    "mode",
     "opacity",
-    "glass",
-    "mica",
-    "vibrancy",
     "tint",
-    "acrylic",
     "ui scale",
     "zoom",
     "accessibility",
@@ -1090,96 +1085,23 @@ fn render_sections(
         group(
             ui,
             "Transparency & tint",
-            "Make the window see-through, choose the OS blur backend, and wash it \
-             with a colour.",
+            "Make the window see-through with a single Opacity slider, and \
+             optionally wash it with a colour.",
         );
         grid("appearance_transparency").show(ui, |ui| {
-            // ---- Transparency / glass (SCR1B3-parity model) ----
-            // Master on/off switch for the whole transparency system. Off by
-            // default: a solid window is fast and never leaves a DWM ghost on
-            // close. Live-applies the opacity/tint passes immediately; switching
-            // a native-blur backend (glass/mica/vibrancy) on/off needs a window
-            // re-init, so that part takes effect on restart (labelled below).
-            if row_visible(q, "transparency master enable glass") {
-                changed |= ui
-                    .checkbox(
-                        &mut config.transparency_enabled,
-                        "Enable window transparency",
-                    )
-                    .on_hover_text(
-                        "Master switch. When off, the window is fully opaque \
-                         regardless of the mode below. Turn on to use transparent / \
-                         glass / mica / vibrancy.",
-                    )
-                    .changed();
-                ui.label(""); // empty control column — checkbox carries the label
-                changed |= reset_to_default(
-                    ui,
-                    &mut config.transparency_enabled,
-                    &def.transparency_enabled,
-                );
-                ui.end_row();
-            }
-
-            // Each dependent row is THREE direct grid cells (label · control · ↺)
-            // exactly like every other section — NOT one `add_enabled_ui` wrapping
-            // all three, which collapsed the row into a single column-1 cell and
-            // left columns 2/3 empty (the reported "Transparency & tint isn't
-            // aligned in columns"). The control cell greys out when disabled; the
-            // label + reset stay put so the columns line up on every row.
-            if row_visible(q, "transparency mode glass mica vibrancy") {
-                let en = config.transparency_enabled;
-                ui.label("Mode").on_hover_text(
-                    "Opaque · Transparent (per-pixel: widgets stay solid, gaps see \
-                     through — applies live) · Dim (uniform: the whole window incl. \
-                     text dims by one alpha, Windows) · Glass/Mica/Vibrancy (OS \
-                     blur). Dim / Glass / Mica / Vibrancy apply on restart.",
-                );
-                ui.add_enabled_ui(en, |ui| {
-                    let wmodes = [
-                        (WindowMode::Opaque, "opaque"),
-                        (WindowMode::Transparent, "transparent"),
-                        (WindowMode::Dim, "dim"),
-                        (WindowMode::Glass, "glass / acrylic"),
-                        (WindowMode::Mica, "mica (Win11)"),
-                        (WindowMode::Vibrancy, "vibrancy (macOS)"),
-                    ];
-                    egui::ComboBox::from_id_salt("c0pl4nd-window-mode")
-                        .selected_text(
-                            wmodes
-                                .iter()
-                                .find(|(m, _)| *m == config.window_mode)
-                                .map(|(_, s)| *s)
-                                .unwrap_or("opaque"),
-                        )
-                        .show_ui(ui, |ui| {
-                            for (m, label) in wmodes {
-                                changed |= ui
-                                    .selectable_value(&mut config.window_mode, m, label)
-                                    .changed();
-                            }
-                        })
-                        .response
-                        .on_hover_text(
-                            "Transparent applies live; Dim / Glass / Mica / Vibrancy \
-                             switch the OS surface effect and apply on restart.",
-                        );
-                });
-                changed |= reset_to_default(ui, &mut config.window_mode, &def.window_mode);
-                ui.end_row();
-            }
-
+            // ---- Single always-transparent opacity model (v0.4.21) ----
+            // The window is ALWAYS transparent-capable; there is no mode selector
+            // and no OS blur backdrop. One Opacity slider is the whole see-through
+            // control: 0% = fully see-through (only the terminal text remains over
+            // the desktop), 100% = a solid ("opaque") window. Applies live.
             if row_visible(q, "opacity transparency") {
-                let en = config.transparency_enabled && config.window_mode.is_translucent();
                 ui.label("Opacity").on_hover_text(
-                    "Surface opacity for every translucent mode (Glass / Mica / \
-                     Vibrancy / Transparent) — below 100% the desktop / blur shows \
-                     through, and the slider tunes how see-through the terminal is \
-                     across its full range.",
+                    "How see-through the window is. 0% = fully transparent (only the \
+                     terminal text stays, over the desktop); 100% = solid. Applies \
+                     live across the whole range.",
                 );
                 changed |= ui
-                    .add_enabled(
-                        en,
+                    .add(
                         egui::Slider::new(&mut config.opacity, 0.0..=1.0)
                             .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
                             .custom_parser(|s| {
@@ -1197,26 +1119,23 @@ fn render_sections(
 
             // Explicit ON/OFF master for the tint colour wash — independent of the
             // strength slider, so a user can toggle the wash off without losing the
-            // colour + strength they set. Enabled whenever transparency is on.
+            // colour + strength they set.
             if row_visible(q, "tint enable toggle wash on off") {
-                let en = config.transparency_enabled;
-                ui.add_enabled_ui(en, |ui| {
-                    changed |= ui
-                        .checkbox(&mut config.tint_enabled, "Enable tint wash")
-                        .on_hover_text(
-                            "Master switch for the colour wash over the window. When \
-                             off, no tint is painted even if a colour and strength are \
-                             set below.",
-                        )
-                        .changed();
-                });
+                changed |= ui
+                    .checkbox(&mut config.tint_enabled, "Enable tint wash")
+                    .on_hover_text(
+                        "Master switch for the colour wash over the window. When \
+                         off, no tint is painted even if a colour and strength are \
+                         set below.",
+                    )
+                    .changed();
                 ui.label(""); // empty control column — checkbox carries the label
                 changed |= reset_to_default(ui, &mut config.tint_enabled, &def.tint_enabled);
                 ui.end_row();
             }
 
             if row_visible(q, "tint color overlay wash picker") {
-                let en = config.transparency_enabled && config.tint_enabled;
+                let en = config.tint_enabled;
                 ui.label("Tint color")
                     .on_hover_text("Color washed over the window (strength below).");
                 ui.add_enabled_ui(en, |ui| {
@@ -1240,7 +1159,7 @@ fn render_sections(
             }
 
             if row_visible(q, "tint strength wash overlay") {
-                let en = config.transparency_enabled && config.tint_enabled;
+                let en = config.tint_enabled;
                 ui.label("Tint strength")
                     .on_hover_text("0% = no tint .. 100% = strong color wash.");
                 changed |= ui

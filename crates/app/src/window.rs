@@ -3248,7 +3248,7 @@ impl App {
     /// caption-button cluster width) so the native hit-test matches what the
     /// renderer draws. Not compiled off Windows; a missing handle is non-fatal.
     #[cfg(windows)]
-    fn install_snap(&self, window: &Window, acrylic: bool) {
+    fn install_snap(&self, window: &Window) {
         use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
         let Ok(handle) = window.window_handle() else {
             return;
@@ -3259,13 +3259,7 @@ impl App {
             // SAFETY: hwnd is the live top-level window winit just created; we
             // install exactly once (resumed() early-returns once gpu exists).
             unsafe {
-                crate::win_snap::install(
-                    hwnd,
-                    TITLEBAR_H as i32,
-                    RESIZE_BORDER as i32,
-                    buttons_w,
-                    acrylic,
-                );
+                crate::win_snap::install(hwnd, TITLEBAR_H as i32, RESIZE_BORDER as i32, buttons_w);
             }
         }
     }
@@ -3296,7 +3290,7 @@ impl App {
 
     /// Non-Windows: no custom frame to install.
     #[cfg(not(windows))]
-    fn install_snap(&self, _window: &Window, _acrylic: bool) {}
+    fn install_snap(&self, _window: &Window) {}
 
     /// Capture the live window geometry into `self.config.window` and persist
     /// it to the config file (D2). Best-effort: a failed `outer_position()`
@@ -3404,11 +3398,12 @@ impl ApplicationHandler for App {
         let width = (cols as f32 * CELL_W) as u32 + 16;
         let height = (rows as f32 * LINE_HEIGHT) as u32 + 16 + TITLEBAR_H as u32;
 
-        let acrylic = self.config.acrylic;
-        // The window is created translucent when opacity < 1.0 or acrylic is
-        // enabled, so the desktop / DWM backdrop shows through. Default (opacity
-        // 1.0, acrylic off) is a solid window — byte-identical to before.
-        let want_transparent = self.config.opacity < 1.0 || acrylic;
+        // The window is created translucent when opacity < 1.0 so the desktop
+        // shows through. Default (opacity 1.0) is a solid window. (The former
+        // `acrylic` DWM-backdrop opt-in was removed with the multi-mode
+        // transparency model in v0.4.21 — the single `opacity` slider is the whole
+        // see-through control now.)
+        let want_transparent = self.config.opacity < 1.0;
         let mut attrs = Window::default_attributes()
             .with_title(c0pl4nd_core::PRODUCT_NAME)
             .with_decorations(false)
@@ -3461,7 +3456,7 @@ impl ApplicationHandler for App {
         // D4 (Windows): re-enable Aero Snap / maximize animations on the
         // frameless window by installing the custom-frame subclass. No-op off
         // Windows; a missing handle is non-fatal (the window just lacks snap).
-        self.install_snap(&window, acrylic);
+        self.install_snap(&window);
 
         let gpu = match pollster::block_on(Gpu::new(
             window.clone(),

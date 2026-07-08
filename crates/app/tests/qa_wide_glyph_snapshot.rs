@@ -251,7 +251,6 @@ fn build_tinted(
     opacity: f32,
     tint_strength: f32,
 ) -> Option<Harness<'static, egui_app::C0pl4ndApp>> {
-    use c0pl4nd_core::config::WindowMode;
     if !gpu_available() {
         eprintln!("QA-SNAPSHOT: no GPU adapter on this host; skipping (not a failure).");
         return None;
@@ -262,10 +261,12 @@ fn build_tinted(
             .wgpu()
             .build_eframe(move |cc| {
                 let mut app = egui_app::C0pl4ndApp::new(cc);
-                app.config.transparency_enabled = true;
-                app.config.window_mode = WindowMode::Transparent;
+                // Single always-transparent model: the opacity slider is the whole
+                // see-through control; a low opacity + a strong tint is the state to
+                // eyeball the tint/transparency fixes in.
                 app.config.opacity = opacity;
                 app.config.tint = "#ff0040".to_string();
+                app.config.tint_enabled = true;
                 app.config.tint_strength = tint_strength;
                 app
             }),

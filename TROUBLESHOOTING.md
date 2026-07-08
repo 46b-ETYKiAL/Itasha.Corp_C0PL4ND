@@ -70,19 +70,19 @@ CJK text displays with the right column widths.
 
 ## GPU, transparency, or the window appears as a solid dark box
 
-Symptoms: window transparency / acrylic blur is enabled in the config but the
-window renders fully opaque; or the app crashes at startup on a machine with a
-third-party GPU overlay layer installed.
+Symptoms: the window is set see-through (`opacity` below `1.0`) but renders
+fully opaque; or the app crashes at startup on a machine with a third-party GPU
+overlay layer installed.
 
 Cause and fixes:
 
 - **Transparency requires Vulkan on Windows.** A wgpu swapchain bound to a
   Win32 window through DX12/DXGI cannot per-pixel alpha-composite with the
-  desktop, so `transparency_enabled = true` is a silent no-op under DX12.
-  C0PL4ND automatically selects the Vulkan backend when transparency is enabled
-  and DX12 otherwise. If transparency still doesn't take effect, confirm
-  `transparency_enabled = true` in your `config.toml` and relaunch (the backend
-  is chosen at startup).
+  desktop, so a reduced `opacity` is a silent no-op under DX12. The window is
+  always transparent-capable and C0PL4ND automatically selects the Vulkan
+  backend for it. If the window still won't go see-through, lower the `opacity`
+  slider (Settings → Appearance) below 100% and check `<config_dir>/gpu-diag.log`
+  for the adapter its surface `alpha_modes` chose.
 - **A Vulkan overlay layer crashes startup.** Some third-party Vulkan overlay
   layers (e.g. game/store overlays) corrupt the Vulkan instance and crash the
   renderer. Force the more robust DX12 backend by setting the `WGPU_BACKEND`

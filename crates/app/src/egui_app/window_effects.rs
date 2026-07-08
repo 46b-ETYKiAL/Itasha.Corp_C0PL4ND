@@ -1,109 +1,86 @@
-//! Window translucency, tint, and OS backdrop effects.
+//! Window translucency and tint.
 //!
-//! Pane/window alpha + clear-colour computation, the egui tint overlay, and the
-//! per-OS backdrop (acrylic / mica / vibrancy via `window-vibrancy`) — extracted
-//! from the `egui_app` god-module. The colour math is pure (`&Config`/`&Theme`) and
-//! unit-testable. Re-exported via `pub(crate) use window_effects::*`.
+//! The window is ALWAYS created transparent-capable (`with_transparent`); a single
+//! **opacity** slider (0.0 = fully see-through, 1.0 = solid) drives the pane +
+//! resting-chrome fill alpha, and an optional tint wash colours the window. There
+//! is no window-mode selector and no OS blur backdrop (acrylic / mica / vibrancy):
+//! on the hybrid-GPU (Optimus) target those backdrops never composited, so the one
+//! effect that works — the portable per-pixel transparent surface — is the only
+//! effect. The colour math is pure (`&Config`) and unit-testable. Re-exported via
+//! `pub(crate) use window_effects::*`.
 
-/// The minimum translucent BACKGROUND alpha (fraction). `0.0` = the pane/window
-/// background can go FULLY transparent (only the terminal text — drawn at its own
-/// full alpha — and the desktop remain), which is what "maximum transparency"
-/// means. There is no readability floor because the grid TEXT alpha is independent
-/// of this background alpha, so a near-zero background never hides the text; the
-/// user drives the whole range with the opacity slider.
+/// The minimum BACKGROUND alpha (fraction). `0.0` = the pane/window background can
+/// go FULLY transparent (only the terminal text — drawn at its own full alpha —
+/// and the desktop remain), which is what "maximum transparency" means. There is
+/// no readability floor because the grid TEXT alpha is independent of this
+/// background alpha, so a near-zero background never hides the text; the user
+/// drives the whole range with the opacity slider.
 pub(crate) const TRANSLUCENT_ALPHA_FLOOR: f32 = 0.0;
 
 /// The alpha (0..=255) to paint the pane grid background (and the central panel
-/// fill) with, for the current config:
-///
-/// * **Opaque** (master toggle off, or `Opaque` mode): `255` — a solid fill so
-///   the desktop never bleeds through. The unchanged, safe default.
-/// * **Translucent** (`effective_translucent()`): the `opacity` slider folded
-///   into a 0..=255 alpha (floored at [`TRANSLUCENT_ALPHA_FLOOR`], now `0.0`, so
-///   the background can go fully transparent — text stays, drawn at its own
-///   alpha). The opacity slider drives the fill alpha across its
-///   FULL range in every translucent mode — Glass/Mica/Vibrancy are
-///   distinguished by their DWM backdrop EFFECT (acrylic / mica / plain, applied
-///   separately via `window-vibrancy`), NOT by capping the alpha. A prior
-///   per-mode ceiling (#27) capped Glass at 0.35 etc., which made the slider a
-///   no-op above the cap AND washed the terminal content out to near-invisible
-///   over a bright backdrop (#41). The backdrop now shows through because the
-///   DEFAULT opacity is < 1.0 (see `Config` default), not because the alpha is
-///   force-capped — so opacity 1.0 legitimately means "fully opaque".
-///
-/// Pure (`&Config`) so the transparency wiring is unit-testable without a
-/// window.
+/// fill) with, for the current config: the `opacity` slider folded into a 0..=255
+/// alpha (floored at [`TRANSLUCENT_ALPHA_FLOOR`], `0.0`, so the background can go
+/// fully transparent — text stays, drawn at its own alpha). `opacity == 1.0`
+/// yields `255` (a solid fill — the "opaque" look) and `0.0` yields `0` (maximum
+/// see-through). Pure (`&Config`) so the transparency wiring is unit-testable
+/// without a window.
 pub(crate) fn pane_bg_alpha(config: &c0pl4nd_core::Config) -> u8 {
-    if !config.effective_translucent() {
-        return 255;
-    }
-    // Uniform-"dim" mode dims the WHOLE window at the OS layer (layered-window
-    // alpha), so its content is painted OPAQUE — the per-pixel pane alpha must stay
-    // 255 or the window would be double-dimmed (per-pixel × OS-layer).
-    if config.window_mode.is_uniform_dim() {
-        return 255;
-    }
-    // The opacity slider drives the alpha directly in ALL translucent modes,
-    // floored so the grid stays readable. No per-mode ceiling: the modes differ
-    // by their DWM backdrop, not by a forced alpha cap (#41).
     let a = config.opacity.clamp(TRANSLUCENT_ALPHA_FLOOR, 1.0);
     (a * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
-/// The frameless-window clear color for the current config + theme.
+/// The frameless-window clear color: unconditionally FULLY transparent
+/// `[0,0,0,0]` — exactly like the sibling app SCR1B3 (whose `clear_color` is
+/// unconditionally `[0,0,0,0]`), which IS see-through on the hybrid-GPU laptop.
+/// The `opacity` slider is folded ONLY into the PANEL fills ([`pane_bg_alpha`]),
+/// NEVER the clear.
 ///
-/// * **Opaque** (master off, or `Opaque` mode): the theme background at full
-///   alpha — a solid window the desktop never bleeds through.
-/// * **Every translucent mode** (`Transparent`/`Glass`/`Mica`/`Vibrancy`): FULLY
-///   transparent `[0,0,0,0]` — exactly like the sibling app SCR1B3 (whose
-///   `clear_color` is unconditionally `[0,0,0,0]`), which IS see-through on the same
-///   hybrid-GPU laptop. The `opacity` slider is folded ONLY into the PANEL fills
-///   ([`pane_bg_alpha`]), NOT the clear.
+/// Why this matters (the transparency bug): eframe issues the clear as the wgpu
+/// render-pass `LoadOp::Clear`, so it sets the base framebuffer alpha for EVERY
+/// pixel before egui paints. An old build cleared to `[theme_bg, opacity]`; egui
+/// then painted the panels (also `[theme_bg, opacity]`) ON TOP, so the two alphas
+/// COMPOUNDED (`0.6` clear over `0.6` panel ≈ `0.84`) and the RGB darkened — the
+/// window read as near-opaque BLACK well before the slider reached 100%. Clearing
+/// to `[0,0,0,0]` makes the panel alpha the SOLE determinant of see-through, so
+/// `opacity` behaves linearly across its whole range: at `1.0` the opaque panels
+/// cover the transparent clear (solid look); below `1.0` the desktop shows through.
+pub(crate) fn window_clear_color() -> [f32; 4] {
+    [0.0, 0.0, 0.0, 0.0]
+}
+
+/// Fade the RESTING chrome + background fills in `v` by the window `opacity`
+/// (0.0..=1.0) so that at low opacity the toolbar / tab / title-bar SHELL goes
+/// see-through along with the panes — leaving only the glyph text (painted opaque
+/// on top) legible over the desktop at `opacity == 0.0`. Ported from SCR1B3
+/// (v0.4.59 fade-chrome): the resting `noninteractive.bg_fill` + the `inactive`
+/// `weak_bg_fill` (the idle button/tab chip fill) fade with the alpha, while:
 ///
-///   Why this matters (the transparency bug): eframe issues the clear as the wgpu
-///   render-pass `LoadOp::Clear`, so it sets the base framebuffer alpha for EVERY
-///   pixel before egui paints. The old code cleared `Transparent` mode to
-///   `[theme_bg, opacity]`; egui then painted the panels (also `[theme_bg, opacity]`)
-///   ON TOP, so the two alphas COMPOUNDED (`0.6` clear over `0.6` panel ≈ `0.84`)
-///   and the RGB darkened — the window read as near-opaque BLACK well before the
-///   slider reached 100%. Clearing to `[0,0,0,0]` (SCR1B3-parity) makes the panel
-///   alpha the SOLE determinant of see-through, so `opacity` behaves linearly and
-///   reaches genuinely-transparent at its low end.
+/// * **hovered / active** widget fills stay OPAQUE — pointer feedback must always
+///   read, even over a fully see-through window;
+/// * the scrollbar HANDLE (`inactive.bg_fill`, which egui paints the idle handle
+///   from) stays OPAQUE so the scrollbar never vanishes;
+/// * `window_fill` stays OPAQUE — egui draws combo dropdowns, context menus,
+///   tooltips, and the floating Settings window from it, so fading it would make
+///   every popup/tooltip see-through and the Settings window darken toward black.
 ///
-/// Free function (takes `&Config`, `&Theme`) so the headless tests can assert
-/// the clear color for a given config without an eframe window.
-pub(crate) fn window_clear_color(
-    config: &c0pl4nd_core::Config,
-    theme: &c0pl4nd_core::Theme,
-) -> [f32; 4] {
-    if !config.effective_translucent() {
-        // Opaque: solid theme background, full alpha.
-        let (r, g, b) =
-            c0pl4nd_core::theme::parse_hex(&theme.background).unwrap_or((0x12, 0x12, 0x12));
-        return [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
-    }
-    match config.window_mode {
-        // Uniform "dim": the content is painted OPAQUE (solid theme background) and
-        // the OS layered-window alpha dims the whole composited window uniformly —
-        // so the clear colour is the theme background at FULL alpha, exactly like
-        // Opaque. (A per-pixel-transparent clear here would double-dim.)
-        c0pl4nd_core::config::WindowMode::Dim => {
-            let (r, g, b) =
-                c0pl4nd_core::theme::parse_hex(&theme.background).unwrap_or((0x12, 0x12, 0x12));
-            [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
-        }
-        // Every per-pixel translucent mode clears FULLY TRANSPARENT (SCR1B3-parity).
-        // Native blur backdrops (Glass/Mica/Vibrancy) need it so the OS blur shows
-        // through; portable `Transparent` needs it so the opacity slider is not
-        // compounded by a dark clear (the "opaque black" bug). The panel fills carry
-        // the `opacity` alpha; the terminal text keeps its own alpha over the desktop.
-        c0pl4nd_core::config::WindowMode::Transparent
-        | c0pl4nd_core::config::WindowMode::Glass
-        | c0pl4nd_core::config::WindowMode::Mica
-        | c0pl4nd_core::config::WindowMode::Vibrancy => [0.0, 0.0, 0.0, 0.0],
-        // Unreachable: effective_translucent() ruled Opaque out above.
-        c0pl4nd_core::config::WindowMode::Opaque => [0.0, 0.0, 0.0, 0.0],
-    }
+/// Pure, so the fade is unit-testable without a window. Applied right after
+/// `set_visuals(visuals_from_theme(..))` (each theme/opacity change re-applies the
+/// visuals), so the opacity slider drives the resting chrome live.
+pub(crate) fn apply_window_opacity(v: &mut egui::Visuals, opacity: f32) {
+    let a = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let with_a = |c: egui::Color32| egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a);
+    // Background / panel surfaces (what sits over the desktop).
+    v.panel_fill = with_a(v.panel_fill);
+    v.extreme_bg_color = with_a(v.extreme_bg_color);
+    v.faint_bg_color = with_a(v.faint_bg_color);
+    // Resting chrome: the non-interactive surface fill and the idle button/tab
+    // chip fill fade so the toolbar/tab/title-bar shell is see-through at low
+    // opacity. Hovered/active/`inactive.bg_fill` (scrollbar handle) are left
+    // untouched (opaque) for feedback + legibility, and `window_fill` stays opaque
+    // so popups/tooltips/Settings hold their colour.
+    v.widgets.noninteractive.bg_fill = with_a(v.widgets.noninteractive.bg_fill);
+    v.widgets.noninteractive.weak_bg_fill = with_a(v.widgets.noninteractive.weak_bg_fill);
+    v.widgets.inactive.weak_bg_fill = with_a(v.widgets.inactive.weak_bg_fill);
 }
 
 /// The 0..=255 alpha for a given tint `strength` (0..=1). Scaled so the slider's
@@ -201,152 +178,6 @@ pub(crate) fn fold_alpha(color: egui::Color32, bg_alpha: u8) -> egui::Color32 {
     color.gamma_multiply(f32::from(bg_alpha) / 255.0)
 }
 
-/// Parse a `#RRGGBB` tint to an RGBA quad for native blur tinting.
-///
-/// Only consumed by Windows' `window_vibrancy::apply_acrylic` (acrylic takes a
-/// tint; mica/vibrancy do not). Gating the fn to Windows keeps `-D warnings`
-/// (clippy `dead_code`) green on Linux and macOS without a blanket allow.
-#[cfg(windows)]
-pub(crate) fn tint_rgba(hex: &str, alpha: u8) -> Option<(u8, u8, u8, u8)> {
-    c0pl4nd_core::theme::parse_hex(hex)
-        .ok()
-        .map(|(r, g, b)| (r, g, b, alpha))
-}
-
-/// Apply the OS window effect for the chosen [`WindowMode`] (best-effort,
-/// graceful on unsupported platforms — recon dossier §3.3). Windows:
-/// acrylic (Glass) / mica (Mica); macOS: vibrancy; elsewhere (Linux) the
-/// portable transparent surface + the tint overlay carry the look. Called only
-/// when the master transparency toggle is on AND the mode wants a non-opaque
-/// surface (`Config::effective_translucent`), so an opaque window never gets a
-/// layered surface (no ghost-on-close risk).
-///
-/// LIVE-APPLY VERDICT (research §1): this is invoked ONCE at startup in
-/// [`super::C0pl4ndApp::new`] because it needs the `eframe::CreationContext`'s raw
-/// window handle, which `frame_tick` (driven only by `&egui::Context`) does not
-/// expose — eframe 0.34 gives no stable cross-platform way to re-apply a DWM
-/// backdrop class to the live window from inside the frame loop. So switching
-/// the transparency MODE (Glass⇄Mica⇄Transparent) or toggling the master switch
-/// at runtime needs a RELAUNCH for the DWM backdrop class to change. What IS
-/// live: the PANEL/grid translucency — [`pane_bg_alpha`] reads `opacity` +
-/// `effective_translucent()` from the config EVERY frame, so the opacity slider
-/// and the pane see-through (the main visible lever) take effect immediately
-/// without a relaunch.
-pub(crate) fn apply_window_effect(
-    cc: &eframe::CreationContext<'_>,
-    mode: c0pl4nd_core::config::WindowMode,
-    tint_hex: &str,
-    opacity: f32,
-) {
-    let _ = (cc, tint_hex, opacity);
-    match mode {
-        // Uniform "dim": dim the WHOLE window (chrome + panes + text) by one alpha
-        // via the Win32 layered-window attribute — genuinely distinct from the
-        // per-pixel `Transparent` mode. Windows-only; elsewhere it degrades to the
-        // opaque surface (its `window_clear_color`/`pane_bg_alpha` are already
-        // opaque, so nothing shows through off-Windows — an honest no-op).
-        c0pl4nd_core::config::WindowMode::Dim => {
-            #[cfg(windows)]
-            {
-                use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-                if let Ok(handle) = cc.window_handle() {
-                    if let RawWindowHandle::Win32(h) = handle.as_raw() {
-                        dim_imp::set_uniform_dim(h.hwnd.get(), opacity);
-                    }
-                }
-            }
-        }
-        c0pl4nd_core::config::WindowMode::Glass => {
-            #[cfg(windows)]
-            {
-                let _ = window_vibrancy::apply_acrylic(cc, tint_rgba(tint_hex, 160));
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let _ = window_vibrancy::apply_vibrancy(
-                    cc,
-                    window_vibrancy::NSVisualEffectMaterial::HudWindow,
-                    None,
-                    None,
-                );
-            }
-        }
-        c0pl4nd_core::config::WindowMode::Mica => {
-            #[cfg(windows)]
-            {
-                let _ = window_vibrancy::apply_mica(cc, Some(true));
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let _ = window_vibrancy::apply_vibrancy(
-                    cc,
-                    window_vibrancy::NSVisualEffectMaterial::HudWindow,
-                    None,
-                    None,
-                );
-            }
-        }
-        c0pl4nd_core::config::WindowMode::Vibrancy => {
-            #[cfg(target_os = "macos")]
-            {
-                let _ = window_vibrancy::apply_vibrancy(
-                    cc,
-                    window_vibrancy::NSVisualEffectMaterial::Sidebar,
-                    None,
-                    None,
-                );
-            }
-        }
-        // Transparent: the portable reduced-alpha surface carries the look (no
-        // native blur). Opaque: no effect at all.
-        c0pl4nd_core::config::WindowMode::Transparent
-        | c0pl4nd_core::config::WindowMode::Opaque => {}
-    }
-}
-
-/// Quarantined Win32 FFI for the uniform-"dim" transparency mode
-/// ([`c0pl4nd_core::config::WindowMode::Dim`]). Isolated behind
-/// `#![allow(unsafe_code)]` with `// SAFETY:` justifications, mirroring the other
-/// `#[cfg(windows)]` FFI islands (`caption_close::imp`, `job_object`).
-#[cfg(windows)]
-mod dim_imp {
-    #![allow(unsafe_code)]
-
-    use windows::Win32::Foundation::{COLORREF, HWND};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE, LWA_ALPHA,
-        WS_EX_LAYERED,
-    };
-
-    /// Dim the ENTIRE window (chrome + panes + text) by one alpha via the layered-
-    /// window attribute — the uniform "dim" mode, genuinely distinct from the
-    /// per-pixel `Transparent` mode. `opacity` (0..=1) → alpha, floored at ~5% so
-    /// the window can never become fully invisible / unclickable. Ensures
-    /// `WS_EX_LAYERED` first (required by `SetLayeredWindowAttributes`). Best-effort;
-    /// a null handle is a no-op.
-    pub(super) fn set_uniform_dim(hwnd: isize, opacity: f32) {
-        if hwnd == 0 {
-            return;
-        }
-        let h = HWND(hwnd as *mut core::ffi::c_void);
-        let alpha = (opacity.clamp(0.05, 1.0) * 255.0).round() as u8;
-        let layered = i64::from(WS_EX_LAYERED.0) as isize;
-        // SAFETY: `hwnd` is this process's live top-level window handle (from
-        // eframe's CreationContext); this only reads this window's own extended-
-        // style word.
-        let ex = unsafe { GetWindowLongPtrW(h, GWL_EXSTYLE) };
-        // SAFETY: rewrites this window's own extended-style word to add
-        // WS_EX_LAYERED (all other bits preserved) — the prerequisite for
-        // SetLayeredWindowAttributes.
-        unsafe {
-            SetWindowLongPtrW(h, GWL_EXSTYLE, ex | layered);
-        }
-        // SAFETY: sets this window's whole-window alpha (LWA_ALPHA); the colour key
-        // is unused for LWA_ALPHA so COLORREF(0) is inert.
-        let _ = unsafe { SetLayeredWindowAttributes(h, COLORREF(0), alpha, LWA_ALPHA) };
-    }
-}
-
 #[cfg(test)]
 mod tint_tests {
     use super::{flatten_chrome_buttons, fold_alpha, tint_alpha};
@@ -379,39 +210,87 @@ mod tint_tests {
     }
 
     #[test]
-    fn dim_mode_paints_opaque_content_transparent_mode_is_per_pixel() {
-        // The two see-through modes must be GENUINELY DISTINCT at the framebuffer:
-        // Dim paints OPAQUE content (the OS layered-window alpha dims the whole
-        // window uniformly), while Transparent folds the opacity into the per-pixel
-        // pane/clear alpha (widgets stay solid, gaps see through). Proven from the
-        // pure colour math without a window.
-        let mut config = c0pl4nd_core::Config {
-            transparency_enabled: true,
-            opacity: 0.4,
-            ..Default::default()
+    fn pane_bg_alpha_folds_opacity_across_the_full_range() {
+        // Single-model: the opacity slider drives the pane fill alpha directly.
+        // 1.0 → 255 (solid), 0.0 → 0 (fully see-through), and it is monotonic.
+        let mk = |o: f32| {
+            super::pane_bg_alpha(&c0pl4nd_core::Config {
+                opacity: o,
+                ..Default::default()
+            })
         };
-        let theme = c0pl4nd_core::Theme::builtin_void();
+        assert_eq!(mk(1.0), 255, "opacity 1.0 is a solid (opaque) fill");
+        assert_eq!(mk(0.0), 0, "opacity 0.0 is a fully transparent fill");
+        assert_eq!(mk(0.6), (0.6 * 255.0_f32).round() as u8);
+        assert!(mk(0.2) < mk(0.5) && mk(0.5) < mk(0.85) && mk(0.85) < mk(1.0));
+    }
 
-        config.window_mode = c0pl4nd_core::config::WindowMode::Dim;
+    #[test]
+    fn window_clear_color_is_always_fully_transparent() {
+        // The clear is unconditionally [0,0,0,0]; the opacity slider drives the
+        // PANEL alpha, never the clear (the SCR1B3-parity anti-"opaque-black" fix).
+        assert_eq!(super::window_clear_color(), [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn apply_window_opacity_fades_resting_chrome_and_keeps_feedback_opaque() {
+        // The fade-chrome port: the resting background + chrome fills fade with the
+        // opacity alpha (so the whole shell goes see-through at opacity 0), while
+        // hovered/active fills, the scrollbar handle (inactive.bg_fill), and
+        // window_fill (popups/tooltips/Settings) stay OPAQUE for feedback/legibility.
+        let mut v = egui::Visuals::dark();
+        v.window_fill = egui::Color32::from_rgb(0x20, 0x20, 0x20);
+        v.panel_fill = egui::Color32::from_rgb(0x10, 0x10, 0x10);
+        v.extreme_bg_color = egui::Color32::from_rgb(0x05, 0x05, 0x05);
+        v.faint_bg_color = egui::Color32::from_rgb(0x15, 0x15, 0x15);
+        v.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(0x11, 0x11, 0x11);
+        v.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(0x22, 0x22, 0x22);
+        v.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x33, 0x33, 0x33);
+        v.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(0x44, 0x44, 0x44);
+        v.widgets.active.weak_bg_fill = egui::Color32::from_rgb(0x55, 0x55, 0x55);
+
+        // Half opacity: resting fills go ~half translucent.
+        super::apply_window_opacity(&mut v, 0.5);
+        assert_eq!(v.panel_fill.a(), 128, "panel fades");
+        assert_eq!(v.extreme_bg_color.a(), 128);
+        assert_eq!(v.faint_bg_color.a(), 128);
         assert_eq!(
-            super::pane_bg_alpha(&config),
+            v.widgets.noninteractive.bg_fill.a(),
+            128,
+            "resting chrome fades"
+        );
+        assert_eq!(v.widgets.inactive.weak_bg_fill.a(), 128, "idle chip fades");
+        // Feedback + legibility surfaces stay opaque.
+        assert_eq!(v.window_fill.a(), 255, "window_fill (popups) stays opaque");
+        assert_eq!(
+            v.widgets.inactive.bg_fill.a(),
             255,
-            "Dim keeps per-pixel panes fully opaque (OS layer does the dimming)"
+            "scrollbar handle stays opaque"
         );
         assert_eq!(
-            super::window_clear_color(&config, &theme)[3],
-            1.0,
-            "Dim clear colour is fully opaque"
+            v.widgets.hovered.weak_bg_fill.a(),
+            255,
+            "hover stays opaque"
+        );
+        assert_eq!(
+            v.widgets.active.weak_bg_fill.a(),
+            255,
+            "active stays opaque"
         );
 
-        config.window_mode = c0pl4nd_core::config::WindowMode::Transparent;
-        assert!(
-            super::pane_bg_alpha(&config) < 255,
-            "Transparent folds opacity into the per-pixel pane alpha"
-        );
-        assert!(
-            super::window_clear_color(&config, &theme)[3] < 1.0,
-            "Transparent clear colour is per-pixel translucent"
+        // Opacity 0.0 → resting chrome fully transparent (only glyphs remain).
+        let mut z = egui::Visuals::dark();
+        z.panel_fill = egui::Color32::from_rgb(0x10, 0x10, 0x10);
+        z.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(0x11, 0x11, 0x11);
+        z.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(0x22, 0x22, 0x22);
+        super::apply_window_opacity(&mut z, 0.0);
+        assert_eq!(z.panel_fill.a(), 0);
+        assert_eq!(z.widgets.noninteractive.bg_fill.a(), 0);
+        assert_eq!(z.widgets.inactive.weak_bg_fill.a(), 0);
+        assert_eq!(
+            z.window_fill.a(),
+            255,
+            "window_fill opaque even at opacity 0"
         );
     }
 

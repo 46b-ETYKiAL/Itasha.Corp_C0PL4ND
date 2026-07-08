@@ -277,19 +277,15 @@ fn launch_check_config() -> (bool, c0pl4nd_core::config::UpdateMode) {
     (should_check, update.mode)
 }
 
-/// Whether the persisted config has window transparency enabled — read at launch
-/// to pick a transparency-capable wgpu backend (see [`prefer_backend_on_windows`]).
-/// Defaults to `false` (opaque) when no config exists, matching the app default.
+/// Whether the launch should pick a transparency-capable wgpu backend + adapter
+/// (see [`prefer_backend_on_windows`] / [`install_transparency_adapter_selector`]).
+/// The window is ALWAYS created transparent-capable now (`with_transparent(true)`)
+/// and the single `opacity` slider drives the see-through level, so this is
+/// unconditionally `true`: the launch always takes the see-through GPU path
+/// (integrated / display-driving adapter) that composites transparency correctly
+/// on the hybrid-GPU (Optimus) target.
 fn launch_transparency_enabled() -> bool {
-    c0pl4nd_core::Config::default_path()
-        .filter(|p| p.exists())
-        .and_then(|p| {
-            std::fs::read_to_string(&p)
-                .ok()
-                .and_then(|s| c0pl4nd_core::Config::from_toml(&s, &p).ok())
-        })
-        .map(|c| c.effective_translucent())
-        .unwrap_or(false)
+    true
 }
 
 /// The persisted `graphics_gpu` preference, read from the on-disk config at

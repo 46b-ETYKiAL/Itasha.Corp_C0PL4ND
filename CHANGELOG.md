@@ -8,6 +8,28 @@ Full per-release artifacts (signed binaries, SBOMs, provenance) are on the
 [GitHub Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases)
 page.
 
+## [0.4.21]
+
+### Changed — window transparency simplified to one effect
+
+- **One Opacity slider, no mode selector.** The window is now always
+  transparent-capable and a single **Opacity** control (0% = fully see-through,
+  100% = solid) drives it. The `WindowMode` dropdown and every extra mode —
+  Opaque, Dim, Glass, Mica, Vibrancy, and the `acrylic` backdrop — were removed:
+  on hybrid-GPU (Optimus) laptops the OS blur backdrops never composited (they
+  looked identical to plain Transparent), Dim rendered black, and the separate
+  Opaque mode rendered black. The one portable per-pixel effect that works is now
+  the only one. Opacity applies live.
+- **Opacity 0 is now maximally see-through.** The resting chrome (toolbar
+  buttons, tab chips, title bar) now fades with the opacity alpha along with the
+  panes, so at 0% only the glyph text remains over the desktop. Hover/active
+  states, the scrollbar handle, popups, tooltips, and the Settings window stay
+  opaque for feedback and legibility. (Ports the SCR1B3 v0.4.59 fade-chrome
+  behaviour.)
+- **Old configs keep loading.** The retired keys (`transparency_enabled`,
+  `window_mode`, `acrylic`) are ignored on load; the retained `opacity` value
+  carries the see-through level.
+
 ## [0.4.14] - 2026-07-03
 
 ### Fixed — rendering

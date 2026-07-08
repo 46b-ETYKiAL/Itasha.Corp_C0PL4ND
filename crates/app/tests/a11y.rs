@@ -276,7 +276,7 @@ fn settings_controls_are_focusable_and_focus_is_not_trapped() {
 
     // Three enabled, distinct interactive controls always present on the default
     // Appearance page: the search box (TextInput), the theme combo (ComboBox), and
-    // the master transparency toggle (Button). Focus each and verify it lands.
+    // the tint-wash toggle (Button). Focus each and verify it lands.
     let focus_and_assert = |h: &mut Harness<'_>, role: Role, which: &str| {
         {
             let node = h
@@ -308,16 +308,16 @@ fn settings_controls_are_focusable_and_focus_is_not_trapped() {
          control that keeps focus after another is focused is a keyboard trap"
     );
 
-    // Focus the master transparency toggle (a Button) — focus moves again, off
-    // the combo. Three hops with no control refusing to yield = no trap.
+    // Focus the tint-wash toggle (a Button) — focus moves again, off the combo.
+    // Three hops with no control refusing to yield = no trap.
     {
-        let toggle = h.get_by_label("Enable window transparency");
+        let toggle = h.get_by_label("Enable tint wash");
         toggle.focus();
     }
     h.run();
     assert!(
-        h.get_by_label("Enable window transparency").is_focused(),
-        "the transparency toggle must accept focus"
+        h.get_by_label("Enable tint wash").is_focused(),
+        "the tint-wash toggle must accept focus"
     );
     assert!(
         !h.get_all_by_role(Role::ComboBox).any(|n| n.is_focused()),

@@ -26,8 +26,8 @@ Most settings are **top-level keys**; a handful are grouped into tables. This re
 | --- | --- | --- |
 | `theme` | top-level string | Active color theme (default: `itasha-corp`) |
 | `scrollback_lines` | top-level | Scrollback buffer size (lines per pane) |
-| `opacity` | top-level | Window opacity, `0.0`..=`1.0` |
-| `transparency_enabled` / `window_mode` / `tint` / `tint_strength` / `acrylic` | top-level | Window translucency system |
+| `opacity` | top-level | See-through level, `0.0` (fully transparent) ..= `1.0` (solid) |
+| `tint` / `tint_strength` / `tint_enabled` | top-level | Optional colour wash over the window |
 | `ui_scale` | top-level | Whole-UI accessibility zoom (`0.5`..=`3.0`) |
 | `startup_panel` | top-level | The neofetch-style launch splash (on by default) |
 | `shell` / `term` | top-level | Override the child shell program / its `TERM` value |
@@ -70,7 +70,7 @@ If the requested family isn't installed, C0PL4ND falls back through the `fallbac
 `opacity` is a **top-level** key (not under `[window]`). The `[window]` table holds the initial grid size, inner padding, and the persisted geometry restored on the next launch.
 
 ```toml
-opacity = 1.0   # top-level: 0.0 (fully transparent) .. 1.0 (fully opaque)
+opacity = 1.0   # top-level: 0.0 (fully see-through) .. 1.0 (solid)
 
 [window]
 cols = 80       # initial terminal width in columns
@@ -80,30 +80,35 @@ padding = 8     # inner padding between the window edge and the grid, in pixels
 # to remember your window geometry; you normally don't set these by hand.
 ```
 
-## Transparency (translucency modes)
+## Transparency & tint
 
-Translucency is **opt-in** and **off by default** (a solid window). The master switch is `transparency_enabled`; `window_mode` picks how the window blends:
+The window is **always transparent-capable**, and a single `opacity` slider is the
+whole see-through control — there is no mode selector. `0.0` = fully see-through
+(only the terminal text and resting chrome fade away, leaving glyphs over the
+desktop); `1.0` = the panels paint fully opaque, so the window reads as a solid
+surface. Applies **live** as you drag the slider. An optional colour wash tints the
+whole window.
 
 ```toml
-transparency_enabled = false   # master on/off for the whole transparency system
-window_mode = "opaque"         # opaque | transparent | glass | mica | vibrancy
-tint = "#08060d"               # #RRGGBB overlay painted when a translucent mode is active (brand-canon VOID BLACK)
-tint_strength = 0.0            # 0.0 (no tint) .. 1.0 (strong)
-tint_enabled = true            # master ON/OFF for the tint wash (independent of strength; default true)
+opacity = 1.0        # 0.0 (fully see-through) .. 1.0 (solid) — the single control
+tint = "#08060d"     # #RRGGBB colour washed over the window (brand-canon VOID BLACK)
+tint_strength = 0.0  # 0.0 (no tint) .. 1.0 (strong)
+tint_enabled = true  # master ON/OFF for the tint wash (independent of strength; default true)
 ```
 
 > **Hybrid-GPU laptops (NVIDIA + Intel):** a see-through window needs a GPU whose
 > swapchain surface exposes a transparent `CompositeAlphaMode`. The discrete GPU
-> often reports `Opaque`-only (→ solid black window), so with a translucent mode on,
-> C0PL4ND now auto-selects the **integrated** GPU (matching the sibling app SCR1B3).
-> If the window is still opaque, check `<config_dir>/gpu-diag.log` — it lists every
-> adapter, its surface `alpha_modes`, and the one chosen.
+> often reports `Opaque`-only (→ solid black window), so C0PL4ND auto-selects the
+> **integrated** GPU (matching the sibling app SCR1B3). If the window is still
+> opaque, check `<config_dir>/gpu-diag.log` — it lists every adapter, its surface
+> `alpha_modes`, and the one chosen.
 
-- `transparent` — the portable, cross-platform reduced-alpha surface.
-- `glass` / `mica` / `vibrancy` — request an OS blur backdrop (acrylic/mica on Windows, vibrancy on macOS), degrading to the portable transparent surface where the API is absent.
-- `acrylic` — a **legacy** top-level bool, retained so older configs still load; `acrylic = true` migrates to `transparency_enabled = true, window_mode = "glass"` on load.
-
-These apply on the next launch.
+> **Upgrading from an older config?** The retired multi-mode keys
+> (`transparency_enabled`, `window_mode`, `acrylic`, and the OS blur backdrops
+> `glass`/`mica`/`vibrancy`/`dim`) are simply **ignored** on load — your file still
+> parses, and the retained `opacity` value carries the see-through level. On the
+> hybrid-GPU target those OS blur backdrops never composited, so they were dropped
+> in favour of the one portable effect that works.
 
 ## Cursor
 
@@ -252,15 +257,14 @@ A configuration with the common keys shown at their default values. Copy this to
 
 theme = "itasha-corp"         # void-black + Itasha Purple #7700FF + Corp Green #00FF90
 scrollback_lines = 10000
-opacity = 1.0                 # 0.0 .. 1.0
+opacity = 1.0                 # 0.0 (fully see-through) .. 1.0 (solid) — the single transparency control
 ui_scale = 1.0                # 0.5 .. 3.0
 startup_panel = true          # neofetch-style splash on launch
 
-# Window translucency (opt-in; off by default)
-transparency_enabled = false
-window_mode = "opaque"        # opaque | transparent | glass | mica | vibrancy
+# Optional colour wash over the window
 tint = "#08060d"
-tint_strength = 0.0
+tint_strength = 0.0           # 0.0 (no tint) .. 1.0 (strong)
+tint_enabled = true           # master ON/OFF for the tint wash
 
 # Shell / behaviour
 term = "xterm-256color"
