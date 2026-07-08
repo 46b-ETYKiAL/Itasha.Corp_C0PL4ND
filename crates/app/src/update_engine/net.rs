@@ -143,6 +143,32 @@ pub struct RawRelease {
     pub assets: Vec<RawAsset>,
 }
 
+/// A verifiable platform installer asset (Windows `*-x86_64-setup.exe`) + its
+/// signature/checksum sidecars, plus the manifest's SIGNED sha256 the download
+/// is pinned to. Present only when the verified manifest enumerates a setup
+/// installer for this platform. Used for the in-place-update path when the app
+/// lives in a protected, admin-owned location (e.g. `C:\Program Files`): the
+/// installer self-elevates (`requireAdministrator`), so running it UNATTENDED
+/// (`--silent --dir`) updates in place where a direct exe swap can't. Verified
+/// through the IDENTICAL gate as the archive (SHA-256 pinned to the signed
+/// manifest digest, THEN minisign bound to the asset name) — this is a separate
+/// elevated fallback, NOT a relaxation of any signature/anti-rollback gate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstallerAsset {
+    /// The `setup.exe` browser_download_url (the release asset url).
+    pub url: String,
+    /// The setup installer asset name (bound into the minisign trusted-comment
+    /// `file:` check, exactly like the archive path).
+    pub asset_name: String,
+    /// The `setup.exe.minisig` url.
+    pub sig_url: String,
+    /// The `setup.exe.sha256` url.
+    pub sha_url: String,
+    /// The SIGNED SHA-256 from the verified manifest, pinned as the expected
+    /// digest for the installer download (binding the bytes to the signed hash).
+    pub pinned_sha256: String,
+}
+
 /// One resolved, newer-than-current release ready to download.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReleaseInfo {
@@ -169,6 +195,12 @@ pub struct ReleaseInfo {
     /// mark on a successful apply. `None` only when the index is not carried
     /// (defensive; the producer always sets it).
     pub release_index: Option<u64>,
+    /// The self-elevating Windows installer for this release, when the manifest
+    /// enumerates one — the apply path for a Program-Files (admin-owned) install.
+    /// `None` on platforms/releases without a `setup.exe`. Boxed so the (common)
+    /// `None` case keeps `ReleaseInfo` small — it rides inside several UI-state
+    /// enum variants.
+    pub installer: Option<Box<InstallerAsset>>,
 }
 
 /// The archive file extension this build's release artifact carries: `.zip` on
@@ -463,7 +495,7 @@ fn resolve_tier1_update(
         None => return Ok(None),
     };
 
-    let info = build_tier1_release_info(raw, masset, &candidate, manifest.release_index)?;
+    let info = build_tier1_release_info(raw, manifest, masset, &candidate, target)?;
     Ok(Some(info))
 }
 
@@ -475,30 +507,12 @@ fn resolve_tier1_update(
 /// a malformed release — fail-closed `Err`.
 fn build_tier1_release_info(
     raw: &RawRelease,
+    manifest: &manifest::Manifest,
     masset: &manifest::ManifestAsset,
     candidate: &semver::Version,
-    release_index: u64,
+    target: &str,
 ) -> Result<ReleaseInfo, String> {
-    let url_of = |name: &str| -> Option<String> {
-        raw.assets
-            .iter()
-            .find(|a| a.name == name)
-            .map(|a| a.browser_download_url.clone())
-    };
-    let sig_name = format!("{}.minisig", masset.asset_name);
-    let sha_name = format!("{}.sha256", masset.asset_name);
-    let sig_url = url_of(&sig_name).ok_or_else(|| {
-        format!(
-            "manifest archive {:?} is missing its .minisig sidecar in the release — refusing",
-            masset.asset_name
-        )
-    })?;
-    let sha_url = url_of(&sha_name).ok_or_else(|| {
-        format!(
-            "manifest archive {:?} is missing its .sha256 sidecar in the release — refusing",
-            masset.asset_name
-        )
-    })?;
+    let (sig_url, sha_url) = sidecar_urls(raw, &masset.asset_name)?;
     if masset.sha256.trim().is_empty() {
         return Err(format!(
             "manifest archive {:?} has an empty sha256 — refusing",
@@ -520,7 +534,57 @@ fn build_tier1_release_info(
         sha_url,
         html_url: raw.html_url.clone(),
         pinned_sha256: masset.sha256.clone(),
-        release_index: Some(release_index),
+        release_index: Some(manifest.release_index),
+        installer: build_tier1_installer(raw, manifest, target).map(Box::new),
+    })
+}
+
+/// Resolve the per-asset `.minisig` + `.sha256` sidecar download urls for
+/// `asset_name` from the release asset list (the manifest does not enumerate
+/// them). A missing sidecar is a malformed release — fail-closed `Err`. Shared
+/// by the archive path ([`build_tier1_release_info`]) and the installer path
+/// ([`build_tier1_installer`]) so both bind their sidecars identically.
+fn sidecar_urls(raw: &RawRelease, asset_name: &str) -> Result<(String, String), String> {
+    let url_of = |name: &str| -> Option<String> {
+        raw.assets
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.browser_download_url.clone())
+    };
+    let sig_name = format!("{asset_name}.minisig");
+    let sha_name = format!("{asset_name}.sha256");
+    let sig_url = url_of(&sig_name).ok_or_else(|| {
+        format!("manifest asset {asset_name:?} is missing its .minisig sidecar in the release — refusing")
+    })?;
+    let sha_url = url_of(&sha_name).ok_or_else(|| {
+        format!("manifest asset {asset_name:?} is missing its .sha256 sidecar in the release — refusing")
+    })?;
+    Ok((sig_url, sha_url))
+}
+
+/// Build the verified-manifest, SHA-pinned self-elevating installer descriptor
+/// for a Windows `target`, if the manifest enumerates one AND its sidecars are
+/// present. Returns `None` (no installer offered — never a fail-OPEN install)
+/// when the manifest has no installer entry, when its url/sha256 are empty, or
+/// when either per-asset sidecar is missing from the release. This is a SEPARATE
+/// elevated fallback resolved alongside — never in place of — the in-place
+/// archive; the archive selector still governs the normal path.
+fn build_tier1_installer(
+    raw: &RawRelease,
+    manifest: &manifest::Manifest,
+    target: &str,
+) -> Option<InstallerAsset> {
+    let masset = manifest.installer_for(target)?;
+    if masset.sha256.trim().is_empty() || masset.url.trim().is_empty() {
+        return None;
+    }
+    let (sig_url, sha_url) = sidecar_urls(raw, &masset.asset_name).ok()?;
+    Some(InstallerAsset {
+        url: masset.url.clone(),
+        asset_name: masset.asset_name.clone(),
+        sig_url,
+        sha_url,
+        pinned_sha256: masset.sha256.clone(),
     })
 }
 
@@ -963,6 +1027,73 @@ fn download_verify_extract_inner(
     extract_binary(&asset_bytes, &info.asset_name, staging_dir)
 }
 
+/// Download the self-elevating installer (`setup.exe`), pin it to the manifest's
+/// SIGNED sha256 (the sidecar must AGREE), verify it (SHA-256 THEN minisign,
+/// bound to the asset name — the IDENTICAL gate the archive path uses), and
+/// write it into `staging_dir`, returning the path to the verified `.exe`. The
+/// caller launches it (elevated, `--silent --dir`) to update in place. ANY
+/// verify failure wipes `staging_dir` and returns `Err` — an unverified
+/// installer is NEVER written for launch (fail-closed, no relaxed gate).
+pub fn download_verify_installer(
+    installer: &InstallerAsset,
+    staging_dir: &Path,
+    progress: impl FnMut(u64, u64),
+) -> Result<PathBuf, String> {
+    match download_verify_installer_inner(installer, staging_dir, progress) {
+        Ok(p) => Ok(p),
+        Err(e) => {
+            let _ = fs::remove_dir_all(staging_dir);
+            Err(e)
+        }
+    }
+}
+
+fn download_verify_installer_inner(
+    installer: &InstallerAsset,
+    staging_dir: &Path,
+    progress: impl FnMut(u64, u64),
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(staging_dir).map_err(|e| format!("failed to create staging dir: {e}"))?;
+
+    // Defense-in-depth (audit #6): assert every download URL is https BEFORE any
+    // fetch — the same TLS-downgrade guard the archive path applies.
+    assert_https(&installer.url)?;
+    assert_https(&installer.sig_url)?;
+    assert_https(&installer.sha_url)?;
+
+    let exe_bytes = download_asset(&installer.url, progress)?;
+    let sig_bytes = download_small(&installer.sig_url)?;
+    let sha_text = download_small(&installer.sha_url)?;
+
+    let sha_str = String::from_utf8(sha_text)
+        .map_err(|e| format!("sha256 sidecar is not valid UTF-8: {e}"))?;
+    let sidecar_sha = sha_str
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| "sha256 sidecar was empty".to_string())?;
+    // The manifest's SIGNED digest is authoritative; the sidecar must AGREE.
+    let expected_sha = resolve_expected_sha(&installer.pinned_sha256, sidecar_sha)?;
+    let sig_str =
+        String::from_utf8(sig_bytes).map_err(|e| format!("minisig is not valid UTF-8: {e}"))?;
+
+    // SHA-256 THEN minisign against the embedded public key, with the
+    // signature's trusted-comment `file:` token bound to the installer asset
+    // name (defense-in-depth against same-key wrong-artifact substitution).
+    // Fails closed — IDENTICAL gate to the tar.gz/zip archive path.
+    verify_artifact_bound(
+        &exe_bytes,
+        expected_sha,
+        &sig_str,
+        EMBEDDED_PUBLIC_KEY,
+        &installer.asset_name,
+    )?;
+
+    // Only reached when verification passed — write the verified installer out.
+    let out = staging_dir.join("c0pl4nd-setup.exe");
+    fs::write(&out, &exe_bytes).map_err(|e| format!("failed to write installer: {e}"))?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::verify::sha256_hex;
@@ -1094,6 +1225,7 @@ mod tests {
             html_url: "https://github.com/o/r".to_string(),
             pinned_sha256: "deadbeef".to_string(),
             release_index: None,
+            installer: None,
         };
         let err = download_verify_extract(&info, dir.path(), |_, _| {})
             .expect_err("http asset url must be refused");
@@ -1116,6 +1248,7 @@ mod tests {
             html_url: "https://github.com/o/r".to_string(),
             pinned_sha256: "deadbeef".to_string(),
             release_index: None,
+            installer: None,
         };
         let err = download_verify_extract(&info, dir.path(), |_, _| {})
             .expect_err("http sig url must be refused");
@@ -1481,6 +1614,83 @@ mod tests {
             .contains("c0pl4nd-v0.4.9-x86_64-unknown-linux-gnu.tar.gz"));
         assert!(info.sig_url.ends_with(".minisig"));
         assert!(info.sha_url.ends_with(".sha256"));
+        // A linux release ships no `setup.exe` — the elevated-installer fallback
+        // is absent (the archive in-place swap is the only path off Windows).
+        assert!(
+            info.installer.is_none(),
+            "no setup.exe installer on a non-Windows platform"
+        );
+    }
+
+    #[test]
+    fn tier1_windows_resolves_the_self_elevating_installer_alongside_the_archive() {
+        // On Windows a release ships BOTH the in-place `.zip` archive AND the
+        // self-elevating `setup.exe`. The resolver must pin the archive for the
+        // normal in-place path AND carry the verified installer descriptor for
+        // the Program-Files fallback — the two are disjoint by `kind`, so wiring
+        // the installer never re-routes the writable-dir path through the exe.
+        let target = "x86_64-pc-windows-msvc";
+        let tag = "v0.4.9";
+        let zip = format!("c0pl4nd-{tag}-{target}.zip");
+        let exe = format!("c0pl4nd-{tag}-x86_64-setup.exe");
+        let dl = |n: &str| format!("https://github.com/o/r/releases/download/{tag}/{n}");
+        let raw = RawRelease {
+            tag_name: tag.to_string(),
+            prerelease: false,
+            draft: false,
+            html_url: "https://github.com/o/r".to_string(),
+            assets: vec![
+                asset(&zip, &dl(&zip)),
+                asset(&format!("{zip}.minisig"), &dl(&format!("{zip}.minisig"))),
+                asset(&format!("{zip}.sha256"), &dl(&format!("{zip}.sha256"))),
+                asset(&exe, &dl(&exe)),
+                asset(&format!("{exe}.minisig"), &dl(&format!("{exe}.minisig"))),
+                asset(&format!("{exe}.sha256"), &dl(&format!("{exe}.sha256"))),
+            ],
+        };
+        let m = manifest::Manifest {
+            schema: "itasha.update.manifest/v1".to_string(),
+            product: "c0pl4nd".to_string(),
+            version: "0.4.9".to_string(),
+            release_index: 4009,
+            minimum_version: "0.4.0".to_string(),
+            published_utc: "2026-06-29T14:17:42Z".to_string(),
+            valid_until_utc: "2099-01-01T00:00:00Z".to_string(),
+            assets: vec![
+                manifest::ManifestAsset {
+                    platform: target.to_string(),
+                    kind: "zip".to_string(),
+                    asset_name: zip.clone(),
+                    url: dl(&zip),
+                    size: 123,
+                    sha256: "aaaa1111".to_string(),
+                },
+                manifest::ManifestAsset {
+                    platform: target.to_string(),
+                    kind: "exe".to_string(),
+                    asset_name: exe.clone(),
+                    url: dl(&exe),
+                    size: 456,
+                    sha256: "bbbb2222".to_string(),
+                },
+            ],
+        };
+        let current = semver::Version::parse("0.4.5").unwrap();
+        let info = resolve_tier1_update(&raw, &m, &current, target, ".zip", 0, 4000)
+            .expect("resolves")
+            .expect("update available");
+        // The normal in-place path still pins the ARCHIVE (never the exe).
+        assert_eq!(info.asset_name, zip);
+        assert_eq!(info.pinned_sha256, "aaaa1111");
+        // The elevated fallback carries the verified, sha-pinned installer.
+        let inst = info
+            .installer
+            .expect("windows carries a setup.exe installer");
+        assert_eq!(inst.asset_name, exe);
+        assert_eq!(inst.url, dl(&exe));
+        assert_eq!(inst.pinned_sha256, "bbbb2222");
+        assert!(inst.sig_url.ends_with(".minisig"));
+        assert!(inst.sha_url.ends_with(".sha256"));
     }
 
     #[test]

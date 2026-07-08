@@ -159,6 +159,14 @@ pub fn update_failed_user_copy(raw: &str) -> String {
         "The downloaded update couldn't be verified as authentic and was \
          discarded for your safety. Try again, or download from the official \
          GitHub releases page."
+    } else if r.contains("launch the installer") || r.contains("run it manually") {
+        // The verified self-elevating installer (the Program-Files fallback) was
+        // staged but could not be started at all — NOT a UAC decline (that is
+        // swallowed and the prior version relaunches), but a genuine launch
+        // failure. The seamless installer path is the DEFAULT for a protected
+        // install; this copy only appears when that launch itself fails.
+        "C0PL4ND couldn't start the installer to finish updating. Please try again, \
+         or download the latest release from GitHub and run it to update."
     } else if r.contains("not writable")
         || r.contains("access is denied")
         || r.contains("permission denied")
@@ -167,17 +175,21 @@ pub fn update_failed_user_copy(raw: &str) -> String {
         || r.contains("read-only")
         || r.contains("readonly")
     {
-        // permission / relocate: the install directory is owned by another
-        // account (Program Files, an admin-extracted folder, a read-only mount),
-        // so the in-place swap cannot write there. This is NOT a disk-space
-        // problem — telling the user to "free disk space" (the previous
-        // behaviour) is a dead-end. Give the real, actionable fix. Checked
-        // BEFORE the disk/unpack bucket so an access-denied `os error 5` (which
-        // also matches "install failed"/"write"/"create" below) lands here.
+        // permission / relocate — the LAST-RESORT dead-end. A protected
+        // (Program Files / admin-owned) install now updates SEAMLESSLY by default
+        // via the verified self-elevating installer (one permission prompt, then
+        // a silent in-place update). This copy is only reached when that path is
+        // unavailable — the release ships no installer for this platform (e.g. an
+        // admin-extracted install on a platform without a setup.exe) — so the
+        // honest relocate/elevate guidance is the right, and only-now-residual,
+        // fix. This is NOT a disk-space problem (the old "free disk space" copy
+        // was a dead-end); checked BEFORE the disk/unpack bucket so an
+        // access-denied `os error 5` lands here.
         "C0PL4ND couldn't update itself because it's installed in a folder this \
-         account can't modify (for example Program Files). Move C0PL4ND to a \
-         folder you own — such as your user folder or Desktop — and try again, or \
-         run it once as administrator so the update can install."
+         account can't modify (for example Program Files) and there's no installer \
+         for your platform. Move C0PL4ND to a folder you own — such as your user \
+         folder or Desktop — and try again, or run it once as administrator so the \
+         update can install."
     } else if r.contains("staging")
         || r.contains("install failed")
         || r.contains("extract")
@@ -329,6 +341,42 @@ mod tests {
             assert!(
                 !s.contains("free disk space"),
                 "a permission failure must NOT be labelled a disk-space problem: {s:?}"
+            );
+            assert_clean(&s);
+        }
+
+        // installer-launch failure (the Program-Files seamless fallback): the
+        // verified self-elevating installer was staged but could not be started
+        // at all. It must route to the "couldn't start the installer" copy (its
+        // own bucket), NOT the relocate/admin copy and NOT a disk-space message.
+        for raw in [
+            "couldn't launch the installer (os error 2). You can run it manually: \
+             C:\\tmp\\c0pl4nd-setup.exe",
+            "couldn't launch the installer (The system cannot find the file). \
+             You can run it manually: setup.exe",
+        ] {
+            let s = update_failed_user_copy(raw);
+            assert!(
+                s.contains("couldn't start the installer"),
+                "an installer-launch failure must get its own copy: raw {raw:?} -> {s:?}"
+            );
+            assert!(
+                !s.contains("free disk space"),
+                "a launch failure is not a disk-space problem: {s:?}"
+            );
+            assert_clean(&s);
+        }
+
+        // no-installer-for-platform (admin-owned dir, no setup.exe): the residual
+        // relocate/elevate dead-end. Still routes to the account-can't-modify copy.
+        {
+            let raw = "install location not writable: C0PL4ND cannot modify its own \
+                       program folder and this release has no installer for your \
+                       platform — move it to a folder you own or run once elevated";
+            let s = update_failed_user_copy(raw);
+            assert!(
+                s.contains("account can't modify") && s.contains("administrator"),
+                "raw {raw:?} -> {s:?}"
             );
             assert_clean(&s);
         }

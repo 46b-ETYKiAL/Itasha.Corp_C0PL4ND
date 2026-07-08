@@ -193,6 +193,29 @@ impl Manifest {
                 && a.asset_name.ends_with(ext)
         })
     }
+
+    /// Select the self-elevating Windows installer (`exe`) asset for a Windows
+    /// `target`, if the manifest enumerates one. This is the Program-Files apply
+    /// path (mirroring the sibling SCR1B3 editor): the `setup.exe` self-elevates
+    /// (`requireAdministrator` manifest) so running it UNATTENDED (`--silent
+    /// --dir`) updates in place in a protected, admin-owned location an in-place
+    /// binary swap cannot write. Returns `None` for a non-Windows target or when
+    /// the manifest carries no matching `exe` asset. The matched asset's signed
+    /// `sha256` pins the installer download (bound exactly like the archive path).
+    ///
+    /// This is a SEPARATE, explicit elevated-installer fallback — it never
+    /// weakens the [`archive_for`](Self::archive_for) rule that the setup `exe`
+    /// is NEVER selected for a plain in-place swap. The two selectors are
+    /// disjoint by `kind` (`archive_for` → `zip`/`tar.gz`; `installer_for` →
+    /// `exe`).
+    pub fn installer_for(&self, target: &str) -> Option<&ManifestAsset> {
+        if !target.contains("windows") {
+            return None;
+        }
+        self.assets
+            .iter()
+            .find(|a| a.kind == "exe" && a.asset_name.ends_with("-x86_64-setup.exe"))
+    }
 }
 
 /// True for the in-place-updatable archive kinds ONLY. `"exe"` (the setup
@@ -304,8 +327,8 @@ mod tests {
   "url":"https://github.com/o/r/releases/download/v{version}/c0pl4nd-v{version}-x86_64-unknown-linux-gnu.tar.gz",
   "size":7000000,"sha256":"deadbeefcafef00d"}},
  {{"platform":"x86_64-pc-windows-msvc","kind":"exe",
-  "asset_name":"c0pl4nd-setup-v{version}.exe",
-  "url":"https://github.com/o/r/releases/download/v{version}/c0pl4nd-setup-v{version}.exe",
+  "asset_name":"c0pl4nd-v{version}-x86_64-setup.exe",
+  "url":"https://github.com/o/r/releases/download/v{version}/c0pl4nd-v{version}-x86_64-setup.exe",
   "size":9000000,"sha256":"00000000feedface"}}
 ]}}"#
         )
@@ -463,6 +486,44 @@ mod tests {
             .expect("a linux tar.gz archive must be selected");
         assert_eq!(nix.kind, "tar.gz");
         assert!(nix.asset_name.ends_with(".tar.gz"));
+    }
+
+    #[test]
+    fn installer_for_picks_the_setup_exe_on_windows_only() {
+        let json = fixture_json("0.4.9", 4009, "2099-01-01T00:00:00Z");
+        let (pk, sig) = sign(json.as_bytes());
+        let m = parse_and_verify(json.as_bytes(), &sig, &pk).unwrap();
+
+        // Windows resolves the self-elevating setup.exe (the elevated
+        // Program-Files apply path), with its signed sha256 pinning the download.
+        let inst = m
+            .installer_for("x86_64-pc-windows-msvc")
+            .expect("a windows setup.exe installer must be selected");
+        assert_eq!(inst.kind, "exe");
+        assert!(inst.asset_name.ends_with("-x86_64-setup.exe"));
+        assert_eq!(inst.sha256, "00000000feedface");
+
+        // Non-Windows never resolves an installer — the elevated path is
+        // Windows-only (the `setup.exe` is a Windows artifact).
+        assert!(m.installer_for("x86_64-unknown-linux-gnu").is_none());
+        assert!(m.installer_for("").is_none());
+    }
+
+    #[test]
+    fn installer_for_is_none_when_manifest_ships_no_exe() {
+        // A manifest with only archive assets yields no installer — the
+        // Program-Files fallback is simply unavailable (an actionable failure),
+        // never a fail-open substitution of some other artifact.
+        let m = Manifest {
+            assets: vec![ManifestAsset {
+                platform: "x86_64-pc-windows-msvc".to_string(),
+                kind: "zip".to_string(),
+                asset_name: "c0pl4nd-v0.4.9-x86_64-pc-windows-msvc.zip".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(m.installer_for("x86_64-pc-windows-msvc").is_none());
     }
 
     #[test]

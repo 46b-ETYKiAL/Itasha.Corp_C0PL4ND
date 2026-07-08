@@ -160,6 +160,7 @@ fn release_info_with_urls(url: &str) -> ReleaseInfo {
         html_url: "https://github.com/o/r".to_string(),
         pinned_sha256: "deadbeef".to_string(),
         release_index: None,
+        installer: None,
     }
 }
 
