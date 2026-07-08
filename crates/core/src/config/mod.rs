@@ -1036,6 +1036,17 @@ pub struct Config {
     /// `window.tint_strength`. Default 0.0 (no tint).
     #[serde(default)]
     pub tint_strength: f32,
+    /// Explicit ON/OFF master for the tint colour wash, independent of
+    /// [`Config::tint_strength`]. When `false`, NO tint is painted regardless of
+    /// the strength slider (so a user can park a preferred colour + strength and
+    /// toggle the wash off/on without losing them). When `true`, the strength
+    /// slider drives the wash as before (strength `0.0` is still no visible tint).
+    ///
+    /// Default `true` so existing configs (which relied on `tint_strength > 0` to
+    /// enable the wash) keep their exact behaviour — the strength slider stays the
+    /// effective control until the user deliberately flips this off.
+    #[serde(default = "default_true")]
+    pub tint_enabled: bool,
     pub cursor: CursorConfig,
     pub window: WindowConfig,
     pub effects: EffectsConfig,
@@ -1179,6 +1190,7 @@ impl Default for Config {
             window_mode: WindowMode::Opaque,
             tint: default_tint(),
             tint_strength: 0.0,
+            tint_enabled: true,
             cursor: CursorConfig::default(),
             window: WindowConfig::default(),
             effects: EffectsConfig::default(),

@@ -627,33 +627,25 @@ fn clear_color_is_transparent_for_native_blur_modes() {
 }
 
 #[test]
-fn clear_color_folds_opacity_into_alpha_for_transparent_mode() {
-    // Portable Transparent mode: alpha tracks the opacity slider so the
-    // desktop shows through at the chosen strength.
+fn clear_color_is_fully_transparent_for_transparent_mode_regardless_of_opacity() {
+    // SCR1B3-parity fix: the CLEAR is unconditionally [0,0,0,0] for the portable
+    // Transparent mode — the `opacity` slider is folded ONLY into the panel fills
+    // ([`pane_bg_alpha`]), never the clear. A non-zero clear compounded with the
+    // panel alpha (0.6 over 0.6 ≈ 0.84) and darkened the window to near-opaque
+    // black; a fully-transparent clear makes the panel alpha the sole determinant
+    // of see-through, matching the sibling app SCR1B3 that IS transparent on the
+    // same hardware.
     let app = C0pl4ndApp::bootstrap();
     let mut cfg = cfg_mode(true, c0pl4nd_core::config::WindowMode::Transparent);
-    cfg.opacity = 0.6;
-    let [_, _, _, a] = window_clear_color(&cfg, &app.theme);
-    assert!(
-        (a - 0.6).abs() < 1e-6,
-        "Transparent mode alpha must equal the opacity slider (got {a})"
-    );
-
-    // The floor is now 0.0, so a very low opacity passes straight through (the
-    // background can go fully transparent; the terminal text keeps its own alpha).
-    cfg.opacity = 0.01;
-    let [_, _, _, a2] = window_clear_color(&cfg, &app.theme);
-    assert!(
-        (a2 - 0.01).abs() < 1e-6,
-        "a low opacity passes through unclamped (floor is 0.0), got {a2}"
-    );
-    // Opacity 0 = a fully transparent background (maximum transparency).
-    cfg.opacity = 0.0;
-    let [_, _, _, a3] = window_clear_color(&cfg, &app.theme);
-    assert!(
-        (a3 - TRANSLUCENT_ALPHA_FLOOR).abs() < 1e-6 && a3 == 0.0,
-        "opacity 0 clears fully transparent, got {a3}"
-    );
+    for opacity in [1.0, 0.6, 0.01, 0.0] {
+        cfg.opacity = opacity;
+        let [_, _, _, a] = window_clear_color(&cfg, &app.theme);
+        assert_eq!(
+            a, 0.0,
+            "Transparent-mode clear is always fully transparent (opacity {opacity} → clear alpha {a}); \
+             the opacity slider drives the PANEL alpha, not the clear"
+        );
+    }
 }
 
 #[test]
