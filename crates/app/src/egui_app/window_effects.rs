@@ -90,6 +90,17 @@ pub(crate) fn tint_alpha(strength: f32) -> u8 {
     (strength.clamp(0.0, 1.0) * 90.0).round() as u8
 }
 
+/// The tint wash alpha folded with the window `opacity`, so the tint fades WITH
+/// the window: `opacity == 0.0` yields `0` (fully clear — the wash vanishes along
+/// with the panes, so the maximally-transparent window shows ONLY glyph text over
+/// the desktop), and `opacity == 1.0` yields the full [`tint_alpha`] weight. The
+/// tint is painted on the background layer BEHIND the translucent panels, so
+/// without this fold it stayed at a fixed alpha and showed straight through the
+/// see-through panels at opacity 0 as a frosted haze. Pure → unit-testable.
+pub(crate) fn tint_wash_alpha(strength: f32, opacity: f32) -> u8 {
+    (f32::from(tint_alpha(strength)) * opacity.clamp(0.0, 1.0)).round() as u8
+}
+
 /// Paint the window tint as a single colour wash on the BACKGROUND layer, EARLY —
 /// call this BEFORE any panel is shown. Because it is the first thing drawn on the
 /// background layer, it sits BEHIND every translucent background fill (pane
@@ -102,10 +113,22 @@ pub(crate) fn tint_alpha(strength: f32) -> u8 {
 /// tinted" issues. A no-op when the tint master toggle
 /// ([`c0pl4nd_core::Config::tint_enabled`]) is off, when `tint_strength <= 0`, or
 /// when the hex is invalid.
+///
+/// The wash alpha is folded with the window `opacity` (see [`tint_wash_alpha`]),
+/// so the tint FADES WITH the window: at opacity 0 it vanishes completely (only
+/// the glyph text remains over the desktop — no frosted colour wash left on top),
+/// climbing back to its `tint_strength` weight as the window approaches solid.
+/// Without this the tint painted at a FIXED alpha on the background layer and
+/// showed straight through the fully-transparent panels at opacity 0 as a uniform
+/// frosted haze — the "opacity 0 still looks frosted" report.
 pub(crate) fn paint_background_tint(ctx: &egui::Context, config: &c0pl4nd_core::Config) {
     // Explicit master switch first: when the user has toggled the tint wash OFF,
     // paint nothing even if a colour + strength are still parked in the config.
     if !config.tint_enabled || config.tint_strength <= 0.0 {
+        return;
+    }
+    let alpha = tint_wash_alpha(config.tint_strength, config.opacity);
+    if alpha == 0 {
         return;
     }
     let Ok((r, g, b)) = c0pl4nd_core::theme::parse_hex(&config.tint) else {
@@ -115,7 +138,7 @@ pub(crate) fn paint_background_tint(ctx: &egui::Context, config: &c0pl4nd_core::
     painter.rect_filled(
         ctx.content_rect(),
         0.0,
-        egui::Color32::from_rgba_unmultiplied(r, g, b, tint_alpha(config.tint_strength)),
+        egui::Color32::from_rgba_unmultiplied(r, g, b, alpha),
     );
 }
 
@@ -180,7 +203,7 @@ pub(crate) fn fold_alpha(color: egui::Color32, bg_alpha: u8) -> egui::Color32 {
 
 #[cfg(test)]
 mod tint_tests {
-    use super::{flatten_chrome_buttons, fold_alpha, tint_alpha};
+    use super::{flatten_chrome_buttons, fold_alpha, tint_alpha, tint_wash_alpha};
 
     #[test]
     fn fold_alpha_passes_opaque_through_and_scales_translucent() {
@@ -304,6 +327,28 @@ mod tint_tests {
         assert_eq!(tint_alpha(2.0), 90, "clamped above 1.0");
         // Mid strength scales linearly.
         assert_eq!(tint_alpha(0.5), 45);
+    }
+
+    #[test]
+    fn tint_wash_alpha_folds_opacity_so_it_vanishes_at_zero() {
+        // The frost fix: the tint wash alpha is folded with the window opacity, so
+        // at opacity 0 the tint is GONE (no frosted colour wash over a maximally-
+        // transparent window — only glyph text remains), and at opacity 1 it is the
+        // full `tint_alpha` weight.
+        // Opacity 0 → fully clear regardless of strength (kills the frost).
+        assert_eq!(
+            tint_wash_alpha(1.0, 0.0),
+            0,
+            "opacity 0 → no tint wash at all"
+        );
+        assert_eq!(tint_wash_alpha(0.5, 0.0), 0);
+        // Opacity 1 → the unmodified tint weight.
+        assert_eq!(tint_wash_alpha(1.0, 1.0), tint_alpha(1.0));
+        assert_eq!(tint_wash_alpha(0.5, 1.0), tint_alpha(0.5));
+        // Mid opacity scales the wash down proportionally (strength 1 → alpha 90).
+        assert_eq!(tint_wash_alpha(1.0, 0.5), 45);
+        // Monotonic in opacity for a fixed strength (more solid ⇒ stronger wash).
+        assert!(tint_wash_alpha(1.0, 0.25) < tint_wash_alpha(1.0, 0.75));
     }
 
     #[test]

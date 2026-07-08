@@ -11,9 +11,14 @@
 //!
 //! Unlike the per-pane CRT scanlines in [`crate::egui_app::crt`] (drawn inside
 //! each pane's grid painter), these wash the WHOLE window and so are painted
-//! once per frame at the `Context` layer's `Order::Foreground` (over the
-//! composited view — the terminal panes paint opaque fills that fully occlude a
-//! Background-order layer).
+//! once per frame at the `Context` layer's `Order::Middle`: ABOVE the panes +
+//! chrome (which render on `Order::Background`, whose opaque fills would fully
+//! occlude a Background-order overlay) yet strictly BELOW egui popups, menus,
+//! color-pickers, and tooltips (`Order::Foreground`/`Order::Tooltip`). That last
+//! part is load-bearing — at `Order::Foreground` the mesh painted OVER the tint
+//! colour-picker popup and obscured the swatch grid; `Order::Middle` guarantees
+//! every effect sits under any open popup. (egui Windows are also `Order::Middle`,
+//! so the Settings/palette/paste panels are kept clean via the `exclude` rect.)
 //!
 //! ## Live-preview exclude rect
 //! Each painter takes an `exclude: Option<Rect>` — the bounding rect of any open
@@ -24,6 +29,15 @@
 //! user needs to see what they are tuning). `None` paints the whole window.
 
 use egui::{Color32, Context, Id, LayerId, Order, Pos2, Rect, Stroke};
+
+/// The `Context`-layer order EVERY whole-window motion overlay paints at. It is
+/// `Order::Middle`: above the panes + chrome (`Order::Background`, whose opaque
+/// fills would occlude a Background overlay) yet strictly BELOW egui popups,
+/// menus, color-pickers, and tooltips (`Order::Foreground`/`Order::Tooltip`). The
+/// single source of truth so all five painters move together and the
+/// "below-popups" invariant is unit-testable (see the tests). Load-bearing: at
+/// `Order::Foreground` the mesh painted OVER the tint colour-picker popup.
+pub(crate) const EFFECT_LAYER_ORDER: Order = Order::Middle;
 
 /// Fill `outer` with `color`, but leave the `exclude` rectangle unpainted so a
 /// full-window wash never washes over an open centered panel. `None` (or a
@@ -93,7 +107,7 @@ fn fill_around(
 /// whose alpha wanders via layered sines of `t` (deterministic — no RNG, so the
 /// reduced-motion resting frame is stable). `strength` (0..=1) scales the wash;
 /// even at 1.0 the alpha peaks near 18/255 (~7%) — a photosensitivity-comfort
-/// ceiling, well short of a full-black strobe. `Order::Foreground` so it modulates the
+/// ceiling, well short of a full-black strobe. `Order::Middle` so it modulates the
 /// whole composited view; `exclude` keeps an open panel clean.
 pub(crate) fn paint_flicker(ctx: &Context, strength: f32, t: f64, exclude: Option<Rect>) {
     let s = strength.clamp(0.0, 1.0);
@@ -105,7 +119,7 @@ pub(crate) fn paint_flicker(ctx: &Context, strength: f32, t: f64, exclude: Optio
     if a == 0 {
         return;
     }
-    let painter = ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("motion-flicker")));
+    let painter = ctx.layer_painter(LayerId::new(EFFECT_LAYER_ORDER, Id::new("motion-flicker")));
     fill_around(
         &painter,
         ctx.content_rect(),
@@ -135,7 +149,7 @@ pub(crate) fn paint_vhs_tracking(ctx: &Context, t: f64, intensity: f32, exclude:
     let a_main = (9.0 * k).round().clamp(0.0, 255.0) as u8;
     let a_core = (7.0 * k).round().clamp(0.0, 255.0) as u8;
     let painter = ctx.layer_painter(LayerId::new(
-        Order::Foreground,
+        EFFECT_LAYER_ORDER,
         Id::new("motion-vhs-tracking"),
     ));
     for (i, speed) in [(0u32, 0.13f64), (1, 0.071)].iter() {
@@ -172,7 +186,7 @@ pub(crate) fn paint_vhs_tracking(ctx: &Context, t: f64, intensity: f32, exclude:
 /// to clearly pop — the "mesh is too dim to notice" report. O(n²) over the capped
 /// node count — bounded per frame.
 ///
-/// Painted at `Order::Foreground` (a faint over-everything veil) rather than
+/// Painted at `Order::Middle` (a faint over-everything veil) rather than
 /// `Order::Background`: C0PL4ND's terminal panes paint OPAQUE fills when window
 /// transparency is off, which fully occluded a Background-order mesh — the
 /// "enabling the mesh does nothing" report. A restrained foreground alpha keeps
@@ -194,7 +208,7 @@ pub(crate) fn paint_wired_mesh(
         return;
     }
     let painter = ctx.layer_painter(LayerId::new(
-        Order::Foreground,
+        EFFECT_LAYER_ORDER,
         Id::new("motion-wired-mesh"),
     ));
     let d = density.clamp(0.0, 2.0);
@@ -271,7 +285,7 @@ pub(crate) fn cursor_trail_life(intensity: f32) -> f64 {
 /// The caller feeds `trail` (rect + birth-time) as the terminal cursor moves;
 /// `intensity` (0..=1) scales BOTH the echo opacity and its lifetime (via
 /// [`cursor_trail_life`]) so the Motion → Cursor-trail-intensity slider tunes the
-/// trail from a faint flick to a bold comet tail. `Order::Foreground` so the
+/// trail from a faint flick to a bold comet tail. `Order::Middle` so the
 /// echoes sit over the grid like the live cursor.
 pub(crate) fn paint_cursor_trail(
     ctx: &Context,
@@ -290,7 +304,7 @@ pub(crate) fn paint_cursor_trail(
     // well above the old fixed 90 — the "trail is barely visible" report.
     let peak = 110.0 + 100.0 * intensity.clamp(0.0, 2.0);
     let painter = ctx.layer_painter(LayerId::new(
-        Order::Foreground,
+        EFFECT_LAYER_ORDER,
         Id::new("motion-cursor-trail"),
     ));
     for (rect, born) in trail.iter() {
@@ -325,7 +339,7 @@ pub(crate) fn paint_boot_glitch(ctx: &Context, elapsed: f64) {
         return; // first-frame 0-width content_rect guard
     }
     let painter = ctx.layer_painter(LayerId::new(
-        Order::Foreground,
+        EFFECT_LAYER_ORDER,
         Id::new("motion-boot-glitch"),
     ));
     let p = (elapsed / DUR) as f32;
@@ -347,6 +361,34 @@ pub(crate) fn paint_boot_glitch(ctx: &Context, elapsed: f64) {
             Rect::from_min_max(Pos2::new(rect.left(), gy), Pos2::new(rect.right(), gy + gh)),
             0.0,
             Color32::from_rgba_unmultiplied(0, 0, 0, (fade * 60.0) as u8),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EFFECT_LAYER_ORDER;
+    use egui::Order;
+
+    #[test]
+    fn effect_layer_order_is_below_popups_and_above_panes() {
+        // FIX B invariant: every whole-window motion overlay paints STRICTLY BELOW
+        // egui popups / menus / color-pickers (`Order::Foreground`) and tooltips
+        // (`Order::Tooltip`), so an open tint colour-picker is never obscured by the
+        // mesh — while staying ABOVE the panes + chrome (`Order::Background`) so the
+        // effects remain visible over the terminal. If someone moves the effects
+        // back to `Order::Foreground`, this fails.
+        assert!(
+            EFFECT_LAYER_ORDER < Order::Foreground,
+            "effects must render below popups/color-pickers (got {EFFECT_LAYER_ORDER:?})"
+        );
+        assert!(
+            EFFECT_LAYER_ORDER < Order::Tooltip,
+            "effects must render below tooltips"
+        );
+        assert!(
+            EFFECT_LAYER_ORDER > Order::Background,
+            "effects must render above the panes/chrome so they stay visible"
         );
     }
 }

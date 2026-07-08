@@ -313,3 +313,61 @@ fn qa_tint_settings_stays_opaque() {
     }
     snapshot(&mut h, "tint-settings-opaque");
 }
+
+/// REGRESSION GUARD (needs a real GPU; skips cleanly otherwise): at opacity 0
+/// the WHOLE window surface must reach alpha 0 (truly clear, SCR1B3-parity) even
+/// with the tint wash ENABLED at a real strength and the ambient mesh ON — the
+/// "opacity 0 still looks frosted" bug. The frost was a fixed-alpha tint wash on
+/// the background layer that showed straight through the transparent panels; the
+/// fix folds the window opacity into the tint (and the ambient effects), so
+/// nothing but the (sparse, opaque) glyph text survives at opacity 0. Unlike a
+/// pixel snapshot this asserts an ALPHA invariant, which is deterministic across
+/// GPU drivers. `#[ignore]` only because it needs a GPU adapter.
+#[test]
+#[ignore = "needs a real GPU; run with --ignored"]
+fn opacity_zero_surface_is_fully_clear_with_tint_and_mesh_on() {
+    if !gpu_available() {
+        eprintln!("no GPU adapter; skipping (not a failure).");
+        return;
+    }
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 720.0))
+        .wgpu()
+        .build_eframe(|cc| {
+            let mut app = egui_app::C0pl4ndApp::new(cc);
+            app.config.opacity = 0.0; // maximally transparent
+            app.config.tint_enabled = true; // tint wash ON …
+            app.config.tint_strength = 0.8; // … at a strong, previously-frosting weight
+            app.config.tint = "#ff0040".to_string();
+            app.config.effects.animations_enabled = true;
+            app.config.effects.wired_ambient = true; // ambient mesh ON
+            app.config.effects.mesh_brightness = 2.0;
+            app
+        });
+    for _ in 0..5 {
+        h.step();
+    }
+    let img = h.render().expect("render");
+    let (w, hgt) = (img.width(), img.height());
+    // Count non-transparent pixels across the WHOLE window (chrome + panes). At
+    // opacity 0 only the sparse, opaque glyph text (and the semantic focus ring)
+    // may remain; the background/chrome/tint/mesh must all be alpha 0. Allow a
+    // small budget for glyphs + the 2px focus ring on a headless (usually empty)
+    // grid.
+    let mut nonzero = 0u64;
+    for y in 0..hgt {
+        for x in 0..w {
+            if img.get_pixel(x, y).0[3] != 0 {
+                nonzero += 1;
+            }
+        }
+    }
+    let total = u64::from(w) * u64::from(hgt);
+    let pct = nonzero as f64 / total as f64 * 100.0;
+    assert!(
+        pct < 3.0,
+        "opacity-0 surface must be ~fully clear (no frosted tint/mesh wash): \
+         {nonzero}/{total} pixels ({pct:.2}%) are non-transparent — expected < 3% \
+         (only sparse glyph text + focus ring)"
+    );
+}

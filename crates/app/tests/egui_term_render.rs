@@ -75,7 +75,20 @@ fn terminal_renders_both_panes_through_real_frame() {
     let mut harness: Harness<'_, egui_app::C0pl4ndApp> = Harness::builder()
         .with_size(egui::vec2(900.0, 600.0))
         .wgpu()
-        .build_eframe(|cc| egui_app::C0pl4ndApp::new(cc));
+        .build_eframe(|cc| {
+            let mut app = egui_app::C0pl4ndApp::new(cc);
+            // HERMETIC: `new` loads the user's real on-disk config, which may carry
+            // a low window `opacity` (or a tint) from their own use. This test
+            // counts BRIGHT (glyph) pixels to prove BOTH panes render text, so it
+            // needs OPAQUE panes — a see-through pane fades its background to the
+            // transparent desktop and the bright-pixel count collapses (a false
+            // failure that has nothing to do with glyph rendering). Force opacity
+            // 1.0 + tint off so the assertion measures glyph rendering only,
+            // independent of whatever transparency the user left persisted.
+            app.config.opacity = 1.0;
+            app.config.tint_enabled = false;
+            app
+        });
 
     // Skip if the platform shell did not spawn (no live PTY → no grid text).
     if harness.state().focused_grid_text().is_none() {
