@@ -297,6 +297,31 @@ fn reset_to_default<T: PartialEq + Clone>(ui: &mut egui::Ui, cur: &mut T, def: &
     false
 }
 
+/// Decide whether — and to what value — a UI-scale slider interaction should be
+/// COMMITTED to `config.ui_scale` (which is what triggers the live
+/// `ctx.set_zoom_factor`). `slider_val` is the slider's current working value and
+/// `dragging` is whether the handle is being dragged THIS frame.
+///
+/// The rule is "defer while dragging": applying the zoom live rescales the whole
+/// UI — including this very slider — so a mid-drag write moves the slider under
+/// the cursor, remaps the pointer to a larger value, and runs the scale away to
+/// the 3.0 max (the reported "flickers small↔big / UI gigantic" bug). So while
+/// the handle is held we return `None` (hold the value, apply nothing); on
+/// release, a track click, or a keyboard step (`dragging == false`) we return
+/// `Some(slider_val)` when it actually differs from the committed value — exactly
+/// one zoom application per interaction, never mid-drag. Pure, so the decision is
+/// unit-testable without a window.
+fn ui_scale_commit(config_val: f32, slider_val: f32, dragging: bool) -> Option<f32> {
+    if dragging {
+        return None;
+    }
+    if slider_val != config_val {
+        Some(slider_val)
+    } else {
+        None
+    }
+}
+
 /// Equal-weight 3-way consent selector for a W1TN3SS reporting stream
 /// (`Off` / `Ask each time` / `Always`). The three radios carry EQUAL visual
 /// weight — there is no pre-ticked default-on or dark-pattern asymmetry; `Off`
@@ -1193,16 +1218,41 @@ fn render_sections(
             if row_visible(q, "ui scale zoom accessibility size") {
                 ui.label("UI scale").on_hover_text(
                     "Accessibility zoom for the WHOLE interface (chrome + grid), \
-                     persisted across launches. 1.0 = 100%. (Ctrl+/- also zooms, \
-                     but is not saved.)",
+                     persisted across launches. 1.0 = 100%. Applies when you \
+                     release the slider. (Ctrl+/- also zooms, but is not saved.)",
                 );
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut config.ui_scale, 0.5..=3.0)
-                            .fixed_decimals(2)
-                            .suffix("×"),
-                    )
-                    .changed();
+                // DEFERRED APPLY (runaway-scale fix): writing the slider straight
+                // to `config.ui_scale` applied the zoom LIVE every frame, which
+                // rescaled this very slider under the cursor → the pointer remapped
+                // to a bigger value → oscillation → runaway to the 3.0 max. Instead
+                // drive the slider from a per-frame WORKING value held in egui temp
+                // memory while the drag is in progress, and commit to
+                // `config.ui_scale` (the sole trigger for `set_zoom_factor`) ONLY
+                // when the handle is NOT being dragged — on release, a track click,
+                // or a keyboard step (see `ui_scale_commit`). So the UI rescales
+                // exactly once per interaction, never mid-drag.
+                let pending_id = egui::Id::new("c0pl4nd_ui_scale_pending");
+                let mut working = ui
+                    .data(|d| d.get_temp::<f32>(pending_id))
+                    .unwrap_or(config.ui_scale);
+                let resp = ui.add(
+                    egui::Slider::new(&mut working, 0.5..=3.0)
+                        .fixed_decimals(2)
+                        .suffix("×"),
+                );
+                let commit = ui_scale_commit(config.ui_scale, working, resp.dragged());
+                if resp.dragged() {
+                    // Hold the dragged value WITHOUT applying it (no live rescale).
+                    ui.data_mut(|d| d.insert_temp(pending_id, working));
+                } else {
+                    // Not dragging: drop the hold so the slider re-syncs to the
+                    // committed config value next frame.
+                    ui.data_mut(|d| d.remove_temp::<f32>(pending_id));
+                }
+                if let Some(v) = commit {
+                    config.ui_scale = v;
+                    changed = true;
+                }
                 changed |= reset_to_default(ui, &mut config.ui_scale, &def.ui_scale);
                 ui.end_row();
             }
@@ -3082,6 +3132,61 @@ mod tests {
             BUILTIN_THEMES.contains(&Config::default().theme.as_str()),
             "the default theme stem must be one of the offered built-ins"
         );
+    }
+
+    #[test]
+    fn ui_scale_commit_defers_while_dragging_and_commits_on_release() {
+        // The runaway-scale fix: while the handle is DRAGGED, no value is committed
+        // (so `set_zoom_factor` never fires mid-drag and can't rescale the slider
+        // under the cursor), no matter how far the working value has moved.
+        assert_eq!(
+            ui_scale_commit(1.0, 3.0, true),
+            None,
+            "a dragged slider must NOT commit — deferring is what stops the runaway"
+        );
+        assert_eq!(
+            ui_scale_commit(1.0, 0.5, true),
+            None,
+            "still deferred while dragging even at the low end"
+        );
+        // On release / track-click / keyboard step (not dragging) a CHANGED value
+        // commits exactly once — this is the frame the zoom is applied.
+        assert_eq!(
+            ui_scale_commit(1.0, 1.5, false),
+            Some(1.5),
+            "releasing at a new value commits it (one zoom application)"
+        );
+        // No spurious write when the value is unchanged (steady-state frames /
+        // the release frame of a no-op interaction).
+        assert_eq!(
+            ui_scale_commit(1.5, 1.5, false),
+            None,
+            "an unchanged value must not be re-committed"
+        );
+    }
+
+    #[test]
+    fn ui_scale_effective_clamp_keeps_the_app_usable() {
+        // Safety net (independent of the slider's own 0.5..=3.0 range): even a
+        // corrupt / runaway config value can never leave the UI unusably tiny,
+        // huge, or blank — `effective_ui_scale` clamps to 0.5..=3.0 and treats a
+        // non-finite value as the 1.0 default.
+        let mk = |s: f32| {
+            Config {
+                ui_scale: s,
+                ..Config::default()
+            }
+            .effective_ui_scale()
+        };
+        assert_eq!(
+            mk(99.0),
+            3.0,
+            "an over-large scale clamps to the 3.0 ceiling"
+        );
+        assert_eq!(mk(0.01), 0.5, "a tiny scale clamps up to the 0.5 floor");
+        assert_eq!(mk(f32::NAN), 1.0, "a non-finite scale falls back to 100%");
+        assert_eq!(mk(f32::INFINITY), 1.0);
+        assert_eq!(mk(1.25), 1.25, "an in-range scale passes through unchanged");
     }
 
     #[test]
