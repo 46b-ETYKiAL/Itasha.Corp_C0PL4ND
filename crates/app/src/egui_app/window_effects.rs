@@ -54,11 +54,21 @@ pub(crate) fn pane_bg_alpha(config: &c0pl4nd_core::Config) -> u8 {
 ///
 /// * **Opaque** (master off, or `Opaque` mode): the theme background at full
 ///   alpha — a solid window the desktop never bleeds through.
-/// * **Translucent with a native blur** (`Glass`/`Mica`/`Vibrancy`): fully
-///   transparent so the OS blur backdrop shows through.
-/// * **`Transparent` mode** (portable, no native blur): the theme background
-///   with alpha folded down to the `opacity` slider so the desktop shows
-///   through at the chosen strength.
+/// * **Every translucent mode** (`Transparent`/`Glass`/`Mica`/`Vibrancy`): FULLY
+///   transparent `[0,0,0,0]` — exactly like the sibling app SCR1B3 (whose
+///   `clear_color` is unconditionally `[0,0,0,0]`), which IS see-through on the same
+///   hybrid-GPU laptop. The `opacity` slider is folded ONLY into the PANEL fills
+///   ([`pane_bg_alpha`]), NOT the clear.
+///
+///   Why this matters (the transparency bug): eframe issues the clear as the wgpu
+///   render-pass `LoadOp::Clear`, so it sets the base framebuffer alpha for EVERY
+///   pixel before egui paints. The old code cleared `Transparent` mode to
+///   `[theme_bg, opacity]`; egui then painted the panels (also `[theme_bg, opacity]`)
+///   ON TOP, so the two alphas COMPOUNDED (`0.6` clear over `0.6` panel ≈ `0.84`)
+///   and the RGB darkened — the window read as near-opaque BLACK well before the
+///   slider reached 100%. Clearing to `[0,0,0,0]` (SCR1B3-parity) makes the panel
+///   alpha the SOLE determinant of see-through, so `opacity` behaves linearly and
+///   reaches genuinely-transparent at its low end.
 ///
 /// Free function (takes `&Config`, `&Theme`) so the headless tests can assert
 /// the clear color for a given config without an eframe window.
@@ -82,21 +92,15 @@ pub(crate) fn window_clear_color(
                 c0pl4nd_core::theme::parse_hex(&theme.background).unwrap_or((0x12, 0x12, 0x12));
             [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
         }
-        // Native blur backdrops want a fully transparent surface so the OS
-        // composited blur shows through.
-        c0pl4nd_core::config::WindowMode::Glass
+        // Every per-pixel translucent mode clears FULLY TRANSPARENT (SCR1B3-parity).
+        // Native blur backdrops (Glass/Mica/Vibrancy) need it so the OS blur shows
+        // through; portable `Transparent` needs it so the opacity slider is not
+        // compounded by a dark clear (the "opaque black" bug). The panel fills carry
+        // the `opacity` alpha; the terminal text keeps its own alpha over the desktop.
+        c0pl4nd_core::config::WindowMode::Transparent
+        | c0pl4nd_core::config::WindowMode::Glass
         | c0pl4nd_core::config::WindowMode::Mica
         | c0pl4nd_core::config::WindowMode::Vibrancy => [0.0, 0.0, 0.0, 0.0],
-        // Portable see-through: theme background, alpha = opacity slider directly.
-        // The floor is now 0.0 (TRANSLUCENT_ALPHA_FLOOR), so the slider reaches a
-        // FULLY transparent background at its low end — the terminal text (its own
-        // alpha) stays visible over the desktop.
-        c0pl4nd_core::config::WindowMode::Transparent => {
-            let (r, g, b) =
-                c0pl4nd_core::theme::parse_hex(&theme.background).unwrap_or((0x12, 0x12, 0x12));
-            let a = config.opacity.clamp(TRANSLUCENT_ALPHA_FLOOR, 1.0);
-            [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a]
-        }
         // Unreachable: effective_translucent() ruled Opaque out above.
         c0pl4nd_core::config::WindowMode::Opaque => [0.0, 0.0, 0.0, 0.0],
     }

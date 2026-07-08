@@ -1,7 +1,46 @@
-# C0PL4ND window transparency — investigation, fix (attempt 2 / redirected), and test instructions
+# C0PL4ND window transparency — investigation + fix
 
 Branch: `fix/transparency-compositing`
-Binary to test: `../c0pl4nd-transparency/target/release/c0pl4nd.exe` (built fresh — the main thread must LAUNCH it; transparency is hardware-verifiable only).
+Binary to test: `../c0pl4nd-transparency/target/release/c0pl4nd.exe` (built fresh — the main thread must LAUNCH it; transparency is hardware-verifiable only). Enable a translucent mode (Settings → Appearance → Enable window transparency, mode = Transparent) and set **Opacity below 100%**.
+
+## ATTEMPT 3 — THE ACTUAL FIX (empirically grounded)
+
+Attempts 1–2 chased GPU/adapter selection; the real bug was **content compositing**.
+I built an instrumented SCR1B3 (the app that IS see-through on this machine) and
+captured its runtime GPU choice. Result: SCR1B3's faithful wgpu-`LowPower` selection
+lands on **Intel Iris Xe / Vulkan / configured_alpha_mode = Opaque** — the *exact same*
+adapter + alpha mode as C0PL4ND attempt 2 (which was black). So the adapter/alpha mode
+is **NOT** the differentiator.
+
+The differentiator is the **clear color**:
+
+* **SCR1B3** clears the frame to `[0,0,0,0]` UNCONDITIONALLY and folds `opacity` only
+  into its PANEL fills.
+* **C0PL4ND (before)** cleared `Transparent` mode to `[theme_bg, opacity]`. eframe issues
+  the clear as the wgpu render-pass `LoadOp::Clear`, so every pixel STARTED as
+  dark-at-opacity; egui then painted the panels (also dark-at-opacity) on top, so the two
+  alphas **compounded** (`0.6` clear + `0.6` panel ≈ `0.84`) and the RGB darkened — the
+  window read as near-opaque BLACK long before the slider hit 100%.
+
+**Fix:** `window_clear_color` now returns `[0,0,0,0]` for EVERY translucent mode
+(`Transparent`/`Glass`/`Mica`/`Vibrancy`), exactly like SCR1B3. The `opacity` slider now
+drives ONLY the panel alpha ([`pane_bg_alpha`]), so it behaves linearly and reaches a
+genuinely see-through window at its low end (opacity 0 = only the terminal glyphs over the
+desktop). The integrated/display-driving adapter selection + default (unforced) backends
++ `LowPower` + frame-latency 1 from attempt 2 are retained (they correctly match SCR1B3's
+Intel-Vulkan choice — confirmed by the SCR1B3 instrumentation).
+
+> To go see-through you MUST lower Opacity below 100% (default is 100% = opaque, same as
+> SCR1B3). The tint ON/OFF toggle from attempt 1 is retained.
+
+SCR1B3 instrumentation used to reach this conclusion:
+`../../public-repo-scans/scr1b3-gpudiag/target/release/scr1b3.exe`
+(branch `diag/gpu-instrumentation`, scratch — not for ship), log at
+`%APPDATA%\ItashaCorp\scr1b3\config\gpu-diag.log`.
+
+---
+
+## (Historical) attempt 2 — adapter-selection redirect
 
 ## TL;DR
 
