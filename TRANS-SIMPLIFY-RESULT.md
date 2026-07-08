@@ -10,7 +10,9 @@
 
 (absolute: `C:/Users/.46b_/Itasha.Corp_S4F3-R0UT3-4RB1T3R/.s4f3-data/pubrepo-work/c0pl4nd-trans-simplify/target/release/c0pl4nd.exe`)
 
-The main thread should launch this so the user can confirm **opacity 0 = maximally see-through** (Settings → Appearance → Opacity slider to 0%: the panes AND the resting chrome — toolbar buttons, tab chips, title bar — should fade away, leaving only the glyph text over the desktop; hover/press, popups, and the Settings window stay legible).
+The main thread should launch this so the user can confirm BOTH fixes:
+1. **Opacity 0 = maximally see-through** (Settings → Appearance → Opacity slider to 0%: the panes AND the resting chrome — toolbar buttons, tab chips, title bar — should fade away, leaving only the glyph text over the desktop; hover/press, popups, and the Settings window stay legible).
+2. **UI-scale slider no longer runs away** (Settings → Appearance → Interface scale: dragging the UI-scale slider should NOT flicker small↔big or shoot to the 3.0 max — the whole UI rescales only when you RELEASE the slider, so the drag stays controllable).
 
 ## What changed
 
@@ -24,6 +26,10 @@ The main thread should launch this so the user can confirm **opacity 0 = maximal
 - New `window_effects::apply_window_opacity()` fades resting `noninteractive.bg_fill` + `inactive.weak_bg_fill` with the opacity alpha (called after each `set_visuals`), so the shell fades with the panes. Hover/active, scrollbar handle, and `window_fill` (popups/tooltips/Settings) stay opaque.
 - Opacity floor confirmed `0.0`.
 - Note: the SCR1B3 public scan is at v0.4.57 (not v0.4.59 yet), so the behaviour was implemented from the task's spec, not copied verbatim.
+
+### Follow-up bug — UI-scale slider runaway (fixed in this branch)
+- The UI-scale slider wrote `config.ui_scale` live every frame, and the frame loop applies `set_zoom_factor` the moment it changes — so dragging rescaled the slider under the cursor, remapped the pointer, and ran the scale away to the 3.0 max (UI gigantic/unusable).
+- Fix (`settings.rs`): the slider is driven from a per-frame working value in egui temp memory while dragged; the value commits to `config.ui_scale` (the sole `set_zoom_factor` trigger) only when NOT dragging — release / track click / keyboard step (pure `ui_scale_commit` helper). One rescale per interaction, never mid-drag. `effective_ui_scale()` keeps its 0.5..=3.0 + non-finite clamp as a safety net; reset-to-default still works. Unit tests added.
 
 ## Verification
 - `cargo check --workspace --all-targets` — clean

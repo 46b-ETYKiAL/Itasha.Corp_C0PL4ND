@@ -30,6 +30,14 @@ page.
   `window_mode`, `acrylic`) are ignored on load; the retained `opacity` value
   carries the see-through level.
 
+### Fixed
+
+- **UI-scale slider no longer runs away.** Dragging Settings → Appearance →
+  Interface scale used to flicker small↔big and shoot to the 3.0 maximum, leaving
+  the UI gigantic: the slider applied the zoom live every frame, rescaling itself
+  under the cursor. The scale now applies only when you release the slider (or on
+  a click / keyboard step), so the drag stays controllable.
+
 ## [0.4.14] - 2026-07-03
 
 ### Fixed — rendering
