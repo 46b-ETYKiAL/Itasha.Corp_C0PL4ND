@@ -37,6 +37,16 @@ page.
   the UI gigantic: the slider applied the zoom live every frame, rescaling itself
   under the cursor. The scale now applies only when you release the slider (or on
   a click / keyboard step), so the drag stays controllable.
+- **Opacity 0 is now genuinely clear (no frosted wash).** With a tint enabled, the
+  colour wash painted at a fixed alpha regardless of opacity, so a maximally
+  see-through window (opacity 0) still showed a uniform frosted haze. The tint —
+  and the ambient background effects (wired mesh / VHS / flicker) — now fade
+  proportionally with the window opacity, so at 0% only the terminal glyph text
+  remains over the desktop.
+- **Ambient effects no longer cover popups.** The wired-mesh and other motion
+  overlays rendered on the same layer order as popups and painted over the tint
+  colour-picker; they now render strictly behind all popups, menus,
+  color-pickers, and tooltips.
 
 ## [0.4.14] - 2026-07-03
 

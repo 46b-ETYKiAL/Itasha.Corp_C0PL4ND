@@ -10,9 +10,11 @@
 
 (absolute: `C:/Users/.46b_/Itasha.Corp_S4F3-R0UT3-4RB1T3R/.s4f3-data/pubrepo-work/c0pl4nd-trans-simplify/target/release/c0pl4nd.exe`)
 
-The main thread should launch this so the user can confirm BOTH fixes:
-1. **Opacity 0 = maximally see-through** (Settings → Appearance → Opacity slider to 0%: the panes AND the resting chrome — toolbar buttons, tab chips, title bar — should fade away, leaving only the glyph text over the desktop; hover/press, popups, and the Settings window stay legible).
-2. **UI-scale slider no longer runs away** (Settings → Appearance → Interface scale: dragging the UI-scale slider should NOT flicker small↔big or shoot to the 3.0 max — the whole UI rescales only when you RELEASE the slider, so the drag stays controllable).
+The main thread should launch this so the user can confirm:
+1. **Opacity 0 = truly clear (no frosted wash)** — the frost was a tint colour wash painting at a fixed alpha regardless of opacity (the user's config has `opacity = 0.0`, `tint_strength = 0.18`). The tint + ambient effects now fade with opacity, so at 0% only glyph text remains over the desktop. Verified headlessly: opacity-0 surface is <3% non-transparent even with tint + mesh ON.
+2. **Tint color picker fully visible** — the wired-mesh/effects now render strictly behind popups/color-pickers (moved to `Order::Middle`).
+3. **Opacity 0 = maximally see-through** (panes + resting chrome fade; hover/press, popups, Settings stay legible).
+4. **UI-scale slider no longer runs away** (rescales only on release).
 
 ## What changed
 
