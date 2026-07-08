@@ -2802,6 +2802,7 @@ fn render_update_status(ui: &mut egui::Ui, updater: &Arc<Mutex<Updater>>) {
         // satisfies `clippy::large_enum_variant`.
         Download(Box<update_engine::net::ReleaseInfo>),
         Apply,
+        RunInstaller,
         Recheck,
     }
     let mut act: Option<Act> = None;
@@ -2863,6 +2864,20 @@ fn render_update_status(ui: &mut egui::Ui, updater: &Arc<Mutex<Updater>>) {
                 act = Some(Act::Apply);
             }
         }
+        UpdateState::ReadyToRunInstaller { version, .. } => {
+            ui.label(format!("v{version} downloaded + verified."));
+            if ui
+                .button("Restart & install")
+                .on_hover_text(
+                    "C0PL4ND is in a protected folder (e.g. Program Files), so it installs \
+                     via the verified installer: one Windows permission prompt, then a \
+                     silent in-place update and relaunch — no installer window.",
+                )
+                .clicked()
+            {
+                act = Some(Act::RunInstaller);
+            }
+        }
         UpdateState::Applied { version } => {
             ui.label(format!("Updated to v{version} — restarting…"));
         }
@@ -2880,6 +2895,7 @@ fn render_update_status(ui: &mut egui::Ui, updater: &Arc<Mutex<Updater>>) {
             match act {
                 Act::Download(info) => u.start_download(ui.ctx(), *info),
                 Act::Apply => u.apply_and_restart(ui.ctx()),
+                Act::RunInstaller => u.run_installer(ui.ctx()),
                 Act::Recheck => u.start_check(ui.ctx(), LaunchKind::Manual),
             }
         }
@@ -3025,6 +3041,27 @@ pub(super) fn update_banner(ctx: &egui::Context) {
                         );
                         ui.add_space(8.0);
                         if ui.button("Restart to finish").clicked() {
+                            act = Some(Act::UpdateNow);
+                        }
+                    }
+                    UpdateState::ReadyToRunInstaller { version, .. } => {
+                        // Program-Files fallback: transient under the one-click
+                        // chain (auto-launches the silent elevated installer);
+                        // render a fallback button for the rare non-chained
+                        // arrival. `update_now` routes this to `run_installer`.
+                        ui.label(
+                            egui::RichText::new(format!("v{version} verified — installing…"))
+                                .color(accent),
+                        );
+                        ui.add_space(8.0);
+                        if ui
+                            .button("Restart & install")
+                            .on_hover_text(
+                                "Installs via the verified installer — one Windows \
+                                 permission prompt, then a silent in-place update.",
+                            )
+                            .clicked()
+                        {
                             act = Some(Act::UpdateNow);
                         }
                     }

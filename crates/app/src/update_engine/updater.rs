@@ -60,6 +60,117 @@ pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// How a downloaded update is applied once verified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ApplyStrategy {
+    /// Writable install dir (portable / per-user) → download the archive and
+    /// swap the running binary in place, then relaunch. SILENT: no installer UI,
+    /// no elevation, one click — the streamlined path a per-user
+    /// (`%LOCALAPPDATA%\Programs\…`) install always takes.
+    InPlaceSwap,
+    /// Admin-owned dir (e.g. `C:\Program Files`) WITH a shipped self-elevating
+    /// installer → download the verified `setup.exe` and run it UNATTENDED
+    /// (`--silent --dir`): a single UAC prompt, then a headless in-place install
+    /// and auto-relaunch — NO installer window and NO "click Continue". This is
+    /// the SCR1B3-parity fallback that fixes updating from Program Files.
+    RunInstaller,
+    /// Admin-owned dir WITHOUT an installer for this platform → an actionable
+    /// failure ("move it, or run once elevated"). The only remaining dead-end.
+    NoInstallerAvailable,
+}
+
+/// Choose the apply strategy from whether the install dir is writable and
+/// whether the release ships a platform installer. The in-place swap is
+/// PREFERRED whenever the dir is writable — so a per-user install never routes
+/// through the elevated installer (no UAC + no installer click-through). Pure
+/// (no filesystem / no `self`) so the routing is unit-testable: a regression
+/// that re-routes a writable install through the installer — re-introducing the
+/// friction the silent swap exists to avoid — is caught by
+/// [`tests::writable_dir_selects_in_place_swap_not_installer`], and a regression
+/// that fails-closed on an admin-owned dir that DOES ship an installer — the
+/// exact Program-Files bug this change fixes — is caught by
+/// [`tests::admin_dir_with_installer_runs_installer`].
+pub(crate) fn select_apply_strategy(dir_writable: bool, has_installer: bool) -> ApplyStrategy {
+    if dir_writable {
+        ApplyStrategy::InPlaceSwap
+    } else if has_installer {
+        ApplyStrategy::RunInstaller
+    } else {
+        ApplyStrategy::NoInstallerAvailable
+    }
+}
+
+/// Build the PowerShell `Start-Process -Verb RunAs` script that runs the
+/// FORGE-WIRE `setup.exe` UNATTENDED (no installer window, no "click Continue")
+/// and then relaunches C0PL4ND. Pure (so it is unit-testable): every path is
+/// single-quoted for PowerShell with any embedded single quote escaped by
+/// doubling.
+///
+/// The installer's `--silent` mode (F0RG3-W1R3 headless install) performs the
+/// install with NO UI; `--dir <install_dir>` targets the exact directory
+/// C0PL4ND currently runs from so the update lands in place (rather than the
+/// installer's own `C:\Program Files\…` default, which could split an install
+/// that lives elsewhere). `-Wait` blocks the unelevated helper until the
+/// elevated install finishes, and only THEN is the freshly-installed binary
+/// relaunched. The relaunch is UNCONDITIONAL (a `try/catch` swallows a UAC
+/// cancel or an install error) so the user is never left without C0PL4ND — on
+/// failure/decline the prior binary already at `app_exe` simply comes back.
+#[cfg(windows)]
+fn powershell_runas_script(
+    installer: &std::path::Path,
+    install_dir: &std::path::Path,
+    app_exe: &std::path::Path,
+) -> String {
+    let q = |p: &std::path::Path| p.to_string_lossy().replace('\'', "''");
+    let inst = q(installer);
+    let dir = q(install_dir);
+    let app = q(app_exe);
+    format!(
+        "try {{ Start-Process -FilePath '{inst}' \
+         -ArgumentList '--silent','--dir','{dir}' -Verb RunAs -Wait }} catch {{ }}; \
+         Start-Process -FilePath '{app}'"
+    )
+}
+
+/// Run the verified self-elevating installer SILENTLY (one UAC prompt, NO
+/// installer UI, NO click-through), then relaunch C0PL4ND in place.
+///
+/// The `setup.exe` carries a `requireAdministrator` manifest. A plain
+/// `Command::spawn` (CreateProcess) CANNOT start such a binary — Windows returns
+/// ERROR_ELEVATION_REQUIRED (os error 740). Elevation needs ShellExecute
+/// semantics, reached here WITHOUT any `unsafe` via PowerShell's `Start-Process
+/// -Verb RunAs`, which raises the standard UAC prompt and runs the installer
+/// elevated. We pass the installer's `--silent`/`--dir` flags so it installs
+/// unattended into the running install's location — the single UAC prompt is
+/// unavoidable for a Program-Files write, but there is no interactive installer
+/// window and no "Continue" button. The child is routed through the shared
+/// no-console-window helper (`CREATE_NO_WINDOW`) so no console flashes.
+#[cfg(windows)]
+fn launch_installer_elevated(installer: &std::path::Path) -> std::io::Result<()> {
+    use c0pl4nd_core::win_process::NoConsoleWindow;
+    // Resolve the running install's directory so the silent update overwrites
+    // the app exactly where it lives (in place) and so we relaunch THAT binary.
+    let app_exe = std::env::current_exe()?;
+    let install_dir = app_exe
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let script = powershell_runas_script(installer, &install_dir, &app_exe);
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .no_console_window()
+        .spawn()
+        .map(|_| ())
+}
+
+/// Non-Windows fallback: the self-elevating installer is a Windows-only path,
+/// but keep the updater buildable everywhere — a plain spawn is correct off
+/// Windows (no admin-owned Program-Files apply path exists there).
+#[cfg(not(windows))]
+fn launch_installer_elevated(installer: &std::path::Path) -> std::io::Result<()> {
+    std::process::Command::new(installer).spawn().map(|_| ())
+}
+
 /// Why a check was started — decides what a found update does on completion.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LaunchKind {
@@ -95,6 +206,12 @@ pub enum UpdateState {
         version: String,
         release_index: Option<u64>,
     },
+    /// The install dir is admin-owned (e.g. Program Files) so an in-place swap
+    /// can't write it — a verified self-elevating installer (`setup.exe`) has
+    /// been staged instead. Running it SILENTLY (`--silent --dir`) updates in
+    /// place (one UAC prompt, no installer UI) and relaunches C0PL4ND. `staged`
+    /// is the path to the verified installer.
+    ReadyToRunInstaller { installer: PathBuf, version: String },
     /// The verified binary was swapped in; restart to run it.
     Applied { version: String },
     /// The last operation failed; `String` is a human-readable reason.
@@ -112,6 +229,11 @@ enum UpdateMsg {
     /// Tier-1 manifest ordinal to persist on a successful apply (`None` for a
     /// legacy, manifest-absent update path).
     Downloaded(Result<(PathBuf, String, Option<u64>), String>),
+    /// The verified self-elevating `setup.exe` has been staged (the admin-owned
+    /// / Program-Files fallback). `Ok((installer_path, version))` — the elevated
+    /// install performs its own in-place write, so no `release_index` is carried
+    /// (the freshly-installed binary's own version governs the floor).
+    InstallerReady(Result<(PathBuf, String), String>),
 }
 
 /// UI-thread updater model: a polled [`UpdateState`] plus the channel to the
@@ -162,6 +284,7 @@ impl Updater {
             UpdateState::Available(_)
                 | UpdateState::Downloading { .. }
                 | UpdateState::ReadyToApply { .. }
+                | UpdateState::ReadyToRunInstaller { .. }
                 | UpdateState::Applied { .. }
                 | UpdateState::Failed(_)
         )
@@ -188,6 +311,7 @@ impl Updater {
                 self.start_download(ctx, info);
             }
             UpdateState::ReadyToApply { .. } => self.apply_and_restart(ctx),
+            UpdateState::ReadyToRunInstaller { .. } => self.run_installer(ctx),
             UpdateState::Failed(_) => self.start_check(ctx, LaunchKind::Notify),
             _ => {}
         }
@@ -287,10 +411,61 @@ impl Updater {
         let (tx, rx) = std::sync::mpsc::channel();
         self.rx = Some(rx);
         let ctx = ctx.clone();
+
+        // Pick the apply strategy (pure, testable) from whether the install dir
+        // is writable and whether the release ships a self-elevating installer:
+        //  • writable (portable / per-user) → InPlaceSwap: download the archive,
+        //    swap the running binary in place + relaunch. SILENT, no elevation.
+        //  • admin-owned (Program Files) WITH a setup.exe → RunInstaller:
+        //    download the verified installer and run it (`--silent --dir`, UAC).
+        //  • admin-owned WITHOUT an installer → an actionable failure.
+        // Probed HERE (on the UI thread, before the worker) so the strategy is a
+        // plain value the worker branches on with no filesystem coupling.
+        let strategy = select_apply_strategy(
+            super::apply::install_dir_writable(),
+            info.installer.is_some(),
+        );
+        let installer = info.installer.clone();
+
         std::thread::spawn(move || {
             let version = info.version.to_string();
             // Tier-1 manifest ordinal to persist after a successful apply.
             let release_index = info.release_index;
+
+            match strategy {
+                ApplyStrategy::RunInstaller => {
+                    // Only chosen when an installer is present, so the take holds.
+                    let inst = installer
+                        .expect("RunInstaller is only selected when an installer is present");
+                    let ptx = tx.clone();
+                    let pctx = ctx.clone();
+                    let result =
+                        net::download_verify_installer(&inst, &staging, move |received, total| {
+                            let _ = ptx.send(UpdateMsg::Progress { received, total });
+                            pctx.request_repaint();
+                        })
+                        .map(|path| (path, version));
+                    let _ = tx.send(UpdateMsg::InstallerReady(result));
+                    ctx.request_repaint();
+                    return;
+                }
+                ApplyStrategy::NoInstallerAvailable => {
+                    // Admin-owned dir, no installer for this platform — the one
+                    // remaining actionable dead-end (routed to the relocate copy).
+                    let _ = tx.send(UpdateMsg::InstallerReady(Err(
+                        "install location not writable: C0PL4ND cannot modify its own \
+                         program folder and this release has no installer for your \
+                         platform — move it to a folder you own or run once elevated"
+                            .to_string(),
+                    )));
+                    ctx.request_repaint();
+                    return;
+                }
+                ApplyStrategy::InPlaceSwap => {}
+            }
+
+            // InPlaceSwap (silent, no elevation, no installer UI): download the
+            // verified archive and chain into the in-place swap + relaunch.
             let ptx = tx.clone();
             let pctx = ctx.clone();
             let result = net::download_verify_extract(&info, &staging, move |received, total| {
@@ -502,6 +677,100 @@ impl Updater {
         }
     }
 
+    /// Launch the staged, verified self-elevating installer in SILENT mode and
+    /// close the app so the elevated `setup.exe` can replace the files in place.
+    /// The helper ([`launch_installer_elevated`]) shows ONE UAC prompt, runs the
+    /// installer with no window and no click-through (`--silent --dir`), waits
+    /// for it, then relaunches C0PL4ND — so a machine-wide (Program-Files) update
+    /// is as seamless as the per-user in-place swap, minus the one unavoidable
+    /// elevation prompt. This is the SCR1B3-parity fallback that fixes updating
+    /// from an admin-owned folder.
+    ///
+    /// ## Anti-rollback (version-downgrade) gate — fail-closed, BEFORE launch
+    ///
+    /// The installer path re-checks the strictly-monotonic freshness rule at
+    /// APPLY time — identical to [`Self::apply_and_restart`] — so a replayed
+    /// older-but-validly-signed installer can never be run over a newer running
+    /// build. Integrity (verify) ≠ freshness (this). A downgrade or unparseable
+    /// version is refused here and never launches anything.
+    ///
+    /// The anti-rollback HIGH-WATER MARK is deliberately NOT advanced here (it is
+    /// on the in-place swap). The elevated install is asynchronous and may be
+    /// declined at the UAC prompt; advancing the persisted floor before the
+    /// install is confirmed would wrongly block a legitimate retry at the next
+    /// check. The freshly-installed binary's own compiled `CARGO_PKG_VERSION`
+    /// governs the version floor on the next launch, so anti-rollback stays
+    /// intact without the premature record write.
+    pub fn run_installer(&mut self, ctx: &egui::Context) {
+        let UpdateState::ReadyToRunInstaller { installer, version } = &self.state else {
+            return;
+        };
+        let (installer, version) = (installer.clone(), version.clone());
+
+        // Anti-rollback gate (fail-closed), BEFORE any elevation: refuse to run
+        // an installer whose version is not strictly newer than the highest
+        // version ever installed, even though it passed signature/checksum
+        // verification. The in-place-swap path already does this; the installer
+        // path MUST too, or the two apply routes defend asymmetrically.
+        let decision = super::rollback_guard::evaluate_installed(&version);
+        if !decision.may_apply() {
+            let reason = decision
+                .reason()
+                .unwrap_or_else(|| "update refused by anti-rollback gate".to_string());
+            tracing::warn!(
+                target: "c0pl4nd::update",
+                event = "update_refused",
+                gate = "anti_rollback",
+                candidate_version = %version,
+                reason = %reason,
+                "refusing installer: anti-rollback (downgrade) gate, before elevation"
+            );
+            self.cleanup_staging_dir();
+            self.state = UpdateState::Failed(reason);
+            return;
+        }
+
+        // Launch with a UAC elevation prompt — the setup.exe is
+        // requireAdministrator, so a plain CreateProcess fails with os error 740.
+        // The staging dir is NOT cleaned on success: the installer is running
+        // FROM it; the OS reclaims the per-run temp dir after the app closes.
+        match launch_installer_elevated(&installer) {
+            Ok(()) => {
+                tracing::info!(
+                    target: "c0pl4nd::update",
+                    event = "update_applied",
+                    version = %version,
+                    "update: elevated silent installer launched; closing to apply in place"
+                );
+                self.state = UpdateState::Applied { version };
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(e) => {
+                // The verified installer could not be launched at all (not a UAC
+                // decline — that is swallowed by the script's try/catch and the
+                // prior binary relaunches). Surface an actionable failure and
+                // clean the staged installer.
+                tracing::error!(
+                    target: "c0pl4nd::update",
+                    event = "installer_launch_failed",
+                    version = %version,
+                    "failed to launch the staged elevated installer; running binary untouched"
+                );
+                tracing::debug!(
+                    target: "c0pl4nd::update",
+                    event = "installer_launch_failed_detail",
+                    detail = %e,
+                    "installer launch failure detail"
+                );
+                self.cleanup_staging_dir();
+                self.state = UpdateState::Failed(format!(
+                    "couldn't launch the installer ({e}). You can run it manually: {}",
+                    installer.display()
+                ));
+            }
+        }
+    }
+
     /// Drain worker messages and advance the state. Call once per frame.
     pub fn poll(&mut self, ctx: &egui::Context) {
         let Some(rx) = &self.rx else {
@@ -510,6 +779,7 @@ impl Updater {
         let mut disconnect = false;
         let mut cleanup_staging = false;
         let mut chain_apply_now = false;
+        let mut run_installer_now = false;
         loop {
             match rx.try_recv() {
                 Ok(UpdateMsg::CheckResult(Ok(Some(info)))) => {
@@ -557,6 +827,25 @@ impl Updater {
                     cleanup_staging = true;
                     self.state = UpdateState::Failed(e);
                 }
+                Ok(UpdateMsg::InstallerReady(Ok((installer, version)))) => {
+                    // The verified self-elevating installer is staged (admin-owned
+                    // / Program-Files fallback). Park at ReadyToRunInstaller; the
+                    // one-click / auto chain then launches it (deferred past the
+                    // `rx` borrow — run_installer needs `&mut self`).
+                    self.state = UpdateState::ReadyToRunInstaller { installer, version };
+                    if self.chain_apply {
+                        run_installer_now = true;
+                        break;
+                    }
+                }
+                Ok(UpdateMsg::InstallerReady(Err(e))) => {
+                    // Installer download/verify failed (fail-closed) OR the
+                    // admin-owned dir has no installer for this platform. The
+                    // staging dir was already wiped by download_verify_installer
+                    // on a verify failure; drop our tracker so nothing leaks.
+                    cleanup_staging = true;
+                    self.state = UpdateState::Failed(e);
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     disconnect = true;
@@ -576,6 +865,15 @@ impl Updater {
             // no-second-click hand-off from a completed download to the swap.
             self.chain_apply = false;
             self.apply_and_restart(ctx);
+        }
+        if run_installer_now {
+            // Same one-shot hand-off for the elevated-installer (Program-Files)
+            // path: a completed + verified installer download flows straight into
+            // the silent elevated launch (no second click), the `rx` borrow now
+            // released. The apply-time anti-rollback gate in `run_installer`
+            // still runs.
+            self.chain_apply = false;
+            self.run_installer(ctx);
         }
     }
 }
@@ -707,6 +1005,7 @@ mod tests {
             html_url: "https://github.com/o/r".to_string(),
             pinned_sha256: "deadbeef".to_string(),
             release_index: None,
+            installer: None,
         }
     }
 
@@ -999,5 +1298,224 @@ mod tests {
         // so the reset line is exercised there, not in this offline unit test).
         u.banner_dismissed = false;
         assert!(u.banner_visible(), "re-armed banner shows again");
+    }
+
+    // --- apply-strategy routing (the Program-Files fallback decision) ----------
+
+    #[test]
+    fn writable_dir_selects_in_place_swap_not_installer() {
+        // The streamlined-update contract: a writable (portable / per-user)
+        // install ALWAYS takes the silent in-place swap — never the elevated
+        // installer — regardless of whether a setup.exe was published. A
+        // regression here is exactly the UAC + installer-click-through friction
+        // the silent swap exists to avoid.
+        assert_eq!(
+            select_apply_strategy(true, true),
+            ApplyStrategy::InPlaceSwap,
+            "writable dir + installer present must STILL swap in place (silent)"
+        );
+        assert_eq!(
+            select_apply_strategy(true, false),
+            ApplyStrategy::InPlaceSwap,
+            "writable dir + no installer must swap in place"
+        );
+    }
+
+    #[test]
+    fn admin_dir_with_installer_runs_installer() {
+        // The load-bearing FIX: an admin-owned (Program Files) install that DOES
+        // ship a self-elevating setup.exe now routes to the silent elevated
+        // installer instead of failing closed with "move it / run as admin".
+        assert_eq!(
+            select_apply_strategy(false, true),
+            ApplyStrategy::RunInstaller,
+            "admin-owned dir WITH an installer runs it silently+elevated (the fix)"
+        );
+    }
+
+    #[test]
+    fn admin_dir_without_installer_is_actionable_failure() {
+        // The only remaining dead-end: an admin-owned dir on a platform with no
+        // setup.exe (e.g. an admin-extracted Linux install) stays an actionable
+        // relocate/elevate failure, never a fake success.
+        assert_eq!(
+            select_apply_strategy(false, false),
+            ApplyStrategy::NoInstallerAvailable,
+            "admin-owned dir with NO installer is an actionable failure, not a swap"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_runas_script_is_silent_and_targets_running_install() {
+        use std::path::Path;
+        // The seamless-update contract for the Program-Files fallback: the
+        // installer is invoked UNATTENDED (`--silent`), targets the exact
+        // directory C0PL4ND runs from (`--dir`, so the update lands in place, not
+        // the installer's own default), WAITS for the elevated install, and then
+        // relaunches the app. A regression that drops any of these re-introduces
+        // the interactive "click Continue" window the silent invocation removes.
+        let script = powershell_runas_script(
+            Path::new(r"C:\pf\c0pl4nd-setup.exe"),
+            Path::new(r"C:\pf\C0PL4ND"),
+            Path::new(r"C:\pf\C0PL4ND\c0pl4nd.exe"),
+        );
+        assert!(
+            script.contains("'--silent'"),
+            "must run unattended: {script}"
+        );
+        assert!(
+            script.contains(r"'--dir','C:\pf\C0PL4ND'"),
+            "must target the running install dir in place: {script}"
+        );
+        assert!(
+            script.contains("-Verb RunAs"),
+            "must still elevate: {script}"
+        );
+        assert!(
+            script.contains("-Wait"),
+            "must wait for the elevated install before relaunch: {script}"
+        );
+        assert!(
+            script.contains(r"Start-Process -FilePath 'C:\pf\C0PL4ND\c0pl4nd.exe'"),
+            "must relaunch the app after the install: {script}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_runas_script_escapes_embedded_single_quote() {
+        use std::path::Path;
+        // Every path is single-quoted; an embedded single quote in ANY path is
+        // escaped by doubling (the PowerShell rule), so a crafted path can never
+        // break out of the quoted string (command-injection defense).
+        let script = powershell_runas_script(
+            Path::new(r"C:\o'brien\c0pl4nd-setup.exe"),
+            Path::new(r"C:\o'brien\app"),
+            Path::new(r"C:\o'brien\app\c0pl4nd.exe"),
+        );
+        assert_eq!(
+            script,
+            "try { Start-Process -FilePath 'C:\\o''brien\\c0pl4nd-setup.exe' \
+             -ArgumentList '--silent','--dir','C:\\o''brien\\app' \
+             -Verb RunAs -Wait } catch { }; \
+             Start-Process -FilePath 'C:\\o''brien\\app\\c0pl4nd.exe'"
+        );
+    }
+
+    #[test]
+    fn run_installer_is_a_noop_when_not_ready() {
+        // The gate only runs from ReadyToRunInstaller; any other state leaves
+        // run_installer a no-op (guards the early-return contract).
+        let ctx = egui::Context::default();
+        let mut u = updater_in(UpdateState::UpToDate);
+        u.run_installer(&ctx);
+        assert_eq!(u.state, UpdateState::UpToDate);
+    }
+
+    #[test]
+    fn run_installer_refuses_a_downgrade_before_elevation() {
+        // Anti-rollback parity with the in-place path: a staged installer whose
+        // version is NOT strictly newer than the running build is refused at
+        // apply time (before any elevation) and lands in Failed — never
+        // launching PowerShell. 0.0.1 is always older than the compiled version.
+        let ctx = egui::Context::default();
+        let mut u = updater_in(UpdateState::ReadyToRunInstaller {
+            installer: PathBuf::from("nonexistent-c0pl4nd-setup.exe"),
+            version: "0.0.1".into(),
+        });
+        u.run_installer(&ctx);
+        match &u.state {
+            UpdateState::Failed(msg) => {
+                assert!(
+                    msg.contains("downgrade blocked"),
+                    "expected a downgrade-blocked failure, got: {msg}"
+                );
+                assert!(msg.contains("0.0.1"), "reason names the candidate: {msg}");
+            }
+            other => panic!("expected Failed(downgrade blocked), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn banner_visible_includes_ready_to_run_installer() {
+        // The Program-Files fallback state is an actionable in-flight state, so
+        // the banner must stay visible through it (never silently disappear while
+        // an elevated install is pending).
+        assert!(updater_in(UpdateState::ReadyToRunInstaller {
+            installer: PathBuf::from("x"),
+            version: "9.9.9".into(),
+        })
+        .banner_visible());
+    }
+
+    #[test]
+    fn poll_installer_ready_ok_parks_without_chain() {
+        // A completed installer download with the chain NOT armed parks at
+        // ReadyToRunInstaller awaiting an explicit "Restart & install" click.
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut u = updater_with_rx(rx, LaunchKind::Manual);
+        tx.send(UpdateMsg::InstallerReady(Ok((
+            PathBuf::from("/staging/c0pl4nd-setup.exe"),
+            "9.9.9".to_string(),
+        ))))
+        .unwrap();
+        u.poll(&ctx);
+        assert_eq!(
+            u.state,
+            UpdateState::ReadyToRunInstaller {
+                installer: PathBuf::from("/staging/c0pl4nd-setup.exe"),
+                version: "9.9.9".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn poll_installer_ready_err_moves_to_failed_and_clears_staging() {
+        // A verify failure / no-installer error surfaces Failed and clears the
+        // tracked staging dir (best-effort; a nonexistent dir is a no-op).
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut u = updater_with_rx(rx, LaunchKind::Manual);
+        u.staging_dir = Some(PathBuf::from("/nonexistent/staging-dir"));
+        tx.send(UpdateMsg::InstallerReady(Err(
+            "install location not writable: …".to_string(),
+        )))
+        .unwrap();
+        u.poll(&ctx);
+        assert!(matches!(u.state, UpdateState::Failed(_)));
+        assert!(
+            u.staging_dir.is_none(),
+            "a failed installer path clears the tracked staging dir"
+        );
+    }
+
+    #[test]
+    fn one_click_chain_installer_ready_flows_straight_into_run_installer() {
+        // The one-click property for the Program-Files path: with the chain
+        // armed, a completed installer download must NOT park — it chains into
+        // run_installer within the SAME poll. A DOWNGRADE version makes the
+        // apply-time anti-rollback gate stop it BEFORE any elevation (so the test
+        // never spawns PowerShell), proving the chain fired: the state ends at
+        // Failed(downgrade), not ReadyToRunInstaller.
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut u = updater_with_rx(rx, LaunchKind::Manual);
+        u.chain_apply = true;
+        tx.send(UpdateMsg::InstallerReady(Ok((
+            PathBuf::from("nonexistent-c0pl4nd-setup.exe"),
+            "0.0.1".to_string(),
+        ))))
+        .unwrap();
+        u.poll(&ctx);
+        match &u.state {
+            UpdateState::Failed(msg) => assert!(
+                msg.contains("downgrade blocked"),
+                "one-click installer chain must reach the apply-time gate: {msg}"
+            ),
+            other => panic!("chain must flow into run_installer, not park; got {other:?}"),
+        }
+        assert!(!u.chain_apply, "the chain flag is one-shot (consumed)");
     }
 }
