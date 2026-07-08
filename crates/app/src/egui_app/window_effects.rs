@@ -118,9 +118,13 @@ pub(crate) fn tint_alpha(strength: f32) -> u8 {
 /// is BEHIND the glyph text (drawn later on the same layer) and BELOW the Settings
 /// window (a higher-order area), so neither the terminal text nor the settings UI
 /// is ever tinted — the reported "tint colours the text / the buttons aren't
-/// tinted" issues. A no-op when `tint_strength <= 0` or the hex is invalid.
+/// tinted" issues. A no-op when the tint master toggle
+/// ([`c0pl4nd_core::Config::tint_enabled`]) is off, when `tint_strength <= 0`, or
+/// when the hex is invalid.
 pub(crate) fn paint_background_tint(ctx: &egui::Context, config: &c0pl4nd_core::Config) {
-    if config.tint_strength <= 0.0 {
+    // Explicit master switch first: when the user has toggled the tint wash OFF,
+    // paint nothing even if a colour + strength are still parked in the config.
+    if !config.tint_enabled || config.tint_strength <= 0.0 {
         return;
     }
     let Ok((r, g, b)) = c0pl4nd_core::theme::parse_hex(&config.tint) else {

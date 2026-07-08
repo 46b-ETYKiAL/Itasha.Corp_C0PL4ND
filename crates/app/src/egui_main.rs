@@ -38,6 +38,8 @@ mod user_error;
 
 use eframe::egui;
 
+use egui_app::gpu_diag;
+
 fn main() -> eframe::Result<()> {
     // FIRST statement: harden the Windows DLL search order before any other DLL
     // could be implicitly loaded, defeating DLL-planting when launched from an
@@ -167,7 +169,23 @@ fn main() -> eframe::Result<()> {
         launch_transparency_enabled(),
         launch_backend_override(),
     );
-    apply_gpu_preference(&mut options, launch_gpu_preference());
+    apply_gpu_preference(
+        &mut options,
+        launch_gpu_preference(),
+        launch_transparency_enabled(),
+    );
+    // TRANSPARENCY ADAPTER SELECTION (the fix for "opaque black" on a hybrid-GPU
+    // Optimus laptop). `power_preference` is only a HINT; the gpu-diag.log evidence
+    // showed the discrete NVIDIA GPU advertises `PreMultiplied` but is opaqued by
+    // the Optimus off-screen→display copy, while the display-driving Intel iGPU is
+    // the one that actually composites see-through. eframe's `native_adapter_selector`
+    // OVERRIDES the hint and is handed the real surface, so we DETERMINISTICALLY pick
+    // the integrated / display-driving adapter (never the discrete GPU) and log every
+    // adapter's `alpha_modes` + the mode egui-wgpu will configure to
+    // `<config_dir>/gpu-diag.log`. Paired with default (non-forced) backends +
+    // `LowPower`, this replicates why SCR1B3 is see-through on the same box. Only
+    // installed when transparency is on; the opaque path keeps the discrete GPU.
+    install_transparency_adapter_selector(&mut options, launch_transparency_enabled());
 
     // Present latency raises the swapchain frame-queue depth. A previous
     // `= Some(1)` "optimization" CORRUPTED the terminal grid: the draw raced
@@ -183,7 +201,15 @@ fn main() -> eframe::Result<()> {
     // render. Do NOT lower this. We also keep the default vsync present mode (NOT
     // Mailbox/AutoNoVsync): the app is event-driven, so an idle terminal repaints
     // ~0 fps and Mailbox would force wasteful continuous high-FPS rendering.
-    options.wgpu_options.desired_maximum_frame_latency = Some(3);
+    //
+    // EXCEPTION — translucent window: use latency 1, matching SCR1B3 exactly (its
+    // whole config is the reference for the see-through path). The glyph-garble that
+    // motivated latency 3 is a DX12/NVIDIA hazard; the translucent path runs on the
+    // integrated GPU with default (non-DX12-forced) backends, where the hazard does
+    // not apply, so we mirror SCR1B3's latency 1 to remove any remaining difference
+    // from the known-good see-through configuration. The opaque path keeps latency 3.
+    options.wgpu_options.desired_maximum_frame_latency =
+        Some(if launch_transparency_enabled() { 1 } else { 3 });
 
     let result = eframe::run_native(
         "C0PL4ND",
@@ -301,32 +327,29 @@ fn launch_backend_override() -> c0pl4nd_core::config::GraphicsBackend {
 
 /// Choose the wgpu backend on Windows.
 ///
-/// **Real window transparency requires the Vulkan backend.** A wgpu swapchain
-/// bound to a plain Win32 HWND through DX12/DXGI cannot per-pixel alpha-composite
-/// with the desktop — `CreateSwapChainForHwnd` forces `DXGI_ALPHA_MODE_UNSPECIFIED`
-/// (opaque to DWM), so `with_transparent(true)` + `clear_color=[0,0,0,0]` is a
-/// silent no-op and the `window-vibrancy` acrylic/mica backdrop is fully occluded
-/// by the opaque swapchain (the "solid dark box" transparency bug). Vulkan's WSI
-/// DOES expose `VK_COMPOSITE_ALPHA_PRE_MULTIPLIED`, so a see-through / acrylic
-/// window only works on Vulkan — empirically verified on Win11 (and the reason the
-/// sibling SCR1B3, which uses the default Vulkan-first backend, is see-through).
+/// **Opaque window → force VULKAN.** Vulkan is immune to the DX12 font-atlas
+/// `write_texture`→sample hazard that intermittently garbles the terminal grid on
+/// some NVIDIA DX12 drivers (wgpu#1306 / #6829, DX12-only).
 ///
-/// **Vulkan is now the Windows default for BOTH opaque and transparent windows**
-/// — it is immune to the DX12 font-atlas `write_texture`→sample hazard that
-/// intermittently garbles the terminal grid on some NVIDIA DX12 drivers
-/// (wgpu#1306 / #6829, DX12-only), and it is the only backend whose WSI exposes
-/// the pre-multiplied alpha a see-through window needs. The trade-off: some
-/// third-party Vulkan *overlay layers* (e.g. `GalaxyOverlayVkLayer`) corrupt the
-/// Vulkan instance and panic egui-wgpu — a user hitting that forces DX12 back via
-/// the config override (below) or `WGPU_BACKEND=dx12`, trading the glyph-hazard
-/// immunity for overlay robustness. No-op on non-Windows platforms.
+/// **Translucent window → do NOT force a backend; use eframe's DEFAULT backends,**
+/// exactly like the sibling app SCR1B3 (identical eframe/egui-wgpu/wgpu stack),
+/// which IS see-through on the same hybrid-GPU (Optimus) laptop. Forcing Vulkan was
+/// the transparency bug: it pinned the integrated / display-driving GPU to its
+/// VULKAN surface, whose `alpha_modes` are `[Opaque, Inherit]` (no
+/// `PreMultiplied`/`PostMultiplied`), so egui-wgpu configures `Auto` → wgpu-core
+/// resolves it to `Opaque` → the window composites solid BLACK. Meanwhile the
+/// discrete NVIDIA Vulkan surface DOES expose `PreMultiplied`, but on Optimus it
+/// renders off-screen and the copy to the Intel-driven display is opaque, so its
+/// transparency never reaches the screen either. Leaving the DEFAULT backends lets
+/// wgpu reach the surface/adapter path that actually composites (paired with the
+/// integrated-GPU adapter selector + `LowPower` — see
+/// [`install_transparency_adapter_selector`]).
 ///
-/// `backend_override` is the persisted [`GraphicsBackend`](c0pl4nd_core::config::GraphicsBackend)
-/// setting: `Auto` keeps the Vulkan default above, while an explicit variant
-/// forces that backend — the in-app escape hatch either way (Vulkan-overlay crash
-/// → force DX12; a DX12-only need → force DX12). Precedence: `WGPU_BACKEND` env
-/// (one-off debug) > config override > platform default. Effective on Windows;
-/// inert elsewhere.
+/// `backend_override` (the persisted [`GraphicsBackend`](c0pl4nd_core::config::GraphicsBackend))
+/// and `WGPU_BACKEND` still force a backend in BOTH modes — the in-app escape hatch
+/// (e.g. a Vulkan-overlay crash → force DX12). Precedence: `WGPU_BACKEND` env >
+/// config override > mode default (Vulkan opaque / eframe-default translucent).
+/// Effective on Windows; inert elsewhere.
 fn prefer_backend_on_windows(
     options: &mut eframe::NativeOptions,
     want_transparency: bool,
@@ -334,37 +357,29 @@ fn prefer_backend_on_windows(
 ) {
     #[cfg(target_os = "windows")]
     {
+        use c0pl4nd_core::config::GraphicsBackend;
         use eframe::wgpu::Backends;
         if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
         {
-            // Platform default: VULKAN, for BOTH the transparent and the opaque
-            // window. Vulkan is immune to the DX12 font-atlas `write_texture`→sample
-            // hazard that intermittently garbles the terminal grid on some NVIDIA
-            // DX12 drivers (wgpu#1306 / #6829 — DX12-only; the in-app atlas fence
-            // only mitigates it), AND it is the only backend whose WSI exposes the
-            // pre-multiplied alpha a see-through window needs. DX12 remains one
-            // setting away — the `graphics_backend` config override (or
-            // `WGPU_BACKEND=dx12`) forces it for anyone who hits a Vulkan-overlay
-            // layer crash (e.g. GalaxyOverlayVkLayer), trading the glyph-hazard
-            // immunity back for overlay robustness.
-            let _ = want_transparency; // both paths default to Vulkan now
-            let platform_default = Backends::VULKAN;
-            // The persisted setting maps to an explicit backend; `Auto` defers to
-            // the platform default. The `WGPU_BACKEND` env still wins over both.
-            let configured = resolve_configured_backends(backend_override, platform_default);
-            let resolved = Backends::from_env().unwrap_or(configured);
-            setup.instance_descriptor.backends = resolved;
-            // F4-3: if transparency was requested but the resolved backend is not
-            // Vulkan (e.g. the user forced `WGPU_BACKEND=dx12` or the config
-            // override to dodge a Vulkan-overlay crash), the window will be
-            // opaque. Tell them why and how to recover, instead of leaving them to
-            // wonder why "transparency does nothing". Pairs with the F4-1 crash
-            // hook: a Vulkan-overlay panic now also self-diagnoses via the crash log.
-            if let Some(msg) = transparency_fallback_warning(
-                want_transparency,
-                resolved.contains(Backends::VULKAN),
-            ) {
-                tracing::warn!("{msg}");
+            // An EXPLICIT choice always wins: `WGPU_BACKEND` env (one-off debug) then
+            // the persisted `graphics_backend` config override.
+            let explicit = Backends::from_env().or(match backend_override {
+                GraphicsBackend::Auto => None,
+                GraphicsBackend::Dx12 => Some(Backends::DX12),
+                GraphicsBackend::Vulkan => Some(Backends::VULKAN),
+                GraphicsBackend::Gl => Some(Backends::GL),
+            });
+            match explicit {
+                Some(backends) => setup.instance_descriptor.backends = backends,
+                None if !want_transparency => {
+                    // Opaque default: Vulkan (dodges the NVIDIA DX12 glyph garble).
+                    setup.instance_descriptor.backends = Backends::VULKAN;
+                }
+                None => {
+                    // Translucent default: leave eframe's DEFAULT backends untouched
+                    // (SCR1B3-parity). Forcing Vulkan here is what caused the opaque
+                    // black window on the Optimus laptop.
+                }
             }
         }
     }
@@ -373,55 +388,6 @@ fn prefer_backend_on_windows(
         let _ = want_transparency;
         let _ = backend_override;
         let _ = options; // used on every platform; backend default is correct off Windows
-    }
-}
-
-/// F4-3 — the user-facing notice for the transparency/Vulkan dependency.
-///
-/// Returns the warning to surface when window transparency was requested but a
-/// non-Vulkan GPU backend ended up selected. In that case the window is OPAQUE:
-/// real transparency needs Vulkan's WSI alpha; a DX12 swapchain is opaque to
-/// DWM. Pure (no I/O, no wgpu types) so it is unit-testable on every platform;
-/// the Windows caller passes `resolved.contains(Backends::VULKAN)`.
-///
-/// Only CALLED on Windows (the backend-selection logic above is Windows-only),
-/// but defined cross-platform so the `#[cfg(test)]` unit tests exercise it on
-/// every OS — hence `allow(dead_code)` off Windows, where there is no caller.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn transparency_fallback_warning(
-    want_transparency: bool,
-    backend_is_vulkan: bool,
-) -> Option<&'static str> {
-    if want_transparency && !backend_is_vulkan {
-        Some(
-            "window transparency was requested but a non-Vulkan GPU backend was selected; \
-             the window will be OPAQUE — real transparency requires the Vulkan backend. \
-             Unset WGPU_BACKEND (or set WGPU_BACKEND=vulkan) to enable transparency.",
-        )
-    } else {
-        None
-    }
-}
-
-/// Map the persisted [`GraphicsBackend`](c0pl4nd_core::config::GraphicsBackend)
-/// override + the platform default to the concrete wgpu `Backends` mask, BEFORE
-/// the `WGPU_BACKEND` env override is applied. `Auto` defers to `platform_default`;
-/// each explicit variant forces that backend. Pure + cross-platform (wgpu's
-/// `Backends` flags exist on every OS) so it is unit-testable everywhere; only
-/// CALLED inside the Windows backend-selection block, hence `allow(dead_code)`
-/// off Windows where there is no caller.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn resolve_configured_backends(
-    backend_override: c0pl4nd_core::config::GraphicsBackend,
-    platform_default: eframe::wgpu::Backends,
-) -> eframe::wgpu::Backends {
-    use c0pl4nd_core::config::GraphicsBackend;
-    use eframe::wgpu::Backends;
-    match backend_override {
-        GraphicsBackend::Auto => platform_default,
-        GraphicsBackend::Dx12 => Backends::DX12,
-        GraphicsBackend::Vulkan => Backends::VULKAN,
-        GraphicsBackend::Gl => Backends::GL,
     }
 }
 
@@ -447,23 +413,128 @@ fn resolve_power_preference(
 }
 
 /// Apply the persisted GPU preference to the wgpu setup by setting the adapter
-/// `power_preference` — the in-app fix for a multi-GPU (Optimus) machine whose
-/// discrete-GPU driver corrupts rendering: `Integrated` routes to the low-power
-/// iGPU. Cross-platform (hybrid graphics exist on Windows + Linux). `Auto` +
-/// `WGPU_POWER_PREF` are honoured via [`resolve_power_preference`]. No-op unless
-/// the setup is `CreateNew` (eframe is creating its own device).
+/// `power_preference`. The default depends on the window mode:
+///
+/// * **Translucent → `LowPower`** — the integrated / display-driving GPU, matching
+///   the sibling app SCR1B3 (which is see-through on the same Optimus laptop). On a
+///   hybrid machine only the iGPU composites a see-through window; the discrete GPU
+///   renders off-screen and its result is copied back opaque.
+/// * **Opaque → `HighPerformance`** — the discrete GPU, for terminal-glyph
+///   throughput.
+///
+/// `Auto` defers to that mode default; an explicit `graphics_gpu` config choice and
+/// `WGPU_POWER_PREF` still win via [`resolve_power_preference`]. This is a HINT —
+/// the authoritative transparency fix is the adapter selector
+/// ([`install_transparency_adapter_selector`]), which overrides the hint — but the
+/// hint keeps the opaque path on the discrete GPU. No-op unless the setup is
+/// `CreateNew` (eframe is creating its own device).
 fn apply_gpu_preference(
     options: &mut eframe::NativeOptions,
     gpu: c0pl4nd_core::config::GpuPreference,
+    want_transparency: bool,
 ) {
     use eframe::wgpu::PowerPreference;
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
-        // eframe's default already folds in `WGPU_POWER_PREF` (its base is
-        // `from_env().unwrap_or(HighPerformance)`); re-derive so the env keeps
-        // priority over the persisted config choice.
         let env_override = PowerPreference::from_env();
-        setup.power_preference =
-            resolve_power_preference(gpu, env_override, PowerPreference::HighPerformance);
+        let mode_default = if want_transparency {
+            PowerPreference::LowPower
+        } else {
+            PowerPreference::HighPerformance
+        };
+        setup.power_preference = resolve_power_preference(gpu, env_override, mode_default);
+    }
+}
+
+/// Install a `native_adapter_selector` that picks the INTEGRATED / display-driving
+/// GPU when a see-through window is requested — the real fix for the "opaque black"
+/// window on a hybrid-GPU (Optimus) laptop.
+///
+/// The selector is handed BOTH the enumerated adapters and the compatible surface,
+/// so it queries each adapter's real `surface.get_capabilities(&adapter).alpha_modes`,
+/// logs them (plus the mode egui-wgpu will configure) to `<config_dir>/gpu-diag.log`,
+/// and picks via [`gpu_diag::choose_display_driving_adapter`] — integrated GPU
+/// first, then richest transparent capability. This deliberately does NOT prefer the
+/// discrete GPU even though its Vulkan surface advertises `PreMultiplied`: on Optimus
+/// the discrete GPU renders off-screen and its result is copied back OPAQUE, so only
+/// the display-driving iGPU composites see-through (the gpu-diag.log evidence from the
+/// first attempt). Overrides wgpu's `power_preference` HINT with a hard device-class
+/// rule, matching why SCR1B3 (`LowPower` → the iGPU) is see-through on the same box.
+///
+/// No-op when transparency is off (the opaque path keeps the discrete GPU for
+/// terminal-glyph throughput). Correct on any native platform (single-adapter
+/// machines pass through; the capability query works on every native backend).
+fn install_transparency_adapter_selector(
+    options: &mut eframe::NativeOptions,
+    want_transparency: bool,
+) {
+    if !want_transparency {
+        return;
+    }
+    use std::sync::Arc;
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        gpu_diag::begin_session(&format!(
+            "transparency=ON backends={:?} (default=unforced when Auto)",
+            setup.instance_descriptor.backends
+        ));
+        setup.native_adapter_selector = Some(Arc::new(
+            move |adapters: &[eframe::wgpu::Adapter],
+                  surface: Option<&eframe::wgpu::Surface<'_>>| {
+                use eframe::wgpu::CompositeAlphaMode;
+                gpu_diag::log_line(&format!(
+                    "adapter enumeration: {} candidate(s), surface_present={}",
+                    adapters.len(),
+                    surface.is_some()
+                ));
+                let mut metas = Vec::with_capacity(adapters.len());
+                for adapter in adapters {
+                    let info = adapter.get_info();
+                    let modes = surface
+                        .map(|s| s.get_capabilities(adapter).alpha_modes)
+                        .unwrap_or_default();
+                    let mode_names: Vec<&str> = modes
+                        .iter()
+                        .map(|m| gpu_diag::alpha_mode_name(*m))
+                        .collect();
+                    gpu_diag::log_line(&format!(
+                        "  adapter: name='{}' type={} backend={:?} driver='{} {}' \
+                         alpha_modes=[{}] egui_wgpu_would_configure={} transparent={}",
+                        info.name,
+                        gpu_diag::device_type_name(info.device_type),
+                        info.backend,
+                        info.driver,
+                        info.driver_info,
+                        mode_names.join(", "),
+                        gpu_diag::alpha_mode_name(gpu_diag::egui_wgpu_configured_mode(&modes)),
+                        gpu_diag::supports_transparency(&modes),
+                    ));
+                    metas.push(gpu_diag::AdapterMeta {
+                        device_type: info.device_type,
+                        premultiplied: modes.contains(&CompositeAlphaMode::PreMultiplied),
+                        postmultiplied: modes.contains(&CompositeAlphaMode::PostMultiplied),
+                        inherit: modes.contains(&CompositeAlphaMode::Inherit),
+                    });
+                }
+                let idx = gpu_diag::choose_display_driving_adapter(&metas).unwrap_or(0);
+                match adapters.get(idx) {
+                    Some(chosen) => {
+                        let info = chosen.get_info();
+                        let modes = surface
+                            .map(|s| s.get_capabilities(chosen).alpha_modes)
+                            .unwrap_or_default();
+                        gpu_diag::log_line(&format!(
+                            "  CHOSEN adapter[{idx}]: name='{}' type={} backend={:?} \
+                             configured_alpha_mode={}",
+                            info.name,
+                            gpu_diag::device_type_name(info.device_type),
+                            info.backend,
+                            gpu_diag::alpha_mode_name(gpu_diag::egui_wgpu_configured_mode(&modes)),
+                        ));
+                        Ok(chosen.clone())
+                    }
+                    None => Err("no wgpu adapter available for a transparent window".to_string()),
+                }
+            },
+        ));
     }
 }
 
@@ -484,11 +555,7 @@ fn load_app_icon() -> Option<egui::IconData> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        resolve_configured_backends, resolve_power_preference, transparency_fallback_warning,
-    };
-    use c0pl4nd_core::config::GraphicsBackend;
-    use eframe::wgpu::Backends;
+    use super::resolve_power_preference;
 
     #[test]
     fn gpu_preference_maps_and_env_wins() {
@@ -522,55 +589,5 @@ mod tests {
             PowerPreference::LowPower,
             "env override wins over the persisted setting",
         );
-    }
-
-    #[test]
-    fn auto_backend_defers_to_the_platform_default() {
-        // `Auto` must NOT force a backend — it passes the platform default through
-        // unchanged (DX12 for opaque, Vulkan for transparency on Windows).
-        assert_eq!(
-            resolve_configured_backends(GraphicsBackend::Auto, Backends::DX12),
-            Backends::DX12,
-        );
-        assert_eq!(
-            resolve_configured_backends(GraphicsBackend::Auto, Backends::VULKAN),
-            Backends::VULKAN,
-        );
-    }
-
-    #[test]
-    fn explicit_backend_overrides_the_platform_default() {
-        // Each explicit choice forces THAT backend regardless of the default —
-        // the garble escape hatch (e.g. Vulkan over a bad DX12 default).
-        assert_eq!(
-            resolve_configured_backends(GraphicsBackend::Vulkan, Backends::DX12),
-            Backends::VULKAN,
-        );
-        assert_eq!(
-            resolve_configured_backends(GraphicsBackend::Dx12, Backends::VULKAN),
-            Backends::DX12,
-        );
-        assert_eq!(
-            resolve_configured_backends(GraphicsBackend::Gl, Backends::DX12),
-            Backends::GL,
-        );
-    }
-
-    #[test]
-    fn warns_only_when_transparency_wanted_but_backend_not_vulkan() {
-        // Transparency requested + non-Vulkan backend → opaque-window warning.
-        assert!(transparency_fallback_warning(true, false).is_some());
-        // Transparency requested + Vulkan backend → no warning (it will work).
-        assert!(transparency_fallback_warning(true, true).is_none());
-        // Opaque window requested → never warn, regardless of backend.
-        assert!(transparency_fallback_warning(false, false).is_none());
-        assert!(transparency_fallback_warning(false, true).is_none());
-    }
-
-    #[test]
-    fn warning_text_names_the_recovery_lever() {
-        let msg = transparency_fallback_warning(true, false).unwrap();
-        assert!(msg.contains("WGPU_BACKEND"));
-        assert!(msg.to_lowercase().contains("vulkan"));
     }
 }

@@ -71,6 +71,8 @@ use pane_term::{CellMetrics, ColorRun, PaneTerm};
 mod glyph_cache;
 pub(crate) use glyph_cache::*;
 
+pub(crate) mod gpu_diag;
+
 /// How many placeholder panes the shell opens with on first launch.
 const INITIAL_PANES: usize = 1;
 
@@ -609,6 +611,31 @@ impl C0pl4ndApp {
                                     // harness, which drives frames explicitly with `step()`); headless tests
                                     // built via `bootstrap()` leave this false.
         app.live_window = cc.wgpu_render_state.is_some();
+        // Cross-check instrumentation (pairs with the adapter-selector log written
+        // during GPU init): record the adapter eframe ACTUALLY bound plus the
+        // resolved transparency state + clear-color alpha, so `gpu-diag.log` shows
+        // both the per-adapter surface capabilities AND the final swapchain-facing
+        // pick. This is the file the user hands back to diagnose "opaque black"
+        // (the release binary is a GUI subsystem app, so stderr/tracing is lost).
+        // Only meaningful when a real window exists AND a translucent mode is on.
+        if app.config.effective_translucent() {
+            if let Some(rs) = &cc.wgpu_render_state {
+                let info = rs.adapter.get_info();
+                let clear_alpha = window_clear_color(&app.config, &app.theme)[3];
+                gpu_diag::log_line(&format!(
+                    "RenderState bound: name='{}' type={} backend={:?} | \
+                     effective_translucent=true window_mode={:?} opacity={:.2} \
+                     with_transparent=true clear_alpha={:.3} pane_bg_alpha={}",
+                    info.name,
+                    gpu_diag::device_type_name(info.device_type),
+                    info.backend,
+                    app.config.window_mode,
+                    app.config.opacity,
+                    clear_alpha,
+                    pane_bg_alpha(&app.config),
+                ));
+            }
+        }
         // W1TN3SS: drain the local crash-report spool per the user's opt-in
         // posture (production-only — never from `bootstrap`, so a unit test that
         // builds the app never reads/writes the real config dir's spool). A user

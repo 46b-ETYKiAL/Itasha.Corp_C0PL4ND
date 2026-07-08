@@ -1195,8 +1195,28 @@ fn render_sections(
                 ui.end_row();
             }
 
-            if row_visible(q, "tint color overlay wash picker") {
+            // Explicit ON/OFF master for the tint colour wash — independent of the
+            // strength slider, so a user can toggle the wash off without losing the
+            // colour + strength they set. Enabled whenever transparency is on.
+            if row_visible(q, "tint enable toggle wash on off") {
                 let en = config.transparency_enabled;
+                ui.add_enabled_ui(en, |ui| {
+                    changed |= ui
+                        .checkbox(&mut config.tint_enabled, "Enable tint wash")
+                        .on_hover_text(
+                            "Master switch for the colour wash over the window. When \
+                             off, no tint is painted even if a colour and strength are \
+                             set below.",
+                        )
+                        .changed();
+                });
+                ui.label(""); // empty control column — checkbox carries the label
+                changed |= reset_to_default(ui, &mut config.tint_enabled, &def.tint_enabled);
+                ui.end_row();
+            }
+
+            if row_visible(q, "tint color overlay wash picker") {
+                let en = config.transparency_enabled && config.tint_enabled;
                 ui.label("Tint color")
                     .on_hover_text("Color washed over the window (strength below).");
                 ui.add_enabled_ui(en, |ui| {
@@ -1220,7 +1240,7 @@ fn render_sections(
             }
 
             if row_visible(q, "tint strength wash overlay") {
-                let en = config.transparency_enabled;
+                let en = config.transparency_enabled && config.tint_enabled;
                 ui.label("Tint strength")
                     .on_hover_text("0% = no tint .. 100% = strong color wash.");
                 changed |= ui

@@ -89,7 +89,15 @@ transparency_enabled = false   # master on/off for the whole transparency system
 window_mode = "opaque"         # opaque | transparent | glass | mica | vibrancy
 tint = "#08060d"               # #RRGGBB overlay painted when a translucent mode is active (brand-canon VOID BLACK)
 tint_strength = 0.0            # 0.0 (no tint) .. 1.0 (strong)
+tint_enabled = true            # master ON/OFF for the tint wash (independent of strength; default true)
 ```
+
+> **Hybrid-GPU laptops (NVIDIA + Intel):** a see-through window needs a GPU whose
+> swapchain surface exposes a transparent `CompositeAlphaMode`. The discrete GPU
+> often reports `Opaque`-only (→ solid black window), so with a translucent mode on,
+> C0PL4ND now auto-selects the **integrated** GPU (matching the sibling app SCR1B3).
+> If the window is still opaque, check `<config_dir>/gpu-diag.log` — it lists every
+> adapter, its surface `alpha_modes`, and the one chosen.
 
 - `transparent` — the portable, cross-platform reduced-alpha surface.
 - `glass` / `mica` / `vibrancy` — request an OS blur backdrop (acrylic/mica on Windows, vibrancy on macOS), degrading to the portable transparent surface where the API is absent.
