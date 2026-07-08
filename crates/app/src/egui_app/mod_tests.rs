@@ -1421,3 +1421,100 @@ fn frame_policy_is_continuous_only_for_crt_animation() {
     };
     assert_eq!(app.frame_policy(), expected);
 }
+
+/// Build a headless egui context whose reported OS appearance is `system` and
+/// run `f` inside a pass, so `follow_os_theme_tick` reads a controlled
+/// `ctx.system_theme()`. Reuse ONE context across calls so its per-frame theme
+/// tracking is realistic.
+#[cfg(test)]
+fn drive_with_system_theme(
+    ctx: &egui::Context,
+    system: Option<egui::Theme>,
+    f: impl FnOnce(&egui::Context),
+) {
+    let raw = egui::RawInput {
+        system_theme: system,
+        ..Default::default()
+    };
+    ctx.begin_pass(raw);
+    f(ctx);
+    let _ = ctx.end_pass();
+}
+
+/// F3 (SCR1B3 parity): while `follow_os_theme` is on, a MANUAL theme pick STICKS
+/// — `follow_os_theme_tick` re-applies the OS-derived theme ONLY when the OS
+/// appearance actually CHANGES, never every frame. Regression guard for the
+/// prior "reassert every frame" behaviour that reverted a manual pick on the
+/// very next frame.
+#[test]
+fn follow_os_theme_only_reapplies_on_os_change_not_every_frame() {
+    let ctx = egui::Context::default();
+    let mut app = C0pl4ndApp::bootstrap();
+    app.config.follow_os_theme = true;
+
+    // Frame 1: the OS appearance (Dark) is observed for the first time and the
+    // matching dark default is applied.
+    drive_with_system_theme(&ctx, Some(egui::Theme::Dark), |ctx| {
+        app.follow_os_theme_tick(ctx);
+    });
+    assert_eq!(
+        app.config.theme, "itasha-corp",
+        "dark OS applies the dark default"
+    );
+    assert_eq!(
+        app.last_os_theme,
+        Some(egui::Theme::Dark),
+        "OS appearance tracked"
+    );
+
+    // The user manually picks a DIFFERENT theme while follow-OS stays on.
+    app.config.theme = "wired-noir".to_string();
+
+    // Frames 2..N with the SAME OS appearance must NOT revert the manual pick —
+    // this is the whole point of the fix. Drive several frames to be sure.
+    for _ in 0..5 {
+        drive_with_system_theme(&ctx, Some(egui::Theme::Dark), |ctx| {
+            app.follow_os_theme_tick(ctx);
+        });
+        assert_eq!(
+            app.config.theme, "wired-noir",
+            "manual pick must STICK while the OS appearance is unchanged"
+        );
+    }
+
+    // When the OS appearance actually FLIPS to Light, follow-OS re-applies the
+    // light default — proving the feature still works, it is just edge-triggered.
+    drive_with_system_theme(&ctx, Some(egui::Theme::Light), |ctx| {
+        app.follow_os_theme_tick(ctx);
+    });
+    assert_eq!(
+        app.config.theme, "ghost-paper",
+        "an actual OS dark→light change re-applies the light default"
+    );
+    assert_eq!(app.last_os_theme, Some(egui::Theme::Light));
+}
+
+/// Turning `follow_os_theme` OFF forgets the tracked OS appearance, so a later
+/// re-enable re-applies the OS theme on its next observation (not suppressed by
+/// a stale match).
+#[test]
+fn follow_os_theme_toggle_off_forgets_tracked_appearance() {
+    let ctx = egui::Context::default();
+    let mut app = C0pl4ndApp::bootstrap();
+    app.config.follow_os_theme = true;
+
+    drive_with_system_theme(&ctx, Some(egui::Theme::Dark), |ctx| {
+        app.follow_os_theme_tick(ctx);
+    });
+    assert_eq!(app.last_os_theme, Some(egui::Theme::Dark));
+
+    // Toggle off: the tracker is cleared even though the tick otherwise no-ops.
+    app.config.follow_os_theme = false;
+    drive_with_system_theme(&ctx, Some(egui::Theme::Dark), |ctx| {
+        app.follow_os_theme_tick(ctx);
+    });
+    assert_eq!(
+        app.last_os_theme, None,
+        "toggle off forgets the tracked appearance"
+    );
+}
