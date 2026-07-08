@@ -12,10 +12,14 @@
 //! window at all**. It is preferred over `DETACHED_PROCESS` because the child's
 //! `stdout`/`stderr` stay capturable (we still read `reg`/clipboard output).
 //!
-//! Route EVERY `std::process::Command` the app spawns through
-//! [`NoConsoleWindow::no_console_window`] so no code path can flash a console.
-//! The method is a no-op off Windows (there is no console to suppress), so
-//! callers use it unconditionally without any `#[cfg]` of their own.
+//! This helper is the shared way to suppress that flash: route a
+//! **console-child** `std::process::Command` through
+//! [`NoConsoleWindow::no_console_window`]. The method is a no-op off Windows
+//! (there is no console to suppress), so callers use it unconditionally without
+//! any `#[cfg]` of their own. It is not universal, and does not need to be: a
+//! few call sites already set their own `CREATE_NO_WINDOW` inline via
+//! `CommandExt::creation_flags`, and a spawn of another **GUI-subsystem**
+//! program (which owns no console) needs no suppression at all.
 
 use std::process::Command;
 
