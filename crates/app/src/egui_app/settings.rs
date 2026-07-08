@@ -648,6 +648,7 @@ pub fn show(
                                 sel,
                                 &q,
                                 incognito,
+                                colors,
                                 &mut clear_history,
                                 &mut set_incognito,
                             );
@@ -944,6 +945,10 @@ fn render_sections(
     sel: &str,
     q: &str,
     incognito: bool,
+    // The chrome palette the host derived from the ACTIVE theme (`self.theme`),
+    // so a file-based CUSTOM theme's accent is available here — used for the mesh
+    // preview swatch below.
+    colors: ChromeColors,
     clear_history: &mut bool,
     set_incognito: &mut Option<bool>,
 ) -> bool {
@@ -1071,8 +1076,9 @@ fn render_sections(
                     .on_hover_text(
                         "Automatically match the operating system's dark/light \
                          appearance, switching between the default dark (itasha-corp) \
-                         and light (ghost-paper) themes. While on, it overrides the \
-                         theme picker above.",
+                         and light (ghost-paper) themes when the OS appearance \
+                         changes. A theme you pick above still applies and sticks \
+                         until the OS dark/light setting next flips.",
                     )
                     .changed();
                 ui.label(""); // checkbox carries its own label
@@ -2100,10 +2106,12 @@ fn render_sections(
                 );
                 // Effective swatch: the override if set, else the theme accent (what
                 // the mesh actually draws with when no override is present) so the
-                // picker opens on the current colour either way.
-                let theme = c0pl4nd_core::Theme::builtin_named(&config.theme)
-                    .unwrap_or_else(c0pl4nd_core::Theme::builtin_void);
-                let accent = super::theme::ChromeColors::from_theme(&theme).accent;
+                // picker opens on the current colour either way. Use `colors.accent`
+                // — the ACTIVE theme's accent the host derived from `self.theme`
+                // (the same theme the mesh painter uses) — NOT a `builtin_named`
+                // re-lookup, which returns None for a file-based CUSTOM theme and
+                // fell back to the void accent, showing the wrong preview swatch.
+                let accent = colors.accent;
                 let overridden = config.effects.mesh_color.is_some();
                 let start =
                     config

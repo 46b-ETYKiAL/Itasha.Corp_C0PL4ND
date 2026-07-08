@@ -53,6 +53,7 @@ mod window_effects;
 pub(crate) use window_effects::*;
 mod caption_close;
 mod font_setup;
+mod startup_recovery;
 mod win_foreground;
 pub(crate) use font_setup::*;
 mod app_config;
@@ -301,6 +302,25 @@ pub struct C0pl4ndApp {
     /// AttachThreadInput backstop — then set this so it NEVER runs again (raising
     /// on later frames would steal focus back from an app the user switched to).
     pub(crate) foreground_done: bool,
+    /// The OS dark/light appearance observed on the previous `follow_os_theme_tick`
+    /// (resolved, unknown → dark). `follow_os_theme_tick` re-applies the OS-derived
+    /// theme ONLY when the live `ctx.system_theme()` differs from this — so a
+    /// MANUAL theme pick sticks between OS-appearance changes (SCR1B3 parity).
+    /// `None` when follow-OS is off / never observed. Never persisted.
+    pub(crate) last_os_theme: Option<egui::Theme>,
+    /// When `Some`, an OS-composited "risky" window mode (Dim/Glass/Mica/
+    /// Vibrancy) was applied at startup and its crash-loop recovery sentinel is
+    /// ARMED in this config dir. The frame loop counts successful frames and,
+    /// once [`startup_recovery::STEADY_STATE_FRAMES`] have rendered, clears the
+    /// sentinel (the window composited fine) and sets this back to `None`. If the
+    /// app is force-killed before then (a black/frozen window), the sentinel
+    /// survives and the NEXT launch auto-reverts to the safe Transparent mode.
+    /// See [`startup_recovery`]. `None` off the risky path (nothing to clear).
+    pub(crate) recovery_sentinel_dir: Option<std::path::PathBuf>,
+    /// Count of rendered frames since a risky-mode launch armed the recovery
+    /// sentinel, used to detect the steady-state window. Only advances while
+    /// `recovery_sentinel_dir` is `Some`.
+    pub(crate) recovery_frames: u32,
     /// True on the first frame the Settings window opens (a closed→open edge),
     /// so `settings::show` FORCES the window to its saved-or-centered position
     /// that frame instead of trusting egui's `default_pos` (which read a
@@ -499,11 +519,56 @@ impl C0pl4ndApp {
             install_chrome_fonts(&cc.egui_ctx, &app.config.font);
         }
         app.applied_font_family = font_apply_key(&app.config.font);
+        // CRASH-LOOP RECOVERY GUARD for the OS-composited "risky" modes
+        // (Dim/Glass/Mica/Vibrancy). Applying a layered-window attribute or a
+        // DWM backdrop to a live Vulkan flip-model swapchain can stop DWM
+        // compositing on some GPU/driver/Windows combos → a black/frozen window.
+        // Because the mode persists in config, an affected user would open a dead
+        // window (with no reachable Settings) on EVERY launch. So: on startup, if
+        // a sentinel from a previous risky launch is STILL present, that launch
+        // never reached steady state (a black window the user force-killed) —
+        // auto-revert to the safe per-pixel Transparent mode, persist it, clear
+        // the sentinel, and notify. Otherwise arm the sentinel; the frame loop
+        // clears it once the window has composited fine for a short window. The
+        // `Transparent` path (and `Opaque`) never touch the risky OS path, so it
+        // is `Proceed` — untouched. See `startup_recovery`.
+        if let Some(sentinel_dir) = c0pl4nd_core::Config::config_dir() {
+            match startup_recovery::decide(
+                startup_recovery::is_armed(&sentinel_dir),
+                app.config.window_mode,
+            ) {
+                startup_recovery::StartupDecision::Revert => {
+                    app.config.window_mode = c0pl4nd_core::config::WindowMode::Transparent;
+                    if let Some(path) = c0pl4nd_core::Config::default_path() {
+                        if let Err(e) = app.config.save_to(&path) {
+                            tracing::warn!("recovery: could not persist reverted window_mode: {e}");
+                        }
+                    }
+                    startup_recovery::disarm(&sentinel_dir);
+                    tracing::warn!(
+                        "recovery: previous launch never stabilised in an \
+                         OS-composited window mode; reverted to Transparent"
+                    );
+                    app.toast = Some(
+                        "A previous launch left the window blank in a special \
+                         transparency mode, so it was reset to the safe \
+                         Transparent mode. Re-select it in Settings if you like."
+                            .to_string(),
+                    );
+                }
+                startup_recovery::StartupDecision::Arm => {
+                    startup_recovery::arm(&sentinel_dir, app.config.window_mode);
+                    app.recovery_sentinel_dir = Some(sentinel_dir);
+                }
+                startup_recovery::StartupDecision::Proceed => {}
+            }
+        }
         // Apply the OS glass/acrylic/mica/vibrancy effect — ONLY when the master
         // transparency toggle is on AND the chosen mode wants a non-opaque
         // surface (`effective_translucent`). Otherwise the window is a normal
         // opaque window: no layered surface, so no DWM ghost-on-close risk.
-        // Done after `bootstrap()` so `app.config` is the source of truth.
+        // Done after `bootstrap()` (and the recovery guard above, which may have
+        // reverted `window_mode`) so `app.config` is the source of truth.
         if app.config.effective_translucent() {
             apply_window_effect(
                 cc,
@@ -657,6 +722,9 @@ impl C0pl4ndApp {
             cursor_trail: std::collections::VecDeque::new(),
             first_frame_time: None,
             foreground_done: false,
+            last_os_theme: None,
+            recovery_sentinel_dir: None,
+            recovery_frames: 0,
             settings_place_pending: false,
             settings_was_open: false,
             live_window: false,
@@ -2473,19 +2541,40 @@ impl C0pl4ndApp {
         }
     }
 
-    /// When `follow_os_theme` is on, track the OS dark/light appearance and swap
-    /// between the default dark (`itasha-corp`) and light (`ghost-paper`) themes to
-    /// match — overriding the manual theme selection while it is on. A no-op when
-    /// the toggle is off or the desired theme is already active. egui reports the
-    /// OS appearance via `ctx.system_theme()`; an unknown value keeps the dark
-    /// default. Mirrors SCR1B3's follow-OS behaviour.
+    /// When `follow_os_theme` is on, swap between the default dark (`itasha-corp`)
+    /// and light (`ghost-paper`) themes to match the OS appearance — but ONLY on
+    /// an actual OS-appearance CHANGE since the last observed frame, NOT every
+    /// frame. Between OS changes a MANUAL theme pick (combo / arrows / name field)
+    /// therefore STICKS until the OS theme actually flips.
+    ///
+    /// This is the SCR1B3-parity behaviour (`frame_tick.rs`: re-apply only when
+    /// `Some(os_theme) != last_os_theme`). The previous C0PL4ND implementation
+    /// reasserted the OS-derived theme on every frame whenever it differed, so a
+    /// manual pick reverted on the very next frame — a divergence from SCR1B3 and
+    /// a confusing UX. egui reports the OS appearance via `ctx.system_theme()`; an
+    /// unknown value resolves to the dark default (the app default), so the first
+    /// observation still applies. Toggling the switch OFF forgets the tracked
+    /// appearance so re-enabling re-applies on the next observed frame.
     fn follow_os_theme_tick(&mut self, ctx: &egui::Context) {
         if !self.config.follow_os_theme {
+            // Forget the tracked OS appearance so a later re-enable re-applies the
+            // OS theme on its next observation instead of being suppressed by a
+            // stale match.
+            self.last_os_theme = None;
             return;
         }
-        let desired = match ctx.system_theme() {
-            Some(egui::Theme::Light) => "ghost-paper",
-            _ => "itasha-corp",
+        // Resolve the OS appearance to a concrete dark/light (unknown → dark, the
+        // app default). Re-apply ONLY when it CHANGED since the last observation;
+        // the `Some(..)` wrap makes the first observation (`last_os_theme == None`)
+        // count as a change so the initial OS theme is applied.
+        let os_theme = ctx.system_theme().unwrap_or(egui::Theme::Dark);
+        if Some(os_theme) == self.last_os_theme {
+            return;
+        }
+        self.last_os_theme = Some(os_theme);
+        let desired = match os_theme {
+            egui::Theme::Light => "ghost-paper",
+            egui::Theme::Dark => "itasha-corp",
         };
         if self.config.theme == desired {
             return;
@@ -3452,6 +3541,24 @@ impl C0pl4ndApp {
         // cost and would hide the sweep).
         if self.first_frame_time.is_none() {
             self.first_frame_time = Some(ctx.input(|i| i.time));
+        }
+        // CRASH-LOOP RECOVERY: once a risky-mode launch (Dim/Glass/Mica/Vibrancy)
+        // has rendered successfully for a short steady-state window, the window
+        // composited fine — clear the sentinel so this launch is NOT mistaken for
+        // a black-window crash on the NEXT start. If the app is force-killed
+        // before this (a window that never composites), the sentinel survives and
+        // the next `new()` reverts to Transparent. See `startup_recovery`.
+        if let Some(dir) = self.recovery_sentinel_dir.as_ref() {
+            self.recovery_frames = self.recovery_frames.saturating_add(1);
+            if self.recovery_frames >= startup_recovery::STEADY_STATE_FRAMES {
+                startup_recovery::disarm(dir);
+                self.recovery_sentinel_dir = None;
+            } else {
+                // Keep the frame pump running so the steady-state window is
+                // reached promptly even without input (real window only; the
+                // sentinel is never armed in the headless harness).
+                ctx.request_repaint();
+            }
         }
         // FIRST-LAUNCH FOREGROUND (once). A freshly-launched window can open
         // BEHIND other windows on Windows 11: the OS foreground-lock ignores the
