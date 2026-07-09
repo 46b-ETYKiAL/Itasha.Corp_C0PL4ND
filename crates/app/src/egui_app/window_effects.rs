@@ -90,15 +90,12 @@ pub(crate) fn tint_alpha(strength: f32) -> u8 {
     (strength.clamp(0.0, 1.0) * 90.0).round() as u8
 }
 
-/// The tint wash alpha folded with the window `opacity`, so the tint fades WITH
-/// the window: `opacity == 0.0` yields `0` (fully clear — the wash vanishes along
-/// with the panes, so the maximally-transparent window shows ONLY glyph text over
-/// the desktop), and `opacity == 1.0` yields the full [`tint_alpha`] weight. The
-/// tint is painted on the background layer BEHIND the translucent panels, so
-/// without this fold it stayed at a fixed alpha and showed straight through the
-/// see-through panels at opacity 0 as a frosted haze. Pure → unit-testable.
-pub(crate) fn tint_wash_alpha(strength: f32, opacity: f32) -> u8 {
-    (f32::from(tint_alpha(strength)) * opacity.clamp(0.0, 1.0)).round() as u8
+/// The 0..=255 alpha for the software frosted-glass wash at a given `amount`
+/// (0..=1). Capped at `200/255` (~78%) even at the maximum so the glyph text
+/// painted OVER the frost stays legible — a full-opaque frost would hide the
+/// terminal. Pure → unit-testable.
+pub(crate) fn frost_alpha(amount: f32) -> u8 {
+    (amount.clamp(0.0, 1.0) * 200.0).round() as u8
 }
 
 /// Paint the window tint as a single colour wash on the BACKGROUND layer, EARLY —
@@ -114,20 +111,18 @@ pub(crate) fn tint_wash_alpha(strength: f32, opacity: f32) -> u8 {
 /// ([`c0pl4nd_core::Config::tint_enabled`]) is off, when `tint_strength <= 0`, or
 /// when the hex is invalid.
 ///
-/// The wash alpha is folded with the window `opacity` (see [`tint_wash_alpha`]),
-/// so the tint FADES WITH the window: at opacity 0 it vanishes completely (only
-/// the glyph text remains over the desktop — no frosted colour wash left on top),
-/// climbing back to its `tint_strength` weight as the window approaches solid.
-/// Without this the tint painted at a FIXED alpha on the background layer and
-/// showed straight through the fully-transparent panels at opacity 0 as a uniform
-/// frosted haze — the "opacity 0 still looks frosted" report.
+/// The wash alpha is [`tint_alpha`] alone — INDEPENDENT of the window opacity, so
+/// the tint ACTUALLY WORKS at any opacity (it colours the see-through glass rather
+/// than vanishing as the window clears). Opacity is a SEPARATE control (the glass
+/// clarity); frost ([`paint_frost`]) is a SEPARATE diffuse wash. A user who wants a
+/// fully-clear window turns the tint (and frost) off.
 pub(crate) fn paint_background_tint(ctx: &egui::Context, config: &c0pl4nd_core::Config) {
     // Explicit master switch first: when the user has toggled the tint wash OFF,
     // paint nothing even if a colour + strength are still parked in the config.
     if !config.tint_enabled || config.tint_strength <= 0.0 {
         return;
     }
-    let alpha = tint_wash_alpha(config.tint_strength, config.opacity);
+    let alpha = tint_alpha(config.tint_strength);
     if alpha == 0 {
         return;
     }
@@ -140,6 +135,110 @@ pub(crate) fn paint_background_tint(ctx: &egui::Context, config: &c0pl4nd_core::
         0.0,
         egui::Color32::from_rgba_unmultiplied(r, g, b, alpha),
     );
+}
+
+/// Paint the software "frosted glass" wash on the BACKGROUND layer — a deliberate,
+/// adjustable diffuse pane over the window, INDEPENDENT of the opacity slider (it
+/// works at any opacity, unlike the tint's sibling wash which the opacity used to
+/// fade). This is NOT a real desktop blur (impossible on the hybrid-GPU target);
+/// it is a self-rendered frosted look: a colour wash at [`frost_alpha`] plus an
+/// optional subtle procedural GRAIN texture so it reads as diffused glass rather
+/// than a flat film. Painted on the background layer, so it sits BEHIND the glyph
+/// text and BELOW the Settings window (both stay crisp/legible). A no-op when the
+/// frost master toggle is off or the amount is 0.
+///
+/// The wash colour is [`c0pl4nd_core::Config::frost_color`] when set to a valid
+/// `#RRGGBB`, else the active `theme` background (so the default frost reads as a
+/// diffuse pane of the terminal's own colour).
+pub(crate) fn paint_frost(
+    ctx: &egui::Context,
+    config: &c0pl4nd_core::Config,
+    theme: &c0pl4nd_core::Theme,
+) {
+    if !config.frost_enabled || config.frost_amount <= 0.0 {
+        return;
+    }
+    let alpha = frost_alpha(config.frost_amount);
+    if alpha == 0 {
+        return;
+    }
+    // Colour: explicit frost_color, else follow the theme background.
+    let (r, g, b) = c0pl4nd_core::theme::parse_hex(&config.frost_color)
+        .or_else(|_| c0pl4nd_core::theme::parse_hex(&theme.background))
+        .unwrap_or((18, 18, 18));
+    let rect = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    painter.rect_filled(
+        rect,
+        0.0,
+        egui::Color32::from_rgba_unmultiplied(r, g, b, alpha),
+    );
+    // Optional grain: one cheap tiling value-noise quad over the wash, its alpha
+    // scaling with the frost amount, so a stronger frost reads as more diffused.
+    if config.frost_grain {
+        let grain_alpha = (config.frost_amount.clamp(0.0, 1.0) * 55.0).round() as u8;
+        if grain_alpha > 0 {
+            let tex = frost_grain_texture(ctx);
+            // Tile the NxN noise across the whole rect via a Repeat-wrapped UV that
+            // spans (rect / tile) tiles; tint carries the grain alpha (the grayscale
+            // texels modulate the luminance, the tint sets the opacity).
+            let tile = FROST_GRAIN_TILE as f32;
+            let uv = egui::Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(rect.width() / tile, rect.height() / tile),
+            );
+            painter.image(
+                tex.id(),
+                rect,
+                uv,
+                egui::Color32::from_white_alpha(grain_alpha),
+            );
+        }
+    }
+}
+
+/// Side length (texels) of the tiling frost-grain noise texture.
+const FROST_GRAIN_TILE: usize = 64;
+
+/// A small tiling value-noise texture for the frost grain, built ONCE and cached
+/// in egui memory (a `TextureHandle` is a cheap `Arc`, so cloning it out of the
+/// cache each frame is free — the GPU upload happens a single time). Deterministic
+/// (a hash of the texel coords), so the grain is stable frame-to-frame and never
+/// shimmers. Wrap mode is Repeat so the small tile fills any window size.
+fn frost_grain_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let id = egui::Id::new("c0pl4nd-frost-grain-tex");
+    if let Some(h) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return h;
+    }
+    let n = FROST_GRAIN_TILE;
+    let mut pixels = Vec::with_capacity(n * n);
+    for y in 0..n {
+        for x in 0..n {
+            // Cheap deterministic hash → a grayscale value in a NARROW band around
+            // mid (≈118..≈168) so the grain is a subtle diffusion, never harsh
+            // salt-and-pepper. (`from_gray` makes an opaque grey; the paint tint
+            // sets the final overlay alpha.)
+            let h = (x as u32)
+                .wrapping_mul(374_761_393)
+                .wrapping_add((y as u32).wrapping_mul(668_265_263));
+            let h = h ^ (h >> 13);
+            let v = 118 + (h.wrapping_mul(1_274_126_177) % 50) as u8;
+            pixels.push(egui::Color32::from_gray(v));
+        }
+    }
+    let image = egui::ColorImage::new([n, n], pixels);
+    let handle = ctx.load_texture(
+        "c0pl4nd-frost-grain",
+        image,
+        egui::TextureOptions {
+            magnification: egui::TextureFilter::Linear,
+            minification: egui::TextureFilter::Linear,
+            wrap_mode: egui::TextureWrapMode::Repeat,
+            mipmap_mode: None,
+        },
+    );
+    ctx.data_mut(|d| d.insert_temp(id, handle.clone()));
+    handle
 }
 
 /// Style the chrome (titlebar + status bar) buttons as FLAT: no idle background,
@@ -203,7 +302,25 @@ pub(crate) fn fold_alpha(color: egui::Color32, bg_alpha: u8) -> egui::Color32 {
 
 #[cfg(test)]
 mod tint_tests {
-    use super::{flatten_chrome_buttons, fold_alpha, tint_alpha, tint_wash_alpha};
+    use super::{flatten_chrome_buttons, fold_alpha, frost_alpha, tint_alpha};
+
+    #[test]
+    fn frost_alpha_scales_and_caps_for_legibility() {
+        // 0 amount → no frost; full amount → the 200/255 cap (never fully opaque,
+        // so glyph text over the frost stays legible); mid scales linearly; and
+        // out-of-range inputs clamp.
+        assert_eq!(frost_alpha(0.0), 0, "no frost at amount 0");
+        assert_eq!(frost_alpha(-1.0), 0, "negative clamps to 0");
+        assert_eq!(
+            frost_alpha(1.0),
+            200,
+            "max frost is capped at ~78% for legibility"
+        );
+        assert_eq!(frost_alpha(2.0), 200, "above 1.0 clamps to the cap");
+        assert_eq!(frost_alpha(0.5), 100, "mid amount scales linearly");
+        // Strictly monotonic in the amount (the slider always does something).
+        assert!(frost_alpha(0.2) < frost_alpha(0.6) && frost_alpha(0.6) < frost_alpha(0.9));
+    }
 
     #[test]
     fn fold_alpha_passes_opaque_through_and_scales_translucent() {
@@ -327,28 +444,6 @@ mod tint_tests {
         assert_eq!(tint_alpha(2.0), 90, "clamped above 1.0");
         // Mid strength scales linearly.
         assert_eq!(tint_alpha(0.5), 45);
-    }
-
-    #[test]
-    fn tint_wash_alpha_folds_opacity_so_it_vanishes_at_zero() {
-        // The frost fix: the tint wash alpha is folded with the window opacity, so
-        // at opacity 0 the tint is GONE (no frosted colour wash over a maximally-
-        // transparent window — only glyph text remains), and at opacity 1 it is the
-        // full `tint_alpha` weight.
-        // Opacity 0 → fully clear regardless of strength (kills the frost).
-        assert_eq!(
-            tint_wash_alpha(1.0, 0.0),
-            0,
-            "opacity 0 → no tint wash at all"
-        );
-        assert_eq!(tint_wash_alpha(0.5, 0.0), 0);
-        // Opacity 1 → the unmodified tint weight.
-        assert_eq!(tint_wash_alpha(1.0, 1.0), tint_alpha(1.0));
-        assert_eq!(tint_wash_alpha(0.5, 1.0), tint_alpha(0.5));
-        // Mid opacity scales the wash down proportionally (strength 1 → alpha 90).
-        assert_eq!(tint_wash_alpha(1.0, 0.5), 45);
-        // Monotonic in opacity for a fixed strength (more solid ⇒ stronger wash).
-        assert!(tint_wash_alpha(1.0, 0.25) < tint_wash_alpha(1.0, 0.75));
     }
 
     #[test]

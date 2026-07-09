@@ -1222,27 +1222,20 @@ impl C0pl4ndApp {
         }
 
         // --- background quad (theme bg) + focus ring ---
-        // `bg_alpha` is 255 for an opaque window and the opacity-folded alpha
-        // when the window is effectively translucent — painting the pane fill
-        // non-opaque is what lets the OS acrylic/mica blur (or, in Transparent
-        // mode, the desktop) show THROUGH the grid. An opaque fill here would
-        // cover the transparent clear-color and defeat the whole DWM backdrop,
-        // which is exactly why transparency "did nothing" before.
-        let bg = terms
-            .get(&pane_id)
-            .map(PaneTerm::background_rgb)
-            .unwrap_or((18, 18, 18));
-        // The pane background is NOT tinted here — the tinted `central_fill` behind
-        // it shows through the (translucent) pane fill, so the tint reaches the pane
-        // in exactly ONE pass, identical to the gaps between panes and the chrome
-        // panels. Tinting the pane fill too would DOUBLE the wash on panes and make
-        // them redder than the dividers/top bar (the reported mismatch). The glyph
-        // text is drawn with its own colour below, so it is never tinted.
-        painter.rect_filled(
-            rect,
-            egui::CornerRadius::same(4),
-            egui::Color32::from_rgba_unmultiplied(bg.0, bg.1, bg.2, bg_alpha),
-        );
+        // SINGLE-BACKDROP RULE (opacity linearity): the terminal background is
+        // painted EXACTLY ONCE — by the `CentralPanel` `central_fill` behind the
+        // whole tiling grid (see `ui`), which already carries the opacity-folded
+        // `pane_bg_alpha` AND backs the gaps between panes (so an opaque window
+        // stays solid, no desktop leak in the 4px seams). This per-pane body used
+        // to ALSO fill the pane rect at the same `bg_alpha`, so the two identical
+        // theme-bg layers COMPOUNDED (`opacity` over `opacity` ≈ `opacity²` — at
+        // 0.7 → ~0.91 effective), which read as a heavy haze that never went clear
+        // like SCR1B3 (whose editor paints its background once). Dropping this
+        // second fill makes the opacity slider LINEAR — one alpha over the desktop.
+        // The tint (background layer, behind `central_fill`) still reaches the pane
+        // through the single translucent backing, in exactly one pass. `bg_alpha`
+        // stays in use below to fold the bezel/focus-ring stroke.
+        //
         // Focus ring + bezel follow the active theme (accent on focus, bezel
         // otherwise) so the grid chrome matches the rest of the themed UI. Both
         // fold the window-transparency alpha (`bg_alpha`) so the border is as
@@ -4263,6 +4256,12 @@ impl C0pl4ndApp {
         // opacity, while the glyph text + the Settings window (painted later /
         // higher) are never tinted. See `paint_background_tint`.
         window_effects::paint_background_tint(ctx, &self.config);
+        // The software "frosted glass" wash, on the SAME background layer, over the
+        // tint and behind the panes/glyphs. Independent of the opacity slider (its
+        // own `frost_amount`), so it adds an adjustable diffuse frost that shows
+        // through the see-through glass at any opacity < 1 without fading. See
+        // `paint_frost`.
+        window_effects::paint_frost(ctx, &self.config, &self.theme);
 
         // 1) custom titlebar + tab strip. Fixed height so the drag region below
         //    is exactly the bar (not the whole remaining column), and so the
@@ -4335,19 +4334,24 @@ impl C0pl4ndApp {
             self.history_sidebar(ctx, colors);
         }
 
-        // 3) the pane grid (egui_tiles) — LIVE terminal panes (Milestone 2). The
-        //    central-panel fill carries the SAME opacity-folded alpha the pane
-        //    quads use when the window is effectively translucent, so the gap
-        //    between/around panes also lets the OS blur (or desktop) show through
-        //    — an opaque central fill here would cover the transparent clear
-        //    color before the pane quads ever painted. Fully opaque otherwise.
+        // 3) the pane grid (egui_tiles) — LIVE terminal panes (Milestone 2). This
+        //    CentralPanel fill is the SINGLE terminal backdrop (see the single-
+        //    backdrop rule in `render_pane_body`): it carries the opacity-folded
+        //    `pane_bg_alpha` and backs BOTH the panes AND the gaps between them, so
+        //    a translucent window reveals the desktop uniformly and an opaque one
+        //    stays solid (no seam leak). The per-pane body no longer paints its own
+        //    fill, so this alpha is applied EXACTLY ONCE — the opacity slider is
+        //    linear (no `opacity²` compounding haze). The backing colour is the
+        //    focused terminal's own theme background (identical to the chrome bg,
+        //    but semantically the TERMINAL surface, not the chrome).
         let central_alpha = pane_bg_alpha(&self.config);
-        let central_fill = egui::Color32::from_rgba_unmultiplied(
-            colors.bg.r(),
-            colors.bg.g(),
-            colors.bg.b(),
-            central_alpha,
-        );
+        let backing = self
+            .terms
+            .get(&self.focused_pane)
+            .map(PaneTerm::background_rgb)
+            .unwrap_or((colors.bg.r(), colors.bg.g(), colors.bg.b()));
+        let central_fill =
+            egui::Color32::from_rgba_unmultiplied(backing.0, backing.1, backing.2, central_alpha);
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(central_fill))
             .show(ctx, |ui| self.grid_ui(ui));

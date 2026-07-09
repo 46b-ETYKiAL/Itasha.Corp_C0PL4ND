@@ -980,6 +980,29 @@ pub struct Config {
     /// effective control until the user deliberately flips this off.
     #[serde(default = "default_true")]
     pub tint_enabled: bool,
+    /// Master ON/OFF for the software "frosted glass" wash — a deliberate,
+    /// adjustable diffuse tint over the window, INDEPENDENT of the opacity slider
+    /// (it works at any opacity). This is NOT a real desktop blur (impossible on
+    /// this hardware); it is a self-rendered frosted look. Default OFF.
+    #[serde(default)]
+    pub frost_enabled: bool,
+    /// Frosted-glass amount (0.0 = none .. 1.0 = maximum, capped short of fully
+    /// opaque so glyph text stays legible). Independent of window opacity. Default
+    /// [`default_frost_amount`] (a tasteful mid-low wash) so flipping the toggle
+    /// shows the effect at once instead of a no-op at 0.
+    #[serde(default = "default_frost_amount")]
+    pub frost_amount: f32,
+    /// Frost wash colour (`#RRGGBB`). Empty (the default) = follow the active
+    /// theme's background, so the frost reads as a diffuse pane of the terminal's
+    /// own colour; set a hex to tint the frost a specific colour.
+    #[serde(default)]
+    pub frost_color: String,
+    /// Add a subtle procedural GRAIN texture to the frost for a real frosted
+    /// (diffused) look rather than a flat wash. Default ON; the texture is a small
+    /// tiling value-noise quad, so it is cheap. Only applied when
+    /// [`Config::frost_enabled`] is on.
+    #[serde(default = "default_true")]
+    pub frost_grain: bool,
     pub cursor: CursorConfig,
     pub window: WindowConfig,
     pub effects: EffectsConfig,
@@ -1092,6 +1115,13 @@ fn default_true() -> bool {
     true
 }
 
+/// serde default for [`Config::frost_amount`] — a tasteful mid-low wash, so
+/// enabling the frosted-glass toggle shows the effect immediately (not a no-op
+/// at 0). The user tunes it up/down from here.
+fn default_frost_amount() -> f32 {
+    0.25
+}
+
 /// serde default for [`Config::term`] — the canonical `TERM` the emulator
 /// advertises. Delegates to [`crate::pty::DEFAULT_TERM`] so the config default
 /// and the PTY spawn default share one source of truth.
@@ -1121,6 +1151,10 @@ impl Default for Config {
             tint: default_tint(),
             tint_strength: 0.0,
             tint_enabled: true,
+            frost_enabled: false,
+            frost_amount: default_frost_amount(),
+            frost_color: String::new(),
+            frost_grain: true,
             cursor: CursorConfig::default(),
             window: WindowConfig::default(),
             effects: EffectsConfig::default(),
@@ -1881,6 +1915,37 @@ mod tests {
             c.tint, "#08060d",
             "fresh default tint is brand-canon VOID BLACK"
         );
+    }
+
+    #[test]
+    fn frost_defaults_are_off_and_load_from_an_older_config() {
+        // Fresh defaults: the frosted-glass feature is OFF (opt-in), at a tasteful
+        // mid-low amount, colour = follow-theme (empty), grain ON.
+        let c = Config::default();
+        assert!(!c.frost_enabled, "frost is opt-in (off by default)");
+        assert!((c.frost_amount - 0.25).abs() < f32::EPSILON);
+        assert_eq!(c.frost_color, "", "empty frost colour follows the theme bg");
+        assert!(c.frost_grain, "grain texture on by default");
+
+        // An OLDER config that predates the frost fields must still load, with the
+        // frost fields backfilled from their serde defaults (never a parse error).
+        let p = PathBuf::from("test.toml");
+        let old = Config::from_toml("theme = \"ghost-paper\"\nopacity = 0.6\n", &p)
+            .expect("a pre-frost config must still load");
+        assert!(!old.frost_enabled);
+        assert!((old.frost_amount - 0.25).abs() < f32::EPSILON);
+        assert!(old.frost_grain);
+
+        // Explicit frost settings round-trip.
+        let c2 = Config::from_toml(
+            "frost_enabled = true\nfrost_amount = 0.7\nfrost_color = \"#112233\"\nfrost_grain = false\n",
+            &p,
+        )
+        .unwrap();
+        assert!(c2.frost_enabled);
+        assert!((c2.frost_amount - 0.7).abs() < f32::EPSILON);
+        assert_eq!(c2.frost_color, "#112233");
+        assert!(!c2.frost_grain);
     }
 
     #[test]

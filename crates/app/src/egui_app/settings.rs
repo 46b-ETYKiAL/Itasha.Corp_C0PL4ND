@@ -69,6 +69,8 @@ const APPEARANCE_SEARCH_LABELS: &[&str] = &[
     "transparency",
     "opacity",
     "tint",
+    "frost frosted glass",
+    "grain",
     "ui scale",
     "zoom",
     "accessibility",
@@ -1297,6 +1299,101 @@ fn render_sections(
                     )
                     .changed();
                 changed |= reset_to_default(ui, &mut config.tint_strength, &def.tint_strength);
+                ui.end_row();
+            }
+        });
+
+        group(
+            ui,
+            "Frosted glass",
+            "A software frosted-glass wash over the window — adjustable, and \
+             independent of the Opacity slider.",
+        );
+        grid("appearance_frost").show(ui, |ui| {
+            // Each dependent row is THREE grid cells (label · control · ↺) with the
+            // control greyed out until the master toggle is on, so the columns never
+            // jump — the same fixed-layout discipline as Transparency & tint above.
+            if row_visible(q, "frost frosted glass enable toggle") {
+                changed |= ui
+                    .checkbox(&mut config.frost_enabled, "Frosted glass")
+                    .on_hover_text(
+                        "Software frosted-glass wash — tints/diffuses the window; \
+                         does NOT blur the desktop behind the window (a real blur \
+                         is not possible on this hardware). Independent of the \
+                         Opacity slider, so it works at any opacity.",
+                    )
+                    .changed();
+                ui.label(""); // checkbox carries its own label
+                changed |= reset_to_default(ui, &mut config.frost_enabled, &def.frost_enabled);
+                ui.end_row();
+            }
+
+            if row_visible(q, "frost amount strength") {
+                let en = config.frost_enabled;
+                ui.label("Frost amount").on_hover_text(
+                    "How frosted the glass reads: 0% = clear, 100% = maximum \
+                     (capped so the terminal text stays legible).",
+                );
+                changed |= ui
+                    .add_enabled(
+                        en,
+                        egui::Slider::new(&mut config.frost_amount, 0.0..=1.0)
+                            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                            .custom_parser(|s| {
+                                s.trim_end_matches('%')
+                                    .trim()
+                                    .parse::<f64>()
+                                    .ok()
+                                    .map(|v| v / 100.0)
+                            }),
+                    )
+                    .changed();
+                changed |= reset_to_default(ui, &mut config.frost_amount, &def.frost_amount);
+                ui.end_row();
+            }
+
+            if row_visible(q, "frost color colour picker") {
+                let en = config.frost_enabled;
+                ui.label("Frost color").on_hover_text(
+                    "Colour of the frost wash. Leave at the theme default (the \
+                     terminal background) or pick a colour to tint the frost.",
+                );
+                ui.add_enabled_ui(en, |ui| {
+                    ui.horizontal(|ui| {
+                        // Empty frost_color = follow the theme background; seed the
+                        // picker with a neutral fallback until the user picks.
+                        let (r, g, b) = c0pl4nd_core::theme::parse_hex(&config.frost_color)
+                            .unwrap_or((8, 6, 13));
+                        let mut rgb = [r, g, b];
+                        if ui.color_edit_button_srgb(&mut rgb).changed() {
+                            config.frost_color =
+                                format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]);
+                            changed = true;
+                        }
+                        if config.frost_color.is_empty() {
+                            ui.weak("theme");
+                        } else {
+                            ui.monospace(&config.frost_color);
+                        }
+                    });
+                });
+                changed |= reset_to_default(ui, &mut config.frost_color, &def.frost_color);
+                ui.end_row();
+            }
+
+            if row_visible(q, "frost grain texture") {
+                let en = config.frost_enabled;
+                ui.add_enabled_ui(en, |ui| {
+                    changed |= ui
+                        .checkbox(&mut config.frost_grain, "Grain texture")
+                        .on_hover_text(
+                            "Add a subtle procedural grain so the frost reads as \
+                             diffused glass rather than a flat colour film.",
+                        )
+                        .changed();
+                });
+                ui.label(""); // checkbox carries its own label
+                changed |= reset_to_default(ui, &mut config.frost_grain, &def.frost_grain);
                 ui.end_row();
             }
         });

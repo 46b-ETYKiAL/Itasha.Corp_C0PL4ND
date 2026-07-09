@@ -314,60 +314,138 @@ fn qa_tint_settings_stays_opaque() {
     snapshot(&mut h, "tint-settings-opaque");
 }
 
-/// REGRESSION GUARD (needs a real GPU; skips cleanly otherwise): at opacity 0
-/// the WHOLE window surface must reach alpha 0 (truly clear, SCR1B3-parity) even
-/// with the tint wash ENABLED at a real strength and the ambient mesh ON — the
-/// "opacity 0 still looks frosted" bug. The frost was a fixed-alpha tint wash on
-/// the background layer that showed straight through the transparent panels; the
-/// fix folds the window opacity into the tint (and the ambient effects), so
-/// nothing but the (sparse, opaque) glyph text survives at opacity 0. Unlike a
-/// pixel snapshot this asserts an ALPHA invariant, which is deterministic across
-/// GPU drivers. `#[ignore]` only because it needs a GPU adapter.
-#[test]
-#[ignore = "needs a real GPU; run with --ignored"]
-fn opacity_zero_surface_is_fully_clear_with_tint_and_mesh_on() {
+/// Render the real app with a config mutation applied, or `None` without a GPU.
+fn render_with(
+    mutate: impl FnOnce(&mut c0pl4nd_core::Config) + 'static,
+) -> Option<image::RgbaImage> {
     if !gpu_available() {
         eprintln!("no GPU adapter; skipping (not a failure).");
-        return;
+        return None;
     }
     let mut h = Harness::builder()
         .with_size(egui::vec2(1100.0, 720.0))
         .wgpu()
-        .build_eframe(|cc| {
+        .build_eframe(move |cc| {
             let mut app = egui_app::C0pl4ndApp::new(cc);
-            app.config.opacity = 0.0; // maximally transparent
-            app.config.tint_enabled = true; // tint wash ON …
-            app.config.tint_strength = 0.8; // … at a strong, previously-frosting weight
-            app.config.tint = "#ff0040".to_string();
-            app.config.effects.animations_enabled = true;
-            app.config.effects.wired_ambient = true; // ambient mesh ON
-            app.config.effects.mesh_brightness = 2.0;
+            mutate(&mut app.config);
             app
         });
     for _ in 0..5 {
         h.step();
     }
-    let img = h.render().expect("render");
+    Some(h.render().expect("render"))
+}
+
+/// The modal non-zero alpha (and its pixel count) over the pane band — the alpha
+/// the terminal BACKING composited to, ignoring the fully-transparent pixels.
+fn modal_pane_alpha(img: &image::RgbaImage) -> (u8, u64) {
     let (w, hgt) = (img.width(), img.height());
-    // Count non-transparent pixels across the WHOLE window (chrome + panes). At
-    // opacity 0 only the sparse, opaque glyph text (and the semantic focus ring)
-    // may remain; the background/chrome/tint/mesh must all be alpha 0. Allow a
-    // small budget for glyphs + the 2px focus ring on a headless (usually empty)
-    // grid.
-    let mut nonzero = 0u64;
+    let mut hist = [0u64; 256];
+    for y in (hgt / 6)..(hgt - hgt / 8) {
+        for x in 0..w {
+            hist[img.get_pixel(x, y).0[3] as usize] += 1;
+        }
+    }
+    hist.iter()
+        .enumerate()
+        .skip(1) // ignore fully-transparent
+        .max_by_key(|(_, n)| **n)
+        .map(|(a, n)| (a as u8, *n))
+        .unwrap_or((0, 0))
+}
+
+/// Fraction (%) of the WHOLE window that is non-transparent.
+fn nonzero_pct(img: &image::RgbaImage) -> f64 {
+    let (w, hgt) = (img.width(), img.height());
+    let mut nz = 0u64;
     for y in 0..hgt {
         for x in 0..w {
             if img.get_pixel(x, y).0[3] != 0 {
-                nonzero += 1;
+                nz += 1;
             }
         }
     }
-    let total = u64::from(w) * u64::from(hgt);
-    let pct = nonzero as f64 / total as f64 * 100.0;
+    nz as f64 / (u64::from(w) * u64::from(hgt)) as f64 * 100.0
+}
+
+/// REGRESSION GUARD (needs a GPU): with the tint AND frost OFF, opacity 0 is a
+/// genuinely CLEAR window — the whole surface reaches alpha 0 except the sparse,
+/// opaque glyph text — even with the ambient mesh on. Proves the clean-glass path
+/// (opacity purely controls see-through; nothing hazes it when tint/frost are off).
+#[test]
+#[ignore = "needs a real GPU; run with --ignored"]
+fn opacity_zero_is_clear_when_tint_and_frost_off() {
+    let Some(img) = render_with(|c| {
+        c.opacity = 0.0;
+        c.tint_enabled = false;
+        c.frost_enabled = false;
+        c.effects.animations_enabled = true;
+        c.effects.wired_ambient = true;
+        c.effects.mesh_brightness = 2.0;
+    }) else {
+        return;
+    };
+    let pct = nonzero_pct(&img);
     assert!(
         pct < 3.0,
-        "opacity-0 surface must be ~fully clear (no frosted tint/mesh wash): \
-         {nonzero}/{total} pixels ({pct:.2}%) are non-transparent — expected < 3% \
-         (only sparse glyph text + focus ring)"
+        "opacity-0 clean glass must be ~fully clear: {pct:.2}% non-transparent \
+         (expected < 3% — only sparse glyph text + focus ring)"
+    );
+}
+
+/// PART 1 GUARD (needs a GPU): the terminal background is painted ONCE, so the
+/// pane-backing alpha is LINEAR in opacity — a single 0.7 opacity yields ≈179
+/// (0.7·255), NOT the ≈125 (0.7²·255) it would if the CentralPanel fill and a
+/// per-pane fill both painted at the opacity alpha and COMPOUNDED (the haze bug).
+#[test]
+#[ignore = "needs a real GPU; run with --ignored"]
+fn pane_backing_alpha_is_linear_single_paint() {
+    let Some(img) = render_with(|c| {
+        c.opacity = 0.7;
+        c.tint_enabled = false;
+        c.frost_enabled = false;
+        c.effects.wired_ambient = false;
+    }) else {
+        return;
+    };
+    let (modal, _) = modal_pane_alpha(&img);
+    let linear = (0.7 * 255.0_f32).round() as i32; // 179
+    let squared = (0.7 * 0.7 * 255.0_f32).round() as i32; // 125
+    eprintln!("pane backing modal alpha = {modal} (linear≈{linear}, squared≈{squared})");
+    assert!(
+        (i32::from(modal) - linear).abs() <= 8,
+        "opacity 0.7 backing must be LINEAR (~{linear}), got {modal} — a value near \
+         {squared} would mean the background is still painted twice (compounding)"
+    );
+}
+
+/// PART 2 GUARD (needs a GPU): the frosted-glass wash is painted ONLY when
+/// enabled, and it visibly thickens the backing (independent of opacity). At a
+/// see-through opacity, turning frost ON must raise the pane-backing alpha well
+/// above the frost-OFF baseline.
+#[test]
+#[ignore = "needs a real GPU; run with --ignored"]
+fn frost_wash_appears_only_when_enabled() {
+    let Some(off) = render_with(|c| {
+        c.opacity = 0.3;
+        c.tint_enabled = false;
+        c.frost_enabled = false;
+    }) else {
+        return;
+    };
+    let on = render_with(|c| {
+        c.opacity = 0.3;
+        c.tint_enabled = false;
+        c.frost_enabled = true;
+        c.frost_amount = 0.6;
+        c.frost_grain = false; // flat wash for a deterministic alpha comparison
+    })
+    .expect("GPU was available for the first render");
+    let (off_a, _) = modal_pane_alpha(&off);
+    let (on_a, _) = modal_pane_alpha(&on);
+    eprintln!("frost off backing alpha = {off_a}, frost on = {on_a}");
+    assert!(
+        i32::from(on_a) >= i32::from(off_a) + 40,
+        "enabling frost must visibly thicken the backing wash (off={off_a}, on={on_a})"
     );
 }
