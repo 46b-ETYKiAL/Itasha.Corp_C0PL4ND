@@ -243,33 +243,27 @@ fn family_value(choice: &str) -> String {
     choice.to_string()
 }
 
-/// One Fallback-slot ComboBox over the installed monospace families plus the
-/// "(none)" sentinel. Mutates `slot` in place and returns whether it changed.
-/// Factored out so the two slots share one widget definition.
+/// One Fallback-slot dropdown (fixed-width combo + up/down stepper) over the
+/// installed monospace families plus the "(none)" sentinel. Mutates `slot` in
+/// place and returns whether it changed. Factored out so the two slots share one
+/// widget definition; delegates to [`dropdown_with_stepper`] so every dropdown in
+/// Settings looks + behaves the same.
 fn fallback_combo(ui: &mut egui::Ui, id_salt: &str, choices: &[String], slot: &mut String) -> bool {
-    let mut changed = false;
-    egui::ComboBox::from_id_salt(id_salt)
-        .selected_text(slot.clone())
-        .width(220.0)
-        .show_ui(ui, |ui| {
-            // "(none)" first so an empty slot is the obvious default choice.
-            changed |= ui
-                .selectable_value(
-                    slot,
-                    super::fonts::NONE_LABEL.to_string(),
-                    super::fonts::NONE_LABEL,
-                )
-                .changed();
-            for fam in choices {
-                // The built-in label is not a meaningful FALLBACK (it is already
-                // the ultimate fallback), so offer only real installed families.
-                if fam == super::fonts::BUILTIN_MONOSPACE_LABEL {
-                    continue;
-                }
-                changed |= ui.selectable_value(slot, fam.clone(), fam).changed();
-            }
-        });
-    changed
+    // "(none)" first so an empty slot is the obvious default; then only real
+    // installed families (the built-in label is already the ultimate fallback, so
+    // it is not a meaningful FALLBACK choice and is skipped).
+    let mut variants: Vec<(String, &str)> = vec![(
+        super::fonts::NONE_LABEL.to_string(),
+        super::fonts::NONE_LABEL,
+    )];
+    for fam in choices {
+        if fam == super::fonts::BUILTIN_MONOSPACE_LABEL {
+            continue;
+        }
+        variants.push((fam.clone(), fam.as_str()));
+    }
+    let cur = slot.clone();
+    dropdown_with_stepper(ui, id_salt, slot, &variants, Some(&cur))
 }
 
 /// A per-setting "restore default" affordance. Renders a small ↺ button that is
@@ -320,6 +314,140 @@ fn ui_scale_commit(config_val: f32, slider_val: f32, dragging: bool) -> Option<f
     } else {
         None
     }
+}
+
+/// The consistent fixed width (points) for EVERY settings dropdown. A combo of a
+/// constant width never resizes with its selected value, so the up/down stepper
+/// beside it never moves — the whole point of the redesign. A label too long for
+/// the width is truncated with an ellipsis (the full text is still visible in the
+/// opened dropdown, and in the row's tooltip).
+const DROPDOWN_WIDTH: f32 = 220.0;
+
+/// Wrap-around index step for the dropdown stepper. `cur` is the currently
+/// selected index (`None` when the live value is not one of the `len` variants —
+/// e.g. a custom theme name typed into the alias field); `delta` is `-1` (▲
+/// previous) or `+1` (▼ next). Returns the index to select next, WRAPPING at both
+/// ends so the spinner cycles the list endlessly. A value outside the list steps
+/// onto the first (next) or last (previous) variant so the arrows always have a
+/// defined landing spot. Pure → unit-testable. `len == 0` returns `0` (the caller
+/// guards against an empty list).
+fn step_index(cur: Option<usize>, len: usize, delta: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let n = len as isize;
+    match cur {
+        Some(i) => (i as isize + delta).rem_euclid(n) as usize,
+        None if delta >= 0 => 0,
+        None => len - 1,
+    }
+}
+
+/// Truncate `text` (with a trailing `…`) so it fits within `max_width` points in
+/// the Button text style, so a fixed-width combo's selected label can never grow
+/// the button. A label that already fits is returned unchanged. Read-only w.r.t.
+/// the ui (font measurement only), so the closed-combo width is a CONSTANT
+/// regardless of the selected value's natural length.
+fn fit_combo_label(ui: &egui::Ui, text: &str, max_width: f32) -> String {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let painter = ui.painter();
+    truncate_to_width(text, max_width, |s| {
+        painter
+            .layout_no_wrap(s.to_owned(), font.clone(), egui::Color32::PLACEHOLDER)
+            .size()
+            .x
+    })
+}
+
+/// Pure truncation core of [`fit_combo_label`]: return `text` unchanged if it
+/// already fits `max_width` (per the caller's `width_of` measurement), else drop
+/// trailing characters and append `…` until the result fits. The measurement is
+/// injected so the truncation logic is unit-testable WITHOUT a live font atlas
+/// (the headless test context measures glyphs as ~0-width, which would make a
+/// real-font test vacuous). Always returns a string whose measured width is
+/// `<= max_width` (or the single `…` when even that is the best it can do).
+fn truncate_to_width(text: &str, max_width: f32, width_of: impl Fn(&str) -> f32) -> String {
+    if width_of(text) <= max_width {
+        return text.to_owned();
+    }
+    let mut chars: Vec<char> = text.chars().collect();
+    while chars.len() > 1 {
+        chars.pop();
+        let candidate = format!("{}…", chars.iter().collect::<String>().trim_end());
+        if width_of(&candidate) <= max_width {
+            return candidate;
+        }
+    }
+    "…".to_owned()
+}
+
+/// A fixed-width [`egui::ComboBox`] followed by a compact up/down STEPPER (▲ =
+/// previous option, ▼ = next option — a spinner) placed to its RIGHT, cycling
+/// `variants` with WRAP-AROUND. Because the combo is a constant
+/// [`DROPDOWN_WIDTH`] (its selected label truncated to fit via [`fit_combo_label`],
+/// never grown), the stepper sits at a fixed x and never shifts with the value's
+/// length — replacing the old flanking `◀ ▶` arrows that moved with the theme
+/// name. The single widget used by every settings dropdown for a consistent,
+/// intuitive UX.
+///
+/// `current_label` is what to SHOW as the selected value: `Some(s)` when the
+/// caller maps value→display or must surface a value NOT present in `variants`
+/// (e.g. a custom theme name / font family); `None` uses the matching variant's
+/// label (the common enum case). Returns whether `value` changed. The caller
+/// still renders its own row label BEFORE and its `reset_to_default` (↺) AFTER
+/// this call, so search-filter (`row_visible`) and the grid columns are unchanged.
+fn dropdown_with_stepper<T: Clone + PartialEq>(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    value: &mut T,
+    variants: &[(T, &str)],
+    current_label: Option<&str>,
+) -> bool {
+    let mut changed = false;
+    // The label to display: explicit override, else the matching variant's label,
+    // else empty (a value not in the list with no override — the stepper still
+    // works and lands on a defined variant).
+    let matched = variants.iter().find(|(v, _)| v == value).map(|(_, l)| *l);
+    let label = current_label.or(matched).unwrap_or("");
+    ui.horizontal(|ui| {
+        // Reserve ~34pt for the dropdown arrow + the button's frame margins so the
+        // truncated label + arrow together never exceed DROPDOWN_WIDTH.
+        let shown = fit_combo_label(ui, label, DROPDOWN_WIDTH - 34.0);
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(shown)
+            .width(DROPDOWN_WIDTH)
+            .truncate()
+            .show_ui(ui, |ui| {
+                for (v, variant_label) in variants {
+                    changed |= ui
+                        .selectable_value(value, v.clone(), *variant_label)
+                        .changed();
+                }
+            });
+        // Compact stacked stepper (▲ / ▼) immediately right of the fixed-width
+        // combo. Tight vertical spacing so the two arrows read as one spinner.
+        let cur = variants.iter().position(|(v, _)| v == value);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            let up = ui
+                .add(egui::Button::new("▲").small())
+                .on_hover_text("Previous option");
+            let down = ui
+                .add(egui::Button::new("▼").small())
+                .on_hover_text("Next option");
+            if !variants.is_empty() {
+                if up.clicked() {
+                    *value = variants[step_index(cur, variants.len(), -1)].0.clone();
+                    changed = true;
+                }
+                if down.clicked() {
+                    *value = variants[step_index(cur, variants.len(), 1)].0.clone();
+                    changed = true;
+                }
+            }
+        });
+    });
+    changed
 }
 
 /// Equal-weight 3-way consent selector for a W1TN3SS reporting stream
@@ -1023,54 +1151,21 @@ fn render_sections(
             if row_visible(q, "theme color") {
                 ui.label("Theme")
                     .on_hover_text("Terminal color theme — a file stem under the themes dir.");
-                ui.horizontal(|ui| {
-                    // Prev/next step: cycle through the built-ins without opening the
-                    // dropdown. `delta` wraps around the list; a custom (non-built-in)
-                    // theme name steps onto the first/last built-in so the arrows
-                    // always have a defined landing spot. Pure (captures nothing
-                    // mutable), so it doesn't hold a borrow across the ComboBox.
-                    let step_to = |cur: &str, delta: isize| -> String {
-                        let n = BUILTIN_THEMES.len() as isize;
-                        let idx = BUILTIN_THEMES.iter().position(|t| *t == cur);
-                        let next = match idx {
-                            Some(i) => (i as isize + delta).rem_euclid(n),
-                            None if delta > 0 => 0,
-                            None => n - 1,
-                        };
-                        BUILTIN_THEMES[next as usize].to_string()
-                    };
-                    // STATIONARY arrows: the left arrow, then a FIXED-WIDTH combo
-                    // showing the current name, then the right arrow. Because the
-                    // centre combo is a fixed width (its long selected_text is
-                    // truncated to fit, not grown), the flanking arrows sit at fixed
-                    // x positions and never shift with the theme name's length — the
-                    // reported "the arrows move depending on the name". The combo is
-                    // still the full-list picker; the arrows step it in place.
-                    if ui
-                        .small_button("◀")
-                        .on_hover_text("Previous theme")
-                        .clicked()
-                    {
-                        let next = step_to(&config.theme, -1);
-                        config.theme = next;
-                        changed = true;
-                    }
-                    egui::ComboBox::from_id_salt("c0pl4nd-theme-picker")
-                        .selected_text(config.theme.clone())
-                        .width(168.0) // fixed centre label between the fixed arrows
-                        .show_ui(ui, |ui| {
-                            for name in BUILTIN_THEMES {
-                                changed |= ui
-                                    .selectable_value(&mut config.theme, (*name).to_string(), *name)
-                                    .changed();
-                            }
-                        });
-                    if ui.small_button("▶").on_hover_text("Next theme").clicked() {
-                        let next = step_to(&config.theme, 1);
-                        config.theme = next;
-                        changed = true;
-                    }
-                });
+                // Fixed-width combo + up/down stepper (spinner). The stepper cycles
+                // the built-ins with wrap-around; a custom theme name (from the
+                // alias field below) still shows in the combo and steps onto the
+                // first/last built-in. Because the combo width is constant the
+                // stepper never moves — the fix for "the arrows move with the name".
+                let theme_variants: Vec<(String, &str)> =
+                    BUILTIN_THEMES.iter().map(|t| (t.to_string(), *t)).collect();
+                let cur_theme = config.theme.clone();
+                changed |= dropdown_with_stepper(
+                    ui,
+                    "c0pl4nd-theme-picker",
+                    &mut config.theme,
+                    &theme_variants,
+                    Some(&cur_theme),
+                );
                 changed |= reset_to_default(ui, &mut config.theme, &def.theme);
                 ui.end_row();
 
@@ -1290,21 +1385,22 @@ fn render_sections(
                      Applies live.",
                 );
                 // The installed monospace families (enumerated once + cached) plus
-                // the built-in label. A ComboBox so the user picks a real font
-                // that the app actually loads — not free text that did nothing.
-                let choices = super::fonts::monospace_family_choices();
+                // the built-in label. Fixed-width combo + stepper so the user picks
+                // a real font the app loads — not free text that did nothing. The
+                // stored value is an internal family key; the combo shows/steps the
+                // human display name via `family_display`/`family_value`.
+                let font_variants: Vec<(String, &str)> = super::fonts::monospace_family_choices()
+                    .iter()
+                    .map(|fam| (family_value(fam), fam.as_str()))
+                    .collect();
                 let selected = family_display(&config.font.family);
-                egui::ComboBox::from_id_salt("c0pl4nd-font-family")
-                    .selected_text(selected)
-                    .width(220.0)
-                    .show_ui(ui, |ui| {
-                        for fam in choices {
-                            let value = family_value(fam);
-                            changed |= ui
-                                .selectable_value(&mut config.font.family, value, fam)
-                                .changed();
-                        }
-                    });
+                changed |= dropdown_with_stepper(
+                    ui,
+                    "c0pl4nd-font-family",
+                    &mut config.font.family,
+                    &font_variants,
+                    Some(&selected),
+                );
                 changed |= reset_to_default(ui, &mut config.font.family, &def.font.family);
                 ui.end_row();
             }
@@ -1317,16 +1413,17 @@ fn render_sections(
                      swap never changes the terminal. \"System default\" keeps egui's \
                      built-in UI font. Applies live.",
                 );
-                egui::ComboBox::from_id_salt("c0pl4nd-ui-font-family")
-                    .selected_text(config.font.ui_family.clone())
-                    .width(220.0)
-                    .show_ui(ui, |ui| {
-                        for fam in super::fonts::ui_family_choices() {
-                            changed |= ui
-                                .selectable_value(&mut config.font.ui_family, fam.to_string(), fam)
-                                .changed();
-                        }
-                    });
+                let ui_font_variants: Vec<(String, &str)> = super::fonts::ui_family_choices()
+                    .map(|fam| (fam.to_string(), fam))
+                    .collect();
+                let cur_ui_font = config.font.ui_family.clone();
+                changed |= dropdown_with_stepper(
+                    ui,
+                    "c0pl4nd-ui-font-family",
+                    &mut config.font.ui_family,
+                    &ui_font_variants,
+                    Some(&cur_ui_font),
+                );
                 changed |= reset_to_default(ui, &mut config.font.ui_family, &def.font.ui_family);
                 ui.end_row();
             }
@@ -1466,19 +1563,18 @@ fn render_sections(
         grid("cursor_grid").show(ui, |ui| {
             if row_visible(q, "style shape block bar underline") {
                 ui.label("Style");
-                egui::ComboBox::from_id_salt("c0pl4nd-cursor-style")
-                    .selected_text(cursor_style_label(config.cursor.style))
-                    .show_ui(ui, |ui| {
-                        for (val, label) in [
-                            (CursorStyle::Block, "block"),
-                            (CursorStyle::Bar, "bar"),
-                            (CursorStyle::Underline, "underline"),
-                        ] {
-                            changed |= ui
-                                .selectable_value(&mut config.cursor.style, val, label)
-                                .changed();
-                        }
-                    });
+                let cursor_label = cursor_style_label(config.cursor.style);
+                changed |= dropdown_with_stepper(
+                    ui,
+                    "c0pl4nd-cursor-style",
+                    &mut config.cursor.style,
+                    &[
+                        (CursorStyle::Block, "block"),
+                        (CursorStyle::Bar, "bar"),
+                        (CursorStyle::Underline, "underline"),
+                    ],
+                    Some(cursor_label),
+                );
                 changed |= reset_to_default(ui, &mut config.cursor.style, &def.cursor.style);
                 ui.end_row();
             }
@@ -1695,35 +1791,24 @@ fn render_sections(
         );
         grid("window_graphics").show(ui, |ui| {
             if row_visible(q, "graphics backend gpu renderer dx12 vulkan gl") {
-                ui.label("Graphics backend");
-                let backends = [
-                    (GraphicsBackend::Auto, "auto (recommended)"),
-                    (GraphicsBackend::Dx12, "DX12"),
-                    (GraphicsBackend::Vulkan, "Vulkan"),
-                    (GraphicsBackend::Gl, "OpenGL"),
-                ];
-                egui::ComboBox::from_id_salt("c0pl4nd-graphics-backend")
-                    .selected_text(
-                        backends
-                            .iter()
-                            .find(|(b, _)| *b == config.graphics_backend)
-                            .map(|(_, s)| *s)
-                            .unwrap_or("auto (recommended)"),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (b, label) in backends {
-                            changed |= ui
-                                .selectable_value(&mut config.graphics_backend, b, label)
-                                .changed();
-                        }
-                    })
-                    .response
-                    .on_hover_text(
-                        "The GPU backend the renderer uses (Windows). Leave on Auto \
-                         unless the terminal grid renders corrupted/garbled glyphs — \
-                         then try Vulkan (or OpenGL) to route around a bad DX12 \
-                         driver. Applies on restart.",
-                    );
+                ui.label("Graphics backend").on_hover_text(
+                    "The GPU backend the renderer uses (Windows). Leave on Auto \
+                     unless the terminal grid renders corrupted/garbled glyphs — \
+                     then try Vulkan (or OpenGL) to route around a bad DX12 \
+                     driver. Applies on restart.",
+                );
+                changed |= dropdown_with_stepper(
+                    ui,
+                    "c0pl4nd-graphics-backend",
+                    &mut config.graphics_backend,
+                    &[
+                        (GraphicsBackend::Auto, "auto (recommended)"),
+                        (GraphicsBackend::Dx12, "DX12"),
+                        (GraphicsBackend::Vulkan, "Vulkan"),
+                        (GraphicsBackend::Gl, "OpenGL"),
+                    ],
+                    None,
+                );
                 changed |=
                     reset_to_default(ui, &mut config.graphics_backend, &def.graphics_backend);
                 ui.end_row();
@@ -1733,33 +1818,23 @@ fn render_sections(
                 q,
                 "graphics gpu preference integrated discrete optimus hybrid",
             ) {
-                ui.label("GPU preference");
-                let gpus = [
-                    (GpuPreference::Auto, "auto (recommended)"),
-                    (GpuPreference::Integrated, "integrated (low power)"),
-                    (GpuPreference::Discrete, "discrete (high performance)"),
-                ];
-                egui::ComboBox::from_id_salt("c0pl4nd-gpu-preference")
-                    .selected_text(
-                        gpus.iter()
-                            .find(|(g, _)| *g == config.graphics_gpu)
-                            .map(|(_, s)| *s)
-                            .unwrap_or("auto (recommended)"),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (g, label) in gpus {
-                            changed |= ui
-                                .selectable_value(&mut config.graphics_gpu, g, label)
-                                .changed();
-                        }
-                    })
-                    .response
-                    .on_hover_text(
-                        "Which GPU to render on, on a laptop with two GPUs (Intel + \
-                         NVIDIA/AMD). Leave on Auto unless the terminal grid renders \
-                         corrupted/garbled glyphs on the discrete GPU — then pick \
-                         Integrated to render on the built-in GPU. Applies on restart.",
-                    );
+                ui.label("GPU preference").on_hover_text(
+                    "Which GPU to render on, on a laptop with two GPUs (Intel + \
+                     NVIDIA/AMD). Leave on Auto unless the terminal grid renders \
+                     corrupted/garbled glyphs on the discrete GPU — then pick \
+                     Integrated to render on the built-in GPU. Applies on restart.",
+                );
+                changed |= dropdown_with_stepper(
+                    ui,
+                    "c0pl4nd-gpu-preference",
+                    &mut config.graphics_gpu,
+                    &[
+                        (GpuPreference::Auto, "auto (recommended)"),
+                        (GpuPreference::Integrated, "integrated (low power)"),
+                        (GpuPreference::Discrete, "discrete (high performance)"),
+                    ],
+                    None,
+                );
                 changed |= reset_to_default(ui, &mut config.graphics_gpu, &def.graphics_gpu);
                 ui.end_row();
             }
@@ -2473,12 +2548,6 @@ fn render_sections(
             // manual = check only when the button below is pressed (default)
             // auto   = check on launch (when due), download + apply when found
             if row_visible(q, "update mode off notify manual auto network") {
-                let modes = [
-                    (UpdateMode::Off, "off"),
-                    (UpdateMode::Notify, "notify"),
-                    (UpdateMode::Manual, "manual"),
-                    (UpdateMode::Auto, "auto"),
-                ];
                 ui.label("Mode").on_hover_text(
                     "When C0PL4ND checks for updates: off (never), manual (only when \
                      you press Check for updates), notify (check once per launch, show \
@@ -2486,21 +2555,18 @@ fn render_sections(
                      a verified update). A check reads only the public GitHub Releases \
                      API and sends no identifiers.",
                 );
-                egui::ComboBox::from_id_salt("c0pl4nd-update-mode")
-                    .selected_text(
-                        modes
-                            .iter()
-                            .find(|(m, _)| *m == config.update.mode)
-                            .map(|(_, s)| *s)
-                            .unwrap_or("manual"),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (m, label) in modes {
-                            changed |= ui
-                                .selectable_value(&mut config.update.mode, m, label)
-                                .changed();
-                        }
-                    });
+                changed |= dropdown_with_stepper(
+                    ui,
+                    "c0pl4nd-update-mode",
+                    &mut config.update.mode,
+                    &[
+                        (UpdateMode::Off, "off"),
+                        (UpdateMode::Notify, "notify"),
+                        (UpdateMode::Manual, "manual"),
+                        (UpdateMode::Auto, "auto"),
+                    ],
+                    None,
+                );
                 changed |= reset_to_default(ui, &mut config.update.mode, &def.update.mode);
                 ui.end_row();
             }
@@ -2537,20 +2603,19 @@ fn render_sections(
                     ui.label("Release channel")
                         .on_hover_text("Which release line update checks follow.");
                 });
+                let channel_variants: Vec<(String, &str)> = UPDATE_CHANNELS
+                    .iter()
+                    .map(|c| (c.to_string(), *c))
+                    .collect();
+                let cur_channel = config.update.channel.clone();
                 ui.add_enabled_ui(networked, |ui| {
-                    egui::ComboBox::from_id_salt("c0pl4nd-update-channel")
-                        .selected_text(config.update.channel.clone())
-                        .show_ui(ui, |ui| {
-                            for chan in UPDATE_CHANNELS {
-                                changed |= ui
-                                    .selectable_value(
-                                        &mut config.update.channel,
-                                        (*chan).to_string(),
-                                        *chan,
-                                    )
-                                    .changed();
-                            }
-                        });
+                    changed |= dropdown_with_stepper(
+                        ui,
+                        "c0pl4nd-update-channel",
+                        &mut config.update.channel,
+                        &channel_variants,
+                        Some(&cur_channel),
+                    );
                 });
                 changed |= reset_to_default(ui, &mut config.update.channel, &def.update.channel);
                 ui.end_row();
@@ -3268,6 +3333,73 @@ mod tests {
         assert_eq!(cursor_style_label(CursorStyle::Block), "block");
         assert_eq!(cursor_style_label(CursorStyle::Bar), "bar");
         assert_eq!(cursor_style_label(CursorStyle::Underline), "underline");
+    }
+
+    #[test]
+    fn dropdown_stepper_cycles_variants_with_wraparound() {
+        // The up/down stepper cycles the variant list and WRAPS at both ends, so
+        // the spinner never dead-ends. `+1` = ▼ next, `-1` = ▲ previous.
+        let n = 3;
+        // Forward from each index, wrapping past the last back to the first.
+        assert_eq!(step_index(Some(0), n, 1), 1);
+        assert_eq!(step_index(Some(1), n, 1), 2);
+        assert_eq!(
+            step_index(Some(2), n, 1),
+            0,
+            "next past the last wraps to first"
+        );
+        // Backward from each index, wrapping past the first back to the last.
+        assert_eq!(step_index(Some(2), n, -1), 1);
+        assert_eq!(
+            step_index(Some(0), n, -1),
+            2,
+            "prev before the first wraps to last"
+        );
+        // A value NOT in the list lands on a defined variant (first on next, last
+        // on prev) so the arrows always do something.
+        assert_eq!(step_index(None, n, 1), 0);
+        assert_eq!(step_index(None, n, -1), n - 1);
+        // A full forward cycle returns to the start (endless spinner).
+        let mut i = 0usize;
+        for _ in 0..n {
+            i = step_index(Some(i), n, 1);
+        }
+        assert_eq!(i, 0, "n forward steps over n variants return to the start");
+        // Degenerate empty list never panics.
+        assert_eq!(step_index(None, 0, 1), 0);
+    }
+
+    #[test]
+    fn dropdown_combo_label_is_truncated_to_a_fixed_width() {
+        // The fixed-width guarantee (deterministic, font-atlas-independent): with a
+        // width of 10pt per character, a label wider than the budget is truncated
+        // with a trailing ellipsis so it fits — this is what keeps the combo (and
+        // the stepper beside it) a CONSTANT width regardless of the value. A label
+        // that already fits is returned unchanged.
+        let w10 = |s: &str| s.chars().count() as f32 * 10.0;
+        // Fits (4 chars = 40pt <= 100): unchanged.
+        assert_eq!(truncate_to_width("auto", 100.0, w10), "auto");
+        // Too wide (10 chars = 100pt > 55): truncated with "…" and now fits.
+        let fitted = truncate_to_width("abcdefghij", 55.0, w10);
+        assert!(
+            fitted.ends_with('…'),
+            "an over-long label gets an ellipsis (got {fitted:?})"
+        );
+        assert!(fitted.chars().count() < "abcdefghij".chars().count());
+        assert!(
+            w10(&fitted) <= 55.0,
+            "the truncated label must fit the budget (got {})",
+            w10(&fitted)
+        );
+        // A budget too small for any char + ellipsis degrades to a bare "…", never
+        // panics or loops forever.
+        assert_eq!(truncate_to_width("hello", 1.0, w10), "…");
+        // `fit_combo_label` wires the real font measurement in without panicking
+        // even in the headless test context (where glyphs measure ~0-width, so it
+        // returns the text unchanged — the width path is covered purely above).
+        egui::__run_test_ui(|ui| {
+            let _ = fit_combo_label(ui, "itasha-corp", DROPDOWN_WIDTH - 34.0);
+        });
     }
 
     #[test]
