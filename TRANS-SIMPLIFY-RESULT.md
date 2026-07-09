@@ -10,7 +10,12 @@
 
 (absolute: `C:/Users/.46b_/Itasha.Corp_S4F3-R0UT3-4RB1T3R/.s4f3-data/pubrepo-work/c0pl4nd-trans-simplify/target/release/c0pl4nd.exe`)
 
-### Latest additions (v0.4.21, folded into PR #277)
+### Newest fixes (v0.4.21, folded into PR #277)
+- **Stepper arrows are now real triangles** — drawn via the painter (not font glyphs), so they never render as empty tofu boxes.
+- **Steppers are side-by-side** `[▲][▼]` (horizontal), to the right of each fixed-width dropdown, before the reset.
+- **Node mesh is decoupled from Opacity** — removed the leftover `* opacity` scaling of the ambient mesh/VHS/flicker; the mesh visibility is now controlled only by its Motion settings. Verified on-GPU: at opacity 0 the mesh still paints (off=1.3% → on=5.6% coverage), unaffected by the Opacity slider. Opacity / Tint / Frost / Motion are four independent controls.
+
+### Prior additions (v0.4.21, folded into PR #277)
 - **Opacity is now clean + linear** — the terminal background was double-painted (CentralPanel fill + per-pane fill), compounding to ≈opacity² (0.7 → ~0.91 haze). Now painted once; verified on-GPU: opacity 0.7 → backing alpha **179** (linear), not 125 (squared).
 - **Software "frosted glass"** (Settings → Appearance → Frosted glass): toggle + amount slider + colour picker + grain checkbox. Independent of opacity. Honest hover: "does not blur the desktop." Verified on-GPU: frost off backing=77 → on=161.
 - **Tint un-coupled from opacity** — it now works at any opacity (colours the glass) instead of fading away. Opacity / Tint / Frost are three independent controls; fully-clear = tint-off + frost-off.
