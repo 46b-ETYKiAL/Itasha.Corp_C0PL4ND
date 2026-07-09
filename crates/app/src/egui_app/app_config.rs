@@ -70,20 +70,8 @@ impl super::C0pl4ndApp {
         self.config.toolbar.show_overflow
     }
 
-    /// The master transparency toggle from the live config. Observation
-    /// accessor for the transparency interaction tests.
-    #[allow(dead_code)]
-    pub fn config_transparency_enabled(&self) -> bool {
-        self.config.transparency_enabled
-    }
-
-    /// The current window translucency mode from the live config.
-    #[allow(dead_code)]
-    pub fn config_window_mode(&self) -> c0pl4nd_core::config::WindowMode {
-        self.config.window_mode
-    }
-
-    /// The current window opacity (0.30..=1.0) from the live config.
+    /// The current window opacity (0.0..=1.0) from the live config — the single
+    /// see-through control. `1.0` = solid, `0.0` = fully transparent.
     #[allow(dead_code)]
     pub fn config_opacity(&self) -> f32 {
         self.config.opacity
@@ -95,11 +83,10 @@ impl super::C0pl4ndApp {
         self.config.tint_strength
     }
 
-    /// Whether the window is effectively translucent for the live config
-    /// (master toggle on AND a non-opaque mode).
+    /// Whether the tint colour wash is enabled in the live config.
     #[allow(dead_code)]
-    pub fn config_effective_translucent(&self) -> bool {
-        self.config.effective_translucent()
+    pub fn config_tint_enabled(&self) -> bool {
+        self.config.tint_enabled
     }
 
     /// The current terminal color theme stem from the live config.

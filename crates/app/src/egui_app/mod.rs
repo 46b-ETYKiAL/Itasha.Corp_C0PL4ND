@@ -53,7 +53,6 @@ mod window_effects;
 pub(crate) use window_effects::*;
 mod caption_close;
 mod font_setup;
-mod startup_recovery;
 mod win_foreground;
 pub(crate) use font_setup::*;
 mod app_config;
@@ -310,19 +309,6 @@ pub struct C0pl4ndApp {
     /// MANUAL theme pick sticks between OS-appearance changes (SCR1B3 parity).
     /// `None` when follow-OS is off / never observed. Never persisted.
     pub(crate) last_os_theme: Option<egui::Theme>,
-    /// When `Some`, an OS-composited "risky" window mode (Dim/Glass/Mica/
-    /// Vibrancy) was applied at startup and its crash-loop recovery sentinel is
-    /// ARMED in this config dir. The frame loop counts successful frames and,
-    /// once [`startup_recovery::STEADY_STATE_FRAMES`] have rendered, clears the
-    /// sentinel (the window composited fine) and sets this back to `None`. If the
-    /// app is force-killed before then (a black/frozen window), the sentinel
-    /// survives and the NEXT launch auto-reverts to the safe Transparent mode.
-    /// See [`startup_recovery`]. `None` off the risky path (nothing to clear).
-    pub(crate) recovery_sentinel_dir: Option<std::path::PathBuf>,
-    /// Count of rendered frames since a risky-mode launch armed the recovery
-    /// sentinel, used to detect the steady-state window. Only advances while
-    /// `recovery_sentinel_dir` is `Some`.
-    pub(crate) recovery_frames: u32,
     /// True on the first frame the Settings window opens (a closed→open edge),
     /// so `settings::show` FORCES the window to its saved-or-centered position
     /// that frame instead of trusting egui's `default_pos` (which read a
@@ -521,64 +507,12 @@ impl C0pl4ndApp {
             install_chrome_fonts(&cc.egui_ctx, &app.config.font);
         }
         app.applied_font_family = font_apply_key(&app.config.font);
-        // CRASH-LOOP RECOVERY GUARD for the OS-composited "risky" modes
-        // (Dim/Glass/Mica/Vibrancy). Applying a layered-window attribute or a
-        // DWM backdrop to a live Vulkan flip-model swapchain can stop DWM
-        // compositing on some GPU/driver/Windows combos → a black/frozen window.
-        // Because the mode persists in config, an affected user would open a dead
-        // window (with no reachable Settings) on EVERY launch. So: on startup, if
-        // a sentinel from a previous risky launch is STILL present, that launch
-        // never reached steady state (a black window the user force-killed) —
-        // auto-revert to the safe per-pixel Transparent mode, persist it, clear
-        // the sentinel, and notify. Otherwise arm the sentinel; the frame loop
-        // clears it once the window has composited fine for a short window. The
-        // `Transparent` path (and `Opaque`) never touch the risky OS path, so it
-        // is `Proceed` — untouched. See `startup_recovery`.
-        if let Some(sentinel_dir) = c0pl4nd_core::Config::config_dir() {
-            match startup_recovery::decide(
-                startup_recovery::is_armed(&sentinel_dir),
-                app.config.window_mode,
-            ) {
-                startup_recovery::StartupDecision::Revert => {
-                    app.config.window_mode = c0pl4nd_core::config::WindowMode::Transparent;
-                    if let Some(path) = c0pl4nd_core::Config::default_path() {
-                        if let Err(e) = app.config.save_to(&path) {
-                            tracing::warn!("recovery: could not persist reverted window_mode: {e}");
-                        }
-                    }
-                    startup_recovery::disarm(&sentinel_dir);
-                    tracing::warn!(
-                        "recovery: previous launch never stabilised in an \
-                         OS-composited window mode; reverted to Transparent"
-                    );
-                    app.toast = Some(
-                        "A previous launch left the window blank in a special \
-                         transparency mode, so it was reset to the safe \
-                         Transparent mode. Re-select it in Settings if you like."
-                            .to_string(),
-                    );
-                }
-                startup_recovery::StartupDecision::Arm => {
-                    startup_recovery::arm(&sentinel_dir, app.config.window_mode);
-                    app.recovery_sentinel_dir = Some(sentinel_dir);
-                }
-                startup_recovery::StartupDecision::Proceed => {}
-            }
-        }
-        // Apply the OS glass/acrylic/mica/vibrancy effect — ONLY when the master
-        // transparency toggle is on AND the chosen mode wants a non-opaque
-        // surface (`effective_translucent`). Otherwise the window is a normal
-        // opaque window: no layered surface, so no DWM ghost-on-close risk.
-        // Done after `bootstrap()` (and the recovery guard above, which may have
-        // reverted `window_mode`) so `app.config` is the source of truth.
-        if app.config.effective_translucent() {
-            apply_window_effect(
-                cc,
-                app.config.window_mode,
-                &app.config.tint,
-                app.config.opacity,
-            );
-        }
+        // The window is ALWAYS created transparent-capable (`with_transparent`) and
+        // the single `opacity` slider drives the see-through level (v0.4.21). There
+        // is no OS blur backdrop (acrylic / mica / vibrancy) and no uniform-dim
+        // layered-window path anymore — those never composited on the hybrid-GPU
+        // target — so the crash-loop recovery guard they needed is gone too. The
+        // portable per-pixel transparent surface is the only effect.
         // The residual native MIN/MAX caption buttons winit leaves on the
         // undecorated window (winit #2754) are suppressed at WINDOW CREATION via
         // `ViewportBuilder::with_minimize_button(false)`/`with_maximize_button(false)`
@@ -602,10 +536,14 @@ impl C0pl4ndApp {
         }
         // Apply Visuals DERIVED FROM the loaded terminal theme so the whole
         // chrome follows the active theme from the first frame (a light theme →
-        // light UI, a dark theme → dark UI). Done after `bootstrap()` so
-        // `app.theme` is loaded.
-        cc.egui_ctx
-            .set_visuals(theme::visuals_from_theme(&app.theme));
+        // light UI, a dark theme → dark UI). Then fold the window `opacity` into
+        // the resting chrome + background fills so the shell is see-through at low
+        // opacity (only glyph text stays over the desktop at opacity 0). Done after
+        // `bootstrap()` so `app.theme`/`app.config` are loaded; re-applied on every
+        // theme/opacity change (see `settings_window` / `follow_os_theme_tick`).
+        let mut visuals = theme::visuals_from_theme(&app.theme);
+        window_effects::apply_window_opacity(&mut visuals, app.config.opacity);
+        cc.egui_ctx.set_visuals(visuals);
         app.fonts_installed = true; // already installed above; skip the frame-tick install
                                     // A wgpu render state means a real window (also true under the wgpu test
                                     // harness, which drives frames explicitly with `step()`); headless tests
@@ -613,28 +551,24 @@ impl C0pl4ndApp {
         app.live_window = cc.wgpu_render_state.is_some();
         // Cross-check instrumentation (pairs with the adapter-selector log written
         // during GPU init): record the adapter eframe ACTUALLY bound plus the
-        // resolved transparency state + clear-color alpha, so `gpu-diag.log` shows
-        // both the per-adapter surface capabilities AND the final swapchain-facing
-        // pick. This is the file the user hands back to diagnose "opaque black"
-        // (the release binary is a GUI subsystem app, so stderr/tracing is lost).
-        // Only meaningful when a real window exists AND a translucent mode is on.
-        if app.config.effective_translucent() {
-            if let Some(rs) = &cc.wgpu_render_state {
-                let info = rs.adapter.get_info();
-                let clear_alpha = window_clear_color(&app.config, &app.theme)[3];
-                gpu_diag::log_line(&format!(
-                    "RenderState bound: name='{}' type={} backend={:?} | \
-                     effective_translucent=true window_mode={:?} opacity={:.2} \
-                     with_transparent=true clear_alpha={:.3} pane_bg_alpha={}",
-                    info.name,
-                    gpu_diag::device_type_name(info.device_type),
-                    info.backend,
-                    app.config.window_mode,
-                    app.config.opacity,
-                    clear_alpha,
-                    pane_bg_alpha(&app.config),
-                ));
-            }
+        // resolved opacity + clear-color alpha, so `gpu-diag.log` shows both the
+        // per-adapter surface capabilities AND the final swapchain-facing pick.
+        // This is the file the user hands back to diagnose "opaque black" (the
+        // release binary is a GUI subsystem app, so stderr/tracing is lost). The
+        // window is always transparent-capable now, so this always logs.
+        if let Some(rs) = &cc.wgpu_render_state {
+            let info = rs.adapter.get_info();
+            let clear_alpha = window_clear_color()[3];
+            gpu_diag::log_line(&format!(
+                "RenderState bound: name='{}' type={} backend={:?} | \
+                 opacity={:.2} with_transparent=true clear_alpha={:.3} pane_bg_alpha={}",
+                info.name,
+                gpu_diag::device_type_name(info.device_type),
+                info.backend,
+                app.config.opacity,
+                clear_alpha,
+                pane_bg_alpha(&app.config),
+            ));
         }
         // W1TN3SS: drain the local crash-report spool per the user's opt-in
         // posture (production-only — never from `bootstrap`, so a unit test that
@@ -750,8 +684,6 @@ impl C0pl4ndApp {
             first_frame_time: None,
             foreground_done: false,
             last_os_theme: None,
-            recovery_sentinel_dir: None,
-            recovery_frames: 0,
             settings_place_pending: false,
             settings_was_open: false,
             live_window: false,
@@ -1290,27 +1222,20 @@ impl C0pl4ndApp {
         }
 
         // --- background quad (theme bg) + focus ring ---
-        // `bg_alpha` is 255 for an opaque window and the opacity-folded alpha
-        // when the window is effectively translucent — painting the pane fill
-        // non-opaque is what lets the OS acrylic/mica blur (or, in Transparent
-        // mode, the desktop) show THROUGH the grid. An opaque fill here would
-        // cover the transparent clear-color and defeat the whole DWM backdrop,
-        // which is exactly why transparency "did nothing" before.
-        let bg = terms
-            .get(&pane_id)
-            .map(PaneTerm::background_rgb)
-            .unwrap_or((18, 18, 18));
-        // The pane background is NOT tinted here — the tinted `central_fill` behind
-        // it shows through the (translucent) pane fill, so the tint reaches the pane
-        // in exactly ONE pass, identical to the gaps between panes and the chrome
-        // panels. Tinting the pane fill too would DOUBLE the wash on panes and make
-        // them redder than the dividers/top bar (the reported mismatch). The glyph
-        // text is drawn with its own colour below, so it is never tinted.
-        painter.rect_filled(
-            rect,
-            egui::CornerRadius::same(4),
-            egui::Color32::from_rgba_unmultiplied(bg.0, bg.1, bg.2, bg_alpha),
-        );
+        // SINGLE-BACKDROP RULE (opacity linearity): the terminal background is
+        // painted EXACTLY ONCE — by the `CentralPanel` `central_fill` behind the
+        // whole tiling grid (see `ui`), which already carries the opacity-folded
+        // `pane_bg_alpha` AND backs the gaps between panes (so an opaque window
+        // stays solid, no desktop leak in the 4px seams). This per-pane body used
+        // to ALSO fill the pane rect at the same `bg_alpha`, so the two identical
+        // theme-bg layers COMPOUNDED (`opacity` over `opacity` ≈ `opacity²` — at
+        // 0.7 → ~0.91 effective), which read as a heavy haze that never went clear
+        // like SCR1B3 (whose editor paints its background once). Dropping this
+        // second fill makes the opacity slider LINEAR — one alpha over the desktop.
+        // The tint (background layer, behind `central_fill`) still reaches the pane
+        // through the single translucent backing, in exactly one pass. `bg_alpha`
+        // stays in use below to fold the bezel/focus-ring stroke.
+        //
         // Focus ring + bezel follow the active theme (accent on focus, bezel
         // otherwise) so the grid chrome matches the rest of the themed UI. Both
         // fold the window-transparency alpha (`bg_alpha`) so the border is as
@@ -2615,7 +2540,9 @@ impl C0pl4ndApp {
         for term in self.terms.values_mut() {
             term.set_theme(self.theme.clone());
         }
-        ctx.set_visuals(theme::visuals_from_theme(&self.theme));
+        let mut visuals = theme::visuals_from_theme(&self.theme);
+        window_effects::apply_window_opacity(&mut visuals, self.config.opacity);
+        ctx.set_visuals(visuals);
     }
 
     fn settings_window(&mut self, ctx: &egui::Context) {
@@ -2674,7 +2601,9 @@ impl C0pl4ndApp {
             // settings window, panel fills — follows the picked theme (a light
             // theme flips the chrome light, a dark one dark) without waiting for
             // a relaunch. `self.theme` was reloaded just above on a theme change.
-            ctx.set_visuals(theme::visuals_from_theme(&self.theme));
+            let mut visuals = theme::visuals_from_theme(&self.theme);
+            window_effects::apply_window_opacity(&mut visuals, self.config.opacity);
+            ctx.set_visuals(visuals);
             // Persist to the platform config file so the change survives a
             // relaunch — but ONLY in a real window. The headless `egui_kittest`
             // harness sets `live_window == false`; persisting there would write
@@ -3310,17 +3239,14 @@ impl C0pl4ndApp {
 }
 
 impl eframe::App for C0pl4ndApp {
-    /// Frameless window clear color.
-    ///
-    /// When the window is effectively translucent (master toggle on + a
-    /// translucent mode) we clear to fully transparent so the rounded corners
-    /// and the OS blur (acrylic / mica / vibrancy) — or, for `Transparent`
-    /// mode and on Linux, the desktop itself — show through; `window_clear_color`
-    /// folds the `opacity` slider into the alpha for the portable see-through
-    /// look. When opaque, we clear to the theme background at full alpha so the
-    /// desktop never bleeds through a solid window.
+    /// Frameless window clear color: unconditionally fully transparent
+    /// `[0,0,0,0]`. The window is always created transparent-capable, so the
+    /// rounded corners and (below opacity 1.0) the desktop show through; the
+    /// `opacity` slider is folded into the PANEL fills ([`pane_bg_alpha`]) +
+    /// resting chrome ([`window_effects::apply_window_opacity`]), never the clear.
+    /// At opacity 1.0 the opaque panels cover the transparent clear (solid look).
     fn clear_color(&self, _v: &egui::Visuals) -> [f32; 4] {
-        window_clear_color(&self.config, &self.theme)
+        window_clear_color()
     }
 
     /// Do NOT persist egui `Memory` to disk (privacy F1).
@@ -3568,24 +3494,6 @@ impl C0pl4ndApp {
         // cost and would hide the sweep).
         if self.first_frame_time.is_none() {
             self.first_frame_time = Some(ctx.input(|i| i.time));
-        }
-        // CRASH-LOOP RECOVERY: once a risky-mode launch (Dim/Glass/Mica/Vibrancy)
-        // has rendered successfully for a short steady-state window, the window
-        // composited fine — clear the sentinel so this launch is NOT mistaken for
-        // a black-window crash on the NEXT start. If the app is force-killed
-        // before this (a window that never composites), the sentinel survives and
-        // the next `new()` reverts to Transparent. See `startup_recovery`.
-        if let Some(dir) = self.recovery_sentinel_dir.as_ref() {
-            self.recovery_frames = self.recovery_frames.saturating_add(1);
-            if self.recovery_frames >= startup_recovery::STEADY_STATE_FRAMES {
-                startup_recovery::disarm(dir);
-                self.recovery_sentinel_dir = None;
-            } else {
-                // Keep the frame pump running so the steady-state window is
-                // reached promptly even without input (real window only; the
-                // sentinel is never armed in the headless harness).
-                ctx.request_repaint();
-            }
         }
         // FIRST-LAUNCH FOREGROUND (once). A freshly-launched window can open
         // BEHIND other windows on Windows 11: the OS foreground-lock ignores the
@@ -4348,6 +4256,12 @@ impl C0pl4ndApp {
         // opacity, while the glyph text + the Settings window (painted later /
         // higher) are never tinted. See `paint_background_tint`.
         window_effects::paint_background_tint(ctx, &self.config);
+        // The software "frosted glass" wash, on the SAME background layer, over the
+        // tint and behind the panes/glyphs. Independent of the opacity slider (its
+        // own `frost_amount`), so it adds an adjustable diffuse frost that shows
+        // through the see-through glass at any opacity < 1 without fading. See
+        // `paint_frost`.
+        window_effects::paint_frost(ctx, &self.config, &self.theme);
 
         // 1) custom titlebar + tab strip. Fixed height so the drag region below
         //    is exactly the bar (not the whole remaining column), and so the
@@ -4420,19 +4334,24 @@ impl C0pl4ndApp {
             self.history_sidebar(ctx, colors);
         }
 
-        // 3) the pane grid (egui_tiles) — LIVE terminal panes (Milestone 2). The
-        //    central-panel fill carries the SAME opacity-folded alpha the pane
-        //    quads use when the window is effectively translucent, so the gap
-        //    between/around panes also lets the OS blur (or desktop) show through
-        //    — an opaque central fill here would cover the transparent clear
-        //    color before the pane quads ever painted. Fully opaque otherwise.
+        // 3) the pane grid (egui_tiles) — LIVE terminal panes (Milestone 2). This
+        //    CentralPanel fill is the SINGLE terminal backdrop (see the single-
+        //    backdrop rule in `render_pane_body`): it carries the opacity-folded
+        //    `pane_bg_alpha` and backs BOTH the panes AND the gaps between them, so
+        //    a translucent window reveals the desktop uniformly and an opaque one
+        //    stays solid (no seam leak). The per-pane body no longer paints its own
+        //    fill, so this alpha is applied EXACTLY ONCE — the opacity slider is
+        //    linear (no `opacity²` compounding haze). The backing colour is the
+        //    focused terminal's own theme background (identical to the chrome bg,
+        //    but semantically the TERMINAL surface, not the chrome).
         let central_alpha = pane_bg_alpha(&self.config);
-        let central_fill = egui::Color32::from_rgba_unmultiplied(
-            colors.bg.r(),
-            colors.bg.g(),
-            colors.bg.b(),
-            central_alpha,
-        );
+        let backing = self
+            .terms
+            .get(&self.focused_pane)
+            .map(PaneTerm::background_rgb)
+            .unwrap_or((colors.bg.r(), colors.bg.g(), colors.bg.b()));
+        let central_fill =
+            egui::Color32::from_rgba_unmultiplied(backing.0, backing.1, backing.2, central_alpha);
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(central_fill))
             .show(ctx, |ui| self.grid_ui(ui));
@@ -4611,6 +4530,11 @@ impl C0pl4ndApp {
         {
             let fx = self.config.effects;
             let t = ctx.input(|i| i.time);
+            // Ambient motion effects (mesh / VHS / flicker) are INDEPENDENT of the
+            // window Opacity slider: their visibility is driven ONLY by their own
+            // Motion settings (mesh brightness/density/speed, VHS/flicker intensity),
+            // so dragging Opacity never changes how strong the node mesh reads.
+            // (Opacity, Tint, Frost, and Motion are four independent controls.)
             // Each continuous drift overlay now carries its OWN speed multiplier
             // (SCR1B3 parity), decoupled from the UI-transition-speed slider
             // (`animation_intensity`, which governs only egui's chrome fades). Each

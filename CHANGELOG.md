@@ -8,6 +8,72 @@ Full per-release artifacts (signed binaries, SBOMs, provenance) are on the
 [GitHub Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases)
 page.
 
+## [0.4.21]
+
+### Added — frosted glass
+
+- **Software "frosted glass" wash.** A new Settings → Appearance → Frosted glass
+  toggle adds an adjustable diffuse frost over the window, with a Frost amount
+  slider (0–100%, capped so text stays legible), a frost colour picker (defaults
+  to the theme background), and an optional procedural Grain texture. It is
+  independent of the Opacity slider (works at any opacity). Honest by design: it
+  tints/diffuses the window; it does not blur the desktop behind the window (a
+  real backdrop blur is not possible on this hardware).
+
+### Changed — window look
+
+- **Opacity is now clean and linear.** The terminal background was being painted
+  twice and the two opacity alphas compounded (≈opacity²), so a mid-opacity window
+  looked far hazier than the slider suggested and never went truly clear. The
+  background is now painted once, so the Opacity slider is linear — clear glass at
+  low values, solid at 100%.
+- **Tint works at any opacity.** The colour tint no longer fades with the Opacity
+  slider — it colours the see-through glass regardless of how transparent the
+  window is. Opacity (glass clarity), Tint (colour), and Frost (diffuse wash) are
+  now three independent controls; a fully-clear window is tint-off + frost-off.
+- **All Settings dropdowns are now fixed-width with an up/down stepper.** Every
+  combo (theme, fonts, cursor, graphics, update, …) is a constant width with a
+  compact ▲/▼ spinner to its right that cycles the options with wrap-around — the
+  dropdown and its stepper no longer move as the selected value's length changes.
+
+### Changed — window transparency simplified to one effect
+
+- **One Opacity slider, no mode selector.** The window is now always
+  transparent-capable and a single **Opacity** control (0% = fully see-through,
+  100% = solid) drives it. The `WindowMode` dropdown and every extra mode —
+  Opaque, Dim, Glass, Mica, Vibrancy, and the `acrylic` backdrop — were removed:
+  on hybrid-GPU (Optimus) laptops the OS blur backdrops never composited (they
+  looked identical to plain Transparent), Dim rendered black, and the separate
+  Opaque mode rendered black. The one portable per-pixel effect that works is now
+  the only one. Opacity applies live.
+- **Opacity 0 is now maximally see-through.** The resting chrome (toolbar
+  buttons, tab chips, title bar) now fades with the opacity alpha along with the
+  panes, so at 0% only the glyph text remains over the desktop. Hover/active
+  states, the scrollbar handle, popups, tooltips, and the Settings window stay
+  opaque for feedback and legibility. (Ports the SCR1B3 v0.4.59 fade-chrome
+  behaviour.)
+- **Old configs keep loading.** The retired keys (`transparency_enabled`,
+  `window_mode`, `acrylic`) are ignored on load; the retained `opacity` value
+  carries the see-through level.
+
+### Fixed
+
+- **UI-scale slider no longer runs away.** Dragging Settings → Appearance →
+  Interface scale used to flicker small↔big and shoot to the 3.0 maximum, leaving
+  the UI gigantic: the slider applied the zoom live every frame, rescaling itself
+  under the cursor. The scale now applies only when you release the slider (or on
+  a click / keyboard step), so the drag stays controllable.
+- **Opacity 0 is now genuinely clear (no frosted wash).** With a tint enabled, the
+  colour wash painted at a fixed alpha regardless of opacity, so a maximally
+  see-through window (opacity 0) still showed a uniform frosted haze. The tint —
+  and the ambient background effects (wired mesh / VHS / flicker) — now fade
+  proportionally with the window opacity, so at 0% only the terminal glyph text
+  remains over the desktop.
+- **Ambient effects no longer cover popups.** The wired-mesh and other motion
+  overlays rendered on the same layer order as popups and painted over the tint
+  colour-picker; they now render strictly behind all popups, menus,
+  color-pickers, and tooltips.
+
 ## [0.4.14] - 2026-07-03
 
 ### Fixed — rendering

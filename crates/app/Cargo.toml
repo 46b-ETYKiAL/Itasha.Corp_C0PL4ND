@@ -101,7 +101,6 @@ eframe.workspace = true
 egui.workspace = true
 egui_tiles.workspace = true
 egui-phosphor.workspace = true
-window-vibrancy.workspace = true
 
 # Native file-open dialog for the titlebar script launcher (#35). The 0.15.x
 # line returns `Option<PathBuf>` directly from the SYNC `pick_file()` (the 0.17
