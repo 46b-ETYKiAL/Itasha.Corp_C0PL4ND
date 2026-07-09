@@ -10,6 +10,32 @@ page.
 
 ## [0.4.21]
 
+### Added — frosted glass
+
+- **Software "frosted glass" wash.** A new Settings → Appearance → Frosted glass
+  toggle adds an adjustable diffuse frost over the window, with a Frost amount
+  slider (0–100%, capped so text stays legible), a frost colour picker (defaults
+  to the theme background), and an optional procedural Grain texture. It is
+  independent of the Opacity slider (works at any opacity). Honest by design: it
+  tints/diffuses the window; it does not blur the desktop behind the window (a
+  real backdrop blur is not possible on this hardware).
+
+### Changed — window look
+
+- **Opacity is now clean and linear.** The terminal background was being painted
+  twice and the two opacity alphas compounded (≈opacity²), so a mid-opacity window
+  looked far hazier than the slider suggested and never went truly clear. The
+  background is now painted once, so the Opacity slider is linear — clear glass at
+  low values, solid at 100%.
+- **Tint works at any opacity.** The colour tint no longer fades with the Opacity
+  slider — it colours the see-through glass regardless of how transparent the
+  window is. Opacity (glass clarity), Tint (colour), and Frost (diffuse wash) are
+  now three independent controls; a fully-clear window is tint-off + frost-off.
+- **All Settings dropdowns are now fixed-width with an up/down stepper.** Every
+  combo (theme, fonts, cursor, graphics, update, …) is a constant width with a
+  compact ▲/▼ spinner to its right that cycles the options with wrap-around — the
+  dropdown and its stepper no longer move as the selected value's length changes.
+
 ### Changed — window transparency simplified to one effect
 
 - **One Opacity slider, no mode selector.** The window is now always

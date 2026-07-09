@@ -10,6 +10,12 @@
 
 (absolute: `C:/Users/.46b_/Itasha.Corp_S4F3-R0UT3-4RB1T3R/.s4f3-data/pubrepo-work/c0pl4nd-trans-simplify/target/release/c0pl4nd.exe`)
 
+### Latest additions (v0.4.21, folded into PR #277)
+- **Opacity is now clean + linear** — the terminal background was double-painted (CentralPanel fill + per-pane fill), compounding to ≈opacity² (0.7 → ~0.91 haze). Now painted once; verified on-GPU: opacity 0.7 → backing alpha **179** (linear), not 125 (squared).
+- **Software "frosted glass"** (Settings → Appearance → Frosted glass): toggle + amount slider + colour picker + grain checkbox. Independent of opacity. Honest hover: "does not blur the desktop." Verified on-GPU: frost off backing=77 → on=161.
+- **Tint un-coupled from opacity** — it now works at any opacity (colours the glass) instead of fading away. Opacity / Tint / Frost are three independent controls; fully-clear = tint-off + frost-off.
+- **All Settings dropdowns** are fixed-width with an up/down ▲/▼ stepper (spinner) to the right, cycling options with wrap-around — the combo/stepper no longer move with the value length.
+
 The main thread should launch this so the user can confirm:
 1. **Opacity 0 = truly clear (no frosted wash)** — the frost was a tint colour wash painting at a fixed alpha regardless of opacity (the user's config has `opacity = 0.0`, `tint_strength = 0.18`). The tint + ambient effects now fade with opacity, so at 0% only glyph text remains over the desktop. Verified headlessly: opacity-0 surface is <3% non-transparent even with tint + mesh ON.
 2. **Tint color picker fully visible** — the wired-mesh/effects now render strictly behind popups/color-pickers (moved to `Order::Middle`).

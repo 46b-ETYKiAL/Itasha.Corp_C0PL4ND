@@ -28,6 +28,7 @@ Most settings are **top-level keys**; a handful are grouped into tables. This re
 | `scrollback_lines` | top-level | Scrollback buffer size (lines per pane) |
 | `opacity` | top-level | See-through level, `0.0` (fully transparent) ..= `1.0` (solid) |
 | `tint` / `tint_strength` / `tint_enabled` | top-level | Optional colour wash over the window |
+| `frost_enabled` / `frost_amount` / `frost_color` / `frost_grain` | top-level | Software frosted-glass wash |
 | `ui_scale` | top-level | Whole-UI accessibility zoom (`0.5`..=`3.0`) |
 | `startup_panel` | top-level | The neofetch-style launch splash (on by default) |
 | `shell` / `term` | top-level | Override the child shell program / its `TERM` value |
@@ -80,20 +81,35 @@ padding = 8     # inner padding between the window edge and the grid, in pixels
 # to remember your window geometry; you normally don't set these by hand.
 ```
 
-## Transparency & tint
+## Transparency, tint & frost
 
-The window is **always transparent-capable**, and a single `opacity` slider is the
-whole see-through control — there is no mode selector. `0.0` = fully see-through
-(only the terminal text and resting chrome fade away, leaving glyphs over the
-desktop); `1.0` = the panels paint fully opaque, so the window reads as a solid
-surface. Applies **live** as you drag the slider. An optional colour wash tints the
-whole window.
+Three independent controls shape the window's look:
+
+- **Opacity** — the glass clarity. `0.0` = fully see-through (only the terminal
+  text remains over the desktop); `1.0` = solid. Painted once, so it is linear —
+  clear at low values, solid at 100%. Applies live.
+- **Tint** — a colour wash over the window, INDEPENDENT of opacity (it colours the
+  see-through glass at any opacity rather than fading with it).
+- **Frost** — a software "frosted glass" wash: an adjustable diffuse tint with an
+  optional grain texture, independent of opacity. It tints/diffuses the window; it
+  does **not** blur the desktop behind the window (a real backdrop blur is not
+  possible on this hardware). Off by default.
+
+A fully-clear window is `opacity = 0` with the tint and frost off.
 
 ```toml
-opacity = 1.0        # 0.0 (fully see-through) .. 1.0 (solid) — the single control
-tint = "#08060d"     # #RRGGBB colour washed over the window (brand-canon VOID BLACK)
-tint_strength = 0.0  # 0.0 (no tint) .. 1.0 (strong)
-tint_enabled = true  # master ON/OFF for the tint wash (independent of strength; default true)
+opacity = 1.0          # 0.0 (fully see-through) .. 1.0 (solid) — the glass clarity
+
+# Tint: a colour wash (works at any opacity)
+tint = "#08060d"       # #RRGGBB colour (brand-canon VOID BLACK)
+tint_strength = 0.0    # 0.0 (no tint) .. 1.0 (strong)
+tint_enabled = true    # master ON/OFF for the tint wash
+
+# Frost: software frosted glass (independent of opacity)
+frost_enabled = false  # master ON/OFF
+frost_amount = 0.25    # 0.0 (clear) .. 1.0 (max; capped so text stays legible)
+frost_color = ""       # #RRGGBB, or empty to follow the theme background
+frost_grain = true     # subtle procedural grain so the frost reads as diffused glass
 ```
 
 > **Hybrid-GPU laptops (NVIDIA + Intel):** a see-through window needs a GPU whose
@@ -261,10 +277,16 @@ opacity = 1.0                 # 0.0 (fully see-through) .. 1.0 (solid) — the s
 ui_scale = 1.0                # 0.5 .. 3.0
 startup_panel = true          # neofetch-style splash on launch
 
-# Optional colour wash over the window
+# Optional colour wash over the window (works at any opacity)
 tint = "#08060d"
 tint_strength = 0.0           # 0.0 (no tint) .. 1.0 (strong)
 tint_enabled = true           # master ON/OFF for the tint wash
+
+# Software frosted glass (independent of opacity; not a real desktop blur)
+frost_enabled = false
+frost_amount = 0.25           # 0.0 (clear) .. 1.0 (max; capped for legibility)
+frost_color = ""              # #RRGGBB, or empty to follow the theme background
+frost_grain = true            # subtle procedural grain
 
 # Shell / behaviour
 term = "xterm-256color"
