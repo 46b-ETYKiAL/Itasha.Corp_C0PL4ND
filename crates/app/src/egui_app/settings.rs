@@ -405,7 +405,7 @@ fn truncate_to_width(text: &str, max_width: f32, width_of: impl Fn(&str) -> f32)
 /// next). Styled like a small egui button (per-state fill + stroke), with the
 /// triangle in the widget's foreground colour so it dims correctly when disabled.
 fn stepper_arrow(ui: &mut egui::Ui, up: bool, hover: &str) -> egui::Response {
-    let size = egui::vec2(18.0, 18.0);
+    let size = egui::vec2(22.0, 22.0);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let resp = resp.on_hover_text(hover);
     if ui.is_rect_visible(rect) {
@@ -417,9 +417,10 @@ fn stepper_arrow(ui: &mut egui::Ui, up: bool, hover: &str) -> egui::Response {
         let painter = ui.painter();
         // Button background (matches egui's small-button styling per interaction state).
         painter.rect(rect, radius, fill, bg_stroke, egui::StrokeKind::Inside);
-        // The arrow, drawn as a filled triangle centred in the button.
+        // The arrow, drawn as a filled triangle centred in the button (proportional
+        // to the 22×22 rect).
         let c = rect.center();
-        let (hw, hh) = (4.0, 3.2);
+        let (hw, hh) = (5.0, 4.0);
         let pts = if up {
             vec![
                 egui::pos2(c.x, c.y - hh),
@@ -472,7 +473,7 @@ fn dropdown_with_stepper<T: Clone + PartialEq>(
         // constant width, so the pair never moves with the selected value.
         let cur = variants.iter().position(|(v, _)| v == value);
         ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().item_spacing.x = 4.0;
             let up = stepper_arrow(ui, true, "Previous option");
             let down = stepper_arrow(ui, false, "Next option");
             if !variants.is_empty() {
@@ -3540,7 +3541,7 @@ mod tests {
     #[test]
     fn stepper_arrows_are_painter_drawn_geometry_side_by_side() {
         // The arrows are DRAWN as triangles via the painter (never font glyphs, so
-        // they can't render as tofu boxes): each is a fixed 18×18 button that always
+        // they can't render as tofu boxes): each is a fixed 22×22 button that always
         // occupies its allocated rect. Laid out in a horizontal row, the "next" (▼)
         // button sits to the RIGHT of the "previous" (▲) button on the same line.
         egui::__run_test_ui(|ui| {
@@ -3549,10 +3550,10 @@ mod tests {
                 let down = stepper_arrow(ui, false, "Next option");
                 assert_eq!(
                     up.rect.size(),
-                    egui::vec2(18.0, 18.0),
+                    egui::vec2(22.0, 22.0),
                     "the up arrow renders as a fixed-size painter button"
                 );
-                assert_eq!(down.rect.size(), egui::vec2(18.0, 18.0));
+                assert_eq!(down.rect.size(), egui::vec2(22.0, 22.0));
                 assert!(
                     (up.rect.center().y - down.rect.center().y).abs() < 0.5,
                     "the two arrows share a row (side by side, not stacked)"
