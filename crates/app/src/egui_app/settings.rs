@@ -398,6 +398,46 @@ fn truncate_to_width(text: &str, max_width: f32, width_of: impl Fn(&str) -> f32)
 /// label (the common enum case). Returns whether `value` changed. The caller
 /// still renders its own row label BEFORE and its `reset_to_default` (↺) AFTER
 /// this call, so search-filter (`row_visible`) and the grid columns are unchanged.
+/// One compact stepper button that DRAWS its arrow as a filled triangle via the
+/// painter — NEVER a font glyph. Unicode arrow characters (`▲`/`▼`) are tofu
+/// (empty boxes) in a UI font that lacks them; a painter-drawn triangle always
+/// renders. `up` picks the direction (up-pointing = previous, down-pointing =
+/// next). Styled like a small egui button (per-state fill + stroke), with the
+/// triangle in the widget's foreground colour so it dims correctly when disabled.
+fn stepper_arrow(ui: &mut egui::Ui, up: bool, hover: &str) -> egui::Response {
+    let size = egui::vec2(18.0, 18.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let resp = resp.on_hover_text(hover);
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact(&resp);
+        let fill = visuals.weak_bg_fill;
+        let bg_stroke = visuals.bg_stroke;
+        let radius = visuals.corner_radius;
+        let tri = visuals.fg_stroke.color;
+        let painter = ui.painter();
+        // Button background (matches egui's small-button styling per interaction state).
+        painter.rect(rect, radius, fill, bg_stroke, egui::StrokeKind::Inside);
+        // The arrow, drawn as a filled triangle centred in the button.
+        let c = rect.center();
+        let (hw, hh) = (4.0, 3.2);
+        let pts = if up {
+            vec![
+                egui::pos2(c.x, c.y - hh),
+                egui::pos2(c.x - hw, c.y + hh),
+                egui::pos2(c.x + hw, c.y + hh),
+            ]
+        } else {
+            vec![
+                egui::pos2(c.x - hw, c.y - hh),
+                egui::pos2(c.x + hw, c.y - hh),
+                egui::pos2(c.x, c.y + hh),
+            ]
+        };
+        painter.add(egui::Shape::convex_polygon(pts, tri, egui::Stroke::NONE));
+    }
+    resp
+}
+
 fn dropdown_with_stepper<T: Clone + PartialEq>(
     ui: &mut egui::Ui,
     id_salt: &str,
@@ -426,17 +466,15 @@ fn dropdown_with_stepper<T: Clone + PartialEq>(
                         .changed();
                 }
             });
-        // Compact stacked stepper (▲ / ▼) immediately right of the fixed-width
-        // combo. Tight vertical spacing so the two arrows read as one spinner.
+        // Compact stepper: two painter-drawn triangle buttons SIDE BY SIDE
+        // [▲][▼] immediately right of the fixed-width combo (tight horizontal
+        // spacing so they read as one spinner). Fixed position — the combo is a
+        // constant width, so the pair never moves with the selected value.
         let cur = variants.iter().position(|(v, _)| v == value);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 1.0;
-            let up = ui
-                .add(egui::Button::new("▲").small())
-                .on_hover_text("Previous option");
-            let down = ui
-                .add(egui::Button::new("▼").small())
-                .on_hover_text("Next option");
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let up = stepper_arrow(ui, true, "Previous option");
+            let down = stepper_arrow(ui, false, "Next option");
             if !variants.is_empty() {
                 if up.clicked() {
                     *value = variants[step_index(cur, variants.len(), -1)].0.clone();
@@ -3496,6 +3534,34 @@ mod tests {
         // returns the text unchanged — the width path is covered purely above).
         egui::__run_test_ui(|ui| {
             let _ = fit_combo_label(ui, "itasha-corp", DROPDOWN_WIDTH - 34.0);
+        });
+    }
+
+    #[test]
+    fn stepper_arrows_are_painter_drawn_geometry_side_by_side() {
+        // The arrows are DRAWN as triangles via the painter (never font glyphs, so
+        // they can't render as tofu boxes): each is a fixed 18×18 button that always
+        // occupies its allocated rect. Laid out in a horizontal row, the "next" (▼)
+        // button sits to the RIGHT of the "previous" (▲) button on the same line.
+        egui::__run_test_ui(|ui| {
+            ui.horizontal(|ui| {
+                let up = stepper_arrow(ui, true, "Previous option");
+                let down = stepper_arrow(ui, false, "Next option");
+                assert_eq!(
+                    up.rect.size(),
+                    egui::vec2(18.0, 18.0),
+                    "the up arrow renders as a fixed-size painter button"
+                );
+                assert_eq!(down.rect.size(), egui::vec2(18.0, 18.0));
+                assert!(
+                    (up.rect.center().y - down.rect.center().y).abs() < 0.5,
+                    "the two arrows share a row (side by side, not stacked)"
+                );
+                assert!(
+                    down.rect.left() >= up.rect.right() - 0.01,
+                    "the next arrow is to the RIGHT of the previous arrow (horizontal)"
+                );
+            });
         });
     }
 

@@ -4530,13 +4530,11 @@ impl C0pl4ndApp {
         {
             let fx = self.config.effects;
             let t = ctx.input(|i| i.time);
-            // Fade the ambient background washes (mesh / VHS / flicker) PROPORTIONALLY
-            // with the window opacity, so at opacity 0 they vanish along with the
-            // panes — only the glyph text remains over the desktop (no ambient haze
-            // on a maximally-transparent window). At opacity 1 they run at full
-            // strength. Folded into each effect's own intensity/brightness/strength
-            // input (each painter early-returns at a zero-weight arg).
-            let fx_opacity = self.config.opacity.clamp(0.0, 1.0);
+            // Ambient motion effects (mesh / VHS / flicker) are INDEPENDENT of the
+            // window Opacity slider: their visibility is driven ONLY by their own
+            // Motion settings (mesh brightness/density/speed, VHS/flicker intensity),
+            // so dragging Opacity never changes how strong the node mesh reads.
+            // (Opacity, Tint, Frost, and Motion are four independent controls.)
             // Each continuous drift overlay now carries its OWN speed multiplier
             // (SCR1B3 parity), decoupled from the UI-transition-speed slider
             // (`animation_intensity`, which governs only egui's chrome fades). Each
@@ -4565,18 +4563,18 @@ impl C0pl4ndApp {
                 paint_wired_mesh(
                     ctx,
                     fx.clamped_mesh_density(),
-                    fx.clamped_mesh_brightness() * fx_opacity,
+                    fx.clamped_mesh_brightness(),
                     accent,
                     t * mesh_move,
                     exclude,
                 );
-                animating |= mesh_move > 0.0 && fx_opacity > 0.0;
+                animating |= mesh_move > 0.0;
             }
             if fx.vhs_tracking {
                 paint_vhs_tracking(
                     ctx,
                     t * fx.clamped_vhs_speed() as f64,
-                    fx.clamped_vhs_intensity() * fx_opacity,
+                    fx.clamped_vhs_intensity(),
                     exclude,
                 );
                 animating = true;
@@ -4584,7 +4582,7 @@ impl C0pl4ndApp {
             if fx.flicker {
                 paint_flicker(
                     ctx,
-                    fx.clamped_flicker_strength() * fx_opacity,
+                    fx.clamped_flicker_strength(),
                     t * fx.clamped_flicker_speed() as f64,
                     exclude,
                 );

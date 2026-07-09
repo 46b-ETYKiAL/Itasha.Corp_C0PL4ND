@@ -368,9 +368,9 @@ fn nonzero_pct(img: &image::RgbaImage) -> f64 {
     nz as f64 / (u64::from(w) * u64::from(hgt)) as f64 * 100.0
 }
 
-/// REGRESSION GUARD (needs a GPU): with the tint AND frost OFF, opacity 0 is a
-/// genuinely CLEAR window — the whole surface reaches alpha 0 except the sparse,
-/// opaque glyph text — even with the ambient mesh on. Proves the clean-glass path
+/// REGRESSION GUARD (needs a GPU): with the tint AND frost OFF and no ambient
+/// effects, opacity 0 is a genuinely CLEAR window — the whole surface reaches
+/// alpha 0 except the sparse, opaque glyph text. Proves the clean-glass path
 /// (opacity purely controls see-through; nothing hazes it when tint/frost are off).
 #[test]
 #[ignore = "needs a real GPU; run with --ignored"]
@@ -379,9 +379,7 @@ fn opacity_zero_is_clear_when_tint_and_frost_off() {
         c.opacity = 0.0;
         c.tint_enabled = false;
         c.frost_enabled = false;
-        c.effects.animations_enabled = true;
-        c.effects.wired_ambient = true;
-        c.effects.mesh_brightness = 2.0;
+        c.effects.wired_ambient = false;
     }) else {
         return;
     };
@@ -390,6 +388,41 @@ fn opacity_zero_is_clear_when_tint_and_frost_off() {
         pct < 3.0,
         "opacity-0 clean glass must be ~fully clear: {pct:.2}% non-transparent \
          (expected < 3% — only sparse glyph text + focus ring)"
+    );
+}
+
+/// GUARD (needs a GPU): the node mesh is INDEPENDENT of the window opacity — it
+/// no longer fades with the Opacity slider. At opacity 0 (fully see-through) the
+/// mesh must STILL paint a visible lattice over the desktop (it used to be scaled
+/// to nothing by `opacity`), so turning the mesh on adds clearly more non-
+/// transparent pixels than the mesh-off clean-glass baseline.
+#[test]
+#[ignore = "needs a real GPU; run with --ignored"]
+fn mesh_shows_at_opacity_zero_independent_of_opacity() {
+    let Some(off) = render_with(|c| {
+        c.opacity = 0.0;
+        c.tint_enabled = false;
+        c.frost_enabled = false;
+        c.effects.wired_ambient = false;
+    }) else {
+        return;
+    };
+    let on = render_with(|c| {
+        c.opacity = 0.0; // fully transparent glass …
+        c.tint_enabled = false;
+        c.frost_enabled = false;
+        c.effects.animations_enabled = true;
+        c.effects.wired_ambient = true; // … yet the mesh still paints
+        c.effects.mesh_density = 1.5;
+        c.effects.mesh_brightness = 2.0;
+    })
+    .expect("GPU was available for the first render");
+    let (off_pct, on_pct) = (nonzero_pct(&off), nonzero_pct(&on));
+    eprintln!("mesh off at opacity0 = {off_pct:.2}%, mesh on = {on_pct:.2}%");
+    assert!(
+        on_pct > off_pct + 1.0,
+        "the mesh must remain visible at opacity 0 (independent of opacity): \
+         off={off_pct:.2}% vs on={on_pct:.2}% — the mesh was scaled away by opacity"
     );
 }
 
