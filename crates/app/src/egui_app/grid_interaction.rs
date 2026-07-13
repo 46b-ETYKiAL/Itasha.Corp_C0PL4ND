@@ -330,7 +330,7 @@ pub(crate) fn paint_one_link_underline(
     let y = origin.y + s.line as f32 * ch + ch - 1.0;
     painter.line_segment(
         [egui::pos2(x0, y), egui::pos2(x1, y)],
-        egui::Stroke::new(1.5, colors.accent),
+        egui::Stroke::new(1.5f32, colors.accent),
     );
 }
 
@@ -379,7 +379,7 @@ pub(crate) fn paint_link_underlines(
         let y = origin.y + s.line as f32 * ch + ch - 1.0;
         painter.line_segment(
             [egui::pos2(x0, y), egui::pos2(x1, y)],
-            egui::Stroke::new(1.0, colors.accent),
+            egui::Stroke::new(1.0f32, colors.accent),
         );
     }
 }
@@ -424,7 +424,7 @@ pub(crate) fn paint_search_highlight(
             painter.rect_stroke(
                 span,
                 1.0,
-                egui::Stroke::new(1.5, colors.accent),
+                egui::Stroke::new(1.5f32, colors.accent),
                 egui::StrokeKind::Inside,
             );
         }
