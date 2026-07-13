@@ -149,6 +149,13 @@ fn main() -> eframe::Result<()> {
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }
+    // Keep the window on top of all others when the user has enabled it (mirrors
+    // SCR1B3's F-035). This is the STARTUP application so the flag takes effect
+    // from the first frame; the settings toggle additionally live-applies it at
+    // runtime via `ViewportCommand::WindowLevel`, so no relaunch is needed.
+    if launch_always_on_top() {
+        viewport = viewport.with_window_level(egui::WindowLevel::AlwaysOnTop);
+    }
 
     let mut options = eframe::NativeOptions {
         viewport,
@@ -286,6 +293,22 @@ fn launch_check_config() -> (bool, c0pl4nd_core::config::UpdateMode) {
 /// on the hybrid-GPU (Optimus) target.
 fn launch_transparency_enabled() -> bool {
     true
+}
+
+/// The persisted `always_on_top` flag, read from the on-disk config at startup so
+/// the viewport can be created already at the always-on-top window level. Mirrors
+/// [`launch_gpu_preference`]: a missing / unreadable config yields `false` (the
+/// opt-in default), never a crash.
+fn launch_always_on_top() -> bool {
+    c0pl4nd_core::Config::default_path()
+        .filter(|p| p.exists())
+        .and_then(|p| {
+            std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|s| c0pl4nd_core::Config::from_toml(&s, &p).ok())
+        })
+        .map(|c| c.always_on_top)
+        .unwrap_or_default()
 }
 
 /// The persisted `graphics_gpu` preference, read from the on-disk config at

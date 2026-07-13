@@ -1003,6 +1003,14 @@ pub struct Config {
     /// [`Config::frost_enabled`] is on.
     #[serde(default = "default_true")]
     pub frost_grain: bool,
+    /// Keep the C0PL4ND window on top of all other windows (mirrors SCR1B3's
+    /// `window.always_on_top`). Applied at startup via the viewport builder's
+    /// window level and live-toggled at runtime through
+    /// `ViewportCommand::WindowLevel`, so flipping it takes effect without a
+    /// relaunch. Default OFF — opt-in. `#[serde(default)]` keeps older configs
+    /// (written before this field) loading cleanly with the flag off.
+    #[serde(default)]
+    pub always_on_top: bool,
     pub cursor: CursorConfig,
     pub window: WindowConfig,
     pub effects: EffectsConfig,
@@ -1155,6 +1163,7 @@ impl Default for Config {
             frost_amount: default_frost_amount(),
             frost_color: String::new(),
             frost_grain: true,
+            always_on_top: false,
             cursor: CursorConfig::default(),
             window: WindowConfig::default(),
             effects: EffectsConfig::default(),
@@ -1946,6 +1955,28 @@ mod tests {
         assert!((c2.frost_amount - 0.7).abs() < f32::EPSILON);
         assert_eq!(c2.frost_color, "#112233");
         assert!(!c2.frost_grain);
+    }
+
+    /// Mirrors SCR1B3's F-035 test: `always_on_top` defaults OFF, an older config
+    /// that predates the field still loads (backfilled to off), and an explicit
+    /// `true` round-trips through a serialize → parse cycle unchanged.
+    #[test]
+    fn always_on_top_default_off_and_round_trips() {
+        let c = Config::default();
+        assert!(!c.always_on_top, "always-on-top is opt-in (off by default)");
+
+        // A pre-field config must still load, with the flag backfilled to off.
+        let p = PathBuf::from("test.toml");
+        let old = Config::from_toml("theme = \"ghost-paper\"\n", &p)
+            .expect("a pre-always_on_top config must still load");
+        assert!(!old.always_on_top);
+
+        // Set true → serialize → deserialize → still true.
+        let mut c2 = c.clone();
+        c2.always_on_top = true;
+        let s = c2.to_toml().expect("serialize config to TOML");
+        let back = Config::from_toml(&s, &p).expect("config TOML round-trip");
+        assert!(back.always_on_top);
     }
 
     #[test]

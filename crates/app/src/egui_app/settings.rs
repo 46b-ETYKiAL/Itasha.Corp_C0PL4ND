@@ -71,6 +71,7 @@ const APPEARANCE_SEARCH_LABELS: &[&str] = &[
     "tint",
     "frost frosted glass",
     "grain",
+    "always on top window level",
     "ui scale",
     "zoom",
     "accessibility",
@@ -1433,6 +1434,28 @@ fn render_sections(
                 });
                 ui.label(""); // checkbox carries its own label
                 changed |= reset_to_default(ui, &mut config.frost_grain, &def.frost_grain);
+                ui.end_row();
+            }
+        });
+
+        group(
+            ui,
+            "Window",
+            "Window behaviour that isn't a colour/translucency effect.",
+        );
+        grid("appearance_window").show(ui, |ui| {
+            // Keep the window above every other window (mirrors SCR1B3). Applied
+            // live via `ViewportCommand::WindowLevel` in the host — no relaunch.
+            if row_visible(q, "always on top window level pin above") {
+                changed |= ui
+                    .checkbox(&mut config.always_on_top, "Always on top")
+                    .on_hover_text(
+                        "Keep the C0PL4ND window above all other windows. Applies \
+                         immediately — no relaunch needed.",
+                    )
+                    .changed();
+                ui.label(""); // checkbox carries its own label
+                changed |= reset_to_default(ui, &mut config.always_on_top, &def.always_on_top);
                 ui.end_row();
             }
         });

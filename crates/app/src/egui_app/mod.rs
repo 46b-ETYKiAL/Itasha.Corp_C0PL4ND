@@ -2607,6 +2607,17 @@ impl C0pl4ndApp {
             let mut visuals = theme::visuals_from_theme(&self.theme);
             window_effects::apply_window_opacity(&mut visuals, self.config.opacity);
             ctx.set_visuals(visuals);
+            // Live-apply the always-on-top window level so flipping the toggle
+            // takes effect without a relaunch (mirrors the opacity live-apply
+            // just above). Setting the level to its current value is idempotent,
+            // so re-sending it on any settings change is harmless.
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                if self.config.always_on_top {
+                    egui::WindowLevel::AlwaysOnTop
+                } else {
+                    egui::WindowLevel::Normal
+                },
+            ));
             // Persist to the platform config file so the change survives a
             // relaunch — but ONLY in a real window. The headless `egui_kittest`
             // harness sets `live_window == false`; persisting there would write
