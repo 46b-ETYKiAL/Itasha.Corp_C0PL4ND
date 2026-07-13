@@ -1250,11 +1250,11 @@ impl C0pl4ndApp {
             // below a legible strength even at very low opacity.
             const FOCUS_RING_ALPHA_FLOOR: u8 = 150;
             let a = bg_alpha.max(FOCUS_RING_ALPHA_FLOOR);
-            egui::Stroke::new(2.0, window_effects::fold_alpha(pane_colors.accent, a))
+            egui::Stroke::new(2.0f32, window_effects::fold_alpha(pane_colors.accent, a))
         } else {
             // The unfocused bezel is pure definition — let it fully fade into
             // negative space as the window goes see-through.
-            egui::Stroke::new(1.0, window_effects::fold_alpha(pane_colors.bezel, bg_alpha))
+            egui::Stroke::new(1.0f32, window_effects::fold_alpha(pane_colors.bezel, bg_alpha))
         };
         painter.rect_stroke(
             rect,
@@ -5307,7 +5307,7 @@ fn paint_grid_native(
                 }
                 c0pl4nd_core::config::CursorStyle::Underline => {
                     let under = egui::Rect::from_min_size(
-                        cell_min + egui::vec2(0.0, ch - 2.0),
+                        cell_min + egui::vec2(0.0f32, ch - 2.0),
                         egui::vec2(cw, 2.0),
                     );
                     painter.rect_filled(under, 0.0, col32);

@@ -263,7 +263,7 @@ pub(crate) fn paint_wired_mesh(
         }
         for j in (i + 1)..n {
             if outside(pts[j]) && pts[i].distance(pts[j]) < max_d {
-                painter.line_segment([pts[i], pts[j]], Stroke::new(1.0, link));
+                painter.line_segment([pts[i], pts[j]], Stroke::new(1.0f32, link));
             }
         }
         painter.circle_filled(pts[i], 2.2, dot);
