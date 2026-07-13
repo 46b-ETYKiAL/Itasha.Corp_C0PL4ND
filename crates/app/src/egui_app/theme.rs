@@ -130,7 +130,7 @@ pub fn visuals_from_theme(theme: &c0pl4nd_core::Theme) -> Visuals {
     v.override_text_color = Some(fg);
     v.hyperlink_color = accent;
     v.selection.bg_fill = sel;
-    v.selection.stroke = Stroke::new(1.0, accent);
+    v.selection.stroke = Stroke::new(1.0f32, accent);
     v.error_fg_color = Color32::from_rgb(0xff, 0x3b, 0x5c); // alarm red (polarity-agnostic)
     v.warn_fg_color = Color32::from_rgb(0xff, 0xc4, 0x4d); // warn amber
 
@@ -145,19 +145,19 @@ pub fn visuals_from_theme(theme: &c0pl4nd_core::Theme) -> Visuals {
     v.widgets.noninteractive.bg_fill = panel;
     v.widgets.inactive.bg_fill = bezel;
     v.widgets.inactive.weak_bg_fill = panel;
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0, fg);
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0f32, fg);
     v.widgets.hovered.bg_fill = bezel;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, accent); // accent outline on hover
-    v.widgets.hovered.fg_stroke = Stroke::new(1.0, accent);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0f32, accent); // accent outline on hover
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0f32, accent);
     v.widgets.active.bg_fill = bezel;
-    v.widgets.active.bg_stroke = Stroke::new(1.0, press); // press accent
-    v.widgets.active.fg_stroke = Stroke::new(1.0, fg);
+    v.widgets.active.bg_stroke = Stroke::new(1.0f32, press); // press accent
+    v.widgets.active.fg_stroke = Stroke::new(1.0f32, fg);
 
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, bezel); // separators
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, fg);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0f32, bezel); // separators
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0f32, fg);
     v.weak_text_color = Some(muted);
     v.window_corner_radius = CornerRadius::same(8);
-    v.window_stroke = Stroke::new(1.0, bezel);
+    v.window_stroke = Stroke::new(1.0f32, bezel);
 
     v
 }

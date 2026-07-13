@@ -65,7 +65,7 @@ pub fn show(
         .frame(
             egui::Frame::new()
                 .fill(colors.panel)
-                .stroke(egui::Stroke::new(1.0, colors.bezel))
+                .stroke(egui::Stroke::new(1.0f32, colors.bezel))
                 .inner_margin(8.0)
                 .corner_radius(6.0),
         )
@@ -123,7 +123,7 @@ fn toggle(
     ui.add(
         egui::Button::new(egui::RichText::new(text).color(text_color))
             .fill(fill)
-            .stroke(egui::Stroke::new(1.0, colors.bezel))
+            .stroke(egui::Stroke::new(1.0f32, colors.bezel))
             .min_size(egui::vec2(30.0, 0.0)),
     )
     .on_hover_text(hover)

@@ -432,7 +432,7 @@ impl C0pl4ndApp {
                             ui.painter().vline(
                                 rect.center().x,
                                 rect.y_range(),
-                                egui::Stroke::new(1.0, colors.fg.gamma_multiply(0.16)),
+                                egui::Stroke::new(1.0f32, colors.fg.gamma_multiply(0.16)),
                             );
                         }
                     }

@@ -1654,14 +1654,14 @@ impl Perform for Screen {
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
         // Charset designation: `ESC ( <set>` for G0, `ESC ) <set>` for G1.
-        if intermediates == [b'('] || intermediates == [b')'] {
+        if intermediates == b"(" || intermediates == b")" {
             let cs = match byte {
                 b'0' => Charset::DecLineDrawing,
                 // B = US-ASCII; 'A'/'1'/'2' are other 8-bit-ish sets we treat as
                 // ASCII (we don't draw their glyph variants).
                 _ => Charset::Ascii,
             };
-            if intermediates == [b'('] {
+            if intermediates == b"(" {
                 self.charset_g0 = cs;
             } else {
                 self.charset_g1 = cs;
