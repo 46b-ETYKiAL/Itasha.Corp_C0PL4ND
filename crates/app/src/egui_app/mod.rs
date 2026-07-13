@@ -1254,7 +1254,10 @@ impl C0pl4ndApp {
         } else {
             // The unfocused bezel is pure definition — let it fully fade into
             // negative space as the window goes see-through.
-            egui::Stroke::new(1.0f32, window_effects::fold_alpha(pane_colors.bezel, bg_alpha))
+            egui::Stroke::new(
+                1.0f32,
+                window_effects::fold_alpha(pane_colors.bezel, bg_alpha),
+            )
         };
         painter.rect_stroke(
             rect,
@@ -5296,7 +5299,7 @@ fn paint_grid_native(
                         painter.rect_stroke(
                             cell,
                             1.0,
-                            egui::Stroke::new(1.0, col32),
+                            egui::Stroke::new(1.0f32, col32),
                             egui::StrokeKind::Inside,
                         );
                     }
