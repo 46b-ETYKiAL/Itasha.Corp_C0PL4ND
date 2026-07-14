@@ -379,7 +379,16 @@ mod tests {
 
     /// Drive a real panic of a given payload through a temporary hook and return
     /// the formatted report. The hook is restored before returning.
+    ///
+    /// Takes [`PANIC_HOOK_TEST_GUARD`] like every other hook-mutating test: this
+    /// helper installs the same process-GLOBAL hook, so without the guard its
+    /// callers raced `format_crash_report_includes_key_fields` (which does lock)
+    /// and each other -- the loser's `set_hook` was clobbered before its
+    /// `catch_unwind` fired, leaving the sink empty and failing the assert. The
+    /// guard is acquired HERE rather than in each caller so no caller can forget
+    /// it; callers must not lock again (the mutex is not reentrant).
     fn report_for_panic<F: FnOnce() + std::panic::UnwindSafe>(f: F) -> String {
+        let _guard = lock_panic_hook_tests();
         let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let sink = captured.clone();
         let previous = std::panic::take_hook();
