@@ -865,18 +865,27 @@ mod tests {
         );
     }
 
-    /// Opt-in onion ENV → Tor selection, end-to-end through the env readers.
-    /// `#[ignore]`'d ONLY for the part that would actually bootstrap Tor; the
-    /// selection itself is asserted with no network. (There is no live-onion E2E
-    /// here — a real connection is out of scope for a unit test and would be
-    /// non-deterministic.)
-    #[test]
-    #[ignore = "would bootstrap a live Tor circuit; selection is covered without network above"]
-    fn live_onion_connect_is_gated_behind_ignore() {
-        // Intentionally a no-op placeholder so a future operator can wire a real
-        // onion-connect smoke test here behind --ignored without it ever running
-        // in CI. The pure selection path is fully covered by the tests above.
-    }
+    // NOTE — there is deliberately NO live-onion test here (E2E_CROSS_SERVICE = N/A).
+    //
+    // This previously held `live_onion_connect_is_gated_behind_ignore`, whose body
+    // was two comment lines. Being `#[ignore]`d, `cargo test -- --ignored` reported
+    // it PASSING while it asserted nothing — strictly worse than an empty cell,
+    // because to a reader and to tooling it looked like a live test existed behind
+    // a flag. It was also a placeholder for future work, which this repo forbids.
+    //
+    // A hermetic version is not possible, and that is a property of the surface,
+    // not a gap to fill later: `send_report_tor` constructs `TorOnionTransport`
+    // inline (see `send_report_tor` above), and driving it needs a real Tor
+    // bootstrap (a directory-consensus fetch = live egress) plus a live W1TN3SS
+    // hidden service. An onion has no loopback substitute — that is the point of an
+    // onion.
+    //
+    // Nothing is left uncovered by removing it. The routing DECISION is pure and is
+    // asserted by `choose_transport` tests above; the result-folding seam
+    // `send_via_backend<B: IngestBackend>` is exercised by `FakeBackend` below. A
+    // test injecting a fake at that seam and asserting the fake would be a
+    // tautology, so it is intentionally absent. A live onion check is an operator
+    // smoke test, not a CI test.
 
     #[test]
     fn remember_choice_maps_to_config_mode() {

@@ -9,12 +9,30 @@
 //! are `#[ignore]`d and pixel output is non-deterministic across GPU drivers —
 //! pixel snapshots are deliberately never gated); they are deliberate visual-QA
 //! aids.
+//!
+//! ## What IS asserted (and what is not)
+//!
+//! Not-gated does not mean not-asserted. [`snapshot`] asserts the two properties
+//! that hold on ANY driver: the frame renders at the harness size, and it is not
+//! a single uniform colour (i.e. something was actually painted). A blank frame
+//! is a real failure mode — a broken paint path still clears the target — and it
+//! used to produce a PNG and pass, because this file only rendered and saved.
+//!
+//! What is NOT asserted, and needs a human (or an agent with image-reading) to
+//! eyeball the PNG: glyph shaping, wide/CJK advance widths, colour fidelity,
+//! cursor placement, layout. That is the eyeball this file exists for; the
+//! assertions only stop it lying when there is nothing to eyeball at all.
 
 use c0pl4nd::egui_app;
 use std::time::{Duration, Instant};
 
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
+
+/// The harness surface size. `snapshot` asserts the rendered frame matches, so
+/// the size lives here rather than being repeated as a magic number.
+const HARNESS_W: u32 = 1100;
+const HARNESS_H: u32 = 720;
 
 /// Probe for a usable wgpu adapter; `false` → skip (never a false green).
 fn gpu_available() -> bool {
@@ -36,16 +54,55 @@ fn build() -> Option<Harness<'static, egui_app::C0pl4ndApp>> {
     }
     Some(
         Harness::builder()
-            .with_size(egui::vec2(1100.0, 720.0))
+            .with_size(egui::vec2(HARNESS_W as f32, HARNESS_H as f32))
             .wgpu()
             .build_eframe(|cc| egui_app::C0pl4ndApp::new(cc)),
     )
 }
 
-/// Render the current frame and save it to `%TEMP%/c0pl4nd-qa-<name>.png`.
+/// Render the current frame, ASSERT it is a real image, and save it to
+/// `%TEMP%/c0pl4nd-qa-<name>.png`.
+///
+/// The assertions are deliberately GPU-INDEPENDENT. Exact pixels vary across
+/// drivers, so this cannot diff against a committed baseline (see the module
+/// doc) — but "the frame rendered at the requested size and something was
+/// actually painted" is deterministic everywhere, and it is the property that
+/// actually regresses. Previously this helper only rendered, saved and printed:
+/// a fully blank frame — the exact symptom of a broken paint path — produced a
+/// PNG and passed, so every test in this file was an artifact generator rather
+/// than a check. An unasserted render is not a test.
 fn snapshot(h: &mut Harness<'_, egui_app::C0pl4ndApp>, name: &str) {
     h.step();
     let img = h.render().expect("kittest wgpu render must succeed");
+
+    // The rendered buffer is PHYSICAL pixels, so the expected size scales with
+    // pixels_per_point. Deriving it from the live ctx (rather than hardcoding
+    // 1100x720) is what makes this meaningful for `qa_launch_frame_hidpi`, which
+    // renders at ppp 1.5 to reproduce the reported HiDPI garble: it pins that the
+    // frame is actually produced at the display's physical resolution instead of
+    // being rendered at 1x and stretched — the very class of bug that test exists
+    // for.
+    let ppp = h.ctx.pixels_per_point();
+    let expect_w = (HARNESS_W as f32 * ppp).round() as u32;
+    let expect_h = (HARNESS_H as f32 * ppp).round() as u32;
+    assert_eq!(
+        (img.width(), img.height()),
+        (expect_w, expect_h),
+        "QA-SNAPSHOT[{name}]: the frame must render at the harness size scaled by \
+         pixels_per_point ({ppp})"
+    );
+
+    // Not uniformly one colour: a blank/cleared frame is a real, seen failure
+    // mode (a broken paint callback still clears the target), and it is exactly
+    // what an eyeball-only snapshot silently accepts.
+    let px = img.as_raw();
+    let first: &[u8] = &px[0..4];
+    let painted = px.chunks_exact(4).any(|c| c != first);
+    assert!(
+        painted,
+        "QA-SNAPSHOT[{name}]: the frame is a single uniform colour ({first:?}) — nothing was painted"
+    );
+
     let out = std::env::temp_dir().join(format!("c0pl4nd-qa-{name}.png"));
     img.save(&out).expect("save QA snapshot PNG");
     eprintln!(
