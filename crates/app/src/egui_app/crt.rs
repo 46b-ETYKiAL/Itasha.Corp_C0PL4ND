@@ -192,3 +192,436 @@ pub(crate) fn paint_crt_scanlines(
         painter.rect_filled(band, 0.0, dark);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `ppp` these tests sweep: 1× (standard), 1.5× and 2× (HiDPI) — the
+    /// scale factors issue #28 was reported against.
+    const PPPS: [f32; 3] = [1.0, 1.5, 2.0];
+
+    // ---- chromatic_offset ----
+
+    /// Aberration OFF ⇒ no ghost. A non-finite intensity (a corrupt config) counts
+    /// as OFF rather than as "infinitely strong" — it must never smear the text.
+    #[test]
+    fn chromatic_offset_is_zero_when_the_effect_is_off_or_the_config_is_corrupt() {
+        for intensity in [0.0, -0.5, f32::NAN, f32::NEG_INFINITY, f32::INFINITY] {
+            assert_eq!(
+                chromatic_offset(intensity, 1.0),
+                0.0,
+                "intensity {intensity} must produce no ghost"
+            );
+        }
+    }
+
+    /// The LOAD-BEARING property of issue #28: once aberration is on, the ghost is
+    /// at least `CHROMATIC_MIN_OFFSET_PHYS_PX` PHYSICAL px at ANY scale factor, so
+    /// the fringe always clears the opaque glyph instead of vanishing under it.
+    /// Asserted in physical px (offset × ppp) — the units the eye sees.
+    #[test]
+    fn chromatic_offset_always_clears_the_glyph_in_physical_pixels() {
+        for ppp in PPPS {
+            for intensity in [0.01, 0.25, 0.5, 1.0] {
+                let phys = chromatic_offset(intensity, ppp) * ppp;
+                assert!(
+                    phys >= CHROMATIC_MIN_OFFSET_PHYS_PX - 1e-4,
+                    "intensity {intensity} at {ppp}× gave {phys} physical px, \
+                     below the {CHROMATIC_MIN_OFFSET_PHYS_PX}px visibility floor"
+                );
+            }
+        }
+    }
+
+    /// A wild config value can never smear the text into illegibility: the ghost is
+    /// capped at `CHROMATIC_MAX_OFFSET_PHYS_PX` physical px at every scale.
+    ///
+    /// Only FINITE intensities are swept here: a non-finite one is treated as "off"
+    /// (asserted separately), which would satisfy a `<= cap` assertion vacuously.
+    #[test]
+    fn chromatic_offset_is_capped_however_wild_the_intensity() {
+        for ppp in PPPS {
+            for intensity in [1.0, 5.0, 1e6] {
+                let phys = chromatic_offset(intensity, ppp) * ppp;
+                assert!(
+                    phys <= CHROMATIC_MAX_OFFSET_PHYS_PX + 1e-4,
+                    "intensity {intensity} at {ppp}× gave {phys} physical px, \
+                     above the {CHROMATIC_MAX_OFFSET_PHYS_PX}px cap"
+                );
+                assert!(
+                    phys > 0.0,
+                    "a positive intensity must still paint a ghost (not a vacuous 0)"
+                );
+            }
+        }
+    }
+
+    /// A saturating intensity reaches the cap EXACTLY — the clamp is live, not a
+    /// ceiling the function never approaches.
+    #[test]
+    fn chromatic_offset_reaches_the_cap_at_full_intensity() {
+        let phys = chromatic_offset(1.0, 1.0) * 1.0;
+        assert!(
+            (phys - CHROMATIC_MAX_OFFSET_PHYS_PX).abs() < 1e-4,
+            "full intensity must reach the {CHROMATIC_MAX_OFFSET_PHYS_PX}px cap, got {phys}"
+        );
+    }
+
+    /// The ghost grows with intensity (it is a scale, not a constant) — the control
+    /// proving the floor/cap tests above are not satisfied by a fixed value.
+    #[test]
+    fn chromatic_offset_grows_with_intensity() {
+        let low = chromatic_offset(0.1, 1.0);
+        let high = chromatic_offset(1.0, 1.0);
+        assert!(
+            high > low,
+            "a stronger aberration must separate further: {low} → {high}"
+        );
+    }
+
+    /// A nonsense `ppp` (zero / negative / non-finite) falls back to 1× rather than
+    /// producing an infinite or NaN offset the painter would smear.
+    #[test]
+    fn chromatic_offset_falls_back_to_1x_for_a_nonsense_ppp() {
+        let expected = chromatic_offset(0.5, 1.0);
+        for ppp in [0.0, -2.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                chromatic_offset(0.5, ppp),
+                expected,
+                "ppp {ppp} must fall back to 1×"
+            );
+        }
+    }
+
+    // ---- chromatic_ghost_alpha ----
+
+    /// Aberration OFF ⇒ fully transparent ghosts (nothing painted). A non-finite
+    /// intensity counts as OFF, matching [`chromatic_offset`] — the two must agree,
+    /// or a corrupt config would paint an opaque ghost at a zero offset.
+    #[test]
+    fn chromatic_ghost_alpha_is_zero_when_the_effect_is_off_or_the_config_is_corrupt() {
+        for intensity in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                chromatic_ghost_alpha(intensity),
+                0,
+                "intensity {intensity} must paint no ghost"
+            );
+        }
+    }
+
+    /// The ghosts stay saturated enough to read as RGB fringing (issue #28: the old
+    /// 100..=140 alphas washed out to grey), and never exceed the 220 ceiling — for
+    /// every FINITE positive intensity, including out-of-range ones.
+    #[test]
+    fn chromatic_ghost_alpha_stays_in_the_saturated_band() {
+        for intensity in [0.01, 0.5, 1.0, 9.0, 1e6] {
+            let a = chromatic_ghost_alpha(intensity);
+            assert!(
+                (150..=220).contains(&a),
+                "intensity {intensity} gave alpha {a}, outside the 150..=220 band"
+            );
+        }
+    }
+
+    /// Alpha scales with intensity — the control proving the band test above is not
+    /// passing on a constant.
+    #[test]
+    fn chromatic_ghost_alpha_grows_with_intensity() {
+        assert!(chromatic_ghost_alpha(1.0) > chromatic_ghost_alpha(0.1));
+    }
+
+    // ---- chromatic_edge_weighted_offset ----
+
+    /// The authentic lens falloff: near-zero fringing at the centre, full at the
+    /// edges, and symmetric about the centre. The centre keeps 40% (never fully
+    /// crisp) and the edge keeps 100%.
+    #[test]
+    fn edge_weighting_is_weakest_at_the_centre_and_full_at_the_edges() {
+        let (left, right, offset) = (0.0_f32, 100.0_f32, 10.0_f32);
+
+        let centre = chromatic_edge_weighted_offset(offset, 50.0, left, right);
+        let at_left = chromatic_edge_weighted_offset(offset, left, left, right);
+        let at_right = chromatic_edge_weighted_offset(offset, right, left, right);
+
+        assert!(
+            (centre - offset * 0.4).abs() < 1e-4,
+            "the centre must keep 40% of the offset, got {centre}"
+        );
+        assert!(
+            (at_left - offset).abs() < 1e-4 && (at_right - offset).abs() < 1e-4,
+            "both edges must keep the full offset, got {at_left} / {at_right}"
+        );
+        assert!(
+            (at_left - at_right).abs() < 1e-4,
+            "the falloff must be symmetric about the centre"
+        );
+        assert!(
+            centre < at_left,
+            "the fringe must be weaker at the centre than at the edge"
+        );
+    }
+
+    /// A glyph beyond the content span clamps to the edge weight rather than
+    /// extrapolating past the full offset.
+    #[test]
+    fn edge_weighting_clamps_outside_the_span() {
+        let full = chromatic_edge_weighted_offset(10.0, 0.0, 0.0, 100.0);
+        for x in [-500.0, 600.0] {
+            let v = chromatic_edge_weighted_offset(10.0, x, 0.0, 100.0);
+            assert!(
+                (v - full).abs() < 1e-4,
+                "x {x} outside the span must clamp to the edge weight {full}, got {v}"
+            );
+        }
+    }
+
+    /// A degenerate span (zero / inverted / non-finite) cannot divide by zero into a
+    /// NaN the painter would consume; the offset passes through, floored at 0.
+    #[test]
+    fn edge_weighting_survives_a_degenerate_span() {
+        for (left, right) in [(0.0_f32, 0.0_f32), (100.0, 0.0), (0.0, f32::NAN)] {
+            let v = chromatic_edge_weighted_offset(10.0, 5.0, left, right);
+            assert!(v.is_finite(), "span [{left}, {right}] produced {v}");
+            assert_eq!(v, 10.0, "a degenerate span passes the offset through");
+        }
+        assert_eq!(
+            chromatic_edge_weighted_offset(-3.0, 5.0, 0.0, 0.0),
+            0.0,
+            "a negative offset floors at 0 rather than inverting the ghost"
+        );
+    }
+
+    // ---- scanline geometry ----
+
+    /// The period is anchored to PHYSICAL pixels, so on HiDPI it shrinks in logical
+    /// points and the band/gap contrast stays resolvable (issue #28).
+    #[test]
+    fn scanline_period_is_anchored_to_physical_pixels() {
+        for ppp in PPPS {
+            let period = scanline_period_pts(ppp);
+            assert!(
+                (period * ppp - CRT_SCANLINE_PERIOD_PHYS_PX).abs() < 1e-4,
+                "at {ppp}× the period must still be {CRT_SCANLINE_PERIOD_PHYS_PX} physical px, got {}",
+                period * ppp
+            );
+        }
+    }
+
+    /// A nonsense `ppp` falls back to 1× instead of dividing by zero into infinity.
+    #[test]
+    fn scanline_period_falls_back_to_1x_for_a_nonsense_ppp() {
+        for ppp in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(scanline_period_pts(ppp), CRT_SCANLINE_PERIOD_PHYS_PX);
+        }
+    }
+
+    /// A pane with no height (or a non-finite one) paints no bands.
+    #[test]
+    fn scanline_count_is_zero_for_a_degenerate_height() {
+        for height in [0.0, -10.0, f32::NAN] {
+            assert_eq!(scanline_count(height, 1.0), 0, "height {height}");
+        }
+    }
+
+    /// The bands fill the WHOLE pane: the count covers the full height (rounding up
+    /// so a partial band at the bottom is still painted), and a taller pane or a
+    /// denser (HiDPI) period yields more bands.
+    #[test]
+    fn scanline_count_covers_the_whole_height() {
+        for ppp in PPPS {
+            let period = scanline_period_pts(ppp);
+            let height = 100.0_f32;
+            let n = scanline_count(height, ppp);
+            assert!(
+                n as f32 * period >= height,
+                "{n} bands of {period}pt at {ppp}× leave a gap below {height}pt"
+            );
+            assert!(
+                (n - 1) as f32 * period < height,
+                "{n} bands at {ppp}× overshoot {height}pt by more than one band"
+            );
+        }
+        assert!(
+            scanline_count(200.0, 1.0) > scanline_count(100.0, 1.0),
+            "a taller pane must take more bands"
+        );
+        assert!(
+            scanline_count(100.0, 2.0) > scanline_count(100.0, 1.0),
+            "a HiDPI panel packs more (physically-anchored) bands into the same pane"
+        );
+    }
+
+    // ---- scanline_dark_alpha ----
+
+    /// Darkness 0 ⇒ no darkening at all (the effect reads as off).
+    #[test]
+    fn scanline_dark_alpha_is_zero_when_darkness_is_off() {
+        for darkness in [0.0, -1.0, f32::NAN] {
+            assert_eq!(scanline_dark_alpha(darkness), 0);
+        }
+    }
+
+    /// The config slider maps onto the documented band: the DEFAULT darkness (0.4)
+    /// lands at alpha 96 — the "distinct lines, not a flat film" point from issue
+    /// #28 — and full darkness caps at the near-black trough.
+    #[test]
+    fn scanline_dark_alpha_maps_the_slider_onto_the_documented_band() {
+        assert_eq!(
+            scanline_dark_alpha(0.4),
+            96,
+            "the default darkness must land on the researched alpha"
+        );
+        assert_eq!(scanline_dark_alpha(1.0), CRT_SCANLINE_MAX_DARK_ALPHA as u8);
+        assert_eq!(
+            scanline_dark_alpha(9.0),
+            CRT_SCANLINE_MAX_DARK_ALPHA as u8,
+            "an out-of-range darkness clamps rather than wrapping"
+        );
+        assert!(
+            scanline_dark_alpha(0.8) > scanline_dark_alpha(0.2),
+            "the slider must actually tune the trough"
+        );
+    }
+
+    // ---- scanline_drift ----
+
+    /// The drift stays inside one period and never runs away with the clock — the
+    /// property that makes the creep seamless.
+    #[test]
+    fn scanline_drift_stays_within_one_period() {
+        let period = scanline_period_pts(1.0);
+        for t in [0.0, 0.1, 1.0, 60.0, 3600.0] {
+            let d = scanline_drift(period, t);
+            assert!(
+                (0.0..period).contains(&d),
+                "t {t}s drifted {d}, outside 0..{period}"
+            );
+        }
+    }
+
+    /// The pattern at a whole-period displacement is identical to zero: the wrap is
+    /// seamless, which is what stops the field visibly jumping each cycle.
+    #[test]
+    fn scanline_drift_wraps_seamlessly_every_period() {
+        let period = scanline_period_pts(1.0);
+        let one_cycle = period / CRT_SCANLINE_DRIFT_PTS_PER_SEC;
+        assert!(
+            scanline_drift(period, one_cycle) < 1e-3,
+            "a full cycle must land back at 0"
+        );
+        let mid = scanline_drift(period, one_cycle * 0.5);
+        assert!(
+            (scanline_drift(period, one_cycle * 1.5) - mid).abs() < 1e-3,
+            "the same phase one cycle later must drift identically"
+        );
+    }
+
+    /// The field actually MOVES (the point of the effect) — the control proving the
+    /// wrap tests above are not passing on a constant 0.
+    #[test]
+    fn scanline_drift_actually_moves_over_time() {
+        let period = scanline_period_pts(1.0);
+        assert!(
+            scanline_drift(period, 0.1) > 0.0,
+            "the band field must creep once the clock advances"
+        );
+    }
+
+    /// A degenerate period cannot produce a NaN offset the painter would consume.
+    #[test]
+    fn scanline_drift_is_zero_for_a_degenerate_period() {
+        for period in [0.0, -3.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(scanline_drift(period, 1.0), 0.0, "period {period}");
+        }
+    }
+
+    // ---- paint_crt_scanlines (observes the REAL shape stream) ----
+
+    /// Collect the rects `paint_crt_scanlines` actually emitted in one frame, read
+    /// off egui's real `FullOutput::shapes` — so this measures the geometry the
+    /// painter produced, not a test mirror of the maths.
+    fn painted_bands(rect: egui::Rect, ppp: f32, t: f32, darkness: f32) -> Vec<egui::Rect> {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(rect),
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| {
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Background,
+                egui::Id::new("crt-scanline-test"),
+            ));
+            paint_crt_scanlines(&painter, rect, ppp, t, darkness);
+        });
+        out.shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Rect(r) => Some(r.rect),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The painter emits one band per period PLUS the extra band above the top edge
+    /// (the `i = -1` start) that stops the drift exposing an ungapped strip, and
+    /// every band spans the full pane width at the duty-cycle height.
+    #[test]
+    fn painting_emits_a_full_width_band_per_period_plus_the_drift_guard() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0));
+        let ppp = 1.0;
+        let bands = painted_bands(rect, ppp, 0.0, 0.4);
+
+        let expected = scanline_count(rect.height(), ppp) + 1;
+        assert_eq!(
+            bands.len(),
+            expected,
+            "expected one band per period plus the top drift guard"
+        );
+
+        let period = scanline_period_pts(ppp);
+        for band in &bands {
+            assert!(
+                (band.left() - rect.left()).abs() < 1e-4
+                    && (band.right() - rect.right()).abs() < 1e-4,
+                "every band must span the full pane width, got {band:?}"
+            );
+            assert!(
+                (band.height() - period * CRT_SCANLINE_DUTY).abs() < 1e-3,
+                "every band must be one duty-cycle tall, got {}",
+                band.height()
+            );
+        }
+    }
+
+    /// The first band starts ABOVE the pane top, so the drift never exposes an
+    /// ungapped strip at the top edge (the painter's clip trims the overhang).
+    #[test]
+    fn painting_starts_a_band_above_the_top_edge() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0));
+        let bands = painted_bands(rect, 1.0, 0.0, 0.4);
+        assert!(
+            bands.iter().any(|b| b.top() < rect.top()),
+            "a band must start above the top edge to cover the drift"
+        );
+    }
+
+    /// A HiDPI panel packs MORE bands into the same pane — the physical-px anchoring
+    /// reaching the painter, not just the maths helper.
+    #[test]
+    fn painting_packs_more_bands_on_a_hidpi_panel() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0));
+        assert!(
+            painted_bands(rect, 2.0, 0.0, 0.4).len() > painted_bands(rect, 1.0, 0.0, 0.4).len(),
+            "a 2× panel must paint more bands than a 1× panel"
+        );
+    }
+
+    /// A zero-height pane paints nothing but the drift guard — no panic, no
+    /// runaway loop.
+    #[test]
+    fn painting_a_zero_height_pane_emits_only_the_drift_guard() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 0.0));
+        assert_eq!(painted_bands(rect, 1.0, 0.0, 0.4).len(), 1);
+    }
+}

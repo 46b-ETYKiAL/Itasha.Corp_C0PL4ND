@@ -165,5 +165,47 @@ mod imp {
             // A style without the bit is reported clean (no needless work).
             assert!(!close_button_style_present(WS_CAPTION.0));
         }
+
+        /// The priming guard: a ZERO handle must never be cached, and an UNPRIMED
+        /// module must strip nothing — the `hwnd == 0` early return is what keeps
+        /// `ensure_close_button_stripped` (which the app calls EVERY frame) from
+        /// reaching Win32 before `new()` has primed the real handle.
+        ///
+        /// Both the public wrappers and the `imp` bodies are driven here.
+        ///
+        /// NOTE: no test in this module ever primes a NON-ZERO handle.
+        /// `CACHED_HWND` is a process-global that `set_main_hwnd` deliberately
+        /// cannot reset (it ignores 0), so priming a fake handle would be an
+        /// irreversible pollution of the test binary — and every `unsafe` block in
+        /// `ensure_close_button_stripped` documents a SAFETY precondition that the
+        /// handle IS this process's real main window, which a fabricated value would
+        /// violate. That keeps the assertions below order-independent: nothing
+        /// writes the static, so it is 0 for the whole binary.
+        #[test]
+        fn a_zero_handle_never_primes_and_an_unprimed_strip_is_a_no_op() {
+            assert_eq!(
+                CACHED_HWND.load(Ordering::Relaxed),
+                0,
+                "precondition: no test primes a handle, so the module starts unprimed"
+            );
+
+            // Through the public wrapper AND the imp body.
+            super::super::set_main_hwnd(0);
+            set_main_hwnd(0);
+            assert_eq!(
+                CACHED_HWND.load(Ordering::Relaxed),
+                0,
+                "a zero handle must never be cached"
+            );
+
+            // Unprimed: must return before touching Win32 (and must not panic).
+            super::super::ensure_close_button_stripped();
+            ensure_close_button_stripped();
+            assert_eq!(
+                CACHED_HWND.load(Ordering::Relaxed),
+                0,
+                "stripping while unprimed must not prime anything"
+            );
+        }
     }
 }
