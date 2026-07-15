@@ -1664,6 +1664,21 @@ criteria = "safe-to-deploy"
 version = "0.9.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.spin]]
+version = "0.9.9"
+criteria = "safe-to-deploy"
+notes = """
+Yank-forced, transitive-only. 0.9.8 was YANKED upstream, so cargo-deny failed the
+supply-chain job on every branch (`error[yanked]`) until the lock moved to 0.9.9.
+Nothing here depends on spin directly: lazy_static -> spin, reached via `age` (the
+W1TN3SS report core) and via colored -> dify -> egui_kittest.
+0.9.8 passed vetting on an IMPORTED audit rather than one of ours, and no import
+covers 0.9.9 yet, so cargo-vet asks for a full `inspect` (5505 lines) rather than a
+delta. Exempted rather than certified, because certifying would mean claiming an
+audit that was not performed. Drop this once an upstream import covers 0.9.9 —
+`cargo vet suggest` will say so.
+"""
+
 [[exemptions.spirv]]
 version = "0.4.0+sdk-1.4.341.0"
 criteria = "safe-to-deploy"
