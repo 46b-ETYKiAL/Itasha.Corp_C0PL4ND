@@ -86,10 +86,21 @@ fn type_text(h: &mut Harness<'_>, s: &str) {
     h.step();
 }
 
+/// How long to wait for the real shell to echo a typed line.
+///
+/// Generous on purpose. The wait ends the instant the echo lands, so a large bound
+/// costs a healthy run NOTHING — it only decides how much scheduler starvation is
+/// tolerated before the suite calls the shell dead. A sibling suite hit exactly
+/// that: under ~27 concurrent rustc processes the echo took >10s and tests failed
+/// with no product defect. This is not a threshold being widened to hide a
+/// failure; the assertion is unchanged and a shell that never echoes still fails,
+/// just loudly and after more patience.
+const ECHO_TIMEOUT: Duration = Duration::from_secs(45);
+
 /// Poll until the focused pane's grid shows `needle` (the shell echoed it), so
 /// the echo-gated history capture records the line deterministically.
 fn wait_for_echo(h: &mut Harness<'_>, app: &RefCell<C0pl4ndApp>, needle: &str) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + ECHO_TIMEOUT;
     while Instant::now() < deadline {
         h.step();
         if app
@@ -101,6 +112,14 @@ fn wait_for_echo(h: &mut Harness<'_>, app: &RefCell<C0pl4ndApp>, needle: &str) {
         }
         std::thread::sleep(Duration::from_millis(40));
     }
+    // Fail LOUD. This used to fall out of the loop and return normally, so a
+    // timed-out wait silently seeded nothing and the caller then asserted against
+    // an empty history — surfacing as a baffling "the sidebar lists the wrong
+    // commands" that reads like a product bug. A wait that gives up must say so.
+    panic!(
+        "the shell never echoed {needle:?} within {ECHO_TIMEOUT:?} — the command \
+         history could not be seeded (the shell is not up, not a product bug)"
+    );
 }
 
 /// Type-then-Enter a command into the focused pane (records it in the history).
