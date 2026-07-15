@@ -631,7 +631,7 @@ impl C0pl4ndApp {
     pub fn bootstrap_with(config: c0pl4nd_core::Config) -> Self {
         let (theme, theme_notice) = load_terminal_theme(&config);
         let mut pane_alloc = PaneIdAllocator::default();
-        let initial: Vec<PaneId> = (0..INITIAL_PANES).map(|_| pane_alloc.next()).collect();
+        let initial: Vec<PaneId> = (0..INITIAL_PANES).map(|_| pane_alloc.alloc()).collect();
         let focused_pane = initial[0];
         let grid_tree = grid::build_default_grid(&initial);
         // DEFER the initial pane PTYs: register them as pending and let
@@ -998,7 +998,7 @@ impl C0pl4ndApp {
             ));
             return;
         }
-        let new_pane = self.pane_alloc.next();
+        let new_pane = self.pane_alloc.alloc();
         if grid::split_focused(&mut self.grid_tree, self.focused_pane, new_pane, dir) {
             self.spawn_term(new_pane);
             self.focused_pane = new_pane;

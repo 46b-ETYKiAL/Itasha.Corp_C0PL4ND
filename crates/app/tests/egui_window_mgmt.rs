@@ -17,12 +17,16 @@
 //! `last_palette_run`) — the same accessors the existing chrome/palette suites
 //! use — NOT internal mirrors.
 //!
-//! These outcomes are PTY-independent: the history feeds from a seeded command
-//! history and the chord handlers act on app state, so the tests are stable on a
-//! CI box with no usable PTY. Where a test needs a populated history it SEEDS the
-//! history via the real type-then-Enter capture path (echo-gated, like the
-//! palette suite) so the sidebar lists real recorded commands.
-
+//! Most outcomes here are PTY-independent: the history feeds from a seeded
+//! command history and the chord handlers act on app state, so those tests are
+//! stable on a CI box with no usable PTY. Where a test needs a populated history
+//! it SEEDS the history via the real type-then-Enter capture path (echo-gated,
+//! like the palette suite) so the sidebar lists real recorded commands.
+//!
+//! The three scrollback/copy tests are the exception and DO require a live PTY:
+//! they call [`ensure_focused_spawned`], which waits for the pane's emulator to
+//! spawn and for the shell's startup banner to land before feeding synthetic
+//! rows. See that helper for why the second wait is not optional.
 
 use c0pl4nd::egui_app;
 use std::cell::RefCell;
@@ -670,18 +674,68 @@ fn primary_drag_selects_text_in_the_pane() {
 
 // ---- clear-scrollback + copy-all conveniences -------------------------------
 
-/// Wait out the focused pane's deferred first-frame PTY spawn, so a subsequent
-/// `test_feed_focused` is not silently dropped (the initial pane's emulator is
-/// created lazily during the first body render). Runs frames until the pane
-/// reports alive; panics if it never spawns (a real regression, not a flake).
+/// Wait out the focused pane's deferred first-frame PTY spawn AND the spawned
+/// shell's own startup output, so a subsequent `test_feed_focused` is neither
+/// silently dropped nor wiped out from under the test.
+///
+/// Two separate waits, and both are load-bearing:
+///
+/// 1. **Spawn.** The initial pane's emulator is created lazily during the first
+///    body render, and `test_feed_focused` no-ops on a pane that has not spawned.
+///
+/// 2. **Shell startup.** `test_focused_alive()` goes true as soon as the PTY
+///    exists — but the shell has not written anything yet. On Windows, conhost
+///    then emits its banner (`Microsoft Windows [Version ...]` + prompt) roughly
+///    40ms later, and that startup write RESETS THE SCREEN. A test that feeds
+///    synthetic rows into that window has its grid blanked mid-test when the
+///    banner lands: the fed rows already in scrollback survive, everything still
+///    on screen does not.
+///
+/// Waiting only for (1) made these tests race the banner and win only by
+/// finishing first — measured, the whole test took ~10ms against a ~42ms banner.
+/// That is an accidental pass, and it inverts under load: with the machine busy
+/// the banner arrives mid-test and `ctrl_shift_a_copies_the_whole_buffer_to_the
+/// _clipboard` failed ~2 runs in 10 (and once in a full instrumented sweep),
+/// reporting the newest fed row missing while the oldest survived.
+///
+/// So wait for the shell's first output before handing the pane to a test. Once
+/// the banner has landed the emulator is quiescent — the shell writes nothing
+/// more until it is sent input — so anything fed after this point stays put.
+/// This waits on an OBSERVABLE condition (real output reached the emulator), not
+/// a fixed sleep, so it cannot be tuned into flakiness by a slower box.
 fn ensure_focused_spawned(h: &mut Harness<'_>, app: &RefCell<C0pl4ndApp>) {
     for _ in 0..120 {
         if app.borrow().test_focused_alive() {
-            return;
+            break;
         }
         h.run();
     }
-    panic!("the focused pane never spawned its emulator");
+    if !app.borrow().test_focused_alive() {
+        panic!("the focused pane never spawned its emulator");
+    }
+
+    // The pane is alive; now let the shell finish announcing itself.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        h.step();
+        let landed = app
+            .borrow()
+            .test_focused_buffer_text()
+            .is_some_and(|t| !t.trim().is_empty());
+        if landed {
+            // The banner is in; drain the remaining startup chunks (the prompt
+            // usually arrives a frame or two after the version lines) so the
+            // screen is settled, not mid-write.
+            for _ in 0..20 {
+                h.step();
+            }
+            return;
+        }
+    }
+    panic!(
+        "the spawned shell never produced startup output — the pane is alive but \
+         silent, so a fed row could still be wiped by a late banner"
+    );
 }
 
 /// The `OutputCommand::CopyText` payload emitted on the last frame, if any — how

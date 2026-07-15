@@ -24,7 +24,6 @@
 //! with a `DragValue` → `Role::SpinButton` that carries the numeric value. This
 //! suite asserts against THAT reality, calibrated by a live tree dump.
 
-
 use c0pl4nd::egui_app;
 use std::cell::RefCell;
 

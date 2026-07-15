@@ -18,7 +18,6 @@
 //! of non-background (glyph) pixels. A regression that blanks either pane fails
 //! this test loudly.
 
-
 use c0pl4nd::egui_app;
 use std::time::{Duration, Instant};
 

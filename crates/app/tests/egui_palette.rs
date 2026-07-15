@@ -24,7 +24,6 @@
 //! `C0pl4ndApp` directly; the closure handed to `Harness::new` calls the same
 //! `frame_tick` the shipping binary runs each frame.
 
-
 use c0pl4nd::egui_app;
 use std::cell::RefCell;
 use std::time::{Duration, Instant};

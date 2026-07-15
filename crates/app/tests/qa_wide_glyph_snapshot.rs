@@ -10,7 +10,6 @@
 //! pixel snapshots are deliberately never gated); they are deliberate visual-QA
 //! aids.
 
-
 use c0pl4nd::egui_app;
 use std::time::{Duration, Instant};
 

@@ -36,7 +36,14 @@ mod update;
 // the binary's own modules: `panic_hook` reaches reporting this way.
 // W1TN3SS opt-in reporting glue (Tier-1 crash spool + manual issue intake).
 // Pure consumers of the pinned-tag `itasha-report-core` SDK; both default OFF.
-use c0pl4nd::{egui_app, reporting, user_error};
+use c0pl4nd::{egui_app, user_error};
+
+// `reporting`'s only consumer in this binary is `panic_hook::capture_panic_w1tn3ss`,
+// which is itself `cfg(not(feature = "legacy-winit"))`. Carry the same gate here or
+// the import is unused under `--all-features` (which turns `legacy-winit` on) and
+// warns.
+#[cfg(not(feature = "legacy-winit"))]
+use c0pl4nd::reporting;
 
 use eframe::egui;
 

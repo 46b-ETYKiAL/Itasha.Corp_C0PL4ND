@@ -24,7 +24,6 @@
 //! `settings_window` is real-window-only) — these tests observe the in-memory
 //! live-apply, which is the load-bearing behaviour.
 
-
 use c0pl4nd::egui_app;
 use std::cell::RefCell;
 
