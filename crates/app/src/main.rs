@@ -163,6 +163,30 @@ fn run_demo(config: &Config) -> Result<()> {
     let rows = config.window.rows;
     let cols = config.window.cols;
 
+    let text = demo_grid_text(config)?;
+
+    println!("--- rendered grid ({rows}x{cols}) ---");
+    for line in text.lines().take(4) {
+        let trimmed = line.trim_end();
+        if !trimmed.is_empty() {
+            println!("{trimmed}");
+        }
+    }
+    println!("--- engine OK ---");
+    Ok(())
+}
+
+/// Run the demo command on a real PTY and return the rendered grid text.
+///
+/// Split out of [`run_demo`] (which only adds the printing around it) so the
+/// engine round-trip — PTY spawn → VT parse → grid render — can be ASSERTED in a
+/// test. `run_demo` itself returns `Ok` even when the poll below times out with
+/// an empty grid, so a test that only checked `run_demo(..).is_ok()` would pass
+/// against a completely dead engine.
+fn demo_grid_text(config: &Config) -> Result<String> {
+    let rows = config.window.rows;
+    let cols = config.window.cols;
+
     // A deterministic, cross-platform command that exercises the VT engine.
     #[cfg(windows)]
     let mut session = Session::spawn_program(
@@ -194,14 +218,11 @@ fn run_demo(config: &Config) -> Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    println!("--- rendered grid ({rows}x{cols}) ---");
-    for line in session.snapshot_text().lines().take(4) {
-        let trimmed = line.trim_end();
-        if !trimmed.is_empty() {
-            println!("{trimmed}");
-        }
-    }
-    println!("--- engine OK ---");
+    let text = session.snapshot_text();
     let _ = &mut session;
-    Ok(())
+    Ok(text)
 }
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;
