@@ -9,7 +9,19 @@ on:
   pull_request:
     paths:
       - "crates/core/src/**"
-      - "mutants.toml"
+      # The app's update_engine is mutated too (a security boundary: it decides
+      # whether a downloaded binary is installed). Without this entry a PR that
+      # touches ONLY update_engine would not trigger this workflow at all, and the
+      # gate would be dead for exactly the code it was extended to protect.
+      #
+      # NOTE the path is spelled the REAL on-disk way here, unlike the glob in
+      # .cargo/mutants.toml which must use `**/update_engine/*.rs`. GitHub matches
+      # these against actual repository paths, while cargo-mutants matches against
+      # the `#[path]`-rewritten `…/egui_app/../update_engine/…` form. The two
+      # spellings are both correct, for different matchers.
+      - "crates/app/src/update_engine/**"
+      # cargo-mutants reads .cargo/mutants.toml (a root mutants.toml is ignored).
+      - ".cargo/mutants.toml"
       - ".github/workflows/mutants.yml"
 
 permissions:
@@ -48,12 +60,59 @@ jobs:
       - name: Compute the PR diff
         run: git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
 
+      # This gate can go vacuous in two ways that BOTH exit 0 and look identical to
+      # success. Both have actually happened in this repo, so assert against them:
+      #
+      #  1. The config is not read at all. cargo-mutants reads `.cargo/mutants.toml`
+      #     — NOT a `mutants.toml` in the repo root, where this file lived until
+      #     recently. While it sat there, every examine/exclude/timeout setting was
+      #     inert and `--list` returned the whole workspace (8553 vs 2880).
+      #  2. A glob silently matches nothing. update_engine is reached via `#[path]`,
+      #     so a glob written against its real directory path selects 0 mutants.
+      #
+      # `--list` does no building, so this costs seconds.
+      - name: Assert the mutants config is actually applied
+        run: |
+          set -euo pipefail
+          test -f .cargo/mutants.toml || {
+            echo "::error::.cargo/mutants.toml is missing. cargo-mutants reads THAT" \
+                 "path; a mutants.toml elsewhere (e.g. the repo root) is silently" \
+                 "ignored and this gate degrades to an unconfigured whole-workspace" \
+                 "run." >&2; exit 1; }
+          cargo mutants --list > all-mutants.txt
+          total=$(wc -l < all-mutants.txt)
+          echo "total selected: $total"
+          for area in "crates/core/src" "update_engine"; do
+            n=$(grep -c -- "$area" all-mutants.txt || true)
+            echo "examine area '$area' -> $n mutants"
+            if [ "$n" -eq 0 ]; then
+              echo "::error::config selects ZERO mutants under '$area'. A glob has" \
+                   "rotted (#[path] or a rename), so this gate is VACUOUS." >&2
+              exit 1
+            fi
+          done
+          # Config-is-inert canary. The configured set is core + update_engine
+          # (~2880). An unconfigured run returns the whole workspace (~8553), so a
+          # total this large means the config stopped applying even though the file
+          # exists. Deliberate scope growth: raise this bound in the same commit.
+          if [ "$total" -gt 4000 ]; then
+            echo "::error::$total mutants selected (>4000). That is the size of an" \
+                 "UNCONFIGURED run — .cargo/mutants.toml exists but is not being" \
+                 "applied, or a glob widened beyond core+update_engine." >&2
+            exit 1
+          fi
+
       # Diff-scoped: mutate only lines this PR changed (mutants.toml restricts to
-      # crates/core/src). `--package c0pl4nd-core` keeps the test run GPU-free and
-      # deterministic. A surviving mutant in changed code fails the job — the
+      # crates/core/src plus the app's update_engine security boundary). Both
+      # packages are named so a mutant is tested by ITS OWN crate's tests — with
+      # only `--package c0pl4nd-core`, an app mutant would be "tested" by core's
+      # suite, which cannot reach it, and would survive as a false gap. Both
+      # suites run GPU-free and deterministic here (ubuntu-latest runs the egui
+      # kittest tests today; the only GPU-dependent tests probe for an adapter and
+      # are `#[ignore]`d). A surviving mutant in changed code fails the job — the
       # author must add an assertion that kills it.
       - name: Run cargo-mutants on the PR diff
-        run: cargo mutants --no-shuffle --in-diff pr.diff --package c0pl4nd-core
+        run: cargo mutants --no-shuffle --in-diff pr.diff --package c0pl4nd-core --package c0pl4nd
 
       - name: Upload mutants report
         if: always()
