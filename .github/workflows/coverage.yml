@@ -67,6 +67,73 @@ jobs:
           path: lcov.info
           if-no-files-found: ignore
 
+  # Whole-crate floor for the APP. Until now `crates/app` had NO coverage gate of
+  # any kind — every gate in this file measured `-p c0pl4nd-core`, so ~17k lines of
+  # app code (the egui shell, the update engine, the reporting glue) could regress
+  # to zero without any job noticing. The per-file reporting gate below covers ONE
+  # file of that.
+  #
+  # This is a RATCHET, not a target: it exists to stop a regression, not to claim
+  # the app is well covered. The floor is set BELOW the measured value on purpose.
+  #
+  # Target selection is load-bearing — the same crate reports wildly different
+  # numbers depending on what is measured, and only one of them is the truth:
+  #   -p c0pl4nd --lib   -> 57.18%  <- lib UNIT tests only; excludes crates/app/tests/*
+  #                                    (the egui/kittest integration suites that do
+  #                                    most of the covering). NOT a crate floor.
+  #   -p c0pl4nd         -> 83.91%  <- all targets, default features. What we gate.
+  # (`--workspace --all-features` reads 72.92% only because it additionally builds
+  # the legacy-winit `window.rs` binary, which default features do not.)
+  #
+  # Floor 78 vs the 83.91% measured locally on WINDOWS. This job runs on Linux, and
+  # per the per-OS jobs below the same crate reads HIGHER on Linux (the
+  # `#[cfg(windows)]` arms do not compile, so they are not counted as misses) — so
+  # 78 should clear with room. Deliberately conservative on its first landing
+  # because it has never been measured on Linux; ratchet it up to just under the
+  # real CI number once this job has reported one, exactly as the core gate went
+  # 88 -> 93.
+  app-coverage:
+    name: App line coverage (>= 78%)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v5
+
+      - name: Install Linux GUI/display build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libxrandr-dev \
+            libxi-dev libxcursor-dev libgl1-mesa-dev libegl1-mesa-dev
+
+      - name: Install Rust toolchain (+ llvm-tools)
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.79.10
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Measure + gate app coverage
+        run: |
+          cargo llvm-cov -p c0pl4nd --lcov --output-path lcov-app.info --fail-under-lines 78
+          cargo llvm-cov -p c0pl4nd --summary-only
+
+      - name: Upload app LCOV report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-lcov-app
+          path: lcov-app.info
+          if-no-files-found: ignore
+
   # Per-file coverage gate for the W1TN3SS reporting INTEGRATION module
   # (crates/app/src/reporting.rs). Distinct from the core gate above: the
   # reporting glue lives in the `c0pl4nd` BIN (the app crate also holds the
