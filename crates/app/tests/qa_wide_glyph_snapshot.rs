@@ -10,17 +10,8 @@
 //! pixel snapshots are deliberately never gated); they are deliberate visual-QA
 //! aids.
 
-#![allow(dead_code)]
 
-#[path = "../src/egui_app/mod.rs"]
-mod egui_app;
-#[path = "../src/issue_intake.rs"]
-mod issue_intake;
-#[path = "../src/reporting.rs"]
-mod reporting;
-#[path = "../src/user_error.rs"]
-mod user_error;
-
+use c0pl4nd::egui_app;
 use std::time::{Duration, Instant};
 
 use egui_kittest::kittest::Queryable;

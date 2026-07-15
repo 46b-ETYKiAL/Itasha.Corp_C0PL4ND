@@ -40,7 +40,7 @@ use super::theme::ChromeColors;
 // (`c0pl4nd update`) + launch-check; this second view is private to `settings`
 // and never shares a type across that boundary, so the two coexist cleanly.
 #[path = "../update_engine/mod.rs"]
-mod update_engine;
+pub mod update_engine;
 
 use update_engine::updater::{LaunchKind, UpdateState, Updater};
 

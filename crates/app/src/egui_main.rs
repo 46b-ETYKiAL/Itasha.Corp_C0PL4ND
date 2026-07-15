@@ -25,16 +25,18 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod diagnostics;
 mod dll_hardening;
-#[path = "egui_app/mod.rs"]
-mod egui_app;
-// W1TN3SS opt-in reporting glue (Tier-1 crash spool + manual issue intake).
-// Pure consumers of the pinned-tag `itasha-report-core` SDK; both default OFF.
-mod issue_intake;
 mod panic_hook;
-mod reporting;
 #[path = "update/mod.rs"]
 mod update;
-mod user_error;
+
+// The egui shell lives in this crate's lib target so `tests/` links THIS
+// compilation instead of `#[path]`-including a private second copy — which made
+// llvm-cov attribute the kittest suites' coverage to an object the report never
+// reads (see lib.rs). The re-import keeps `crate::reporting` &c. resolving for
+// the binary's own modules: `panic_hook` reaches reporting this way.
+// W1TN3SS opt-in reporting glue (Tier-1 crash spool + manual issue intake).
+// Pure consumers of the pinned-tag `itasha-report-core` SDK; both default OFF.
+use c0pl4nd::{egui_app, reporting, user_error};
 
 use eframe::egui;
 

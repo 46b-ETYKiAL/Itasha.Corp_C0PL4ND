@@ -42,14 +42,14 @@ use eframe::wgpu::{CompositeAlphaMode, DeviceType};
 
 /// The on-disk diagnostics log path: `<config_dir>/gpu-diag.log`, next to
 /// `config.toml`. `None` when the per-user config dir cannot be resolved.
-pub(crate) fn diag_log_path() -> Option<PathBuf> {
+pub fn diag_log_path() -> Option<PathBuf> {
     c0pl4nd_core::Config::config_dir().map(|d| d.join("gpu-diag.log"))
 }
 
 /// Append one line (with a seconds-since-epoch prefix) to the GPU diagnostics log.
 /// Best-effort: a missing dir or an I/O error is swallowed — diagnostics must never
 /// break launch. Creates the parent dir if needed.
-pub(crate) fn log_line(msg: &str) {
+pub fn log_line(msg: &str) {
     let Some(path) = diag_log_path() else {
         return;
     };
@@ -73,7 +73,7 @@ pub(crate) fn log_line(msg: &str) {
 /// Truncate the diagnostics log and write a fresh session header, so each launch's
 /// data starts clean (the file does not grow unboundedly across launches). Called
 /// once at the very start of GPU init. Best-effort.
-pub(crate) fn begin_session(header: &str) {
+pub fn begin_session(header: &str) {
     let Some(path) = diag_log_path() else {
         return;
     };
@@ -85,7 +85,7 @@ pub(crate) fn begin_session(header: &str) {
 
 /// Human-readable name for a wgpu [`CompositeAlphaMode`] (stable across wgpu
 /// versions where the enum variants may otherwise `Debug`-print differently).
-pub(crate) fn alpha_mode_name(m: CompositeAlphaMode) -> &'static str {
+pub fn alpha_mode_name(m: CompositeAlphaMode) -> &'static str {
     match m {
         CompositeAlphaMode::Auto => "Auto",
         CompositeAlphaMode::Opaque => "Opaque",
@@ -96,7 +96,7 @@ pub(crate) fn alpha_mode_name(m: CompositeAlphaMode) -> &'static str {
 }
 
 /// Human-readable name for a wgpu [`DeviceType`].
-pub(crate) fn device_type_name(t: DeviceType) -> &'static str {
+pub fn device_type_name(t: DeviceType) -> &'static str {
     match t {
         DeviceType::Other => "Other",
         DeviceType::IntegratedGpu => "IntegratedGpu",
@@ -117,7 +117,7 @@ pub(crate) fn device_type_name(t: DeviceType) -> &'static str {
 /// — which is exactly why the Intel Vulkan surface was black and why the fix is to
 /// land on a surface/adapter path that composites, not merely one that lists a
 /// transparent mode.
-pub(crate) fn egui_wgpu_configured_mode(modes: &[CompositeAlphaMode]) -> CompositeAlphaMode {
+pub fn egui_wgpu_configured_mode(modes: &[CompositeAlphaMode]) -> CompositeAlphaMode {
     if modes.contains(&CompositeAlphaMode::PreMultiplied) {
         CompositeAlphaMode::PreMultiplied
     } else if modes.contains(&CompositeAlphaMode::PostMultiplied) {
@@ -135,7 +135,7 @@ pub(crate) fn egui_wgpu_configured_mode(modes: &[CompositeAlphaMode]) -> Composi
 
 /// Whether a set of supported alpha modes includes a *transparent* one that
 /// egui-wgpu will actually configure (`PreMultiplied`/`PostMultiplied`).
-pub(crate) fn supports_transparency(modes: &[CompositeAlphaMode]) -> bool {
+pub fn supports_transparency(modes: &[CompositeAlphaMode]) -> bool {
     modes.contains(&CompositeAlphaMode::PreMultiplied)
         || modes.contains(&CompositeAlphaMode::PostMultiplied)
 }
@@ -144,7 +144,7 @@ pub(crate) fn supports_transparency(modes: &[CompositeAlphaMode]) -> bool {
 /// [`choose_display_driving_adapter`], free of wgpu handles so the selection policy
 /// is unit-testable without a GPU.
 #[derive(Debug, Clone)]
-pub(crate) struct AdapterMeta {
+pub struct AdapterMeta {
     pub device_type: DeviceType,
     pub premultiplied: bool,
     pub postmultiplied: bool,
@@ -190,7 +190,7 @@ fn transparency_score(a: &AdapterMeta) -> i32 {
 /// [`transparency_score`] (integrated / display-driving GPU first, then richest
 /// transparent capability), stable on ties (first adapter wins). Returns `None`
 /// only for an empty list.
-pub(crate) fn choose_display_driving_adapter(adapters: &[AdapterMeta]) -> Option<usize> {
+pub fn choose_display_driving_adapter(adapters: &[AdapterMeta]) -> Option<usize> {
     adapters
         .iter()
         .enumerate()

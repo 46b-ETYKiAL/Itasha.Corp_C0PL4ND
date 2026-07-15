@@ -23,18 +23,8 @@
 //! history via the real type-then-Enter capture path (echo-gated, like the
 //! palette suite) so the sidebar lists real recorded commands.
 
-#![allow(dead_code)] // The `#[path]`-included module has production entry points
-                     // (eframe `App` impl, `apply_window_effect`) unused here.
 
-#[path = "../src/egui_app/mod.rs"]
-mod egui_app;
-#[path = "../src/issue_intake.rs"]
-mod issue_intake;
-#[path = "../src/reporting.rs"]
-mod reporting;
-#[path = "../src/user_error.rs"]
-mod user_error;
-
+use c0pl4nd::egui_app;
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 

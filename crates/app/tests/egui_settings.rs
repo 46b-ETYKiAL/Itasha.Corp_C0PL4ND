@@ -24,19 +24,8 @@
 //! `settings_window` is real-window-only) — these tests observe the in-memory
 //! live-apply, which is the load-bearing behaviour.
 
-#![allow(dead_code)] // The `#[path]`-included module has production entry points
-                     // (eframe `App` impl, `apply_window_effect`, and several
-                     // observation accessors) unused by this particular binary.
 
-#[path = "../src/egui_app/mod.rs"]
-mod egui_app;
-#[path = "../src/issue_intake.rs"]
-mod issue_intake;
-#[path = "../src/reporting.rs"]
-mod reporting;
-#[path = "../src/user_error.rs"]
-mod user_error;
-
+use c0pl4nd::egui_app;
 use std::cell::RefCell;
 
 use egui_kittest::kittest::{NodeT, Queryable};
