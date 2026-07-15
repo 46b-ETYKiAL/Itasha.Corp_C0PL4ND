@@ -25,8 +25,14 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
-  # CI runners are headless; display/GPU-dependent tests opt into skipping.
-  C0PL4ND_HEADLESS: "1"
+  # NOTE: there is deliberately no C0PL4ND_HEADLESS here. It used to be set with
+  # the comment "display/GPU-dependent tests opt into skipping" — but NOTHING
+  # read it (zero readers in any .rs), so it described a mechanism that did not
+  # exist and implied CI silently skips the GPU tests. It does not. The real
+  # mechanism is a runtime probe: qa_wide_glyph_snapshot's `gpu_available()`
+  # asks wgpu for an adapter and skips only when there genuinely is none, and
+  # those pixel-snapshot tests are `#[ignore]`d besides. Every other egui/kittest
+  # test RUNS headless here and is green on all three runners.
 
 jobs:
   test:
