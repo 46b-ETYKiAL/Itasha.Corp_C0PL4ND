@@ -151,10 +151,13 @@ jobs:
         # not an error. Promote it to one: a typo'd gate is an absent gate.
         run: |
           set -euo pipefail
-          cargo nextest list --workspace --locked 2>config-stderr.txt >/dev/null || true
-          if grep -q "ignoring unknown configuration key" config-stderr.txt; then
+          # Into a temp file, not the workspace: this step also gets run locally
+          # when someone verifies the gate, and it should leave nothing behind.
+          stderr_log="$(mktemp)"
+          cargo nextest list --workspace --locked 2>"$stderr_log" >/dev/null || true
+          if grep -q "ignoring unknown configuration key" "$stderr_log"; then
             echo "::error::nextest ignored a config key -- the flaky gate may be disarmed:"
-            grep "ignoring unknown configuration key" config-stderr.txt
+            grep "ignoring unknown configuration key" "$stderr_log"
             exit 1
           fi
           echo "No ignored config keys."
