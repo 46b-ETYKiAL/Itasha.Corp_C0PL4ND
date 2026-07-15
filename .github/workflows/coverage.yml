@@ -85,15 +85,19 @@ jobs:
   # (`--workspace --all-features` reads 72.92% only because it additionally builds
   # the legacy-winit `window.rs` binary, which default features do not.)
   #
-  # Floor 78 vs the 83.91% measured locally on WINDOWS. This job runs on Linux, and
-  # per the per-OS jobs below the same crate reads HIGHER on Linux (the
-  # `#[cfg(windows)]` arms do not compile, so they are not counted as misses) — so
-  # 78 should clear with room. Deliberately conservative on its first landing
-  # because it has never been measured on Linux; ratchet it up to just under the
-  # real CI number once this job has reported one, exactly as the core gate went
-  # 88 -> 93.
+  # Floor 80 against a MEASURED 83.99% (16936 lines, 2711 missed) — the number this
+  # job itself reported on Linux, not an estimate. It landed at 78 first, before the
+  # app had ever been measured on Linux, precisely so the floor would come from a
+  # measurement rather than a guess; the prediction (Linux reads at or above the
+  # 83.91% seen on Windows, because `#[cfg(windows)]` arms do not compile there and
+  # so are not counted as misses) held to within 0.08pp. Ratcheted to lock the gain
+  # in, keeping ~4pp for platform variance and honest churn — the same headroom the
+  # core gate kept when it went 88 -> 93.
+  #
+  # Raise this when the real number rises. Do NOT lower it to make a red build
+  # green: this floor exists to catch exactly that.
   app-coverage:
-    name: App line coverage (>= 78%)
+    name: App line coverage (>= 80%)
     runs-on: ubuntu-latest
     steps:
       - name: Harden the runner (egress audit)
@@ -123,7 +127,7 @@ jobs:
 
       - name: Measure + gate app coverage
         run: |
-          cargo llvm-cov -p c0pl4nd --lcov --output-path lcov-app.info --fail-under-lines 78
+          cargo llvm-cov -p c0pl4nd --lcov --output-path lcov-app.info --fail-under-lines 80
           cargo llvm-cov -p c0pl4nd --summary-only
 
       - name: Upload app LCOV report
@@ -135,12 +139,17 @@ jobs:
           if-no-files-found: ignore
 
   # Per-file coverage gate for the W1TN3SS reporting INTEGRATION module
-  # (crates/app/src/reporting.rs). Distinct from the core gate above: the
-  # reporting glue lives in the `c0pl4nd` BIN (the app crate also holds the
-  # display-gated egui shell, deliberately excluded), so we gate the one file via
-  # scripts/coverage-reporting.sh (llvm-cov JSON + a per-file line-% floor). The
-  # job NAME is independent of the floor value so it cannot orphan a required
-  # status check; the enforced floor is REPORTING_COVERAGE_FLOOR below.
+  # (crates/app/src/reporting.rs), at a much higher bar (95%) than the whole-app
+  # floor above. `--fail-under-lines` gates a whole package, not one file, so this
+  # goes through scripts/coverage-reporting.sh (llvm-cov JSON + a per-file line-%
+  # floor). The job NAME is independent of the floor value so it cannot orphan a
+  # required status check; the enforced floor is REPORTING_COVERAGE_FLOOR below.
+  #
+  # `reporting` is declared by src/lib.rs — the `c0pl4nd` bin only `use`s it — so
+  # the script measures --lib. It previously measured --bin, which ran the bin's
+  # tests but NOT reporting's own `#[cfg(test)] mod tests`, reporting 12% over 275
+  # lines of a 1097-line file. The script now also pins a minimum line count so
+  # measuring the wrong target fails loudly instead of quietly grading a fragment.
   reporting-coverage:
     name: W1TN3SS reporting-integration coverage
     runs-on: ubuntu-latest
