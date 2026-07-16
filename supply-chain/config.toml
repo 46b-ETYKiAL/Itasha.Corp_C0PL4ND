@@ -1296,6 +1296,10 @@ criteria = "safe-to-deploy"
 version = "0.4.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.pollster]]
+version = "1.0.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.poly1305]]
 version = "0.8.0"
 criteria = "safe-to-deploy"
@@ -1729,6 +1733,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.sysinfo]]
 version = "0.39.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.sysinfo]]
+version = "0.39.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.tar]]

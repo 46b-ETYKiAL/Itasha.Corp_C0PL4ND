@@ -324,8 +324,8 @@ user-login = "Amanieu"
 user-name = "Amanieu d'Antras"
 
 [[publisher.memchr]]
-version = "2.8.2"
-when = "2026-06-12"
+version = "2.8.3"
+when = "2026-07-08"
 user-id = 189
 user-login = "BurntSushi"
 user-name = "Andrew Gallant"
@@ -435,8 +435,8 @@ user-login = "dtolnay"
 user-name = "David Tolnay"
 
 [[publisher.regex]]
-version = "1.12.4"
-when = "2026-06-09"
+version = "1.13.0"
+when = "2026-07-09"
 user-id = 189
 user-login = "BurntSushi"
 user-name = "Andrew Gallant"
@@ -1138,13 +1138,6 @@ user-name = "Kenny Kerr"
 
 [[publisher.windows-threading]]
 version = "0.2.1"
-when = "2025-10-06"
-user-id = 64539
-user-login = "kennykerr"
-user-name = "Kenny Kerr"
-
-[[publisher.windows-version]]
-version = "0.1.7"
 when = "2025-10-06"
 user-id = 64539
 user-login = "kennykerr"

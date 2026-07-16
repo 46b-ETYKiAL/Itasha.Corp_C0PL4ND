@@ -71,7 +71,7 @@ serde.workspace = true
 winit.workspace = true
 wgpu.workspace = true
 glyphon.workspace = true # used by the legacy winit-driven `c0pl4nd` binary's renderer
-pollster = "=0.4.0"
+pollster = "=1.0.1"
 # HTTP client for the in-app updater. `tls` is ureq 2.x's DEFAULT TLS feature
 # and is rustls-backed (the lock graph resolves rustls, never native-tls);
 # declared explicitly with `default-features = false` + `["tls", "gzip"]` so the
