@@ -730,7 +730,10 @@ mod tests {
         }
         assert_eq!(g.cell(0, 0).unwrap().c, 'A', "OOB op must not mutate cells");
         assert_eq!(g.cell(1, 2).unwrap().c, 'Z');
-        assert!(!g.is_damaged(), "an out-of-bounds no-op must not mark damage");
+        assert!(
+            !g.is_damaged(),
+            "an out-of-bounds no-op must not mark damage"
+        );
     }
 
     #[test]
