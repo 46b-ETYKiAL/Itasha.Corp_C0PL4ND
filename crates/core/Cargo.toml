@@ -46,7 +46,7 @@ memchr = "=2.8.3"
 # as an accepted risk in .cargo/audit.toml; bump to >=0.9.x only once #6783 is
 # fixed and the Windows PTY round-trip verifies green.
 portable-pty = "=0.8.1"
-regex = "=1.13.0"
+regex = "=1.13.1"
 # East-Asian / wide-character width lookup (wcwidth). Pure data table, no
 # transitive deps — used by every serious terminal to advance the cursor by
 # 1 or 2 columns per printed grapheme.
