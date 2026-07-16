@@ -70,4 +70,13 @@ jobs:
           # carries no contamination risk. The `pkg:githubactions/...` purl (no
           # version: the dep graph reports the pinned tag, not the SHA) allowlists
           # it so a NEW workflow file referencing it does not fail this per-PR gate.
-          allow-dependencies-licenses: pkg:cargo/filetime@0.2.29, pkg:cargo/libfuzzer-sys@0.4.10, pkg:cargo/generator@0.8.9, pkg:githubactions/Swatinem/rust-cache
+          # `pollster` declares `Apache-2.0/MIT` — the SAME deprecated slash-syntax
+          # quirk as `filetime` and `generator` above, mis-parsed here as the
+          # non-SPDX `LicenseRef-bad-apache-2.0mit`. Both halves are in the
+          # allow-list, and `cargo deny check` (which parses the slash form
+          # correctly) resolves it as dual Apache-2.0 OR MIT and passes. 0.4.0 has
+          # the identical field and only escapes this gate because it predates the
+          # diff; 1.0.1 is new, so the parser quirk surfaces. Not a real license
+          # issue. Both versions are listed: eframe keeps 0.4.0 while the app's
+          # direct dep is 1.0.1, so either can be the one a future PR re-reviews.
+          allow-dependencies-licenses: pkg:cargo/filetime@0.2.29, pkg:cargo/libfuzzer-sys@0.4.10, pkg:cargo/generator@0.8.9, pkg:cargo/pollster@0.4.0, pkg:cargo/pollster@1.0.1, pkg:githubactions/Swatinem/rust-cache
