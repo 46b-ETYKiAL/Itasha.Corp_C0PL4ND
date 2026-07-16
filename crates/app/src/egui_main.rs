@@ -25,16 +25,25 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod diagnostics;
 mod dll_hardening;
-#[path = "egui_app/mod.rs"]
-mod egui_app;
-// W1TN3SS opt-in reporting glue (Tier-1 crash spool + manual issue intake).
-// Pure consumers of the pinned-tag `itasha-report-core` SDK; both default OFF.
-mod issue_intake;
 mod panic_hook;
-mod reporting;
 #[path = "update/mod.rs"]
 mod update;
-mod user_error;
+
+// The egui shell lives in this crate's lib target so `tests/` links THIS
+// compilation instead of `#[path]`-including a private second copy — which made
+// llvm-cov attribute the kittest suites' coverage to an object the report never
+// reads (see lib.rs). The re-import keeps `crate::reporting` &c. resolving for
+// the binary's own modules: `panic_hook` reaches reporting this way.
+// W1TN3SS opt-in reporting glue (Tier-1 crash spool + manual issue intake).
+// Pure consumers of the pinned-tag `itasha-report-core` SDK; both default OFF.
+use c0pl4nd::{egui_app, user_error};
+
+// `reporting`'s only consumer in this binary is `panic_hook::capture_panic_w1tn3ss`,
+// which is itself `cfg(not(feature = "legacy-winit"))`. Carry the same gate here or
+// the import is unused under `--all-features` (which turns `legacy-winit` on) and
+// warns.
+#[cfg(not(feature = "legacy-winit"))]
+use c0pl4nd::reporting;
 
 use eframe::egui;
 
@@ -376,29 +385,13 @@ fn prefer_backend_on_windows(
 ) {
     #[cfg(target_os = "windows")]
     {
-        use c0pl4nd_core::config::GraphicsBackend;
         use eframe::wgpu::Backends;
         if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
         {
-            // An EXPLICIT choice always wins: `WGPU_BACKEND` env (one-off debug) then
-            // the persisted `graphics_backend` config override.
-            let explicit = Backends::from_env().or(match backend_override {
-                GraphicsBackend::Auto => None,
-                GraphicsBackend::Dx12 => Some(Backends::DX12),
-                GraphicsBackend::Vulkan => Some(Backends::VULKAN),
-                GraphicsBackend::Gl => Some(Backends::GL),
-            });
-            match explicit {
-                Some(backends) => setup.instance_descriptor.backends = backends,
-                None if !want_transparency => {
-                    // Opaque default: Vulkan (dodges the NVIDIA DX12 glyph garble).
-                    setup.instance_descriptor.backends = Backends::VULKAN;
-                }
-                None => {
-                    // Translucent default: leave eframe's DEFAULT backends untouched
-                    // (SCR1B3-parity). Forcing Vulkan here is what caused the opaque
-                    // black window on the Optimus laptop.
-                }
+            if let Some(backends) =
+                resolve_backends(Backends::from_env(), backend_override, want_transparency)
+            {
+                setup.instance_descriptor.backends = backends;
             }
         }
     }
@@ -407,6 +400,49 @@ fn prefer_backend_on_windows(
         let _ = want_transparency;
         let _ = backend_override;
         let _ = options; // used on every platform; backend default is correct off Windows
+    }
+}
+
+/// Decide the wgpu `Backends` on Windows. `None` means "leave eframe's DEFAULT
+/// backends untouched".
+///
+/// Precedence: `WGPU_BACKEND` env (one-off debug) > the persisted
+/// `graphics_backend` config override > the mode default.
+///
+/// The two mode defaults each encode a REAL shipped bug, which is why this is
+/// worth pinning:
+/// * **Opaque → Vulkan** — dodges the NVIDIA DX12 glyph garble.
+/// * **Translucent → leave eframe's default** — forcing Vulkan here is what caused
+///   the opaque black window on the Optimus laptop.
+///
+/// Pure and parameterised on `env_override` (mirroring [`resolve_power_preference`])
+/// so the precedence is unit-testable WITHOUT mutating process-global env — which
+/// this binary could not do anyway under `#![deny(unsafe_code)]`. Extracting it is
+/// what makes the logic reachable from a test at all; the caller
+/// [`prefer_backend_on_windows`] only reads the env and applies the result, so
+/// behaviour is unchanged.
+#[cfg(target_os = "windows")]
+fn resolve_backends(
+    env_override: Option<eframe::wgpu::Backends>,
+    backend_override: c0pl4nd_core::config::GraphicsBackend,
+    want_transparency: bool,
+) -> Option<eframe::wgpu::Backends> {
+    use c0pl4nd_core::config::GraphicsBackend;
+    use eframe::wgpu::Backends;
+    let explicit = env_override.or(match backend_override {
+        GraphicsBackend::Auto => None,
+        GraphicsBackend::Dx12 => Some(Backends::DX12),
+        GraphicsBackend::Vulkan => Some(Backends::VULKAN),
+        GraphicsBackend::Gl => Some(Backends::GL),
+    });
+    match explicit {
+        Some(backends) => Some(backends),
+        // Opaque default: Vulkan (dodges the NVIDIA DX12 glyph garble).
+        None if !want_transparency => Some(Backends::VULKAN),
+        // Translucent default: leave eframe's DEFAULT backends untouched
+        // (SCR1B3-parity). Forcing Vulkan here is what caused the opaque black
+        // window on the Optimus laptop.
+        None => None,
     }
 }
 
@@ -607,6 +643,81 @@ mod tests {
             ),
             PowerPreference::LowPower,
             "env override wins over the persisted setting",
+        );
+    }
+
+    // -- backend selection (Windows) ------------------------------------
+    //
+    // Both mode defaults below encode a REAL shipped bug, and neither was pinned
+    // by a test before: the logic lived inline in `prefer_backend_on_windows`,
+    // reachable only through `Backends::from_env()`, so nothing could reach it
+    // without mutating process-global env.
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn opaque_launch_defaults_to_vulkan_to_dodge_the_dx12_glyph_garble() {
+        use c0pl4nd_core::config::GraphicsBackend;
+        use eframe::wgpu::Backends;
+        assert_eq!(
+            super::resolve_backends(None, GraphicsBackend::Auto, false),
+            Some(Backends::VULKAN),
+            "an opaque window with no explicit choice must force Vulkan",
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn translucent_launch_leaves_eframe_default_backends_alone() {
+        use c0pl4nd_core::config::GraphicsBackend;
+        // The Optimus regression: forcing Vulkan on the translucent path produced
+        // an opaque BLACK window. `None` here means "do not touch eframe's
+        // default" -- the fix. If this ever returns Some(VULKAN), that bug is back.
+        assert_eq!(
+            super::resolve_backends(None, GraphicsBackend::Auto, true),
+            None,
+            "a translucent window must inherit eframe's default backends",
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_config_backend_override_wins_over_both_mode_defaults() {
+        use c0pl4nd_core::config::GraphicsBackend;
+        use eframe::wgpu::Backends;
+        // The in-app escape hatch (e.g. a Vulkan-overlay crash -> force DX12) must
+        // work in BOTH modes, including the translucent one that otherwise returns
+        // None.
+        assert_eq!(
+            super::resolve_backends(None, GraphicsBackend::Dx12, true),
+            Some(Backends::DX12),
+        );
+        assert_eq!(
+            super::resolve_backends(None, GraphicsBackend::Dx12, false),
+            Some(Backends::DX12),
+            "the override must beat the opaque Vulkan default too",
+        );
+        assert_eq!(
+            super::resolve_backends(None, GraphicsBackend::Gl, true),
+            Some(Backends::GL),
+        );
+        assert_eq!(
+            super::resolve_backends(None, GraphicsBackend::Vulkan, true),
+            Some(Backends::VULKAN),
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn wgpu_backend_env_wins_over_the_config_override() {
+        use c0pl4nd_core::config::GraphicsBackend;
+        use eframe::wgpu::Backends;
+        // Documented precedence: env > config > mode default. Passing the env value
+        // as a parameter is what lets this be asserted at all -- the binary denies
+        // unsafe_code, so a test cannot call the unsafe `std::env::set_var`.
+        assert_eq!(
+            super::resolve_backends(Some(Backends::GL), GraphicsBackend::Dx12, false),
+            Some(Backends::GL),
+            "WGPU_BACKEND must beat the persisted graphics_backend override",
         );
     }
 }

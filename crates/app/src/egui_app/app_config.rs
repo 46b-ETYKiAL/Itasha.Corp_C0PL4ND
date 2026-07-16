@@ -117,3 +117,122 @@ impl super::C0pl4ndApp {
         self.config.paste_warn_multiline
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::C0pl4ndApp;
+
+    fn app_with(config: c0pl4nd_core::Config) -> C0pl4ndApp {
+        C0pl4ndApp::bootstrap_with(config)
+    }
+
+    /// Every accessor in this module is a one-line getter, so there is no logic to
+    /// test — but there IS a wiring question worth answering: does each one read its
+    /// OWN field? These accessors are the observation surface the settings
+    /// interaction tests assert through, so one silently reading a neighbouring
+    /// field would make those tests assert the wrong thing while still passing.
+    ///
+    /// Each field below is set to a value DISTINCT from every other field's (and
+    /// from the default), so an accessor wired to the wrong field fails here. This
+    /// is deliberately a wiring check, not a claim to be testing behaviour.
+    #[test]
+    fn every_config_accessor_reads_its_own_field() {
+        let mut config = c0pl4nd_core::Config::default();
+        config.font.size = 21.5;
+        config.font.family = "Sentinel Family".to_string();
+        config.font.fallback = vec!["Sentinel Fallback".to_string()];
+        config.cursor.blink = !config.cursor.blink;
+        config.toolbar.left = vec!["sentinel-left".to_string()];
+        config.toolbar.right = vec!["sentinel-right".to_string()];
+        config.toolbar.menu = vec!["sentinel-menu".to_string()];
+        config.toolbar.show_overflow = !config.toolbar.show_overflow;
+        config.opacity = 0.37;
+        config.tint_strength = 0.62;
+        config.tint_enabled = !config.tint_enabled;
+        config.scrollback_lines = 4321;
+        config.paste_warn_multiline = !config.paste_warn_multiline;
+
+        // Snapshot the flipped booleans before `config` is moved into the app.
+        let blink = config.cursor.blink;
+        let show_overflow = config.toolbar.show_overflow;
+        let tint_enabled = config.tint_enabled;
+        let paste_warn = config.paste_warn_multiline;
+
+        let app = app_with(config);
+
+        assert_eq!(app.config_font_size(), 21.5);
+        assert_eq!(app.config_font_family(), "Sentinel Family");
+        assert_eq!(app.config_font_fallback(), vec!["Sentinel Fallback"]);
+        assert_eq!(app.config_cursor_blink(), blink);
+        assert_eq!(app.config_toolbar_left(), vec!["sentinel-left"]);
+        assert_eq!(app.config_toolbar_right(), vec!["sentinel-right"]);
+        assert_eq!(app.config_toolbar_menu(), vec!["sentinel-menu"]);
+        assert_eq!(app.config_toolbar_show_overflow(), show_overflow);
+        assert_eq!(app.config_opacity(), 0.37);
+        assert_eq!(app.config_tint_strength(), 0.62);
+        assert_eq!(app.config_tint_enabled(), tint_enabled);
+        assert_eq!(app.config_scrollback_lines(), 4321);
+        assert_eq!(app.config_paste_warn_multiline(), paste_warn);
+    }
+
+    /// The theme accessor reports the configured theme stem.
+    #[test]
+    fn config_theme_reports_the_selected_theme() {
+        let config = c0pl4nd_core::Config {
+            theme: "ghost-paper".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(app_with(config).config_theme(), "ghost-paper");
+    }
+
+    /// `applied_font_key` reports the font stack actually INSTALLED into egui, which
+    /// is NOT the configured family: a freshly bootstrapped app has installed
+    /// nothing yet, so it must be empty even though a family IS configured. This is
+    /// what lets the settings test prove a family change was really re-installed
+    /// rather than only stored in the config.
+    #[test]
+    fn applied_font_key_is_empty_until_a_font_is_installed() {
+        let config = c0pl4nd_core::Config {
+            font: c0pl4nd_core::config::FontConfig {
+                family: "Sentinel Family".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let app = app_with(config);
+        assert_eq!(
+            app.applied_font_key(),
+            "",
+            "bootstrap installs no font, so the applied key must not echo the config"
+        );
+        assert_eq!(
+            app.config_font_family(),
+            "Sentinel Family",
+            "precondition: a family IS configured, so the assertion above is not vacuous"
+        );
+    }
+
+    /// The whole-app chrome follows the selected terminal theme: a LIGHT theme
+    /// derives light egui visuals and a DARK theme derives dark ones. Both
+    /// directions are asserted, so this cannot pass on a constant.
+    #[test]
+    fn visuals_follow_the_selected_theme_in_both_directions() {
+        let light = app_with(c0pl4nd_core::Config {
+            theme: "ghost-paper".to_string(),
+            ..Default::default()
+        });
+        assert!(
+            light.visuals_are_light(),
+            "a light theme (ghost-paper) must derive LIGHT egui visuals"
+        );
+
+        let dark = app_with(c0pl4nd_core::Config {
+            theme: "void".to_string(),
+            ..Default::default()
+        });
+        assert!(
+            !dark.visuals_are_light(),
+            "a dark theme (void) must derive DARK egui visuals"
+        );
+    }
+}

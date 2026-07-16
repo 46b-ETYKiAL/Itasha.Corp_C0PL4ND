@@ -25,8 +25,14 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
-  # CI runners are headless; display/GPU-dependent tests opt into skipping.
-  C0PL4ND_HEADLESS: "1"
+  # NOTE: there is deliberately no C0PL4ND_HEADLESS here. It used to be set with
+  # the comment "display/GPU-dependent tests opt into skipping" — but NOTHING
+  # read it (zero readers in any .rs), so it described a mechanism that did not
+  # exist and implied CI silently skips the GPU tests. It does not. The real
+  # mechanism is a runtime probe: qa_wide_glyph_snapshot's `gpu_available()`
+  # asks wgpu for an adapter and skips only when there genuinely is none, and
+  # those pixel-snapshot tests are `#[ignore]`d besides. Every other egui/kittest
+  # test RUNS headless here and is green on all three runners.
 
 jobs:
   test:
@@ -88,6 +94,198 @@ jobs:
 
       - name: cargo test (doctests — nextest does not run these)
         run: cargo test --workspace --locked --doc
+
+  # Asserts the rerun-masking gate in .config/nextest.toml is LIVE.
+  #
+  # `flaky-result = "fail"` is what stops a test that passes only on retry from
+  # reporting green. It is one config key, and nextest does not reject a key it
+  # does not recognise — it warns and carries on:
+  #
+  #   warning: in config file .config/nextest.toml, ignoring unknown
+  #   configuration key: profile.default.flaky-result-typo-xyz
+  #
+  # So a rename, a typo, or an upstream key change silently reverts the whole
+  # suite to "flaky tests pass" while every job stays green — which is exactly
+  # how the inert mutants.toml and the dead C0PL4ND_HEADLESS survived so long.
+  # `cargo nextest show-config` cannot print this setting, so the only honest
+  # check is behavioural: rig a real flake and require the gate to catch it.
+  #
+  # The canary is written HERE, not committed, so the suite never carries a
+  # deliberately-flaky test. It lives in c0pl4nd-core, which the allowlist
+  # override does NOT cover — the assertion is that an unallowlisted flake fails.
+  flaky-gate-live:
+    name: Flaky gate is live (canary)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        # step-security/harden-runner@v2.19.4
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: stable
+
+      - name: Install cargo-nextest
+        # taiki-e/install-action@v2.79.10
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3
+        with:
+          tool: cargo-nextest
+
+      - name: Cache cargo registry and target
+        # Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          workspaces: ". -> target"
+
+      - name: Reject any config key nextest ignored
+        # The warning above is the ONLY signal that a key went unread, and it is
+        # not an error. Promote it to one: a typo'd gate is an absent gate.
+        run: |
+          set -euo pipefail
+          # Into a temp file, not the workspace: this step also gets run locally
+          # when someone verifies the gate, and it should leave nothing behind.
+          stderr_log="$(mktemp)"
+          cargo nextest list --workspace --locked 2>"$stderr_log" >/dev/null || true
+          if grep -q "ignoring unknown configuration key" "$stderr_log"; then
+            echo "::error::nextest ignored a config key -- the flaky gate may be disarmed:"
+            grep "ignoring unknown configuration key" "$stderr_log"
+            exit 1
+          fi
+          echo "No ignored config keys."
+
+      - name: A flake must FAIL (the gate direction that rots silently)
+        run: |
+          set -euo pipefail
+          cat > crates/core/tests/zz_flaky_gate_canary.rs <<'RS'
+          //! CI-generated canary; never committed. Fails twice, passes on the 3rd
+          //! attempt -- exactly what `flaky-result = "fail"` must reject.
+          use std::fs;
+          use std::path::PathBuf;
+
+          fn counter() -> PathBuf {
+              std::env::temp_dir().join("c0pl4nd-flaky-gate-canary.txt")
+          }
+
+          #[test]
+          fn canary_passes_only_on_retry() {
+              let p = counter();
+              let n: u32 = fs::read_to_string(&p).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+              fs::write(&p, (n + 1).to_string()).unwrap();
+              assert!(n >= 2, "attempt {} fails by design", n + 1);
+          }
+          RS
+          rm -f "${TMPDIR:-/tmp}/c0pl4nd-flaky-gate-canary.txt"
+          if cargo nextest run -p c0pl4nd-core --test zz_flaky_gate_canary --locked; then
+            echo "::error::A test that passed ONLY on retry reported SUCCESS. The rerun-masking gate (flaky-result = \"fail\" in .config/nextest.toml) is not in effect."
+            exit 1
+          fi
+          echo "Gate is live: the flaky canary failed the run, as required."
+
+      - name: CONTROL — a first-try pass must still PASS
+        # Without this, a gate hard-wired to fail everything would satisfy the
+        # step above and look identical to a working one. The canary's counter
+        # is now >= 3, so the SAME test passes on its first attempt.
+        run: |
+          set -euo pipefail
+          cargo nextest run -p c0pl4nd-core --test zz_flaky_gate_canary --locked
+          echo "Control holds: the gate passes a non-flaky test."
+          rm -f crates/core/tests/zz_flaky_gate_canary.rs
+
+  # The visual-QA suite (crates/app/tests/qa_wide_glyph_snapshot.rs) renders the
+  # REAL egui app through wgpu and asserts the driver-INDEPENDENT properties: the
+  # frame comes out at the harness size, something was actually painted, and the
+  # opacity/tint/frost/mesh compositing guards hold. Every test there is #[ignore]d
+  # (it needs a renderer), so the `test` matrix above never runs a single one of
+  # them — until now the whole file only ever ran on a developer's desk.
+  #
+  # This job gives it a real CI cell by supplying a SOFTWARE rasteriser: apt's
+  # mesa-vulkan-drivers ships lavapipe and self-registers an ICD at
+  # /usr/share/vulkan/icd.d/, so wgpu enumerates it with no WGPU_*/VK_* env vars.
+  # egui_kittest already prefers a DeviceType::Cpu adapter, so lavapipe is picked.
+  # No xvfb: kittest builds surface-less (`without_display_handle()`), so there is
+  # no window and no display to serve.
+  #
+  # What this job does NOT do is diff pixels. egui_kittest's own snapshot diffing
+  # is perceptual precisely because GPU output is not reproducible across drivers,
+  # and a lavapipe-rendered baseline would be wrong for every other backend. Only
+  # the driver-independent assertions are gated here; the PNGs stay an eyeball aid
+  # and are uploaded as an artifact for exactly that.
+  #
+  # Fail-closed: a missing lavapipe means ZERO adapters, and require_gpu() in that
+  # file turns that into a hard failure with an actionable message. It must never
+  # come back as a skip — a green tick from a run that rendered nothing is the bug
+  # this job was added to close.
+  visual-qa:
+    name: Visual-QA render (software GPU)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        # step-security/harden-runner@v2.19.4
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        # actions/checkout@v4.2.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: stable
+
+      - name: Install cargo-nextest
+        # taiki-e/install-action@v2.79.10
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3
+        with:
+          tool: cargo-nextest
+
+      - name: Cache cargo registry and target
+        # Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          workspaces: ". -> target"
+
+      - name: Install GUI build deps + lavapipe (software Vulkan)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libfontconfig1-dev \
+            libgl1-mesa-dri libegl1-mesa-dev mesa-vulkan-drivers vulkan-tools
+
+      # Names the adapter the tests will actually get. When this job fails, this
+      # step is the difference between "lavapipe is missing" and "the app
+      # regressed" — the two failures look identical from the test output alone.
+      - name: Show the available Vulkan adapters
+        run: vulkaninfo --summary || true
+
+      - name: Run the visual-QA render suite
+        # --run-ignored only: every test in this file is #[ignore]d, so this runs
+        # exactly the visual-QA suite and nothing else. Single-threaded because
+        # each test stands up its own wgpu device against one software rasteriser.
+        run: cargo nextest run -p c0pl4nd --test qa_wide_glyph_snapshot --locked --run-ignored only --test-threads 1
+
+      - name: Upload the rendered QA frames (eyeball aid)
+        if: always()
+        # actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: visual-qa-frames
+          path: /tmp/c0pl4nd-qa-*.png
+          if-no-files-found: ignore
 
   lint:
     name: Format & Clippy

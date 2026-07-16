@@ -16,18 +16,7 @@
 //! `Harness::new` calls `frame_tick` verbatim — the same function the binary's
 //! `eframe::App::ui` calls — so what the test exercises is what ships.
 
-#![allow(dead_code)] // The `#[path]`-included module has production entry points
-                     // (eframe `App` impl, `apply_window_effect`) that this test
-                     // binary does not call; they are legitimately unused here.
-
-#[path = "../src/egui_app/mod.rs"]
-mod egui_app;
-#[path = "../src/issue_intake.rs"]
-mod issue_intake;
-#[path = "../src/reporting.rs"]
-mod reporting;
-#[path = "../src/user_error.rs"]
-mod user_error;
+use c0pl4nd::egui_app;
 
 use std::cell::RefCell;
 

@@ -348,6 +348,21 @@ pub fn default_shell() -> String {
 mod tests {
     use super::*;
 
+    /// How long a test waits for a real PTY child to produce output / exit.
+    ///
+    /// Generous on purpose. Every wait here ends the instant the data arrives, so a
+    /// healthy run pays NOTHING for a large bound — it only decides how much
+    /// slowness is tolerated before the child is declared broken.
+    ///
+    /// This was 5s and it broke `cargo llvm-cov`: instrumented builds run several
+    /// times slower, and `spawn_one_shot_echo_round_trips` +
+    /// `spawned_child_sees_term_and_colorterm` failed there while passing in ~1s
+    /// uninstrumented. That is not cosmetic — it made the whole coverage sweep exit
+    /// 101, so C0PL4ND's coverage could not be measured at all.
+    ///
+    /// No assertion is weakened: a child that never speaks still fails the test.
+    const PTY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
     /// Serializes the `apply_prompt_env_*` tests: they mutate the process-wide
     /// `PROMPT` env var, so they must not run concurrently with each other.
     /// `Mutex<()>` poisons if a test panics while holding it; the helper below
@@ -526,8 +541,8 @@ mod tests {
             let _ = tx.send(buf);
         });
         let buf = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap_or_default();
+            .recv_timeout(PTY_READ_TIMEOUT)
+            .expect("the PTY reader thread never delivered the child's output");
         let _ = proc.wait();
         let out = String::from_utf8_lossy(&buf);
         assert!(
@@ -684,7 +699,10 @@ mod tests {
             let _ = proc.wait();
             let _ = tx.send(());
         });
-        let reaped = rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
+        // Here the timeout IS the assertion (below), so it stays a bool — but it
+        // gets the same generous bound so an instrumented/loaded run cannot forge
+        // the orphan-leak verdict.
+        let reaped = rx.recv_timeout(PTY_READ_TIMEOUT).is_ok();
         assert!(
             reaped,
             "after kill(), the child shell must terminate (wait() returns) — \
@@ -727,8 +745,8 @@ mod tests {
             let _ = tx.send(buf);
         });
         let buf = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap_or_default();
+            .recv_timeout(PTY_READ_TIMEOUT)
+            .expect("the PTY reader thread never delivered the child's output");
         let _ = proc.wait();
         let out = String::from_utf8_lossy(&buf);
         assert!(

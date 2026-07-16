@@ -27,7 +27,7 @@ mod layout_state;
 mod motion_fx;
 pub mod pane_term;
 mod search_ui;
-mod settings;
+pub mod settings;
 /// Kick off the on-launch update CHECK on the shared in-app updater that drives
 /// the notification banner + Settings → Updates page. Exposed for the binary
 /// entry point (`egui_main`), which calls it exactly once at startup when the
@@ -70,7 +70,7 @@ use pane_term::{CellMetrics, ColorRun, PaneTerm};
 mod glyph_cache;
 pub(crate) use glyph_cache::*;
 
-pub(crate) mod gpu_diag;
+pub mod gpu_diag;
 
 /// How many placeholder panes the shell opens with on first launch.
 const INITIAL_PANES: usize = 1;
@@ -95,12 +95,18 @@ pub enum WindowCmd {
 pub struct C0pl4ndApp {
     /// Core config (loaded best-effort; defaults when absent). Kept so Milestone
     /// 2 can read font/cursor/keybinding settings without re-plumbing.
-    pub(crate) config: c0pl4nd_core::Config,
+    ///
+    /// `pub` (not `pub(crate)`) so the `tests/` suites can drive and observe it
+    /// now that they link the lib target instead of `#[path]`-including a second
+    /// copy of this module. This crate is an application lib — it is never
+    /// published, and its only consumers are its own two binaries and its tests
+    /// — so the wider visibility exposes nothing to a third party.
+    pub config: c0pl4nd_core::Config,
     /// The active colour theme — glyph colours for the terminal grid come from
     /// here (NOT egui Visuals, which only style the chrome).
-    pub(crate) theme: c0pl4nd_core::Theme,
+    pub theme: c0pl4nd_core::Theme,
     /// The tiling pane grid.
-    pub(crate) grid_tree: egui_tiles::Tree<Pane>,
+    pub grid_tree: egui_tiles::Tree<Pane>,
     /// Per-pane live terminal state (PTY + grid), keyed by pane id. A pane with
     /// no entry (or a failed spawn) renders an error/placeholder body.
     pub(crate) terms: HashMap<PaneId, PaneTerm>,
@@ -625,7 +631,7 @@ impl C0pl4ndApp {
     pub fn bootstrap_with(config: c0pl4nd_core::Config) -> Self {
         let (theme, theme_notice) = load_terminal_theme(&config);
         let mut pane_alloc = PaneIdAllocator::default();
-        let initial: Vec<PaneId> = (0..INITIAL_PANES).map(|_| pane_alloc.next()).collect();
+        let initial: Vec<PaneId> = (0..INITIAL_PANES).map(|_| pane_alloc.alloc()).collect();
         let focused_pane = initial[0];
         let grid_tree = grid::build_default_grid(&initial);
         // DEFER the initial pane PTYs: register them as pending and let
@@ -992,7 +998,7 @@ impl C0pl4ndApp {
             ));
             return;
         }
-        let new_pane = self.pane_alloc.next();
+        let new_pane = self.pane_alloc.alloc();
         if grid::split_focused(&mut self.grid_tree, self.focused_pane, new_pane, dir) {
             self.spawn_term(new_pane);
             self.focused_pane = new_pane;

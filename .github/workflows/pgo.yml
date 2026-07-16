@@ -32,8 +32,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # CI runners are headless; display/GPU-dependent tests opt into skipping.
-  C0PL4ND_HEADLESS: "1"
+  # NOTE: no C0PL4ND_HEADLESS — it was set here with a comment claiming
+  # "display/GPU-dependent tests opt into skipping", but nothing ever read it.
+  # See the same note in ci.yml: skipping is decided by a real wgpu-adapter
+  # probe (`gpu_available()`), not by this variable.
   # Pin the toolchain used for BOTH the instrumented and optimized builds. PGO
   # profile data is tied to the exact rustc version that produced the
   # instrumented binary; a mismatch silently discards the profile. Keep in step

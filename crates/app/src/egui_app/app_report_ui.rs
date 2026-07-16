@@ -92,17 +92,55 @@ impl super::C0pl4ndApp {
     /// Persist a remembered crash-consent choice into the config (graduating the
     /// crash stream to `Always` or `Off`), then save the config so the next
     /// launch honours it. `JustThisTime` persists nothing. Best-effort save.
+    ///
+    /// The disk write is REAL-WINDOW-ONLY, exactly like every other config-save
+    /// site (`persist_config_change`, `prepare_shutdown`, the settings handler):
+    /// the headless `egui_kittest` harness has `live_window == false`, so a test
+    /// driving this dialog never writes the user's real
+    /// `%APPDATA%\c0pl4nd\config.toml` (test pollution). This mirrors the spool
+    /// I/O of this very dialog, which is already rooted at an explicit
+    /// [`crate::reporting::CrashConsentState::set_config_dir`] rather than a
+    /// resolved global. The in-memory graduation is what the tests observe.
     fn apply_remember_choice(&mut self, choice: crate::reporting::RememberChoice) {
-        if let Some(mode) = choice.persisted_mode() {
-            self.config.reporting.streams.crash_reports = mode;
-            if let Some(path) = c0pl4nd_core::Config::default_path() {
-                if let Err(e) = self.config.save_to(&path) {
-                    self.toast = Some(crate::user_error::config_save_failed(
-                        e,
-                        "Your reporting choice",
-                    ));
-                }
-            }
+        let path = self.remember_save_path();
+        self.apply_remember_choice_to(choice, path.as_deref());
+    }
+
+    /// The config file this dialog's remembered-choice save targets: the platform
+    /// config path in a REAL window, and NOTHING when headless. Split out as its own
+    /// decision so it is unit-testable WITHOUT redirecting the process-global env
+    /// vars `Config::default_path()` reads (the `reporting` tests already serialise
+    /// those behind their own lock; a second, unrelated lock here would not compose).
+    /// Short-circuits: when headless it never even resolves the global.
+    fn remember_save_path(&self) -> Option<std::path::PathBuf> {
+        self.live_window
+            .then(c0pl4nd_core::Config::default_path)
+            .flatten()
+    }
+
+    /// Pure core of the remembered-choice apply, parameterised on the save path so
+    /// it is unit-testable (the real entry resolves `Config::default_path()`, and
+    /// only in a real window). The in-memory graduation ALWAYS happens — it is the
+    /// load-bearing behaviour the headless tests observe; a `None` path writes
+    /// nothing at all. A write failure surfaces as a toast and never blocks the
+    /// in-memory apply. `JustThisTime` (`persisted_mode() == None`) changes nothing.
+    fn apply_remember_choice_to(
+        &mut self,
+        choice: crate::reporting::RememberChoice,
+        path: Option<&std::path::Path>,
+    ) {
+        let Some(mode) = choice.persisted_mode() else {
+            return;
+        };
+        self.config.reporting.streams.crash_reports = mode;
+        let Some(path) = path else {
+            return;
+        };
+        if let Err(e) = self.config.save_to(path) {
+            self.toast = Some(crate::user_error::config_save_failed(
+                e,
+                "Your reporting choice",
+            ));
         }
     }
 
@@ -235,5 +273,464 @@ impl super::C0pl4ndApp {
         } else if do_close {
             self.issue_intake.open = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::C0pl4ndApp;
+    use crate::reporting::{RememberChoice, ReportingMode};
+    use std::path::Path;
+
+    // These tests deliberately do NOT write the config-dir-rooting env vars
+    // (`APPDATA` / `XDG_CONFIG_HOME` / `HOME`). `reporting.rs`'s tests redirect
+    // those behind their OWN private lock, which this module cannot reach; a
+    // second unrelated lock would not compose, and the two would corrupt each
+    // other. Instead the path DECISION (`remember_save_path`) and the path USE
+    // (`apply_remember_choice_to`) are asserted separately, which needs no env
+    // mutation at all and yields the same end-to-end guarantee.
+
+    fn headless_app() -> C0pl4ndApp {
+        C0pl4ndApp::bootstrap_with(c0pl4nd_core::Config::default())
+    }
+
+    /// Read the crash-stream mode back out of a config file ON DISK, so the
+    /// persistence assertions observe what a NEXT LAUNCH would actually load
+    /// rather than the in-memory struct we just mutated.
+    fn crash_mode_on_disk(path: &Path) -> ReportingMode {
+        let body = std::fs::read_to_string(path).expect("config file readable");
+        c0pl4nd_core::Config::from_toml(&body, path)
+            .expect("config file parses")
+            .reporting
+            .streams
+            .crash_reports
+    }
+
+    /// REGRESSION (the real bug), half 1 of 2. A headless app — `live_window ==
+    /// false`, which is what `bootstrap_with` and every `egui_kittest` harness
+    /// produce — selects NO save path at all, so a remembered crash-consent choice
+    /// cannot reach the user's real `%APPDATA%\c0pl4nd\config.toml`. Before the fix
+    /// `apply_remember_choice` resolved the GLOBAL `Config::default_path()` and
+    /// called `save_to` UNCONDITIONALLY, so merely exercising this path from a test
+    /// wrote the developer's real config file. Paired with
+    /// [`a_none_path_applies_in_memory_and_writes_nothing`] (which proves a `None`
+    /// path writes nothing), this composes to the full end-to-end guarantee without
+    /// this test having to mutate any process-global env var.
+    #[test]
+    fn a_headless_app_selects_no_save_path() {
+        let app = headless_app();
+        assert!(!app.live_window, "precondition: bootstrap_with is headless");
+        assert_eq!(
+            app.remember_save_path(),
+            None,
+            "a headless run must target no config file — it would be the user's real one"
+        );
+    }
+
+    /// REGRESSION half 2 of 2 — the CONTROL. The gate must not be "never save": in a
+    /// REAL window the remembered choice still targets the platform config path, so
+    /// the next launch honours it. Without this, "fixing" the bug by deleting the
+    /// save outright would pass [`a_headless_app_selects_no_save_path`] — this is
+    /// what makes that test a real safeguard rather than a rubber stamp.
+    #[test]
+    fn a_real_window_targets_the_platform_config_path() {
+        let mut app = headless_app();
+        app.live_window = true;
+        assert_eq!(
+            app.remember_save_path(),
+            c0pl4nd_core::Config::default_path(),
+            "a real window must persist to the platform config path"
+        );
+        assert!(
+            app.remember_save_path().is_some(),
+            "precondition: this host resolves a platform config path, so the \
+             assertion above is not a vacuous None == None"
+        );
+    }
+
+    /// "Always send" graduates the crash stream to `Always` and round-trips
+    /// through the file a next launch reads. Drives the injectable seam directly.
+    #[test]
+    fn always_graduates_the_crash_stream_and_round_trips() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let path = tmp.path().join("config.toml");
+        let mut app = headless_app();
+
+        app.apply_remember_choice_to(RememberChoice::Always, Some(&path));
+
+        assert_eq!(
+            app.config.reporting.streams.crash_reports,
+            ReportingMode::Always
+        );
+        assert_eq!(crash_mode_on_disk(&path), ReportingMode::Always);
+    }
+
+    /// "Never" sets the crash stream to `Off` — the opt-OUT must persist just as
+    /// firmly as the opt-in, or a user who declined keeps being asked.
+    ///
+    /// The stream is put at `Always` FIRST: `Off` is the built-in default, so
+    /// starting from a default config would make the assertion pass even if this
+    /// method did nothing at all.
+    #[test]
+    fn never_turns_the_crash_stream_off_and_round_trips() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let path = tmp.path().join("config.toml");
+        let mut app = headless_app();
+        app.config.reporting.streams.crash_reports = ReportingMode::Always;
+
+        app.apply_remember_choice_to(RememberChoice::Never, Some(&path));
+
+        assert_eq!(
+            app.config.reporting.streams.crash_reports,
+            ReportingMode::Off
+        );
+        assert_eq!(crash_mode_on_disk(&path), ReportingMode::Off);
+    }
+
+    /// "Just this time" persists NOTHING: no mode change and no file, so the next
+    /// crash asks again. The stream is put at `Always` first so "unchanged" is a
+    /// value this method would have had to actively overwrite to fail.
+    #[test]
+    fn just_this_time_persists_nothing() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let path = tmp.path().join("config.toml");
+        let mut app = headless_app();
+        app.config.reporting.streams.crash_reports = ReportingMode::Always;
+
+        app.apply_remember_choice_to(RememberChoice::JustThisTime, Some(&path));
+
+        assert_eq!(
+            app.config.reporting.streams.crash_reports,
+            ReportingMode::Always,
+            "JustThisTime must not change the stream"
+        );
+        assert!(!path.exists(), "JustThisTime must not write a config file");
+    }
+
+    /// A save failure is BEST-EFFORT: it surfaces as a toast and never blocks the
+    /// live in-memory apply. The unwritable path is a `config.toml` whose PARENT is
+    /// a regular FILE, so `save_to`'s `create_dir_all` cannot succeed.
+    #[test]
+    fn a_save_failure_surfaces_a_toast_and_keeps_the_in_memory_apply() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let blocker = tmp.path().join("not-a-dir");
+        std::fs::write(&blocker, b"i am a file, not a directory").expect("write blocker");
+        let path = blocker.join("config.toml");
+
+        let mut app = headless_app();
+        app.apply_remember_choice_to(RememberChoice::Always, Some(&path));
+
+        assert_eq!(
+            app.config.reporting.streams.crash_reports,
+            ReportingMode::Always,
+            "a write failure must never block the live in-memory apply"
+        );
+        let toast = app.toast.expect("a failed save must surface a toast");
+        assert!(
+            toast.contains("couldn't be saved"),
+            "the toast must name the persist failure: {toast:?}"
+        );
+        assert!(
+            toast.contains("Your reporting choice"),
+            "the toast must name WHAT failed to save: {toast:?}"
+        );
+    }
+
+    /// A `None` path writes nothing but still applies in memory — the exact shape
+    /// the headless entry relies on.
+    #[test]
+    fn a_none_path_applies_in_memory_and_writes_nothing() {
+        let mut app = headless_app();
+        app.apply_remember_choice_to(RememberChoice::Always, None);
+        assert_eq!(
+            app.config.reporting.streams.crash_reports,
+            ReportingMode::Always
+        );
+        assert!(app.toast.is_none(), "no write was attempted, so no toast");
+    }
+
+    // ---- dialog rendering (headless egui_kittest, real widgets) ----
+    //
+    // NOT covered here, for specific reasons rather than convenience:
+    //
+    //  * "Email instead" (`do_mailto`) and the SHORT-body "Open on GitHub" both
+    //    call `itasha_report_core::intake::launch`, which really spawns the
+    //    user's browser / mail client. Clicking them in a test would open real
+    //    windows on the developer's desktop, so only the LONG-body "Open on
+    //    GitHub" arm — which returns `CopyToClipboard` and launches nothing — is
+    //    driven below.
+    //  * "Send report" (`consent_and_send`) resolves its transport endpoint from
+    //    the process-global env (`onion_from_env` / `endpoint_from_env`), which
+    //    `reporting.rs`'s tests mutate behind their own private lock. Clicking
+    //    Send here could observe a concurrently-set endpoint and attempt a real
+    //    network send, so the hermetic DECLINE path is driven instead.
+
+    use egui_kittest::kittest::Queryable;
+    use egui_kittest::Harness;
+    use std::cell::RefCell;
+
+    /// A headless harness driving the REAL `render_report_issue` each frame.
+    fn issue_harness(app: &RefCell<C0pl4ndApp>) -> Harness<'_> {
+        #[allow(deprecated)]
+        let mut h = Harness::new(move |ctx| app.borrow_mut().render_report_issue(ctx));
+        h.set_size(egui::vec2(1000.0, 800.0));
+        h.run();
+        h
+    }
+
+    /// A headless harness driving the REAL `render_crash_consent` each frame.
+    fn consent_harness(app: &RefCell<C0pl4ndApp>) -> Harness<'_> {
+        #[allow(deprecated)]
+        let mut h = Harness::new(move |ctx| app.borrow_mut().render_crash_consent(ctx));
+        h.set_size(egui::vec2(1000.0, 800.0));
+        h.run();
+        h
+    }
+
+    /// An app with ONE crash report spooled in `dir` and loaded into the dialog.
+    /// The spool is rooted at an explicit temp dir via `set_config_dir`, so no
+    /// real user state is touched.
+    fn app_with_pending_crash(dir: &Path) -> C0pl4ndApp {
+        let spool = crate::reporting::open_spool_in(dir).expect("spool opens in temp dir");
+        let report = crate::reporting::build_crash_report("boom", "src/x.rs:1");
+        spool.enqueue(&report).expect("enqueue a crash report");
+
+        let mut app = headless_app();
+        app.crash_consent.set_config_dir(Some(dir.to_path_buf()));
+        app.crash_consent.load_from_spool();
+        assert!(
+            app.crash_consent.has_pending(),
+            "precondition: a spooled crash report must be pending"
+        );
+        app
+    }
+
+    /// The report-issue dialog is USER-INITIATED: with `open == false` it renders
+    /// nothing at all, so the default experience is untouched.
+    #[test]
+    fn report_issue_renders_nothing_until_opened() {
+        let app = RefCell::new(headless_app());
+        assert!(!app.borrow().issue_intake.open, "precondition: closed");
+        let h = issue_harness(&app);
+        assert!(
+            h.query_by_label("Open on GitHub").is_none(),
+            "a closed dialog must render no widgets"
+        );
+    }
+
+    /// Opening the dialog renders the real form: the action buttons and the
+    /// live preview of EXACTLY what would be sent.
+    #[test]
+    fn report_issue_renders_the_form_and_a_live_preview_when_open() {
+        let mut a = headless_app();
+        a.issue_intake.open = true;
+        a.issue_intake.description = "the terminal ate my homework".to_string();
+        let app = RefCell::new(a);
+        let h = issue_harness(&app);
+
+        h.get_by_label("Open on GitHub");
+        h.get_by_label("Email instead");
+        h.get_by_label("Close");
+        // The preview must show the user's actual words — proof it previews the
+        // real body rather than a placeholder.
+        assert!(
+            h.query_by_label_contains("the terminal ate my homework")
+                .is_some(),
+            "the preview must render the user's description verbatim"
+        );
+    }
+
+    /// Clicking Close closes the dialog — the real widget → real state path.
+    #[test]
+    fn report_issue_close_button_closes_the_dialog() {
+        let mut a = headless_app();
+        a.issue_intake.open = true;
+        let app = RefCell::new(a);
+        let mut h = issue_harness(&app);
+
+        h.get_by_label("Close").click();
+        h.run();
+
+        assert!(
+            !app.borrow().issue_intake.open,
+            "Close must close the dialog"
+        );
+    }
+
+    /// A report too long for a GitHub deep link warns the user UP FRONT that
+    /// "Open on GitHub" will fall back to the clipboard.
+    #[test]
+    fn report_issue_warns_when_the_report_is_too_long_for_a_deep_link() {
+        let mut a = headless_app();
+        a.issue_intake.open = true;
+        a.issue_intake.description = "x".repeat(9000);
+        assert!(
+            !a.issue_intake
+                .fits_url_length(&a.config.reporting.issue_intake.repo, "test-renderer"),
+            "precondition: this body must exceed the deep-link ceiling"
+        );
+        let app = RefCell::new(a);
+        let h = issue_harness(&app);
+
+        assert!(
+            h.query_by_label_contains("copy it to your clipboard")
+                .is_some(),
+            "an over-long report must warn about the clipboard fallback"
+        );
+    }
+
+    /// A SHORT report renders NO clipboard warning — the control proving the
+    /// warning above is driven by the length, not always on screen.
+    #[test]
+    fn report_issue_does_not_warn_when_the_report_fits_a_deep_link() {
+        let mut a = headless_app();
+        a.issue_intake.open = true;
+        a.issue_intake.description = "short".to_string();
+        let app = RefCell::new(a);
+        let h = issue_harness(&app);
+
+        assert!(
+            h.query_by_label_contains("copy it to your clipboard")
+                .is_none(),
+            "a short report must not show the clipboard-fallback warning"
+        );
+    }
+
+    /// "Open on GitHub" on an over-long report copies to the clipboard instead of
+    /// launching a browser, and reports that outcome. This is the ONE `do_open`
+    /// arm that launches nothing, so it is the only one drivable in a test.
+    #[test]
+    fn report_issue_open_on_github_falls_back_to_the_clipboard_when_too_long() {
+        let mut a = headless_app();
+        a.issue_intake.open = true;
+        a.issue_intake.description = "x".repeat(9000);
+        let app = RefCell::new(a);
+        let mut h = issue_harness(&app);
+
+        h.get_by_label("Open on GitHub").click();
+        h.run();
+
+        assert_eq!(
+            app.borrow().issue_intake.last_outcome,
+            Some(crate::issue_intake::IntakeOutcome::CopiedToClipboard),
+            "an over-long report must copy to the clipboard, never launch a browser"
+        );
+    }
+
+    /// Each recorded outcome renders its own status line, so the user always
+    /// learns what actually happened.
+    #[test]
+    fn report_issue_renders_a_status_line_for_every_outcome() {
+        let cases = [
+            (
+                crate::issue_intake::IntakeOutcome::OpenedDeepLink,
+                "Opened the issue form",
+            ),
+            (
+                crate::issue_intake::IntakeOutcome::CopiedToClipboard,
+                "Copied the report to your clipboard",
+            ),
+            (
+                crate::issue_intake::IntakeOutcome::OpenedMailto,
+                "Opened your mail client",
+            ),
+            (
+                crate::issue_intake::IntakeOutcome::Failed("nope".to_string()),
+                "That didn't work",
+            ),
+        ];
+        for (outcome, expected) in cases {
+            let mut a = headless_app();
+            a.issue_intake.open = true;
+            a.issue_intake.last_outcome = Some(outcome.clone());
+            let app = RefCell::new(a);
+            let h = issue_harness(&app);
+            assert!(
+                h.query_by_label_contains(expected).is_some(),
+                "outcome {outcome:?} must render the status line {expected:?}"
+            );
+        }
+    }
+
+    /// The crash-consent dialog is a no-op when nothing is spooled — the
+    /// opted-out / nothing-crashed case, i.e. the default experience.
+    #[test]
+    fn crash_consent_renders_nothing_when_no_report_is_pending() {
+        let app = RefCell::new(headless_app());
+        assert!(!app.borrow().crash_consent.has_pending(), "precondition");
+        let h = consent_harness(&app);
+        assert!(
+            h.query_by_label("Send report").is_none(),
+            "no pending report must render no dialog"
+        );
+    }
+
+    /// A pending crash report renders the consent dialog with EQUAL-WEIGHT Send /
+    /// Don't-send and the remember-choice radios.
+    #[test]
+    fn crash_consent_renders_equal_weight_choices_when_a_report_is_pending() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let app = RefCell::new(app_with_pending_crash(tmp.path()));
+        let h = consent_harness(&app);
+
+        h.get_by_label("Send report");
+        h.get_by_label("Don't send");
+        h.get_by_label("Just this time");
+        h.get_by_label("Always send");
+        h.get_by_label("Never");
+    }
+
+    /// Don't-send discards the report WITHOUT transmitting: the dialog clears and
+    /// the spooled file is gone. Hermetic — the spool is rooted at a temp dir.
+    #[test]
+    fn crash_consent_dont_send_discards_the_report() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let app = RefCell::new(app_with_pending_crash(tmp.path()));
+        let mut h = consent_harness(&app);
+
+        h.get_by_label("Don't send").click();
+        h.run();
+
+        assert!(
+            !app.borrow().crash_consent.has_pending(),
+            "Don't-send must clear the pending report"
+        );
+    }
+
+    /// END-TO-END over the real widgets, and the UI-level statement of the bug this
+    /// module was fixed for: picking "Always send" + Don't-send graduates the crash
+    /// stream IN MEMORY, and — because the harness is headless — targets NO config
+    /// file, so the developer's real `%APPDATA%\c0pl4nd\config.toml` is untouched.
+    ///
+    /// "Always send" (not "Never") is the choice driven here because `Off` is the
+    /// built-in default: remembering Never would assert a value the config already
+    /// had, and would pass even if the radio were wired to nothing.
+    #[test]
+    fn crash_consent_remembering_always_applies_in_memory_without_writing_config() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let app = RefCell::new(app_with_pending_crash(tmp.path()));
+        assert_eq!(
+            app.borrow().config.reporting.streams.crash_reports,
+            ReportingMode::Off,
+            "precondition: the crash stream starts Off (the opt-in default)"
+        );
+        let mut h = consent_harness(&app);
+
+        h.get_by_label("Always send").click();
+        h.run();
+        h.get_by_label("Don't send").click();
+        h.run();
+
+        let app = app.borrow();
+        assert_eq!(
+            app.config.reporting.streams.crash_reports,
+            ReportingMode::Always,
+            "remembering Always must graduate the crash stream in memory"
+        );
+        assert_eq!(
+            app.remember_save_path(),
+            None,
+            "a headless run must not target the user's real config file"
+        );
     }
 }

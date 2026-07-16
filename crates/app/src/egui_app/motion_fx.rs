@@ -367,8 +367,320 @@ pub(crate) fn paint_boot_glitch(ctx: &Context, elapsed: f64) {
 
 #[cfg(test)]
 mod tests {
-    use super::EFFECT_LAYER_ORDER;
-    use egui::Order;
+    use super::{cursor_trail_life, fill_around, paint_cursor_trail, paint_flicker};
+    use super::{EFFECT_LAYER_ORDER, *};
+    use egui::{pos2, Order};
+
+    /// Run ONE headless frame that paints via `body`, and return the rects the
+    /// frame actually emitted at the effect layer.
+    ///
+    /// This observes the REAL shape stream `egui` collected (`FullOutput::shapes`),
+    /// so a painter that early-returns contributes nothing and one that paints is
+    /// measured by the geometry it produced — not by a test mirror of the maths.
+    ///
+    /// `screen` sizes the frame so `ctx.content_rect()` is a usable rect (the
+    /// painters that read it guard against a zero-width first frame).
+    fn painted_rects(screen: Rect, mut body: impl FnMut(&Context)) -> Vec<Rect> {
+        let ctx = Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| body(ui.ctx()));
+        out.shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Rect(r) => Some(r.rect),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Paint `body` onto a throwaway effect-layer painter inside one frame.
+    fn with_painter(ctx: &Context, body: impl FnOnce(&egui::Painter)) {
+        let painter = ctx.layer_painter(LayerId::new(EFFECT_LAYER_ORDER, Id::new("test-layer")));
+        body(&painter);
+    }
+
+    const OUTER: Rect = Rect {
+        min: pos2(0.0, 0.0),
+        max: pos2(100.0, 100.0),
+    };
+
+    #[test]
+    fn fill_around_without_an_exclude_paints_the_whole_rect_once() {
+        // The `None` fast path: no open panel to protect, so the wash is a single
+        // rect covering `outer` exactly — not a four-band decomposition.
+        let rects = painted_rects(OUTER, |ctx| {
+            with_painter(ctx, |p| {
+                fill_around(p, OUTER, None, 0.0, Color32::RED);
+            });
+        });
+        assert_eq!(
+            rects,
+            vec![OUTER],
+            "with no exclude the wash must be ONE rect covering the whole area"
+        );
+    }
+
+    #[test]
+    fn fill_around_tiles_the_area_outside_the_exclude_exactly() {
+        // The live-preview contract: a Motion effect paints everywhere EXCEPT the
+        // open panel's rect. This asserts all three halves of that at once, from
+        // the REAL emitted geometry:
+        //
+        //   1. No painted band overlaps the hole  → the panel stays clean.
+        //   2. Every band stays inside `outer`    → the wash never bleeds out.
+        //   3. The bands' total area == outer - hole → no GAP is left unpainted.
+        //
+        // (3) is what makes this more than a smoke test: a band whose bounds are
+        // mutated (e.g. clamping to the wrong edge) still satisfies (1) and (2)
+        // but changes the area, so the tiling is pinned exactly.
+        let hole = Rect::from_min_max(pos2(40.0, 40.0), pos2(60.0, 60.0));
+        let rects = painted_rects(OUTER, |ctx| {
+            with_painter(ctx, |p| {
+                fill_around(p, OUTER, Some(hole), 0.0, Color32::RED);
+            });
+        });
+        assert!(
+            !rects.is_empty(),
+            "an excluded wash still paints the surround"
+        );
+
+        for r in &rects {
+            assert!(
+                !r.intersect(hole).is_positive(),
+                "no band may overlap the excluded panel rect (band {r:?} hits {hole:?})"
+            );
+            assert!(
+                outer_contains(OUTER, *r),
+                "no band may escape the outer rect (band {r:?} outside {OUTER:?})"
+            );
+        }
+
+        let painted: f32 = rects.iter().map(|r| r.width() * r.height()).sum();
+        let expected = OUTER.width() * OUTER.height() - hole.width() * hole.height();
+        assert!(
+            (painted - expected).abs() < 0.01,
+            "the bands must tile the whole surround with no gap and no overlap \
+             (painted {painted}, expected {expected})"
+        );
+    }
+
+    /// Whether `inner` lies within `outer` (tolerant of float noise).
+    fn outer_contains(outer: Rect, inner: Rect) -> bool {
+        inner.left() >= outer.left() - 0.01
+            && inner.right() <= outer.right() + 0.01
+            && inner.top() >= outer.top() - 0.01
+            && inner.bottom() <= outer.bottom() + 0.01
+    }
+
+    #[test]
+    fn fill_around_paints_everything_when_the_exclude_misses_the_area() {
+        // A panel that does not overlap this painter's area must not carve a hole
+        // out of it — the `!hole.is_positive()` fast path after the intersect.
+        let elsewhere = Rect::from_min_max(pos2(500.0, 500.0), pos2(600.0, 600.0));
+        let rects = painted_rects(OUTER, |ctx| {
+            with_painter(ctx, |p| {
+                fill_around(p, OUTER, Some(elsewhere), 0.0, Color32::RED);
+            });
+        });
+        assert_eq!(
+            rects,
+            vec![OUTER],
+            "a non-overlapping exclude must leave the wash a single full rect"
+        );
+    }
+
+    #[test]
+    fn flicker_at_zero_strength_paints_nothing() {
+        // The master/per-effect gates promise "idle frames cost the same as plain
+        // egui". At zero strength the painter must emit NO geometry at all — not a
+        // fully-transparent rect that still costs a draw call.
+        let rects = painted_rects(OUTER, |ctx| paint_flicker(ctx, 0.0, 1.0, None));
+        assert!(
+            rects.is_empty(),
+            "zero-strength flicker must paint nothing (got {} rects)",
+            rects.len()
+        );
+    }
+
+    #[test]
+    fn flicker_at_full_strength_stays_under_the_photosensitivity_ceiling() {
+        // The documented comfort ceiling: even at strength 1.0 the wash alpha peaks
+        // near 18/255 (~7%) — deliberately well short of a full-black strobe. This
+        // samples the REAL painter across a range of `t` and asserts the emitted
+        // alpha never exceeds that ceiling, so raising the 18.0 coefficient (a
+        // photosensitivity regression) fails here.
+        let ctx = Context::default();
+        let mut peak = 0u8;
+        let mut painted_any = false;
+        for step in 0..400 {
+            let t = f64::from(step) * 0.01;
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(OUTER),
+                    ..Default::default()
+                },
+                |ui| paint_flicker(ui.ctx(), 1.0, t, None),
+            );
+            for cs in &out.shapes {
+                if let egui::Shape::Rect(r) = &cs.shape {
+                    painted_any = true;
+                    peak = peak.max(r.fill.a());
+                }
+            }
+        }
+        assert!(
+            painted_any,
+            "full-strength flicker must actually paint on some frames"
+        );
+        assert!(
+            peak <= 18,
+            "the flicker wash must stay under the ~7% photosensitivity ceiling \
+             (peak alpha {peak} > 18)"
+        );
+    }
+
+    #[test]
+    fn cursor_trail_life_spans_the_documented_range_and_clamps() {
+        // The single source of truth for the trail's temporal span — shared by the
+        // painter's fade AND the caller's deque prune, so the two can never
+        // disagree about when an echo is dead. Pinning the documented anchors here
+        // is what keeps that shared contract honest.
+        assert!(
+            (cursor_trail_life(0.0) - 0.35).abs() < 1e-6,
+            "zero intensity is a 0.35s flick (got {})",
+            cursor_trail_life(0.0)
+        );
+        assert!(
+            (cursor_trail_life(0.6) - 0.65).abs() < 1e-6,
+            "the default config intensity (0.6) lands at ~0.65s (got {})",
+            cursor_trail_life(0.6)
+        );
+        assert!(
+            (cursor_trail_life(2.0) - 1.35).abs() < 1e-6,
+            "max intensity is a 1.35s comet tail (got {})",
+            cursor_trail_life(2.0)
+        );
+        // Strictly increasing in intensity — a longer trail for a bolder setting.
+        assert!(
+            cursor_trail_life(0.2) < cursor_trail_life(0.8),
+            "a higher intensity must let each echo linger longer"
+        );
+        // Clamped at BOTH ends, so a garbage config value can never produce a
+        // negative lifetime (which would divide-by-zero the painter's fade) or an
+        // unbounded one (which would let the caller's deque grow without bound).
+        assert!(
+            (cursor_trail_life(-5.0) - cursor_trail_life(0.0)).abs() < 1e-6,
+            "a negative intensity clamps to the zero-intensity lifetime"
+        );
+        assert!(
+            (cursor_trail_life(99.0) - cursor_trail_life(2.0)).abs() < 1e-6,
+            "an oversized intensity clamps to the max lifetime"
+        );
+    }
+
+    #[test]
+    fn cursor_trail_skips_echoes_over_an_open_panel_and_drops_dead_ones() {
+        // Two behaviours of the trail painter, each observed from the REAL emitted
+        // geometry:
+        //   * an echo whose rect falls over an open panel is skipped (the panel
+        //     stays clean — the live-preview exclude contract), and
+        //   * an echo older than its lifetime contributes nothing (the fade floor).
+        // A live echo away from the panel still paints, which is the control that
+        // stops this passing vacuously.
+        let live = Rect::from_min_max(pos2(5.0, 5.0), pos2(15.0, 15.0));
+        let over_panel = Rect::from_min_max(pos2(45.0, 45.0), pos2(55.0, 55.0));
+        let panel = Rect::from_min_max(pos2(40.0, 40.0), pos2(60.0, 60.0));
+        let now = 10.0;
+        let life = cursor_trail_life(0.6);
+
+        // Control: with no exclude, a fresh echo paints.
+        let trail: std::collections::VecDeque<(Rect, f64)> = [(live, now)].into_iter().collect();
+        let rects = painted_rects(OUTER, |ctx| {
+            paint_cursor_trail(ctx, &trail, Color32::GREEN, now, 0.6, None);
+        });
+        assert_eq!(rects.len(), 1, "a fresh echo must paint");
+
+        // The echo over the panel is skipped; the one away from it still paints.
+        let trail: std::collections::VecDeque<(Rect, f64)> =
+            [(live, now), (over_panel, now)].into_iter().collect();
+        let rects = painted_rects(OUTER, |ctx| {
+            paint_cursor_trail(ctx, &trail, Color32::GREEN, now, 0.6, Some(panel));
+        });
+        assert_eq!(
+            rects,
+            vec![live],
+            "the echo over the open panel must be skipped, the other still painted"
+        );
+
+        // An echo older than its lifetime has faded out entirely.
+        let trail: std::collections::VecDeque<(Rect, f64)> =
+            [(live, now - life - 1.0)].into_iter().collect();
+        let rects = painted_rects(OUTER, |ctx| {
+            paint_cursor_trail(ctx, &trail, Color32::GREEN, now, 0.6, None);
+        });
+        assert!(
+            rects.is_empty(),
+            "an echo past its lifetime must paint nothing (got {} rects)",
+            rects.len()
+        );
+    }
+
+    #[test]
+    fn boot_glitch_paints_only_within_its_one_shot_window() {
+        // The boot sweep is a ONE-SHOT over the first ~0.55s. Outside `[0, DUR]` it
+        // must no-op, so it can never cost anything on a long-running session (the
+        // `elapsed` clock keeps growing forever).
+        //
+        // Uses a WIDE screen deliberately: the painter early-returns on a
+        // `content_rect` narrower than 160px (its first-frame zero-width guard), so
+        // the 100px `OUTER` used elsewhere would make the "paints nothing" half
+        // pass vacuously — for the wrong reason, proving nothing about the window.
+        // The `during` control below is what pins that down.
+        let screen = Rect::from_min_max(pos2(0.0, 0.0), pos2(800.0, 600.0));
+        let during = painted_rects(screen, |ctx| paint_boot_glitch(ctx, 0.1));
+        assert!(
+            !during.is_empty(),
+            "the boot sweep must paint during its window (if this fails the \
+             'paints nothing' assertions below are vacuous)"
+        );
+        for elapsed in [-0.1_f64, 0.56, 5.0, 3600.0] {
+            let rects = painted_rects(screen, |ctx| paint_boot_glitch(ctx, elapsed));
+            assert!(
+                rects.is_empty(),
+                "the one-shot boot sweep must paint nothing at elapsed={elapsed} \
+                 (got {} rects)",
+                rects.len()
+            );
+        }
+    }
+
+    #[test]
+    fn the_boot_glitch_sweep_descends_over_its_window() {
+        // The sweep's bright scan line travels DOWN the window as `elapsed` grows
+        // (`y = top + p * height`). Sampling the real emitted geometry at two times
+        // and asserting the line moved down pins the direction — a sign flip or a
+        // constant `y` (a "paints something" smoke test would miss both) fails here.
+        let screen = Rect::from_min_max(pos2(0.0, 0.0), pos2(800.0, 600.0));
+        // The bright scan line is the FIRST rect the painter emits, before the three
+        // dark offset bands.
+        let line_y = |elapsed: f64| -> f32 {
+            painted_rects(screen, |ctx| paint_boot_glitch(ctx, elapsed))
+                .first()
+                .expect("the sweep paints its scan line during the window")
+                .center()
+                .y
+        };
+        let early = line_y(0.05);
+        let late = line_y(0.5);
+        assert!(
+            late > early,
+            "the boot scan line must DESCEND over the sweep window \
+             (y at t=0.05 was {early}, at t=0.5 was {late})"
+        );
+    }
 
     #[test]
     fn effect_layer_order_is_below_popups_and_above_panes() {

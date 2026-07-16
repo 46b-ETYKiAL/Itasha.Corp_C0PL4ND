@@ -18,18 +18,7 @@
 //! of non-background (glyph) pixels. A regression that blanks either pane fails
 //! this test loudly.
 
-#![allow(dead_code)] // `#[path]`-included module exposes production entry points
-                     // (eframe `App` impl, chrome accessors) unused by this test.
-
-#[path = "../src/egui_app/mod.rs"]
-mod egui_app;
-#[path = "../src/issue_intake.rs"]
-mod issue_intake;
-#[path = "../src/reporting.rs"]
-mod reporting;
-#[path = "../src/user_error.rs"]
-mod user_error;
-
+use c0pl4nd::egui_app;
 use std::time::{Duration, Instant};
 
 /// The known text fed into the focused pane's PTY; its glyphs must show up in

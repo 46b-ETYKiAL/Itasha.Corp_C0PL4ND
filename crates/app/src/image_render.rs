@@ -118,12 +118,12 @@ impl ImageRenderer {
         // Guard a degenerate surface: the NDC math in `prepare_one` divides by
         // `surface_w`/`surface_h`, so a zero surface would yield inf/NaN verts.
         // Mirrors `pane_render.rs::ChromeRenderer::prepare`.
-        if surface_w <= 0.0 || surface_h <= 0.0 {
+        if !surface_is_drawable(surface_w, surface_h) {
             return Vec::new();
         }
         quads
             .iter()
-            .filter(|q| q.width > 0 && q.height > 0)
+            .filter(|q| is_drawable(q))
             .map(|q| self.prepare_one(device, queue, surface_w, surface_h, q))
             .collect()
     }
@@ -213,6 +213,23 @@ impl ImageRenderer {
             pass.draw(0..6, 0..1);
         }
     }
+}
+
+/// Whether a quad has any drawable area. A zero-dimension image would produce a
+/// zero-extent texture, which `wgpu` rejects (a validation error, not a silent
+/// no-op), so these are filtered out before [`ImageRenderer::prepare_one`].
+/// Split out of the `prepare` filter so the predicate is unit-testable against
+/// the REAL code path rather than a re-stated copy of it.
+fn is_drawable(q: &ImageQuad) -> bool {
+    q.width > 0 && q.height > 0
+}
+
+/// Whether the target surface has area. The NDC math in
+/// [`ImageRenderer::prepare_one`] divides by the surface extents, so a
+/// zero-sized surface (e.g. a minimized window) would yield inf/NaN vertices.
+/// Mirrors `pane_render.rs::ChromeRenderer::prepare`.
+fn surface_is_drawable(surface_w: f32, surface_h: f32) -> bool {
+    surface_w > 0.0 && surface_h > 0.0
 }
 
 /// Map a pixel-space rectangle `(x, y, w, h)` over a `(sw, sh)` surface into the
@@ -326,14 +343,54 @@ mod tests {
         assert_eq!(first, v[0][0]);
     }
 
-    /// The drawable filter the renderer applies: zero-dimension images are
-    /// rejected, positive ones accepted (the predicate used in `prepare`).
+    fn quad(width: u32, height: u32) -> ImageQuad {
+        ImageQuad {
+            rgba: vec![0; (width as usize * height as usize * 4).max(4)],
+            width,
+            height,
+            x: 0.0,
+            y: 0.0,
+        }
+    }
+
+    /// The drawable filter `prepare` actually applies: a zero-dimension image
+    /// would build a zero-extent texture and trip wgpu validation.
+    ///
+    /// This calls the REAL `is_drawable`. The previous version of this test
+    /// declared its own `|w, h| w > 0 && h > 0` closure and asserted on that, so
+    /// it passed identically whether or not the production filter existed at all.
     #[test]
     fn zero_dimension_quads_are_not_drawable() {
-        let drawable = |w: u32, h: u32| w > 0 && h > 0;
-        assert!(!drawable(0, 10));
-        assert!(!drawable(10, 0));
-        assert!(!drawable(0, 0));
-        assert!(drawable(1, 1));
+        assert!(!is_drawable(&quad(0, 10)), "zero width is not drawable");
+        assert!(!is_drawable(&quad(10, 0)), "zero height is not drawable");
+        assert!(!is_drawable(&quad(0, 0)));
+        assert!(is_drawable(&quad(1, 1)), "a 1x1 image is drawable");
+        assert!(is_drawable(&quad(64, 32)));
+    }
+
+    /// A zero-sized surface (e.g. a minimized window) must short-circuit before
+    /// the NDC divide, which would otherwise emit inf/NaN vertices.
+    #[test]
+    fn zero_sized_surface_is_not_drawable() {
+        assert!(!surface_is_drawable(0.0, 100.0));
+        assert!(!surface_is_drawable(100.0, 0.0));
+        assert!(!surface_is_drawable(-1.0, 100.0));
+        assert!(surface_is_drawable(1.0, 1.0));
+        assert!(surface_is_drawable(1920.0, 1080.0));
+    }
+
+    /// Guard the reason the surface check exists: the NDC math really does blow
+    /// up on a zero surface, so the early return is load-bearing, not defensive
+    /// decoration.
+    #[test]
+    fn ndc_math_would_produce_non_finite_verts_on_a_zero_surface() {
+        let v = quad_ndc_verts(0.0, 0.0, 10.0, 10.0, 0.0, 0.0);
+        assert!(
+            v.iter().flatten().any(|c| !c.is_finite()),
+            "a zero surface must yield non-finite verts, which is why prepare() bails first"
+        );
+        // ...and a real surface stays finite.
+        let ok = quad_ndc_verts(0.0, 0.0, 10.0, 10.0, 100.0, 100.0);
+        assert!(ok.iter().flatten().all(|c| c.is_finite()));
     }
 }

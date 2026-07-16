@@ -289,16 +289,29 @@ fn geometry_on_screen(
         // place it). Conservative: better than discarding a valid size.
         return true;
     }
-    const MIN_VISIBLE: i32 = 64;
-    let (wx0, wy0, wx1, wy1) = (px, py, px + sw as i32, py + sh as i32);
+    let win = LRect::new(px, py, sw as i32, sh as i32);
     monitors.iter().any(|m| {
         let mp = m.position();
         let ms = m.size();
-        let (mx0, my0, mx1, my1) = (mp.x, mp.y, mp.x + ms.width as i32, mp.y + ms.height as i32);
-        let ox = (wx1.min(mx1) - wx0.max(mx0)).max(0);
-        let oy = (wy1.min(my1) - wy0.max(my0)).max(0);
-        ox >= MIN_VISIBLE && oy >= MIN_VISIBLE
+        let mon = LRect::new(mp.x, mp.y, ms.width as i32, ms.height as i32);
+        window_visible_on_monitor(win, mon)
     })
+}
+
+/// True when the `win` rect overlaps the `mon` rect by at least [`MIN_VISIBLE`]
+/// px on BOTH axes (physical pixels).
+///
+/// Split out of [`geometry_on_screen`] so the multi-monitor safety math is unit
+/// testable: `winit::monitor::MonitorHandle` wraps an opaque platform handle and
+/// has no public constructor, so a test can only ever pass `geometry_on_screen`
+/// an EMPTY monitor slice — the overlap rule itself would otherwise be
+/// unreachable from a test.
+fn window_visible_on_monitor(win: LRect, mon: LRect) -> bool {
+    /// Minimum on-screen overlap (px, per axis) for a saved rect to be usable.
+    const MIN_VISIBLE: i32 = 64;
+    let ox = ((win.x + win.w).min(mon.x + mon.w) - win.x.max(mon.x)).max(0);
+    let oy = ((win.y + win.h).min(mon.y + mon.h) - win.y.max(mon.y)).max(0);
+    ox >= MIN_VISIBLE && oy >= MIN_VISIBLE
 }
 
 /// Find a URL spanning column `col` within a row of characters (E9). Expands
@@ -381,6 +394,54 @@ enum TabZone {
     Tab(usize),
     NewTab,
     Settings,
+}
+
+/// Pure title-bar hit-test: classify the physical-pixel point `(x, y)` against
+/// a title bar on a `width`-px surface. Split out of [`App::hit_titlebar`] —
+/// whose only impure step is reading `width` off the live wgpu surface — so the
+/// caption-button / drag-strip routing is unit testable without a window/GPU.
+///
+/// Below the title bar → [`TitlebarHit::None`]; left of the button cluster →
+/// [`TitlebarHit::Drag`]; otherwise the cluster slot the point falls in, with
+/// anything past the third slot resolving to Close so the right-most pixels
+/// (the corner the user throws the mouse at) are never dead.
+fn titlebar_hit_at(x: f64, y: f64, width: f64) -> TitlebarHit {
+    if y > TITLEBAR_H as f64 {
+        return TitlebarHit::None;
+    }
+    let buttons_left = App::buttons_left_px(width as f32) as f64;
+    if x < buttons_left {
+        return TitlebarHit::Drag;
+    }
+    match ((x - buttons_left) / (BUTTON_CELLS as f64 * CELL_W as f64)) as i32 {
+        0 => TitlebarHit::Minimize,
+        1 => TitlebarHit::Maximize,
+        _ => TitlebarHit::Close,
+    }
+}
+
+/// Pure window-edge resize hit-test: classify `(x, y)` against the
+/// [`RESIZE_BORDER`] band of a `w`×`h` surface. Split out of
+/// [`App::hit_resize_edge`] — whose only impure step is reading the surface size
+/// off the live GPU — so the frameless resize band is unit testable. A
+/// degenerate (0-sized) surface yields `None`.
+fn resize_edge_at(x: f64, y: f64, w: f64, h: f64) -> Option<ResizeDirection> {
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let b = RESIZE_BORDER;
+    let (left, right, top, bottom) = (x <= b, x >= w - b, y <= b, y >= h - b);
+    match (top, bottom, left, right) {
+        (true, _, true, _) => Some(ResizeDirection::NorthWest),
+        (true, _, _, true) => Some(ResizeDirection::NorthEast),
+        (_, true, true, _) => Some(ResizeDirection::SouthWest),
+        (_, true, _, true) => Some(ResizeDirection::SouthEast),
+        (true, ..) => Some(ResizeDirection::North),
+        (_, true, ..) => Some(ResizeDirection::South),
+        (_, _, true, _) => Some(ResizeDirection::West),
+        (_, _, _, true) => Some(ResizeDirection::East),
+        _ => None,
+    }
 }
 
 /// Pure tab-strip hit-test: the zone whose pixel x-range `[x0, x1)` contains
@@ -854,36 +915,52 @@ impl App {
     }
 
     fn handle_palette_key(&mut self, key: &Key, event_loop: &ActiveEventLoop) {
+        if let Some(action) = self.palette_key_nav(key) {
+            self.execute_palette_action(action, event_loop);
+        }
+        self.request_redraw();
+    }
+
+    /// Apply `key` to the palette's OWN state (open/closed, query, selection)
+    /// and return the action `Enter` picked, if any.
+    ///
+    /// Split out of [`App::handle_palette_key`] so the palette's navigation,
+    /// filtering, and text editing are unit testable: only the returned action's
+    /// EXECUTION needs an `&ActiveEventLoop`, which exists solely inside a
+    /// running winit event loop and cannot be constructed by a test.
+    fn palette_key_nav(&mut self, key: &Key) -> Option<&'static str> {
         match key {
             Key::Named(NamedKey::Escape) => {
                 self.palette_mode = false;
+                None
             }
             Key::Named(NamedKey::ArrowDown) => {
                 let n = self.palette_filtered().len().max(1);
                 self.palette_idx = (self.palette_idx + 1) % n;
+                None
             }
             Key::Named(NamedKey::ArrowUp) => {
                 let n = self.palette_filtered().len().max(1);
                 self.palette_idx = (self.palette_idx + n - 1) % n;
+                None
             }
             Key::Named(NamedKey::Enter) => {
                 let pick = self.palette_filtered().get(self.palette_idx).copied();
                 self.palette_mode = false;
-                if let Some(action) = pick {
-                    self.execute_palette_action(action, event_loop);
-                }
+                pick
             }
             Key::Named(NamedKey::Backspace) => {
                 self.palette_query.pop();
                 self.palette_idx = 0;
+                None
             }
             Key::Character(s) => {
                 self.palette_query.push_str(s);
                 self.palette_idx = 0;
+                None
             }
-            _ => {}
+            _ => None,
         }
-        self.request_redraw();
     }
 
     fn execute_palette_action(&mut self, action: &str, event_loop: &ActiveEventLoop) {
@@ -3214,25 +3291,15 @@ impl App {
         GColor::rgb(r, g, b)
     }
 
-    /// Classify a physical-pixel point against the title bar.
+    /// Classify a physical-pixel point against the title bar. The only impure
+    /// input is the surface width; the classification is [`titlebar_hit_at`].
     fn hit_titlebar(&self, x: f64, y: f64) -> TitlebarHit {
         let width = self
             .gpu
             .as_ref()
             .map(|g| g.surface_config.width as f64)
             .unwrap_or(0.0);
-        if y > TITLEBAR_H as f64 {
-            return TitlebarHit::None;
-        }
-        let buttons_left = Self::buttons_left_px(width as f32) as f64;
-        if x < buttons_left {
-            return TitlebarHit::Drag;
-        }
-        match ((x - buttons_left) / (BUTTON_CELLS as f64 * CELL_W as f64)) as i32 {
-            0 => TitlebarHit::Minimize,
-            1 => TitlebarHit::Maximize,
-            _ => TitlebarHit::Close,
-        }
+        titlebar_hit_at(x, y, width)
     }
 
     /// X pixel where the title-bar button cluster begins, for a given width.
@@ -3357,7 +3424,8 @@ impl App {
 
     /// Classify a point against the window's resize edges. A frameless window
     /// has no OS resize border, so we hit-test a thin band ourselves and ask
-    /// winit to drive the native resize.
+    /// winit to drive the native resize. The only impure input is the surface
+    /// size; the band math is [`resize_edge_at`].
     fn hit_resize_edge(&self, x: f64, y: f64) -> Option<ResizeDirection> {
         let (w, h) = self
             .gpu
@@ -3369,22 +3437,7 @@ impl App {
                 )
             })
             .unwrap_or((0.0, 0.0));
-        if w <= 0.0 || h <= 0.0 {
-            return None;
-        }
-        let b = RESIZE_BORDER;
-        let (left, right, top, bottom) = (x <= b, x >= w - b, y <= b, y >= h - b);
-        match (top, bottom, left, right) {
-            (true, _, true, _) => Some(ResizeDirection::NorthWest),
-            (true, _, _, true) => Some(ResizeDirection::NorthEast),
-            (_, true, true, _) => Some(ResizeDirection::SouthWest),
-            (_, true, _, true) => Some(ResizeDirection::SouthEast),
-            (true, ..) => Some(ResizeDirection::North),
-            (_, true, ..) => Some(ResizeDirection::South),
-            (_, _, true, _) => Some(ResizeDirection::West),
-            (_, _, _, true) => Some(ResizeDirection::East),
-            _ => None,
-        }
+        resize_edge_at(x, y, w, h)
     }
 }
 

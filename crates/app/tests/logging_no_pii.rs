@@ -27,8 +27,7 @@
 #![allow(dead_code)] // The `#[path]`-included module has production entry points
                      // this suite does not all exercise.
 
-#[path = "../src/update_engine/mod.rs"]
-mod update_engine;
+use c0pl4nd::egui_app::settings::update_engine;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};

@@ -85,12 +85,27 @@ fn assert_confined(url: &str) -> Result<()> {
 /// AND an allow-listed host at EVERY hop, then reads at most
 /// [`MAX_RELEASE_JSON_BYTES`]. Connect/read timeouts bound a hung launch thread.
 fn confined_api_get(url: &str) -> Result<String> {
-    assert_confined(url)?;
-    let agent = ureq::AgentBuilder::new()
+    confined_api_get_with(&default_agent(), url)
+}
+
+/// The agent the production check runs on: redirects disabled (the walk in
+/// [`confined_api_get_with`] follows them MANUALLY so every hop is re-confined)
+/// plus connect/read timeouts that bound a hung launch thread.
+fn default_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
         .redirects(0)
         .timeout_connect(Duration::from_secs(10))
         .timeout_read(Duration::from_secs(20))
-        .build();
+        .build()
+}
+
+/// [`confined_api_get`] over an explicit `agent`. The agent is the ONLY seam:
+/// the entry assert, the per-hop re-confinement, the hop cap and the size cap
+/// all run identically whoever supplies the transport. Production always passes
+/// [`default_agent`]; the tests pass an agent whose middleware short-circuits the
+/// socket (see the test module's hermetic transport harness).
+fn confined_api_get_with(agent: &ureq::Agent, url: &str) -> Result<String> {
+    assert_confined(url)?;
     let mut current = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
         // With redirects(0) a 3xx returns Ok (status in 300..400); ureq still
@@ -418,6 +433,172 @@ mod tests {
         assert!(assert_confined("https://api.github.com@evil.example.com/").is_err());
         // Malformed (no host) is refused.
         assert!(assert_confined("https:///releases").is_err());
+    }
+
+    // =====================================================================
+    // Hermetic transport harness for the legacy check's confined GET
+    // =====================================================================
+    //
+    // `assert_confined_allows_only_https_github_api` above proves the PREDICATE.
+    // It does NOT prove the predicate is CALLED on redirect hop 2 — the property
+    // `confined_api_get`'s doc comment actually claims ("re-asserting https AND
+    // an allow-listed host at EVERY hop"). This module's walk is a second, near
+    // duplicate of `update_engine::net::confined_get_with`, and it carried the
+    // same untested-walk gap.
+    //
+    // Injection is at the `ureq::Agent` boundary: the middleware never calls
+    // `next.handle`, so the chain short-circuits above `unit::connect` and NO
+    // socket, DNS lookup or TLS handshake occurs. Only the third-party transport
+    // is replaced; the confinement asserts and the walk are the real code.
+    //
+    // DOES NOT PROVE (socket never opens): TLS, certificate/hostname validation,
+    // DNS resolution or rebinding, the connect/read timeouts firing, or real
+    // GitHub redirect behaviour. See the equivalent note in `update_engine::net`.
+
+    use std::sync::{Arc, Mutex};
+
+    struct MockTransport {
+        seen: Arc<Mutex<Vec<String>>>,
+        #[allow(clippy::type_complexity)]
+        responder: Box<dyn Fn(usize) -> String + Send + Sync>,
+    }
+
+    impl ureq::Middleware for MockTransport {
+        fn handle(
+            &self,
+            request: ureq::Request,
+            _next: ureq::MiddlewareNext,
+        ) -> Result<ureq::Response, ureq::Error> {
+            let idx = {
+                let mut log = self.seen.lock().expect("seen log poisoned");
+                log.push(request.url().to_string());
+                log.len() - 1
+            };
+            // `_next` is deliberately never handled: that is the short-circuit.
+            Ok((self.responder)(idx)
+                .parse()
+                .expect("test fixture must be a well-formed HTTP response"))
+        }
+    }
+
+    fn mock_agent(
+        responder: impl Fn(usize) -> String + Send + Sync + 'static,
+    ) -> (ureq::Agent, Arc<Mutex<Vec<String>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let agent = ureq::AgentBuilder::new()
+            .redirects(0)
+            .middleware(MockTransport {
+                seen: Arc::clone(&seen),
+                responder: Box::new(responder),
+            })
+            .build();
+        (agent, seen)
+    }
+
+    const API_URL: &str = "https://api.github.com/repos/x/y/releases/latest";
+
+    #[test]
+    fn legacy_check_refuses_a_redirect_off_the_allowlist_at_hop_2() {
+        let (agent, seen) = mock_agent(|i| match i {
+            0 => "HTTP/1.1 302 Found\r\nLocation: https://evil.example.com/x\r\n\r\n".to_string(),
+            _ => "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_string(),
+        });
+
+        let err = confined_api_get_with(&agent, API_URL).expect_err("hop 2 must be refused");
+        assert!(
+            err.to_string().contains("unexpected server"),
+            "expected the host refusal copy, got: {err}"
+        );
+        // len==1 proves the walk RAN (an entry-assert bail would be 0) and that
+        // the attacker host was never contacted.
+        let urls = seen.lock().unwrap().clone();
+        assert_eq!(
+            urls.len(),
+            1,
+            "hop 2 must never be dispatched; saw {urls:?}"
+        );
+        assert!(!urls.iter().any(|u| u.contains("evil.example")));
+    }
+
+    #[test]
+    fn legacy_check_refuses_a_scheme_downgrade_redirect_at_hop_2() {
+        // The redirect target is the ALLOW-LISTED host, so only the per-hop
+        // https re-assert can refuse this.
+        let (agent, seen) = mock_agent(|i| match i {
+            0 => "HTTP/1.1 302 Found\r\nLocation: http://api.github.com/x\r\n\r\n".to_string(),
+            _ => "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_string(),
+        });
+
+        let err = confined_api_get_with(&agent, API_URL).expect_err("http hop must be refused");
+        assert!(
+            err.to_string().contains("secure (https) link"),
+            "expected the https refusal copy, got: {err}"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1, "cleartext hop dispatched");
+    }
+
+    #[test]
+    fn legacy_check_stops_at_max_redirects() {
+        let (agent, seen) = mock_agent(|i| {
+            format!("HTTP/1.1 302 Found\r\nLocation: https://api.github.com/hop{i}\r\n\r\n")
+        });
+
+        let err =
+            confined_api_get_with(&agent, API_URL).expect_err("endless chain must be refused");
+        assert!(
+            err.to_string().contains("too many redirects"),
+            "expected the redirect-cap copy, got: {err}"
+        );
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            MAX_REDIRECTS + 1,
+            "the walk must dispatch exactly MAX_REDIRECTS + 1 requests"
+        );
+    }
+
+    #[test]
+    fn legacy_check_follows_a_confined_redirect_and_returns_the_body() {
+        // Control: without this, a `confined_api_get_with` that refused
+        // everything would satisfy all three tests above.
+        let body = r#"{"tag_name":"v9.9.9"}"#;
+        let (agent, seen) = mock_agent(move |i| match i {
+            0 => "HTTP/1.1 302 Found\r\nLocation: https://api.github.com/moved\r\n\r\n".to_string(),
+            _ => format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        });
+
+        let got = confined_api_get_with(&agent, API_URL).expect("a confined chain must succeed");
+        assert_eq!(got, body);
+        assert_eq!(seen.lock().unwrap().len(), 2, "both hops dispatched");
+        // The body flows into the real pure parser — the check end-to-end.
+        assert_eq!(parse_tag(&got).as_deref(), Some("9.9.9"));
+    }
+
+    #[test]
+    fn legacy_check_truncates_a_body_past_the_size_cap() {
+        // The read is `.take(MAX_RELEASE_JSON_BYTES)`, which TRUNCATES rather
+        // than refusing. That still bounds memory, and a truncated body fails
+        // the downstream parse (fail-closed) — this pins that behaviour so a
+        // change to it is noticed.
+        let over = (MAX_RELEASE_JSON_BYTES + 1024) as usize;
+        let (agent, _seen) = mock_agent(move |_| {
+            let body = "a".repeat(over);
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {over}\r\n\r\n{body}")
+        });
+
+        let got = confined_api_get_with(&agent, API_URL).expect("truncation is not an error");
+        assert_eq!(
+            got.len() as u64,
+            MAX_RELEASE_JSON_BYTES,
+            "the body must be truncated to exactly the cap, never read unbounded"
+        );
+        assert_eq!(
+            parse_tag(&got),
+            None,
+            "a truncated body must not yield a tag (fail-closed)"
+        );
     }
 
     /// The refusal messages are plain user copy — they must NOT echo the

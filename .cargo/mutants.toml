@@ -18,7 +18,29 @@ minimum_test_timeout = 120
 # model, config, theming, layout — where a missed mutant is a real test gap.
 # The GPU/egui render path and binary entry-point shells are driven by the
 # kittest interaction tests and are not productive mutation targets.
-examine_globs = ["crates/core/src/**"]
+#
+# The app's update_engine is included because it is the one piece of app-crate
+# logic that is a SECURITY boundary rather than render code: it decides whether a
+# downloaded binary is installed. It is pure logic (sha256 + minisign verify +
+# manifest parse), so it mutates and tests exactly like core does. Measured
+# before adding it — verify.rs is 12 mutants, 12 caught, 0 missed (including
+# `verify_artifact_bound -> Ok(())`, i.e. the whole gate accepting any artifact,
+# and `verify_checksum -> true`) — so this glob RATCHETS existing strength in; it
+# is not a new debt. Until now no app mutant had ever been run.
+#
+# !! The `**/` prefix is LOAD-BEARING — do NOT "tidy" it to match the real
+# directory layout. update_engine is reached through a `#[path]` attribute, so
+# cargo-mutants records its mutants under
+# `crates/app/src/egui_app/../update_engine/…`. A glob written against the actual
+# on-disk path therefore matches NOTHING, and zero selected mutants EXITS 0 —
+# indistinguishable from "nothing survived". Measured on this tree:
+#
+#   crates/app/src/update_engine/**  -> 2560 total,   0 update_engine  <- FALSE GREEN
+#   **/update_engine/*.rs            -> 2880 total, 320 update_engine  <- correct
+#
+# `.github/workflows/mutants.yml` asserts update_engine still selects >0, so a
+# rename or a "helpful" path tidy-up cannot silently empty this gate again.
+examine_globs = ["crates/core/src/**", "**/update_engine/*.rs"]
 
 exclude_globs = [
     "crates/*/benches/**",

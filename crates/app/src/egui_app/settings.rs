@@ -40,7 +40,7 @@ use super::theme::ChromeColors;
 // (`c0pl4nd update`) + launch-check; this second view is private to `settings`
 // and never shares a type across that boundary, so the two coexist cleanly.
 #[path = "../update_engine/mod.rs"]
-mod update_engine;
+pub mod update_engine;
 
 use update_engine::updater::{LaunchKind, UpdateState, Updater};
 
@@ -110,6 +110,26 @@ const MOTION_SEARCH_LABELS: &[&str] = &[
 /// The release channels the Updates section offers. Mirrors the channels the
 /// `c0pl4nd update` checker understands; a free choice list, not invented.
 const UPDATE_CHANNELS: &[&str] = &["stable", "beta", "nightly"];
+
+/// The usable range of the chromatic-aberration INTENSITY slider.
+///
+/// [`CHROMATIC_MIN`] doubles as the "not meaningfully set" floor, and that is
+/// load-bearing for the first-enable seed below. egui's `Slider` defaults to
+/// `SliderClamping::Always`, which clamps its bound value into the slider's range
+/// **on every render and writes the clamped value straight back** (see
+/// `Slider::add_contents`: `let old = self.get_value(); self.set_value(old);`).
+/// So the stored 0.0 "never set" sentinel is silently rewritten to
+/// `CHROMATIC_MIN` the FIRST time the Motion page draws — before the user has
+/// touched anything. A first-enable seed that tests `<= 0.0` therefore never
+/// fires, and ticking the checkbox switches the effect on at the FAINTEST
+/// setting: exactly the "it reads as broken" report the seed exists to fix.
+/// Testing against this floor instead is what keeps the seed alive; tying both
+/// the slider range and the guard to these consts stops them drifting apart.
+/// Regression-guarded by the `first_enabling_chromatic_aberration_seeds_a_
+/// visible_intensity` test in `tests/egui_settings_deep.rs`.
+const CHROMATIC_MIN: f32 = 0.1;
+/// The upper bound of the chromatic-aberration intensity slider.
+const CHROMATIC_MAX: f32 = 1.5;
 
 // ---- Fixed width budget (the runaway-width root-cause fix, #26) ----
 // The settings window is content-sized by egui. WITHOUT a hard cap, any child
@@ -2195,6 +2215,12 @@ fn render_sections(
                 // Explicit ON/OFF checkbox in col 1 (checkbox-left), the intensity
                 // slider in col 2. The intensity slider alone read as "broken" when
                 // it sat at 0, so on first enable we default it to a visible value.
+                //
+                // The "still at the floor" test below is `<= CHROMATIC_MIN`, NOT
+                // `<= 0.0`: the slider's own render already clamped any 0.0 sentinel
+                // up to `CHROMATIC_MIN` and wrote it back (see `CHROMATIC_MIN`), so
+                // a `<= 0.0` guard is unreachable and leaves the effect enabling at
+                // the faintest possible setting.
                 let was_enabled = config.effects.chromatic_aberration_enabled;
                 if ui
                     .add_enabled(
@@ -2210,7 +2236,7 @@ fn render_sections(
                     changed = true;
                     if config.effects.chromatic_aberration_enabled
                         && !was_enabled
-                        && config.effects.chromatic_aberration <= 0.0
+                        && config.effects.chromatic_aberration <= CHROMATIC_MIN
                     {
                         config.effects.chromatic_aberration =
                             c0pl4nd_core::config::DEFAULT_CHROMATIC_INTENSITY;
@@ -2220,8 +2246,11 @@ fn render_sections(
                 changed |= ui
                     .add_enabled(
                         ca_on,
-                        egui::Slider::new(&mut config.effects.chromatic_aberration, 0.1..=1.5)
-                            .text("intensity"),
+                        egui::Slider::new(
+                            &mut config.effects.chromatic_aberration,
+                            CHROMATIC_MIN..=CHROMATIC_MAX,
+                        )
+                        .text("intensity"),
                     )
                     .changed();
                 changed |= reset_to_default(

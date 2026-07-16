@@ -56,7 +56,12 @@ pub struct PaneIdAllocator {
 
 impl PaneIdAllocator {
     /// Allocate the next id.
-    pub fn next(&mut self) -> PaneId {
+    ///
+    /// Named `alloc`, not `next`: this type is not an `Iterator`, and a public
+    /// inherent `next` trips `clippy::should_implement_trait` (a hard error under
+    /// the CI `-D warnings`). The lint was dormant while this crate was bin-only —
+    /// adding the lib target made the method reachable public API and surfaced it.
+    pub fn alloc(&mut self) -> PaneId {
         let id = PaneId(self.next);
         self.next = self.next.wrapping_add(1);
         id
@@ -405,8 +410,8 @@ mod tests {
     #[test]
     fn pane_id_allocator_monotonic() {
         let mut a = PaneIdAllocator::default();
-        let a0 = a.next();
-        let a1 = a.next();
+        let a0 = a.alloc();
+        let a1 = a.alloc();
         assert!(a0.0 < a1.0);
     }
 

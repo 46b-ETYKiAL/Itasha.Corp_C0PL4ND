@@ -3,59 +3,124 @@
 //! EYEBALL the rendering that cannot be asserted from accessibility/grid state
 //! alone.
 //!
-//! Run on demand (needs a real GPU; skips cleanly otherwise):
+//! Run on demand (needs a renderer — see [`require_gpu`]; FAILS, never skips,
+//! without one):
 //!   cargo test -p c0pl4nd --test qa_wide_glyph_snapshot -- --ignored --nocapture
-//! Each test prints the absolute PNG path it wrote. These are NOT CI gates (they
-//! are `#[ignore]`d and pixel output is non-deterministic across GPU drivers —
-//! pixel snapshots are deliberately never gated); they are deliberate visual-QA
-//! aids.
+//! Each test prints the absolute PNG path it wrote. The PNGs themselves are not
+//! gated — pixel output is non-deterministic across GPU drivers, so nothing here
+//! diffs against a committed baseline. The driver-independent assertions below
+//! ARE gated, by the `visual-qa` job in ci.yml, which supplies a software
+//! rasteriser (lavapipe) so this file has a real CI cell instead of only ever
+//! running on a developer's desk.
+//!
+//! ## What IS asserted (and what is not)
+//!
+//! Not-gated does not mean not-asserted. [`snapshot`] asserts the two properties
+//! that hold on ANY driver: the frame renders at the harness size, and it is not
+//! a single uniform colour (i.e. something was actually painted). A blank frame
+//! is a real failure mode — a broken paint path still clears the target — and it
+//! used to produce a PNG and pass, because this file only rendered and saved.
+//!
+//! What is NOT asserted, and needs a human (or an agent with image-reading) to
+//! eyeball the PNG: glyph shaping, wide/CJK advance widths, colour fidelity,
+//! cursor placement, layout. That is the eyeball this file exists for; the
+//! assertions only stop it lying when there is nothing to eyeball at all.
 
-#![allow(dead_code)]
-
-#[path = "../src/egui_app/mod.rs"]
-mod egui_app;
-#[path = "../src/issue_intake.rs"]
-mod issue_intake;
-#[path = "../src/reporting.rs"]
-mod reporting;
-#[path = "../src/user_error.rs"]
-mod user_error;
-
+use c0pl4nd::egui_app;
 use std::time::{Duration, Instant};
 
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
-/// Probe for a usable wgpu adapter; `false` → skip (never a false green).
-fn gpu_available() -> bool {
-    let instance = wgpu::Instance::default();
-    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::LowPower,
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .is_ok()
+/// The harness surface size. `snapshot` asserts the rendered frame matches, so
+/// the size lives here rather than being repeated as a magic number.
+const HARNESS_W: u32 = 1100;
+const HARNESS_H: u32 = 720;
+
+/// Assert this host can actually render, with an ACTIONABLE message if it cannot.
+///
+/// This is a diagnostic, NOT a gate: `egui_kittest` is already fail-closed (its
+/// `create_render_state` ends in `.expect("Failed to create render state")`), so a
+/// GPU-less host fails the test either way. All this adds is a message that names
+/// the cause and the fix instead of an opaque panic from inside the harness.
+///
+/// It must NEVER skip. Every test here is `#[ignore]`d, so it runs only when
+/// something explicitly asked for it — a host that cannot honour that request has
+/// failed, and reporting green would assert nothing at all. This function used to
+/// return `bool`, and each test did `let Some(h) = build() else { return }`: on a
+/// GPU-less runner all 15 "passed" without rendering a single frame.
+///
+/// The adapter enumeration deliberately mirrors the backend set `egui_kittest`
+/// itself resolves (`Backends::from_env()`, defaulting to `PRIMARY | GL`). A probe
+/// on a DIFFERENT backend set can disagree with the harness it is speaking for.
+fn require_gpu() {
+    let backends =
+        wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY | wgpu::Backends::GL);
+    let adapters = pollster::block_on(wgpu::Instance::default().enumerate_adapters(backends));
+    assert!(
+        !adapters.is_empty(),
+        "no wgpu adapter for backends {backends:?} — these visual-QA tests cannot render. \
+         On a headless Linux runner install a software rasteriser: \
+         `apt-get install -y mesa-vulkan-drivers` (lavapipe, auto-registered as an ICD). \
+         Override the backend set with WGPU_BACKEND=<vulkan|gl|...> if needed."
+    );
 }
 
-/// Build a real-wgpu harness over the production `C0pl4ndApp`, or `None` if no
-/// GPU adapter is present on this host.
-fn build() -> Option<Harness<'static, egui_app::C0pl4ndApp>> {
-    if !gpu_available() {
-        eprintln!("QA-SNAPSHOT: no GPU adapter on this host; skipping (not a failure).");
-        return None;
-    }
-    Some(
-        Harness::builder()
-            .with_size(egui::vec2(1100.0, 720.0))
-            .wgpu()
-            .build_eframe(|cc| egui_app::C0pl4ndApp::new(cc)),
-    )
+/// Build a real-wgpu harness over the production `C0pl4ndApp`.
+///
+/// Panics (via [`require_gpu`] or the harness itself) when the host cannot render —
+/// never silently degrades. See [`require_gpu`].
+fn build() -> Harness<'static, egui_app::C0pl4ndApp> {
+    require_gpu();
+    Harness::builder()
+        .with_size(egui::vec2(HARNESS_W as f32, HARNESS_H as f32))
+        .wgpu()
+        .build_eframe(|cc| egui_app::C0pl4ndApp::new(cc))
 }
 
-/// Render the current frame and save it to `%TEMP%/c0pl4nd-qa-<name>.png`.
+/// Render the current frame, ASSERT it is a real image, and save it to
+/// `%TEMP%/c0pl4nd-qa-<name>.png`.
+///
+/// The assertions are deliberately GPU-INDEPENDENT. Exact pixels vary across
+/// drivers, so this cannot diff against a committed baseline (see the module
+/// doc) — but "the frame rendered at the requested size and something was
+/// actually painted" is deterministic everywhere, and it is the property that
+/// actually regresses. Previously this helper only rendered, saved and printed:
+/// a fully blank frame — the exact symptom of a broken paint path — produced a
+/// PNG and passed, so every test in this file was an artifact generator rather
+/// than a check. An unasserted render is not a test.
 fn snapshot(h: &mut Harness<'_, egui_app::C0pl4ndApp>, name: &str) {
     h.step();
     let img = h.render().expect("kittest wgpu render must succeed");
+
+    // The rendered buffer is PHYSICAL pixels, so the expected size scales with
+    // pixels_per_point. Deriving it from the live ctx (rather than hardcoding
+    // 1100x720) is what makes this meaningful for `qa_launch_frame_hidpi`, which
+    // renders at ppp 1.5 to reproduce the reported HiDPI garble: it pins that the
+    // frame is actually produced at the display's physical resolution instead of
+    // being rendered at 1x and stretched — the very class of bug that test exists
+    // for.
+    let ppp = h.ctx.pixels_per_point();
+    let expect_w = (HARNESS_W as f32 * ppp).round() as u32;
+    let expect_h = (HARNESS_H as f32 * ppp).round() as u32;
+    assert_eq!(
+        (img.width(), img.height()),
+        (expect_w, expect_h),
+        "QA-SNAPSHOT[{name}]: the frame must render at the harness size scaled by \
+         pixels_per_point ({ppp})"
+    );
+
+    // Not uniformly one colour: a blank/cleared frame is a real, seen failure
+    // mode (a broken paint callback still clears the target), and it is exactly
+    // what an eyeball-only snapshot silently accepts.
+    let px = img.as_raw();
+    let first: &[u8] = &px[0..4];
+    let painted = px.chunks_exact(4).any(|c| c != first);
+    assert!(
+        painted,
+        "QA-SNAPSHOT[{name}]: the frame is a single uniform colour ({first:?}) — nothing was painted"
+    );
+
     let out = std::env::temp_dir().join(format!("c0pl4nd-qa-{name}.png"));
     img.save(&out).expect("save QA snapshot PNG");
     eprintln!(
@@ -111,7 +176,7 @@ fn type_line(h: &mut Harness<'_, egui_app::C0pl4ndApp>, line: &str, needle: &str
 #[test]
 #[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
 fn qa_launch_frame() {
-    let Some(mut h) = build() else { return };
+    let mut h = build();
     // A few frames to let the shell banner + prompt land.
     for _ in 0..30 {
         h.step();
@@ -125,10 +190,7 @@ fn qa_launch_frame() {
 fn qa_launch_frame_hidpi() {
     // Reproduce a 1.5x HiDPI display (the reported garble machine) — the default
     // qa harness renders at ppp 1.0, which never reproduced it.
-    if !gpu_available() {
-        eprintln!("QA-SNAPSHOT: no GPU adapter on this host; skipping (not a failure).");
-        return;
-    }
+    require_gpu();
     let mut h: Harness<'static, egui_app::C0pl4ndApp> = Harness::builder()
         .with_size(egui::vec2(1100.0, 720.0))
         .with_pixels_per_point(1.5)
@@ -144,7 +206,7 @@ fn qa_launch_frame_hidpi() {
 #[test]
 #[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
 fn qa_wide_glyph_frame() {
-    let Some(mut h) = build() else { return };
+    let mut h = build();
     type_line(&mut h, "echo ASCII | 日本語 | ＡＢＣ | 😀 | end", "end");
     snapshot(&mut h, "wide-glyph");
 }
@@ -152,7 +214,7 @@ fn qa_wide_glyph_frame() {
 #[test]
 #[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
 fn qa_settings_page() {
-    let Some(mut h) = build() else { return };
+    let mut h = build();
     for _ in 0..10 {
         h.step();
     }
@@ -167,7 +229,7 @@ fn qa_settings_page() {
 #[test]
 #[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
 fn qa_toolbar_settings_page() {
-    let Some(mut h) = build() else { return };
+    let mut h = build();
     for _ in 0..10 {
         h.step();
     }
@@ -187,7 +249,7 @@ fn qa_toolbar_settings_page() {
 #[test]
 #[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
 fn qa_motion_settings_page() {
-    let Some(mut h) = build() else { return };
+    let mut h = build();
     for _ in 0..10 {
         h.step();
     }
@@ -208,7 +270,7 @@ fn qa_motion_settings_page() {
 #[test]
 #[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
 fn qa_command_palette() {
-    let Some(mut h) = build() else { return };
+    let mut h = build();
     for _ in 0..10 {
         h.step();
     }
@@ -219,7 +281,7 @@ fn qa_command_palette() {
 #[test]
 #[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
 fn qa_find_overlay() {
-    let Some(mut h) = build() else { return };
+    let mut h = build();
     type_line(&mut h, "echo findme_token_123", "findme");
     chord(&mut h, egui::Key::F); // Ctrl+Shift+F opens the find overlay
     for ch in "findme".chars() {
@@ -231,7 +293,7 @@ fn qa_find_overlay() {
 #[test]
 #[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
 fn qa_split_panes() {
-    let Some(mut h) = build() else { return };
+    let mut h = build();
     for _ in 0..10 {
         h.step();
     }
@@ -246,31 +308,23 @@ fn qa_split_panes() {
 /// strong background TINT at a LOW opacity — the exact state the tint/transparency
 /// fixes must be eyeballed in. `new(cc)` loads the persisted config, then we
 /// override just the transparency fields for the QA render (mirrors the user
-/// dialling Settings → Appearance). `None` when no GPU adapter is present.
-fn build_tinted(
-    opacity: f32,
-    tint_strength: f32,
-) -> Option<Harness<'static, egui_app::C0pl4ndApp>> {
-    if !gpu_available() {
-        eprintln!("QA-SNAPSHOT: no GPU adapter on this host; skipping (not a failure).");
-        return None;
-    }
-    Some(
-        Harness::builder()
-            .with_size(egui::vec2(1100.0, 720.0))
-            .wgpu()
-            .build_eframe(move |cc| {
-                let mut app = egui_app::C0pl4ndApp::new(cc);
-                // Single always-transparent model: the opacity slider is the whole
-                // see-through control; a low opacity + a strong tint is the state to
-                // eyeball the tint/transparency fixes in.
-                app.config.opacity = opacity;
-                app.config.tint = "#ff0040".to_string();
-                app.config.tint_enabled = true;
-                app.config.tint_strength = tint_strength;
-                app
-            }),
-    )
+/// dialling Settings → Appearance). Panics without a GPU; see [`require_gpu`].
+fn build_tinted(opacity: f32, tint_strength: f32) -> Harness<'static, egui_app::C0pl4ndApp> {
+    require_gpu();
+    Harness::builder()
+        .with_size(egui::vec2(1100.0, 720.0))
+        .wgpu()
+        .build_eframe(move |cc| {
+            let mut app = egui_app::C0pl4ndApp::new(cc);
+            // Single always-transparent model: the opacity slider is the whole
+            // see-through control; a low opacity + a strong tint is the state to
+            // eyeball the tint/transparency fixes in.
+            app.config.opacity = opacity;
+            app.config.tint = "#ff0040".to_string();
+            app.config.tint_enabled = true;
+            app.config.tint_strength = tint_strength;
+            app
+        })
 }
 
 /// VISUAL-QA: window transparency ON + strong red tint at LOW opacity, split into
@@ -282,9 +336,7 @@ fn build_tinted(
 #[test]
 #[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
 fn qa_tint_transparent_low_opacity() {
-    let Some(mut h) = build_tinted(0.10, 0.8) else {
-        return;
-    };
+    let mut h = build_tinted(0.10, 0.8);
     for _ in 0..10 {
         h.step();
     }
@@ -301,9 +353,7 @@ fn qa_tint_transparent_low_opacity() {
 #[test]
 #[ignore = "visual-QA aid: needs a real GPU; run explicitly with --ignored"]
 fn qa_tint_settings_stays_opaque() {
-    let Some(mut h) = build_tinted(0.10, 0.8) else {
-        return;
-    };
+    let mut h = build_tinted(0.10, 0.8);
     for _ in 0..10 {
         h.step();
     }
@@ -314,14 +364,10 @@ fn qa_tint_settings_stays_opaque() {
     snapshot(&mut h, "tint-settings-opaque");
 }
 
-/// Render the real app with a config mutation applied, or `None` without a GPU.
-fn render_with(
-    mutate: impl FnOnce(&mut c0pl4nd_core::Config) + 'static,
-) -> Option<image::RgbaImage> {
-    if !gpu_available() {
-        eprintln!("no GPU adapter; skipping (not a failure).");
-        return None;
-    }
+/// Render the real app with a config mutation applied. Panics without a GPU; see
+/// [`require_gpu`].
+fn render_with(mutate: impl FnOnce(&mut c0pl4nd_core::Config) + 'static) -> image::RgbaImage {
+    require_gpu();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1100.0, 720.0))
         .wgpu()
@@ -333,7 +379,7 @@ fn render_with(
     for _ in 0..5 {
         h.step();
     }
-    Some(h.render().expect("render"))
+    h.render().expect("render")
 }
 
 /// The modal non-zero alpha (and its pixel count) over the pane band — the alpha
@@ -375,14 +421,12 @@ fn nonzero_pct(img: &image::RgbaImage) -> f64 {
 #[test]
 #[ignore = "needs a real GPU; run with --ignored"]
 fn opacity_zero_is_clear_when_tint_and_frost_off() {
-    let Some(img) = render_with(|c| {
+    let img = render_with(|c| {
         c.opacity = 0.0;
         c.tint_enabled = false;
         c.frost_enabled = false;
         c.effects.wired_ambient = false;
-    }) else {
-        return;
-    };
+    });
     let pct = nonzero_pct(&img);
     assert!(
         pct < 3.0,
@@ -399,14 +443,12 @@ fn opacity_zero_is_clear_when_tint_and_frost_off() {
 #[test]
 #[ignore = "needs a real GPU; run with --ignored"]
 fn mesh_shows_at_opacity_zero_independent_of_opacity() {
-    let Some(off) = render_with(|c| {
+    let off = render_with(|c| {
         c.opacity = 0.0;
         c.tint_enabled = false;
         c.frost_enabled = false;
         c.effects.wired_ambient = false;
-    }) else {
-        return;
-    };
+    });
     let on = render_with(|c| {
         c.opacity = 0.0; // fully transparent glass …
         c.tint_enabled = false;
@@ -415,8 +457,7 @@ fn mesh_shows_at_opacity_zero_independent_of_opacity() {
         c.effects.wired_ambient = true; // … yet the mesh still paints
         c.effects.mesh_density = 1.5;
         c.effects.mesh_brightness = 2.0;
-    })
-    .expect("GPU was available for the first render");
+    });
     let (off_pct, on_pct) = (nonzero_pct(&off), nonzero_pct(&on));
     eprintln!("mesh off at opacity0 = {off_pct:.2}%, mesh on = {on_pct:.2}%");
     assert!(
@@ -433,14 +474,12 @@ fn mesh_shows_at_opacity_zero_independent_of_opacity() {
 #[test]
 #[ignore = "needs a real GPU; run with --ignored"]
 fn pane_backing_alpha_is_linear_single_paint() {
-    let Some(img) = render_with(|c| {
+    let img = render_with(|c| {
         c.opacity = 0.7;
         c.tint_enabled = false;
         c.frost_enabled = false;
         c.effects.wired_ambient = false;
-    }) else {
-        return;
-    };
+    });
     let (modal, _) = modal_pane_alpha(&img);
     let linear = (0.7 * 255.0_f32).round() as i32; // 179
     let squared = (0.7 * 0.7 * 255.0_f32).round() as i32; // 125
@@ -459,21 +498,18 @@ fn pane_backing_alpha_is_linear_single_paint() {
 #[test]
 #[ignore = "needs a real GPU; run with --ignored"]
 fn frost_wash_appears_only_when_enabled() {
-    let Some(off) = render_with(|c| {
+    let off = render_with(|c| {
         c.opacity = 0.3;
         c.tint_enabled = false;
         c.frost_enabled = false;
-    }) else {
-        return;
-    };
+    });
     let on = render_with(|c| {
         c.opacity = 0.3;
         c.tint_enabled = false;
         c.frost_enabled = true;
         c.frost_amount = 0.6;
         c.frost_grain = false; // flat wash for a deterministic alpha comparison
-    })
-    .expect("GPU was available for the first render");
+    });
     let (off_a, _) = modal_pane_alpha(&off);
     let (on_a, _) = modal_pane_alpha(&on);
     eprintln!("frost off backing alpha = {off_a}, frost on = {on_a}");

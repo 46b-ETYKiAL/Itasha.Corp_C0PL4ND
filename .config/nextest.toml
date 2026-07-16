@@ -1,17 +1,90 @@
 # cargo-nextest configuration.
 #
-# A large share of this crate's integration tests drive a REAL shell through the
+# ## Retries, and why a flake now FAILS by default
+#
+# A share of this workspace's integration tests drive a REAL shell through the
 # headless egui harness and assert on what the shell ECHOES back into the grid
 # (typed input, pasted text, command history). That echo is an asynchronous PTY
 # round-trip: the assertions are deterministic, but the *timing* can lag on a
 # heavily-loaded CI runner (nextest runs the whole suite in parallel), so a slow
-# echo occasionally trips a poll-with-timeout. Retry a failed test a couple of
-# times rather than failing the whole run — a genuinely-broken test still fails
-# every attempt, while a timing flake recovers. Retries only ever re-run FAILED
-# tests, so the green path is not slowed.
+# echo occasionally trips a poll-with-timeout. Retrying a failed test a couple of
+# times rather than failing the whole run is a real, defensible reason, and the
+# retries below stay.
+#
+# What was NOT defensible is that the retry applied to the WHOLE workspace and
+# cost nothing to notice. `retries = 2` alone means nextest's default
+# `flaky-result = "pass"`, so ANY test in ANY of the 28 binaries could fail 2 of
+# 3 attempts and report green. Measured on a test rigged to fail twice and pass
+# on the third attempt:
+#
+#     Summary [3.648s] 1 test run: 1 passed (1 flaky), 0 skipped
+#     FLAKY 3/3 ... c0pl4nd-core::zz_flakeprobe flakeprobe_passes_on_third_attempt
+#     exit 0
+#
+# nextest is more honest than pytest here (which printed the rerun and recorded
+# it in NO artifact) — it does say "1 flaky" on the terminal. But the exit status
+# is 0, nothing consumes the terminal, and no --junit was configured, so the
+# flake reached no gate.
+#
+# `flaky-result = "fail"` closes that: a test that passes only on retry now fails
+# the run. Verified in both directions, since a gate that always fires and one
+# that never fires look identical from one green run:
+#
+#     flaky, no override        -> "FLKY-FL 3/3", exit 100   (was exit 0)
+#     first-try pass            -> "PASS",        exit 0
+#     flaky, override below     -> "FLAKY 3/3",   exit 0
+#
+# The third case is the CONTROL that proves the override key is honoured rather
+# than ignored — and that matters, because nextest does not reject an unknown
+# config key, it warns and carries on:
+#
+#     warning: in config file .config/nextest.toml, ignoring unknown
+#     configuration key: profile.default.flaky-result-typo-xyz
+#
+# so a typo here would disarm the gate silently. The `flaky-gate-live` job in
+# ci.yml asserts the setting is actually applied rather than trusting this file.
 [profile.default]
 retries = 2
+flaky-result = "fail"
 
-# CI uses the same policy (the default profile is inherited).
+# The allowlist: the PTY-echo class the retries were justified for in the first
+# place, and ONLY that class. These are the binaries whose tests drive a real
+# shell through the harness and poll for its echo, so a loaded-runner timing lag
+# is a known, understood, non-product failure — those may still pass on retry.
+#
+# Everything else in the workspace — the VT parser, the grid, config, theming,
+# layout, the property/proptest suites, the reflow and conformance corpora — is
+# deterministic and GPU-free. None of it has any business needing a retry, and if
+# it flakes that is a real bug in the code or the test, which is now what it
+# reports.
+#
+# This list is DRAIN-ONLY: entries come out as tests get deflaked, never in
+# without a reason of the same kind. It is scoped by binary rather than by test
+# name because the echo poll is a property of how the whole harness suite drives
+# the shell, not of individual cases.
+[[profile.default.overrides]]
+filter = '''
+  binary_id(c0pl4nd::egui_chrome)
+  + binary_id(c0pl4nd::egui_palette)
+  + binary_id(c0pl4nd::egui_search)
+  + binary_id(c0pl4nd::egui_settings)
+  + binary_id(c0pl4nd::egui_settings_deep)
+  + binary_id(c0pl4nd::egui_term_render)
+  + binary_id(c0pl4nd::egui_terminal)
+  + binary_id(c0pl4nd::egui_window_mgmt)
+  + binary_id(c0pl4nd-core::e2e_terminal)
+  + binary_id(c0pl4nd-core::integration)
+'''
+flaky-result = "pass"
+
+# CI inherits the same retry + flaky policy, and additionally emits a JUnit
+# report — the machine-readable record that did not exist before. nextest
+# serialises a pass-on-retry as <flakyFailure>, so a flake in the allowlisted
+# PTY class (which still exits 0) survives past the terminal scrollback into an
+# artifact, instead of being noticed by nobody.
 [profile.ci]
 retries = 2
+flaky-result = "fail"
+
+[profile.ci.junit]
+path = "junit.xml"

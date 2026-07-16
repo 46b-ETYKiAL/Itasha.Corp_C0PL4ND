@@ -183,3 +183,319 @@ impl ImageTextureCache {
         self.seen_this_frame.clear();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    const STYLE: u64 = 7;
+    const WHITE: (u8, u8, u8) = (255, 255, 255);
+
+    /// Run `body` inside one real egui frame, so the font atlas the galley layout
+    /// needs is available, and hand it a throwaway painter.
+    fn with_painter<R>(body: impl FnOnce(&egui::Painter) -> R) -> R {
+        let ctx = egui::Context::default();
+        // `run_ui` takes an FnMut, so the FnOnce body is parked in an Option and
+        // taken on the single pass.
+        let mut body = Some(body);
+        let mut out = None;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Background,
+                egui::Id::new("glyph-cache-test"),
+            ));
+            if let Some(body) = body.take() {
+                out = Some(body(&painter));
+            }
+        });
+        out.expect("the frame body runs exactly once")
+    }
+
+    fn job(c: char) -> egui::text::LayoutJob {
+        build_glyph_job(c, &egui::FontId::monospace(12.0), egui::Color32::WHITE)
+    }
+
+    // ---- glyph_cache_key ----
+
+    /// The cache-key INVARIANT the module documents: the key must capture EVERY
+    /// input that changes the laid-out galley. If any two of these collided, two
+    /// visually-different cells would share one cached galley and the grid would
+    /// paint the wrong glyph/colour.
+    #[test]
+    fn glyph_cache_key_distinguishes_every_input_that_changes_the_galley() {
+        let base = glyph_cache_key('a', WHITE, RowPass::Main, STYLE);
+        let variants = [
+            (
+                "a different char",
+                glyph_cache_key('b', WHITE, RowPass::Main, STYLE),
+            ),
+            (
+                "a different colour",
+                glyph_cache_key('a', (255, 0, 0), RowPass::Main, STYLE),
+            ),
+            (
+                "the red ghost pass",
+                glyph_cache_key('a', WHITE, RowPass::GhostRed, STYLE),
+            ),
+            (
+                "the blue ghost pass",
+                glyph_cache_key('a', WHITE, RowPass::GhostBlue, STYLE),
+            ),
+            (
+                "a different style (font size)",
+                glyph_cache_key('a', WHITE, RowPass::Main, STYLE + 1),
+            ),
+        ];
+        for (what, key) in variants {
+            assert_ne!(base, key, "{what} must not collide with the base glyph");
+        }
+    }
+
+    /// The three passes are mutually distinct — a ghost galley (drawn in one
+    /// override colour) must never be served for the crisp pass, or vice versa.
+    #[test]
+    fn glyph_cache_key_keeps_all_three_passes_distinct() {
+        let keys = [RowPass::Main, RowPass::GhostRed, RowPass::GhostBlue]
+            .map(|p| glyph_cache_key('a', WHITE, p, STYLE));
+        assert_ne!(keys[0], keys[1]);
+        assert_ne!(keys[1], keys[2]);
+        assert_ne!(keys[0], keys[2]);
+    }
+
+    /// The same glyph keys identically — the property that makes the cache HIT at
+    /// all (the control for the distinctness tests above).
+    #[test]
+    fn glyph_cache_key_is_stable_for_the_same_glyph() {
+        assert_eq!(
+            glyph_cache_key('a', WHITE, RowPass::Main, STYLE),
+            glyph_cache_key('a', WHITE, RowPass::Main, STYLE),
+            "the same glyph must reuse one cached galley"
+        );
+    }
+
+    // ---- GalleyCache ----
+
+    /// A repeated glyph is laid out ONCE and reused — the whole point of the cache.
+    /// `build` invocations are counted, so this observes the real work skipped
+    /// rather than asserting on the cache's internals.
+    #[test]
+    fn galley_cache_lays_a_repeated_glyph_out_only_once() {
+        let builds = Cell::new(0);
+        with_painter(|painter| {
+            let mut cache = GalleyCache::default();
+            for _ in 0..3 {
+                cache.glyph(painter, 1, || {
+                    builds.set(builds.get() + 1);
+                    job('a')
+                });
+            }
+        });
+        assert_eq!(
+            builds.get(),
+            1,
+            "three paints of one glyph must lay out once"
+        );
+    }
+
+    /// A DIFFERENT key still lays out — the control proving the cache is keyed, not
+    /// just returning the first galley forever.
+    #[test]
+    fn galley_cache_lays_out_each_distinct_glyph() {
+        let builds = Cell::new(0);
+        with_painter(|painter| {
+            let mut cache = GalleyCache::default();
+            for key in [1, 2, 3] {
+                cache.glyph(painter, key, || {
+                    builds.set(builds.get() + 1);
+                    job('a')
+                });
+            }
+        });
+        assert_eq!(builds.get(), 3, "each distinct glyph must be laid out");
+    }
+
+    /// Glyphs that scrolled off are dropped, glyphs still on screen are kept — so
+    /// the map stays bounded by what is actually visible.
+    #[test]
+    fn prune_unseen_drops_glyphs_that_were_not_painted_this_frame() {
+        let builds = Cell::new(0);
+        let relaid = with_painter(|painter| {
+            let mut cache = GalleyCache::default();
+            // Frame 1: paint glyphs 1 and 2.
+            cache.glyph(painter, 1, || job('a'));
+            cache.glyph(painter, 2, || job('b'));
+            cache.prune_unseen();
+
+            // Frame 2: paint only glyph 1 — glyph 2 has scrolled off.
+            cache.glyph(painter, 1, || job('a'));
+            cache.prune_unseen();
+
+            // Frame 3: glyph 1 must still HIT; glyph 2 must have been evicted.
+            cache.glyph(painter, 1, || {
+                builds.set(builds.get() + 1);
+                job('a')
+            });
+            let mut two_relaid = false;
+            cache.glyph(painter, 2, || {
+                two_relaid = true;
+                job('b')
+            });
+            two_relaid
+        });
+        assert_eq!(
+            builds.get(),
+            0,
+            "a glyph painted every frame must survive the prune"
+        );
+        assert!(relaid, "a glyph that scrolled off must be evicted");
+    }
+
+    /// The documented transient-empty-frame guard: a frame that painted NOTHING
+    /// (e.g. every pane errored) must not evict the whole cache, or the next real
+    /// frame re-lays out every glyph on screen.
+    #[test]
+    fn prune_unseen_keeps_the_cache_when_nothing_was_painted() {
+        let relaid = Cell::new(false);
+        with_painter(|painter| {
+            let mut cache = GalleyCache::default();
+            cache.glyph(painter, 1, || job('a'));
+            cache.prune_unseen();
+
+            // A frame that painted nothing at all.
+            cache.prune_unseen();
+
+            cache.glyph(painter, 1, || {
+                relaid.set(true);
+                job('a')
+            });
+        });
+        assert!(
+            !relaid.get(),
+            "an empty frame must not evict the cache (transient-frame guard)"
+        );
+    }
+
+    /// A font re-install must drop every galley — the cached ones reference the old
+    /// atlas and would paint from a stale texture.
+    #[test]
+    fn clear_drops_every_cached_galley() {
+        let relaid = Cell::new(false);
+        with_painter(|painter| {
+            let mut cache = GalleyCache::default();
+            cache.glyph(painter, 1, || job('a'));
+            cache.clear();
+            cache.glyph(painter, 1, || {
+                relaid.set(true);
+                job('a')
+            });
+        });
+        assert!(relaid.get(), "clear() must force a re-layout");
+    }
+
+    // ---- build_glyph_job ----
+
+    /// The job carries the glyph in the requested colour and font, and never wraps
+    /// (each glyph is painted at its own cell origin).
+    #[test]
+    fn build_glyph_job_renders_one_glyph_in_the_requested_colour() {
+        let font = egui::FontId::monospace(13.0);
+        let j = build_glyph_job('Z', &font, egui::Color32::RED);
+
+        assert_eq!(j.text, "Z", "the job must carry exactly the one glyph");
+        assert_eq!(
+            j.wrap.max_width,
+            f32::INFINITY,
+            "a single glyph must never wrap"
+        );
+        let section = j.sections.first().expect("one formatted section");
+        assert_eq!(section.format.color, egui::Color32::RED);
+        assert_eq!(section.format.font_id, font);
+    }
+
+    /// A multi-byte char survives the `encode_utf8` buffer (a 4-byte emoji is the
+    /// worst case the grid can hand this).
+    #[test]
+    fn build_glyph_job_handles_a_multi_byte_char() {
+        assert_eq!(
+            build_glyph_job('🦀', &egui::FontId::monospace(12.0), egui::Color32::WHITE).text,
+            "🦀"
+        );
+    }
+
+    // ---- ImageTextureCache ----
+
+    fn img_key(col: usize) -> ImageKey {
+        (PaneId(1), 0, col, 2, 2)
+    }
+
+    fn rgba_2x2() -> Option<(usize, usize, Vec<u8>)> {
+        Some((2, 2, vec![255u8; 2 * 2 * 4]))
+    }
+
+    /// An image uploads ONCE: the second look-up hits the cache and never re-copies
+    /// the pixel bytes (the documented "at most once per uploaded texture").
+    #[test]
+    fn image_cache_uploads_once_then_hits() {
+        let ctx = egui::Context::default();
+        let mut cache = ImageTextureCache::default();
+        let fetches = Cell::new(0);
+
+        let first = cache.get_or_upload(&ctx, img_key(0), || {
+            fetches.set(fetches.get() + 1);
+            rgba_2x2()
+        });
+        let second = cache.get_or_upload(&ctx, img_key(0), || {
+            fetches.set(fetches.get() + 1);
+            rgba_2x2()
+        });
+
+        assert!(first.is_some(), "the first look-up must upload a texture");
+        assert_eq!(first, second, "a hit must return the same texture id");
+        assert_eq!(fetches.get(), 1, "a cache hit must not re-fetch the pixels");
+    }
+
+    /// An image evicted between the metadata sweep and the fetch yields `None`
+    /// rather than uploading an empty texture.
+    #[test]
+    fn image_cache_returns_none_when_the_fetch_yields_nothing() {
+        let ctx = egui::Context::default();
+        let mut cache = ImageTextureCache::default();
+        assert_eq!(cache.get_or_upload(&ctx, img_key(0), || None), None);
+    }
+
+    /// Textures for images that scrolled off are dropped (freeing GPU memory), while
+    /// those still on screen survive.
+    #[test]
+    fn image_cache_prune_drops_untouched_textures() {
+        let ctx = egui::Context::default();
+        let mut cache = ImageTextureCache::default();
+        cache.get_or_upload(&ctx, img_key(0), rgba_2x2);
+        cache.get_or_upload(&ctx, img_key(1), rgba_2x2);
+        cache.prune_unseen();
+
+        // Next frame: only image 0 is still on screen.
+        cache.get_or_upload(&ctx, img_key(0), rgba_2x2);
+        cache.prune_unseen();
+
+        let refetched = Cell::new(false);
+        cache.get_or_upload(&ctx, img_key(1), || {
+            refetched.set(true);
+            rgba_2x2()
+        });
+        assert!(
+            refetched.get(),
+            "a texture that scrolled off must be pruned and re-uploaded"
+        );
+
+        let kept = Cell::new(false);
+        cache.get_or_upload(&ctx, img_key(0), || {
+            kept.set(true);
+            rgba_2x2()
+        });
+        assert!(
+            !kept.get(),
+            "a texture still on screen must survive the prune"
+        );
+    }
+}

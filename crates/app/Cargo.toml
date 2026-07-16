@@ -14,6 +14,15 @@ description = "C0PL4ND — a fast, local-first, GPU-accelerated terminal emulato
 # a dedicated `--features legacy-winit` lint/build step (see ci.yml).
 default-run = "c0pl4nd"
 
+# The egui shell's testable surface. `tests/` links this target rather than
+# `#[path]`-including a private second copy of the module tree: the duplicate
+# compilation is what made `cargo llvm-cov` report the bin object (which the
+# integration tests never execute) and score the app crate on its in-file unit
+# tests alone. Same code, same binary — only now the measurement can see it.
+[lib]
+name = "c0pl4nd"
+path = "src/lib.rs"
+
 # The modern eframe/egui chrome shell — the canonical C0PL4ND app. It draws each
 # pane's terminal grid with egui's native coloured-text painter.
 # See `.s4f3-data/recon-c0pl4nd-egui-modernization.md`.

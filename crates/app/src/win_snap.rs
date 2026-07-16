@@ -349,14 +349,41 @@ unsafe fn hit_test(hwnd: HWND, lparam: LPARAM, geom: &SnapGeometry) -> LRESULT {
     }
     let w = rc.right - rc.left;
     let h = rc.bottom - rc.top;
+
+    LRESULT(classify_nc_hit(pt.x, pt.y, w, h, geom, || {
+        in_interactive_zone(pt.x)
+    }))
+}
+
+/// Pure `WM_NCHITTEST` classification: map a CLIENT-space point `(px, py)` on a
+/// `w`×`h` client rect to its `HT*` code.
+///
+/// Split out of [`hit_test`] — whose only impure steps are `ScreenToClient`,
+/// `GetClientRect`, and reading the published interactive-zone global — so the
+/// custom frame's resize-edge and drag-strip routing is unit testable without a
+/// live HWND.
+///
+/// `interactive` supplies the [`in_interactive_zone`] answer for `px` LAZILY: the
+/// original only consulted the zone global (taking its mutex) inside the body
+/// arm, and only after the `py`/`px` bounds checks short-circuited. Taking a
+/// closure rather than a pre-computed `bool` keeps that locking behaviour
+/// identical on the resize-edge paths.
+fn classify_nc_hit<F: FnOnce() -> bool>(
+    px: i32,
+    py: i32,
+    w: i32,
+    h: i32,
+    geom: &SnapGeometry,
+    interactive: F,
+) -> isize {
     let b = geom.resize_border;
 
-    let on_left = pt.x < b;
-    let on_right = pt.x >= w - b;
-    let on_top = pt.y < b;
-    let on_bottom = pt.y >= h - b;
+    let on_left = px < b;
+    let on_right = px >= w - b;
+    let on_top = py < b;
+    let on_bottom = py >= h - b;
 
-    let code = match (on_top, on_bottom, on_left, on_right) {
+    match (on_top, on_bottom, on_left, on_right) {
         (true, _, true, _) => HTTOPLEFT,
         (true, _, _, true) => HTTOPRIGHT,
         (_, true, true, _) => HTBOTTOMLEFT,
@@ -372,14 +399,13 @@ unsafe fn hit_test(hwnd: HWND, lparam: LPARAM, geom: &SnapGeometry) -> LRESULT {
             // controls in the tab strip (tab chips, the new-tab `+`, the
             // settings gear), both of which stay HTCLIENT so the click reaches
             // winit's MouseInput handler instead of starting a window drag.
-            if pt.y < geom.titlebar_h && pt.x < w - geom.buttons_w && !in_interactive_zone(pt.x) {
+            if py < geom.titlebar_h && px < w - geom.buttons_w && !interactive() {
                 HTCAPTION
             } else {
                 HTCLIENT
             }
         }
-    };
-    LRESULT(code)
+    }
 }
 
 /// Clamp `WM_GETMINMAXINFO`'s max size/position to the monitor's work area so a
@@ -449,5 +475,107 @@ mod tests {
         set_interactive_zones(vec![(100, 110)]);
         assert!(in_interactive_zone(105));
         assert!(!in_interactive_zone(15));
+    }
+
+    /// The chrome geometry the renderer publishes: a 30px title bar, an 8px
+    /// resize band, and a 143px caption-button cluster on an 800x600 client.
+    fn geom() -> SnapGeometry {
+        SnapGeometry {
+            titlebar_h: 30,
+            resize_border: 8,
+            buttons_w: 143,
+        }
+    }
+
+    #[test]
+    fn nc_hit_reports_every_resize_edge_and_corner() {
+        let g = geom();
+        // Corners take priority over the straight edges that also match.
+        assert_eq!(classify_nc_hit(0, 0, 800, 600, &g, || false), HTTOPLEFT);
+        assert_eq!(classify_nc_hit(799, 0, 800, 600, &g, || false), HTTOPRIGHT);
+        assert_eq!(
+            classify_nc_hit(0, 599, 800, 600, &g, || false),
+            HTBOTTOMLEFT
+        );
+        assert_eq!(
+            classify_nc_hit(799, 599, 800, 600, &g, || false),
+            HTBOTTOMRIGHT
+        );
+        // Straight edges, away from the corners.
+        assert_eq!(classify_nc_hit(400, 0, 800, 600, &g, || false), HTTOP);
+        assert_eq!(classify_nc_hit(400, 599, 800, 600, &g, || false), HTBOTTOM);
+        assert_eq!(classify_nc_hit(0, 300, 800, 600, &g, || false), HTLEFT);
+        assert_eq!(classify_nc_hit(799, 300, 800, 600, &g, || false), HTRIGHT);
+    }
+
+    #[test]
+    fn nc_hit_resize_band_is_exactly_resize_border_thick() {
+        let g = geom();
+        // 0..=7 is the band; 8 is already the body. Without this the window
+        // would either be un-resizable or would steal terminal clicks.
+        assert_eq!(classify_nc_hit(7, 300, 800, 600, &g, || false), HTLEFT);
+        assert_ne!(classify_nc_hit(8, 300, 800, 600, &g, || false), HTLEFT);
+        assert_eq!(classify_nc_hit(792, 300, 800, 600, &g, || false), HTRIGHT);
+        assert_ne!(classify_nc_hit(791, 300, 800, 600, &g, || false), HTRIGHT);
+    }
+
+    #[test]
+    fn titlebar_strip_drags_the_window_but_the_buttons_do_not() {
+        let g = geom();
+        // Below the resize band, above titlebar_h, left of the button cluster:
+        // the drag strip. HTCAPTION is what gives a frameless window Aero Snap.
+        assert_eq!(classify_nc_hit(400, 20, 800, 600, &g, || false), HTCAPTION);
+        // The caption-button cluster (right 143px) must stay HTCLIENT so the
+        // click reaches winit's MouseInput and our own min/max/close handler —
+        // as HTCAPTION, Windows would swallow it as a window drag.
+        assert_eq!(classify_nc_hit(700, 20, 800, 600, &g, || false), HTCLIENT);
+        assert_eq!(
+            classify_nc_hit(800 - 143, 20, 800, 600, &g, || false),
+            HTCLIENT,
+            "the cluster's left edge is already a button"
+        );
+        assert_eq!(
+            classify_nc_hit(800 - 144, 20, 800, 600, &g, || false),
+            HTCAPTION,
+            "one pixel left of the cluster still drags"
+        );
+        // Below the title bar is the terminal.
+        assert_eq!(classify_nc_hit(400, 30, 800, 600, &g, || false), HTCLIENT);
+    }
+
+    #[test]
+    fn interactive_tab_strip_controls_are_client_not_caption() {
+        let g = geom();
+        // A tab chip / '+' / gear published by the renderer sits INSIDE the drag
+        // strip but must not drag the window — otherwise the tab is unclickable.
+        assert_eq!(
+            classify_nc_hit(400, 20, 800, 600, &g, || true),
+            HTCLIENT,
+            "an interactive zone overrides the drag strip"
+        );
+        // The same point with no zone published drags, proving the override is
+        // what changed the answer (and not the coordinates).
+        assert_eq!(classify_nc_hit(400, 20, 800, 600, &g, || false), HTCAPTION);
+    }
+
+    #[test]
+    fn interactive_zones_are_not_consulted_on_the_resize_edges() {
+        // The zone lookup takes a mutex; the original only consulted it in the
+        // body arm. Passing a closure that panics proves the edge paths never
+        // call it, i.e. the lazy short-circuit is preserved.
+        let g = geom();
+        let boom =
+            || -> bool { panic!("in_interactive_zone must not be consulted on a resize edge") };
+        assert_eq!(classify_nc_hit(0, 0, 800, 600, &g, boom), HTTOPLEFT);
+        assert_eq!(classify_nc_hit(400, 0, 800, 600, &g, boom), HTTOP);
+        assert_eq!(classify_nc_hit(0, 300, 800, 600, &g, boom), HTLEFT);
+    }
+
+    #[test]
+    fn a_click_past_the_titlebar_never_consults_the_zones_either() {
+        // `py < titlebar_h` short-circuits before the zone lookup.
+        let g = geom();
+        let boom = || -> bool { panic!("zones must not be consulted below the title bar") };
+        assert_eq!(classify_nc_hit(400, 300, 800, 600, &g, boom), HTCLIENT);
     }
 }

@@ -1,0 +1,35 @@
+//! The C0PL4ND app library — the egui shell's testable surface.
+//!
+//! # Why this crate has a lib target
+//!
+//! `crates/app` was binary-only. Integration tests in `tests/` therefore could
+//! not `use c0pl4nd::…`; they reached the app by `#[path]`-including
+//! `../src/egui_app/mod.rs` and its siblings, which compiles a SECOND, private
+//! copy of the whole module tree into every test binary.
+//!
+//! That is invisible to `cargo test` (the tests pass, and they genuinely drive
+//! the real `frame_tick`) but it wrecks coverage attribution: `cargo llvm-cov`
+//! reports the `c0pl4nd` **bin** object, and the `#[path]` copies live in the
+//! test binaries instead. Measured directly — running the `egui_chrome` suite
+//! alone reported **0.00%** for every app file while 400+ of its tests passed.
+//! The consequence was that the app's reported coverage counted only the in-file
+//! `#[cfg(test)]` unit tests, and roughly 3,900 real UI test executions across
+//! nine `egui_kittest` suites contributed nothing to the number. `chrome.rs`
+//! read 17.5% — exactly its in-file `mod tests` block, and no more.
+//!
+//! Exposing the module tree as a library makes the tests link the SAME
+//! compilation the binary ships, so coverage lands on the real object and the
+//! reported number means what it says. Nothing about what the tests exercise
+//! changes — only whether the measurement can see it.
+//!
+//! # Scope
+//!
+//! These four modules are a closed set under `crate::` (they reference only one
+//! another), which is why they move together and why the binaries' remaining
+//! modules can stay where they are. `panic_hook` resolves `crate::reporting`
+//! through the binary's root re-export.
+
+pub mod egui_app;
+pub mod issue_intake;
+pub mod reporting;
+pub mod user_error;

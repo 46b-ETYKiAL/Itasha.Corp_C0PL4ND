@@ -690,16 +690,35 @@ fn assert_allowed_host(url: &str) -> Result<(), String> {
 /// transparently. This builds a `redirects(0)` agent and walks the chain itself,
 /// confining every hop to GitHub over https.
 fn confined_get(url: &str, headers: &[(&str, &str)]) -> Result<ureq::Response, String> {
-    assert_https(url)?;
-    assert_allowed_host(url)?;
-    // Connect/read timeouts bound a hung update thread: without them a stalled
-    // or slow-loris peer keeps the download/check thread (and any window waiting
-    // on it) alive forever. Matches the legacy `update::http_get` bounds.
-    let agent = ureq::AgentBuilder::new()
+    confined_get_with(&default_agent(), url, headers)
+}
+
+/// The agent every production fetch runs on: redirects disabled (the walk in
+/// [`confined_get_with`] follows them MANUALLY so every hop is re-confined) plus
+/// connect/read timeouts that bound a hung update thread — without them a stalled
+/// or slow-loris peer keeps the download/check thread (and any window waiting on
+/// it) alive forever. Matches the legacy `update::http_get` bounds.
+fn default_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
         .redirects(0)
         .timeout_connect(std::time::Duration::from_secs(10))
         .timeout_read(std::time::Duration::from_secs(30))
-        .build();
+        .build()
+}
+
+/// [`confined_get`] over an explicit `agent`. The agent is the ONLY seam: every
+/// confinement assert, the redirect walk, and the hop cap below run identically
+/// whoever supplies the transport. Production always passes [`default_agent`];
+/// the tests pass an agent whose middleware short-circuits the socket so the
+/// confinement logic can be driven against synthesized responses (see the test
+/// module's `E2E_API` harness).
+fn confined_get_with(
+    agent: &ureq::Agent,
+    url: &str,
+    headers: &[(&str, &str)],
+) -> Result<ureq::Response, String> {
+    assert_https(url)?;
+    assert_allowed_host(url)?;
     let mut current = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
         let mut req = agent.get(&current).set("User-Agent", USER_AGENT);
@@ -778,7 +797,18 @@ fn download_small_capped(url: &str, cap: u64) -> Result<Vec<u8>, String> {
 /// is reported as `0` (the UI shows an indeterminate bar). Returns the full
 /// asset bytes.
 fn download_asset(url: &str, progress: impl FnMut(u64, u64)) -> Result<Vec<u8>, String> {
-    let resp = confined_get(url, &[])?;
+    download_asset_with(&default_agent(), url, progress)
+}
+
+/// [`download_asset`] over an explicit `agent` (see [`confined_get_with`] for the
+/// seam's rationale). The declared-size check and the streamed cap below are
+/// unchanged and run identically on any transport.
+fn download_asset_with(
+    agent: &ureq::Agent,
+    url: &str,
+    progress: impl FnMut(u64, u64),
+) -> Result<Vec<u8>, String> {
+    let resp = confined_get_with(agent, url, &[])?;
 
     let total: u64 = resp
         .header("Content-Length")
@@ -1168,6 +1198,453 @@ mod tests {
         assert!(assert_allowed_host("https://objects.githubusercontent.com/x").is_ok());
         assert!(assert_allowed_host("https://evil.example/x").is_err());
         assert!(assert_allowed_host("https:///no-host").is_err());
+    }
+
+    // =====================================================================
+    // E2E_API — hermetic transport harness for the confined GET
+    // =====================================================================
+    //
+    // ## What this harness IS
+    //
+    // The tests above prove the confinement PREDICATES (`assert_https`,
+    // `host_allowed`) in isolation, and the `download_verify_extract_refuses_*`
+    // tests prove the FIRST url is checked. None of them enters
+    // `confined_get_with`'s redirect walk, so the security property the doc
+    // comment on `confined_get` actually claims — that https AND the host
+    // allow-list are RE-ASSERTED AT EVERY HOP — was, before this harness,
+    // asserted by no test at all. A predicate being correct does not prove it is
+    // CALLED on hop 2.
+    //
+    // The harness closes that gap by injecting at the `ureq::Agent` boundary via
+    // ureq's `Middleware`. A middleware that never calls `next.handle(req)`
+    // short-circuits the chain ABOVE `unit::connect`, so no socket, no DNS
+    // resolution and no TLS handshake ever occur (see `MockTransport::handle`).
+    // Responses are synthesized with `impl FromStr for Response`, which parses a
+    // full status line + headers, letting us drive `Location` / `Content-Length`.
+    //
+    // Crucially the mock replaces ONLY the third-party transport. Everything
+    // under test — the `assert_https` / `assert_allowed_host` calls, the
+    // redirect walk, `resolve_redirect`, the `MAX_REDIRECTS` cap, the
+    // declared-size check — is the REAL production code path. Injecting any
+    // higher (at `confined_get`/`fetch_latest_release` level) would degenerate
+    // into a tautology that merely re-tested serde against a fixture, which the
+    // `RawRelease` tests already cover.
+    //
+    // ## What this harness DOES NOT PROVE  (read before trusting a green run)
+    //
+    // Because the socket is never opened, these are OUT OF SCOPE here and are
+    // NOT covered by any assertion below:
+    //   * TLS itself: handshake, protocol version, cipher selection.
+    //   * Certificate validation, hostname verification, pinning, revocation.
+    //   * DNS resolution and any DNS-rebinding class of attack (a host that
+    //     passes the allow-list string check but RESOLVES to an attacker IP is
+    //     NOT addressed by this defense at all — the allow-list is a string
+    //     gate, and this harness only proves the string gate runs per hop).
+    //   * That `default_agent`'s connect/read timeouts actually fire (no real
+    //     socket can stall), nor any slow-loris behaviour.
+    //   * Real GitHub API compatibility: that api.github.com truly returns the
+    //     shapes synthesized here, or that its real redirect chain stays inside
+    //     the allow-list.
+    //   * The `Err(ureq::Error::Status(code, r))` 3xx arm of the walk: ureq maps
+    //     only >=400 to `Error::Status`, so a synthesized 3xx always arrives via
+    //     the `Ok(r)` arm. That arm is defensive and stays untested here.
+    //   * Proxy handling and connection pooling.
+
+    use std::sync::{Arc, Mutex};
+
+    /// One request exactly as the transport saw it, captured BEFORE any socket
+    /// would have been opened.
+    #[derive(Clone, Debug)]
+    struct SeenRequest {
+        url: String,
+        headers: Vec<(String, String)>,
+    }
+
+    impl SeenRequest {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        }
+    }
+
+    /// The hermetic transport. `responder` maps `(hop_index, request)` to a raw
+    /// HTTP response string. It NEVER calls `next.handle`, so the request dies
+    /// here and no byte reaches a socket.
+    struct MockTransport {
+        seen: Arc<Mutex<Vec<SeenRequest>>>,
+        #[allow(clippy::type_complexity)]
+        responder: Box<dyn Fn(usize, &SeenRequest) -> String + Send + Sync>,
+    }
+
+    impl ureq::Middleware for MockTransport {
+        fn handle(
+            &self,
+            request: ureq::Request,
+            _next: ureq::MiddlewareNext,
+        ) -> Result<ureq::Response, ureq::Error> {
+            let headers = request
+                .header_names()
+                .into_iter()
+                .map(|n| {
+                    let v = request.header(&n).unwrap_or_default().to_string();
+                    (n, v)
+                })
+                .collect();
+            let seen = SeenRequest {
+                url: request.url().to_string(),
+                headers,
+            };
+            let idx = {
+                let mut log = self.seen.lock().expect("seen log poisoned");
+                log.push(seen.clone());
+                log.len() - 1
+            };
+            let raw = (self.responder)(idx, &seen);
+            // NOTE: `_next` is deliberately dropped without being handled. That
+            // is what makes this hermetic — dropping it is the short-circuit.
+            let resp: ureq::Response = raw
+                .parse()
+                .expect("test fixture must be a well-formed HTTP response");
+            Ok(resp)
+        }
+    }
+
+    /// Build an agent whose transport is `responder`, mirroring `default_agent`'s
+    /// `redirects(0)` so the manual walk under test behaves exactly as in
+    /// production. Returns the agent plus the shared request log.
+    fn mock_agent(
+        responder: impl Fn(usize, &SeenRequest) -> String + Send + Sync + 'static,
+    ) -> (ureq::Agent, Arc<Mutex<Vec<SeenRequest>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let agent = ureq::AgentBuilder::new()
+            .redirects(0)
+            .middleware(MockTransport {
+                seen: Arc::clone(&seen),
+                responder: Box::new(responder),
+            })
+            .build();
+        (agent, seen)
+    }
+
+    /// The urls the transport was actually asked for, in order.
+    fn seen_urls(seen: &Arc<Mutex<Vec<SeenRequest>>>) -> Vec<String> {
+        seen.lock()
+            .expect("seen log poisoned")
+            .iter()
+            .map(|r| r.url.clone())
+            .collect()
+    }
+
+    const API_URL: &str = "https://api.github.com/repos/o/r/releases/latest";
+
+    #[test]
+    fn redirect_to_non_allowlisted_host_is_refused_at_hop_2() {
+        // Hop 1 is a perfectly legitimate api.github.com request that returns a
+        // 302 pointing off the allow-list — the SSRF / exfil shape. The refusal
+        // must come from the redirect walk's per-hop re-assert, NOT from the
+        // entry assert (which hop 1's url passes cleanly).
+        let (agent, seen) = mock_agent(|i, _| match i {
+            0 => "HTTP/1.1 302 Found\r\nLocation: https://evil.example/payload\r\n\r\n".to_string(),
+            _ => "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npwnd".to_string(),
+        });
+
+        let err = confined_get_with(&agent, API_URL, &[]).expect_err("hop 2 must be refused");
+
+        assert!(
+            err.contains("non-allowlisted host") && err.contains("evil.example"),
+            "expected a host-allowlist refusal naming the host, got: {err}"
+        );
+        // THE load-bearing assertion: the transport saw hop 1 and was NEVER
+        // asked for evil.example. len==1 proves the walk ran (not an early
+        // bail at the entry assert, which would give len==0) AND that the
+        // refusal happened BEFORE hop 2 was dispatched.
+        let urls = seen_urls(&seen);
+        assert_eq!(
+            urls.len(),
+            1,
+            "hop 2 must never be dispatched; saw {urls:?}"
+        );
+        assert_eq!(urls[0], API_URL, "hop 1 should be the api.github.com url");
+        assert!(
+            !urls.iter().any(|u| u.contains("evil.example")),
+            "the updater must never send a request to the redirect target: {urls:?}"
+        );
+    }
+
+    #[test]
+    fn redirect_scheme_downgrade_to_http_is_refused_at_hop_2() {
+        // The redirect target host is ALLOW-LISTED (codeload.github.com), so the
+        // host gate cannot be what refuses this. Only the per-hop `assert_https`
+        // can — which isolates the TLS-downgrade defense at hop 2 specifically.
+        let (agent, seen) = mock_agent(|i, _| match i {
+            0 => "HTTP/1.1 302 Found\r\nLocation: http://codeload.github.com/a.zip\r\n\r\n"
+                .to_string(),
+            _ => "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npwnd".to_string(),
+        });
+
+        let err =
+            confined_get_with(&agent, API_URL, &[]).expect_err("http redirect must be refused");
+
+        assert!(
+            err.contains("non-https"),
+            "expected an https-downgrade refusal, got: {err}"
+        );
+        let urls = seen_urls(&seen);
+        assert_eq!(
+            urls.len(),
+            1,
+            "the cleartext hop must never be dispatched; saw {urls:?}"
+        );
+    }
+
+    #[test]
+    fn redirect_walk_stops_at_max_redirects() {
+        // Every hop is https + allow-listed, so ONLY the hop cap can stop this.
+        // Without the cap the walk would follow an endless chain forever.
+        let (agent, seen) = mock_agent(|i, _| {
+            format!("HTTP/1.1 302 Found\r\nLocation: https://codeload.github.com/hop{i}\r\n\r\n")
+        });
+
+        let err = confined_get_with(&agent, API_URL, &[])
+            .expect_err("an endless redirect chain must be refused");
+
+        assert!(
+            err.contains("too many redirects"),
+            "expected a redirect-cap refusal, got: {err}"
+        );
+        // The walk is `for _ in 0..=MAX_REDIRECTS`, so it dispatches exactly
+        // MAX_REDIRECTS + 1 requests and then gives up. Pinning the exact count
+        // is what makes this test notice a cap that silently grows.
+        let urls = seen_urls(&seen);
+        assert_eq!(
+            urls.len(),
+            MAX_REDIRECTS + 1,
+            "expected exactly {} dispatches, saw {urls:?}",
+            MAX_REDIRECTS + 1
+        );
+    }
+
+    #[test]
+    fn a_confined_redirect_chain_is_followed_to_the_body() {
+        // The control for the three refusal tests above: a chain that stays
+        // https + inside the allow-list MUST be followed and deliver the body.
+        // Without this, a `confined_get_with` that refused EVERYTHING would pass
+        // every other test in this section.
+        let (agent, seen) = mock_agent(|i, _| match i {
+            0 => "HTTP/1.1 302 Found\r\nLocation: https://codeload.github.com/a.zip\r\n\r\n"
+                .to_string(),
+            _ => "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_string(),
+        });
+
+        let resp = confined_get_with(&agent, API_URL, &[]).expect("a confined chain must succeed");
+        assert_eq!(resp.status(), 200);
+        let mut body = String::new();
+        resp.into_reader()
+            .read_to_string(&mut body)
+            .expect("body reads");
+        assert_eq!(body, "ok");
+
+        let urls = seen_urls(&seen);
+        assert_eq!(
+            urls,
+            vec![
+                API_URL.to_string(),
+                "https://codeload.github.com/a.zip".to_string()
+            ],
+            "both hops should be dispatched in order"
+        );
+    }
+
+    #[test]
+    fn a_relative_redirect_location_is_resolved_and_confined() {
+        // `Location` may be relative (RFC 7231). It must resolve against the
+        // CURRENT url and still be re-confined, not silently dropped.
+        let (agent, seen) = mock_agent(|i, _| match i {
+            0 => "HTTP/1.1 302 Found\r\nLocation: /o/r/releases/download/a.zip\r\n\r\n".to_string(),
+            _ => "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_string(),
+        });
+
+        let resp = confined_get_with(&agent, API_URL, &[]).expect("relative redirect resolves");
+        assert_eq!(resp.status(), 200);
+        let urls = seen_urls(&seen);
+        assert_eq!(
+            urls[1], "https://api.github.com/o/r/releases/download/a.zip",
+            "a relative Location must resolve against the current url; saw {urls:?}"
+        );
+    }
+
+    #[test]
+    fn a_redirect_without_a_location_header_is_an_error() {
+        let (agent, _seen) =
+            mock_agent(|_, _| "HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n".to_string());
+        let err = confined_get_with(&agent, API_URL, &[])
+            .expect_err("a 302 with no Location must not be silently treated as a body");
+        assert!(
+            err.contains("without Location"),
+            "expected a missing-Location error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn every_request_carries_the_exact_telemetry_free_headers() {
+        // The module doc claims "telemetry-free by construction: every request
+        // sends only a generic User-Agent (app name + version)". That claim was
+        // asserted by NO test. This pins it on the REQUEST AS THE TRANSPORT SEES
+        // IT — i.e. what would actually go on the wire — for BOTH hops, since a
+        // redirect must not silently drop or mutate the headers either.
+        let (agent, seen) = mock_agent(|i, _| match i {
+            0 => "HTTP/1.1 302 Found\r\nLocation: https://codeload.github.com/a.zip\r\n\r\n"
+                .to_string(),
+            _ => "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_string(),
+        });
+
+        confined_get_with(
+            &agent,
+            API_URL,
+            &[
+                ("Accept", GITHUB_ACCEPT),
+                ("X-GitHub-Api-Version", GITHUB_API_VERSION),
+            ],
+        )
+        .expect("confined chain succeeds");
+
+        let log = seen.lock().expect("seen log poisoned").clone();
+        assert_eq!(log.len(), 2, "expected both hops to be dispatched");
+
+        for (hop, req) in log.iter().enumerate() {
+            assert_eq!(
+                req.header("User-Agent"),
+                Some(USER_AGENT),
+                "hop {hop} must carry the generic User-Agent"
+            );
+            assert_eq!(
+                req.header("Accept"),
+                Some(GITHUB_ACCEPT),
+                "hop {hop} must carry the Accept header"
+            );
+            assert_eq!(
+                req.header("X-GitHub-Api-Version"),
+                Some(GITHUB_API_VERSION),
+                "hop {hop} must carry the API-version header"
+            );
+
+            // ZERO-TELEMETRY: nothing BEYOND the known headers may ride along.
+            // This is the assertion that would catch a future change slipping an
+            // install-id / machine fingerprint / auth token onto the wire — the
+            // whole point of the "no identifiers" claim.
+            //
+            // `accept-encoding: gzip` is in this list because ureq's `gzip`
+            // feature adds it to every request BEFORE the middleware chain runs
+            // (it is not set by our code). It is content negotiation only and
+            // carries no identifier, so it is benign — but it IS on the wire,
+            // and this list documents what actually goes out rather than what we
+            // wish went out. `Host` is added later, inside `unit::connect`, and
+            // so is not visible at this seam.
+            let mut names: Vec<String> = req
+                .headers
+                .iter()
+                .map(|(k, _)| k.to_ascii_lowercase())
+                .collect();
+            names.sort();
+            assert_eq!(
+                names,
+                vec![
+                    "accept",
+                    "accept-encoding",
+                    "user-agent",
+                    "x-github-api-version"
+                ],
+                "hop {hop} sent unexpected header(s) — telemetry-free claim broken: {:?}",
+                req.headers
+            );
+        }
+
+        // The User-Agent is app name + version ONLY: no OS, arch, or machine id.
+        assert_eq!(
+            USER_AGENT,
+            concat!("c0pl4nd-updater/", env!("CARGO_PKG_VERSION")),
+            "the User-Agent must stay app-name/version with no fingerprint"
+        );
+    }
+
+    #[test]
+    fn download_asset_refuses_a_declared_size_over_the_cap() {
+        // A hostile endpoint declaring a multi-GB body must be refused on the
+        // HEADER, before `into_reader` and before any allocation sized from it.
+        let over = MAX_DOWNLOAD_BYTES + 1;
+        let (agent, _seen) =
+            mock_agent(move |_, _| format!("HTTP/1.1 200 OK\r\nContent-Length: {over}\r\n\r\n"));
+
+        let err = download_asset_with(&agent, "https://codeload.github.com/a.zip", |_, _| {})
+            .expect_err("a declared size over the cap must be refused");
+
+        assert!(
+            err.contains("refusing download") && err.contains("exceeds cap"),
+            "expected a declared-size refusal, got: {err}"
+        );
+        assert!(
+            err.contains(&over.to_string()),
+            "the refusal should report the declared size, got: {err}"
+        );
+    }
+
+    #[test]
+    fn download_asset_declared_size_check_is_exclusive_at_the_cap_boundary() {
+        // Boundary control for the test above: the check is `>` not `>=`, so a
+        // body declaring EXACTLY the cap must get PAST the declared-size gate.
+        //
+        // We cannot send a real 256 MiB body, so we assert the boundary
+        // NEGATIVELY: declare exactly the cap, send a short body, and require
+        // that whatever error comes back is NOT the declared-size refusal. That
+        // proves control flow reached `into_reader` — i.e. the gate let it
+        // through. Widening the gate to `>=` makes this fail with
+        // "refusing download ... exceeds cap", which is exactly the regression
+        // this pins. (The read then fails on ureq's own Content-Length
+        // enforcement; that error is the EVIDENCE of passage, not the subject.)
+        let (agent, _seen) = mock_agent(|_, _| {
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {MAX_DOWNLOAD_BYTES}\r\n\r\n")
+        });
+
+        let err = download_asset_with(&agent, "https://codeload.github.com/a.zip", |_, _| {})
+            .expect_err("the short body cannot satisfy the declared length");
+        assert!(
+            !err.contains("exceeds cap"),
+            "a declared size exactly AT the cap must pass the gate (`>` not `>=`), got: {err}"
+        );
+        assert!(
+            err.contains("read failed"),
+            "expected the failure to come from the read stage, proving the \
+             declared-size gate was passed, got: {err}"
+        );
+    }
+
+    #[test]
+    fn download_asset_streams_a_legitimate_body_and_reports_progress() {
+        // The success control for the whole `download_asset_with` path: without
+        // it, a `download_asset_with` that refused EVERYTHING would satisfy both
+        // cap tests above.
+        let body = "c0pl4nd-archive-bytes";
+        let (agent, _seen) = mock_agent(move |_, _| {
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        });
+
+        let mut last = (0u64, 0u64);
+        let got = download_asset_with(&agent, "https://codeload.github.com/a.zip", |d, t| {
+            last = (d, t)
+        })
+        .expect("a legitimate download must succeed");
+
+        assert_eq!(got, body.as_bytes());
+        assert_eq!(
+            last,
+            (body.len() as u64, body.len() as u64),
+            "progress must report the streamed and declared sizes"
+        );
     }
 
     #[test]
