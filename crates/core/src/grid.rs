@@ -700,6 +700,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ich_dch_ech_ignore_out_of_bounds_coords() {
+        // insert_blanks / delete_chars / erase_chars each guard against a row or
+        // col past the grid before indexing. Removing the guard panics on the
+        // slice index, so an out-of-bounds call must be a silent no-op that
+        // leaves every existing cell (and the damage flag) untouched.
+        let mut g = Grid::new(2, 3);
+        g.set(
+            0,
+            0,
+            Cell {
+                c: 'A',
+                ..Default::default()
+            },
+        );
+        g.set(
+            1,
+            2,
+            Cell {
+                c: 'Z',
+                ..Default::default()
+            },
+        );
+        g.clear_damage();
+        for (r, c) in [(5usize, 0usize), (0usize, 9usize), (99usize, 99usize)] {
+            g.insert_blanks(r, c, 2);
+            g.delete_chars(r, c, 2);
+            g.erase_chars(r, c, 2);
+        }
+        assert_eq!(g.cell(0, 0).unwrap().c, 'A', "OOB op must not mutate cells");
+        assert_eq!(g.cell(1, 2).unwrap().c, 'Z');
+        assert!(
+            !g.is_damaged(),
+            "an out-of-bounds no-op must not mark damage"
+        );
+    }
+
+    #[test]
     fn new_grid_is_blank_and_damaged() {
         let g = Grid::new(3, 4);
         assert_eq!(g.rows(), 3);

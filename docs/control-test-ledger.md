@@ -142,16 +142,21 @@ The core VT-correctness + DoS-cap fixes (PR #169) carry their own
 scrollback ×2, the six queue/cap DoS tests). See `GAP_LIST.md` §
 "Whole-app audit-and-fix program (2026-06-12)".
 
-## Milestone 3+ (planned controls — tests required before "done")
+## Milestone 3+ (planned controls) — reconciled 2026-07-16
 
-| Control | Asserted outcome | Status |
-|---|---|---|
-| Tab middle-click | tab/pane closes | ⬜ |
-| Tab drag A→B | order changes | ⬜ |
-| Settings: theme dropdown | runtime visuals change | ⬜ |
-| Settings: opacity slider | window opacity changes | ⬜ |
-| Settings: acrylic toggle | backdrop toggles | ⬜ |
-| Settings: font size | grid cell size changes | ⬜ |
-| Command palette | command executes | ⬜ |
-| Scrollback (mouse-wheel) | view offset moves off the live bottom (see Milestone 2.2 `scroll_view_moves_the_scrollback_offset`) | ✅ |
-| Copy / paste | clipboard round-trips to PTY | ⬜ |
+The rows below were planned before the interaction suites landed; an audit
+against the actual test files (`crates/app/tests/egui_*.rs`) shows every real
+control is now covered. Two rows describe interactions this UI deliberately does
+NOT implement (they are marked `n/a`, not left as open work).
+
+| Control | Asserted outcome | Status | Test |
+|---|---|---|---|
+| Tab middle-click | tab/pane closes | n/a | Not a feature — middle-click is wired to PTY mouse reporting (`egui_app/mod.rs`), not tab-close. Tabs close via the close button (`clicking_tab_close_removes_the_pane`). |
+| Tab drag A→B | order changes | n/a | Not a feature — there is no tab drag-to-reorder in this per-cell tab UI (only BiDi text reordering exists). |
+| Settings: theme dropdown | runtime visuals change | ✅ | `picking_a_theme_in_the_combo_changes_the_live_config`, `picking_a_light_theme_flips_the_whole_ui_light` (egui_settings) |
+| Settings: opacity slider | window opacity changes | ✅ | `the_opacity_slider_changes_the_live_config` (egui_settings) |
+| Settings: acrylic toggle | backdrop toggles | ✅ | `toggling_the_tint_wash_checkbox_flips_the_live_config` (egui_settings) — the "Enable tint wash" checkbox is the acrylic/backdrop control |
+| Settings: font size | grid cell size changes | ✅ | `clicking_the_font_size_slider_changes_the_live_config` (egui_settings), `ctrl_plus_minus_zero_zooms_the_grid_font` (egui_chrome) |
+| Command palette | command executes | ✅ | `selecting_and_running_a_palette_entry_runs_it_and_closes` (egui_palette) |
+| Scrollback (mouse-wheel) | view offset moves off the live bottom (see Milestone 2.2 `scroll_view_moves_the_scrollback_offset`) | ✅ | `mouse_wheel_scrolls_the_pane_scrollback` (egui_window_mgmt) |
+| Copy / paste | clipboard round-trips to PTY | ✅ | `singleline_paste_reaches_the_pty`, `multiline_paste_is_deferred_until_confirmed` (egui_terminal), `ctrl_shift_a_copies_the_whole_buffer_to_the_clipboard` (egui_window_mgmt) |
