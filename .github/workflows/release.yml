@@ -77,7 +77,7 @@ jobs:
     steps:
       - name: Harden the runner (egress audit)
         # step-security/harden-runner@v2.19.4
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920
         with:
           egress-policy: audit
 
@@ -102,7 +102,7 @@ jobs:
         # only — it does not change the binary's runtime behavior or add a
         # runtime dependency.
         # taiki-e/install-action@v2.79.10 — reproducible prebuilt-tool install.
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853
         with:
           tool: cargo-auditable
 
@@ -233,7 +233,7 @@ jobs:
     steps:
       - name: Harden the runner (egress audit)
         # step-security/harden-runner@v2.19.4
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920
         with:
           egress-policy: audit
 
@@ -350,7 +350,7 @@ jobs:
       attestations: write
     steps:
       - name: Harden the runner (egress audit)
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920
         with:
           egress-policy: audit
       - name: Checkout C0PL4ND (assets + licenses)
@@ -465,7 +465,7 @@ jobs:
     steps:
       - name: Harden the runner (egress audit)
         # step-security/harden-runner@v2.19.4
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920
         with:
           egress-policy: audit
 
@@ -734,14 +734,14 @@ jobs:
             release/SHA256SUMS
 
       - name: Create GitHub Release
-        # softprops/action-gh-release@v2.6.2
+        # softprops/action-gh-release@v3.0.2
         # zizmor: ignore[superfluous-actions]
         # Deliberate: this action is SHA-pinned, gives declarative asset globs
         # (`files: release/*`), `generate_release_notes`, and prerelease
         # detection that a hand-rolled `gh release create` script would have to
         # re-implement. The functionality overlaps the runner's `gh` CLI but the
         # ergonomic + auditable surface is worth keeping; no security delta.
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
         with:
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}

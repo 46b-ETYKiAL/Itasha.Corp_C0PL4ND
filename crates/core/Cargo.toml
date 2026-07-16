@@ -38,7 +38,7 @@ vte = "=0.15.0"
 # runs of plain printable bytes to the next ESC/control byte instead of scanning
 # scalar. Already in the lock graph transitively (via `regex`); exact-pinned per
 # dependency-management.md. Pure-Rust, no transitive deps.
-memchr = "=2.8.2"
+memchr = "=2.8.3"
 # PINNED to 0.8.x deliberately. 0.9.0 drops the unmaintained `serial` dep
 # (RUSTSEC-2017-0008) for `serial2`, but is KNOWN-BROKEN on Windows —
 # ConPTY `pty.read` returns garbage / the shell round-trip hangs
@@ -46,12 +46,12 @@ memchr = "=2.8.2"
 # as an accepted risk in .cargo/audit.toml; bump to >=0.9.x only once #6783 is
 # fixed and the Windows PTY round-trip verifies green.
 portable-pty = "=0.8.1"
-regex = "=1.12.4"
+regex = "=1.13.0"
 # East-Asian / wide-character width lookup (wcwidth). Pure data table, no
 # transitive deps — used by every serious terminal to advance the cursor by
 # 1 or 2 columns per printed grapheme.
 unicode-width = "=0.2.2"
-sysinfo = "=0.39.5"
+sysinfo = "=0.39.6"
 # PNG decoding for the Kitty graphics protocol (f=100). Default features are
 # disabled and only the `png` codec is enabled to keep the dependency surface
 # minimal — Kitty f=24/f=32 are decoded in-house and need no codec.
