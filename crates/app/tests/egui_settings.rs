@@ -428,6 +428,32 @@ fn the_opacity_slider_changes_the_live_config() {
 }
 
 #[test]
+fn toggling_the_tint_wash_checkbox_flips_the_live_config() {
+    // The "Enable tint wash" checkbox is the acrylic/backdrop control; it defaults
+    // ON. Its focus is covered in a11y.rs, but the click->config effect was not:
+    // clicking it must turn the live tint wash OFF, proving the Appearance toggle
+    // is wired to `config.tint_enabled` (kills a mutant that drops the checkbox
+    // binding). Closes the Milestone 3+ "acrylic toggle -> backdrop toggles" row.
+    let app = RefCell::new(C0pl4ndApp::bootstrap());
+    assert!(
+        app.borrow().config_tint_enabled(),
+        "precondition: the tint wash is enabled by default"
+    );
+    let mut h = harness(&app);
+
+    open_settings(&mut h);
+    select_category(&mut h, "Appearance");
+
+    h.get_by_label("Enable tint wash").click();
+    h.run();
+
+    assert!(
+        !app.borrow().config_tint_enabled(),
+        "clicking the tint-wash toggle must turn it OFF in the live config"
+    );
+}
+
+#[test]
 fn the_tint_strength_slider_changes_the_live_config() {
     // The tint wash is enabled by default (`tint_enabled == true`), so the tint
     // controls are live without any master toggle. Appearance renders sliders in

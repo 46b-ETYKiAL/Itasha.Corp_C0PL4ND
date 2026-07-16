@@ -312,6 +312,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normalize_flex_empty_slice_is_noop() {
+        // The empty-slice guard: normalizing zero children must return before the
+        // `1.0 / total` redistribution. Removing the guard divides by a zero
+        // total (NaN flex). An empty slice in / an empty slice out, no panic.
+        let mut empty: Vec<Child> = Vec::new();
+        normalize_flex(&mut empty);
+        assert!(empty.is_empty(), "normalizing no children stays a no-op");
+    }
+
+    #[test]
     fn new_layout_is_single_focused_leaf() {
         let l = Layout::new();
         assert_eq!(l.leaf_count(), 1);

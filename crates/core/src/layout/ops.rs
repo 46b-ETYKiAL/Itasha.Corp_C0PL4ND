@@ -351,6 +351,34 @@ fn equalize_in(node: &mut LayoutNode) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn reattach_at_root_never_loses_the_pane() {
+        // reattach_at_root is the safety net a move falls back to when its target
+        // vanishes (a "cannot happen for distinct leaves in a >=2-leaf tree" path
+        // that stays total anyway). Exercised directly: it must wrap the old root
+        // in a fresh split beside `leaf`, focus `leaf`, and keep every pane.
+        let mut l = Layout::new();
+        let b = l.alloc_id();
+        l.split(LeafId(0), Axis::Horizontal, b);
+        let before = l.leaf_count();
+        let rescued = l.alloc_id();
+        l.reattach_at_root(rescued, Axis::Vertical, true);
+        assert!(l.contains(rescued), "the rescued leaf must be present");
+        assert!(
+            l.contains(LeafId(0)) && l.contains(b),
+            "the pre-existing panes must survive the reattach"
+        );
+        assert_eq!(l.leaf_count(), before + 1, "no pane is lost or duplicated");
+        assert_eq!(l.focused, rescued, "reattach focuses the rescued leaf");
+        match &l.root {
+            LayoutNode::Split { axis, children } => {
+                assert_eq!(*axis, Axis::Vertical);
+                assert_eq!(children.len(), 2, "root wraps rescued + old root");
+            }
+            _ => panic!("root must be a split after reattach"),
+        }
+    }
+
     fn flex_sum_ok(node: &LayoutNode) -> bool {
         match node {
             LayoutNode::Leaf(_) => true,
