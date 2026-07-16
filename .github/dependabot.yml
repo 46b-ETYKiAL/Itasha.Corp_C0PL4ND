@@ -29,6 +29,20 @@ updates:
         versions: [">= 0.35.0"]
       - dependency-name: "egui_tiles"
         versions: [">= 0.16.0"]
+      # The GPU stack is pinned as ONE coordinated set to the wgpu-29 generation:
+      # eframe/egui-wgpu 0.34 (held above via egui) resolve wgpu 29.0.3, and
+      # glyphon 0.11 shares that single wgpu::Device (Cargo.toml §GPU anchor).
+      # glyphon 0.12 requires wgpu 30, which eframe 0.34 cannot use — taking it
+      # duplicates the ENTIRE wgpu/naga stack in the tree (wgpu 29 for eframe +
+      # wgpu 30 for glyphon), bloating the shipping binary and breaking the
+      # shared-Device invariant, for a crate only the legacy winit binary uses.
+      # Hold glyphon + wgpu at the 29-generation until the whole stack (eframe →
+      # wgpu 30) is upgraded together. Re-enable with egui 0.35. PR #288 closed
+      # for this reason.
+      - dependency-name: "glyphon"
+        versions: [">= 0.12.0"]
+      - dependency-name: "wgpu"
+        versions: [">= 30.0.0"]
 
   # Keep pinned GitHub Actions SHAs current. Dependabot updates the SHA AND the
   # version comment, so the pin-by-SHA discipline is preserved automatically.
