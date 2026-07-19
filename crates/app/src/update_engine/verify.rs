@@ -137,6 +137,40 @@ pub fn verify_artifact_bound(
     public_key_box: &str,
     expected_asset: &str,
 ) -> Result<(), String> {
+    verify_artifact_bound_optional_sig(
+        bytes,
+        expected_sha256,
+        Some(sig_str),
+        public_key_box,
+        expected_asset,
+    )
+}
+
+/// Verify an artifact against the SIGNED-manifest digest (`expected_sha256`,
+/// ALWAYS enforced) and, WHEN a `.minisig` sidecar is present, its minisign
+/// signature bound to `expected_asset` (defense-in-depth).
+///
+/// The checksum gate is authoritative: the digest is pinned by the manifest,
+/// which is itself minisign-verified against the embedded key BEFORE any asset
+/// is fetched. A bit-for-bit substitution is therefore impossible without a
+/// SHA-256 preimage, and a forged manifest is impossible without the release
+/// private key.
+///
+/// `sig_str == None` means the release ships NO per-artifact `.minisig` sidecar —
+/// the migration toward the signed-manifest-only asset set (fewer release
+/// assets). Verification then rests on the checksum gate ALONE, which loses no
+/// security because the manifest signature already authenticates that digest. A
+/// sidecar that is PRESENT but whose signature is invalid or bound to the WRONG
+/// asset is a tampering signal and is REJECTED (fail-closed). The checksum gate
+/// runs FIRST in every case, so a mismatching artifact never reaches the
+/// signature step.
+pub fn verify_artifact_bound_optional_sig(
+    bytes: &[u8],
+    expected_sha256: &str,
+    sig_str: Option<&str>,
+    public_key_box: &str,
+    expected_asset: &str,
+) -> Result<(), String> {
     if !verify_checksum(bytes, expected_sha256) {
         // SECURITY: a checksum mismatch means the downloaded bytes are NOT the
         // artifact the signed manifest pinned — corruption or substitution. Log
@@ -155,6 +189,19 @@ pub fn verify_artifact_bound(
         );
         return Err("checksum mismatch".to_string());
     }
+    let Some(sig_str) = sig_str else {
+        // No per-artifact sidecar shipped: the signed-manifest checksum gate
+        // above is authoritative. Record the fall-back so a skipped
+        // defense-in-depth layer is OBSERVABLE (never a silent swallow).
+        tracing::info!(
+            target: "c0pl4nd::update",
+            event = "verify_sidecarless",
+            asset = expected_asset,
+            artifact_bytes = bytes.len(),
+            "no .minisig sidecar present; verified against the signed-manifest SHA-256"
+        );
+        return Ok(());
+    };
     if let Err(e) = verify_signature_bound(bytes, sig_str, public_key_box, expected_asset) {
         // SECURITY: a minisign verification failure means the bytes were not
         // signed by the embedded release key (tampering, a forged sidecar, or a
@@ -309,6 +356,63 @@ mod tests {
             verify_artifact_bound(data, &sha, "untrusted comment: x\nbogus", &pk_box, asset)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn optional_sig_absent_verifies_via_pin_but_never_relaxes_integrity() {
+        // The signed-manifest-only migration: when NO `.minisig` sidecar ships
+        // (`sig = None`) the artifact is accepted on the AUTHORITATIVE
+        // signed-manifest SHA-256 ALONE — but a wrong/ tampered hash is still
+        // rejected, and a PRESENT-but-bogus signature still fails closed. Proves
+        // absence relaxes ONLY the redundant signature layer, never integrity.
+        let kp = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let pk_box = kp.pk.to_box().unwrap().to_string();
+        let data = b"signed-manifest-only archive bytes";
+        let sha = sha256_hex(data);
+        let asset = "c0pl4nd-x86_64-unknown-linux-gnu.tar.gz";
+
+        // No sidecar + correct signed hash → accepted (verified via the pin).
+        assert!(
+            verify_artifact_bound_optional_sig(data, &sha, None, &pk_box, asset).is_ok(),
+            "an absent sidecar must verify against the signed-manifest SHA-256"
+        );
+        // No sidecar + WRONG hash → rejected (the integrity gate always runs).
+        assert_eq!(
+            verify_artifact_bound_optional_sig(data, "deadbeef", None, &pk_box, asset).unwrap_err(),
+            "checksum mismatch"
+        );
+        // A tampered archive carrying the OLD pinned hash → rejected even without
+        // a sidecar (preimage resistance of the signed pin catches substitution).
+        let tampered = b"signed-manifest-only archive bytes (TAMPERED)";
+        assert_eq!(
+            verify_artifact_bound_optional_sig(tampered, &sha, None, &pk_box, asset).unwrap_err(),
+            "checksum mismatch"
+        );
+        // Sidecar PRESENT but bogus, correct hash → still fails closed (a present
+        // signature is ALWAYS enforced; absence is the only relaxation).
+        assert!(
+            verify_artifact_bound_optional_sig(
+                data,
+                &sha,
+                Some("untrusted comment: x\nbogus"),
+                &pk_box,
+                asset
+            )
+            .is_err(),
+            "a present-but-invalid signature must be rejected"
+        );
+        // Sidecar present + valid signature + correct hash → accepted (parity
+        // with the strict `verify_artifact_bound` path).
+        let sig = minisign::sign(
+            Some(&kp.pk),
+            &kp.sk,
+            std::io::Cursor::new(&data[..]),
+            Some("timestamp:1\tfile:c0pl4nd-x86_64-unknown-linux-gnu.tar.gz"),
+            Some("c"),
+        )
+        .unwrap()
+        .to_string();
+        assert!(verify_artifact_bound_optional_sig(data, &sha, Some(&sig), &pk_box, asset).is_ok());
     }
 
     #[test]
