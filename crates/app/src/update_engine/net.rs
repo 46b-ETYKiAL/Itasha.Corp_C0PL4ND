@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use super::verify::{verify_artifact_bound, EMBEDDED_PUBLIC_KEY};
+use super::verify::{verify_artifact_bound_optional_sig, EMBEDDED_PUBLIC_KEY};
 use super::{manifest, update_state};
 
 /// Decompression-bomb guard: hard cap on the TOTAL number of uncompressed bytes
@@ -512,7 +512,7 @@ fn build_tier1_release_info(
     candidate: &semver::Version,
     target: &str,
 ) -> Result<ReleaseInfo, String> {
-    let (sig_url, sha_url) = sidecar_urls(raw, &masset.asset_name)?;
+    let (sig_url, sha_url) = sidecar_urls(raw, &masset.asset_name);
     if masset.sha256.trim().is_empty() {
         return Err(format!(
             "manifest archive {:?} has an empty sha256 — refusing",
@@ -544,22 +544,25 @@ fn build_tier1_release_info(
 /// them). A missing sidecar is a malformed release — fail-closed `Err`. Shared
 /// by the archive path ([`build_tier1_release_info`]) and the installer path
 /// ([`build_tier1_installer`]) so both bind their sidecars identically.
-fn sidecar_urls(raw: &RawRelease, asset_name: &str) -> Result<(String, String), String> {
-    let url_of = |name: &str| -> Option<String> {
+fn sidecar_urls(raw: &RawRelease, asset_name: &str) -> (String, String) {
+    let url_of = |name: &str| -> String {
         raw.assets
             .iter()
             .find(|a| a.name == name)
             .map(|a| a.browser_download_url.clone())
+            .unwrap_or_default()
     };
-    let sig_name = format!("{asset_name}.minisig");
-    let sha_name = format!("{asset_name}.sha256");
-    let sig_url = url_of(&sig_name).ok_or_else(|| {
-        format!("manifest asset {asset_name:?} is missing its .minisig sidecar in the release — refusing")
-    })?;
-    let sha_url = url_of(&sha_name).ok_or_else(|| {
-        format!("manifest asset {asset_name:?} is missing its .sha256 sidecar in the release — refusing")
-    })?;
-    Ok((sig_url, sha_url))
+    // An EMPTY url means the release does not enumerate that sidecar — the
+    // signed-manifest-only asset set (the migration that trims per-artifact
+    // `.minisig`/`.sha256`). The caller treats an empty url as "sidecar absent"
+    // and falls back to the AUTHORITATIVE signed-manifest SHA-256 (which the
+    // verified manifest already authenticates); a sidecar that IS enumerated is
+    // still fetched and fully verified (defense-in-depth). A missing sidecar is
+    // therefore never fatal here — the manifest pin is the load-bearing gate.
+    (
+        url_of(&format!("{asset_name}.minisig")),
+        url_of(&format!("{asset_name}.sha256")),
+    )
 }
 
 /// Build the verified-manifest, SHA-pinned self-elevating installer descriptor
@@ -578,7 +581,7 @@ fn build_tier1_installer(
     if masset.sha256.trim().is_empty() || masset.url.trim().is_empty() {
         return None;
     }
-    let (sig_url, sha_url) = sidecar_urls(raw, &masset.asset_name).ok()?;
+    let (sig_url, sha_url) = sidecar_urls(raw, &masset.asset_name);
     Some(InstallerAsset {
         url: masset.url.clone(),
         asset_name: masset.asset_name.clone(),
@@ -790,6 +793,28 @@ fn download_small_capped(url: &str, cap: u64) -> Result<Vec<u8>, String> {
         .read_to_end(&mut buf)
         .map_err(|e| format!("read failed for {url}: {e}"))?;
     Ok(buf)
+}
+
+/// Fetch a per-artifact sidecar (`.minisig` / `.sha256`) that MAY be absent.
+///
+/// The migration boundary is deterministic and lives in the RELEASE, not the
+/// network: an EMPTY `url` means the release does not enumerate the sidecar (the
+/// signed-manifest-only asset set) → `Ok(None)`, and the caller falls back to the
+/// AUTHORITATIVE signed-manifest SHA-256. When the release DOES enumerate the
+/// sidecar (`url` non-empty) it is fetched over the https/host-confined path and
+/// returned as text; a TLS/fetch/UTF-8 failure there is a genuine error and fails
+/// CLOSED (`Err`) — so defense-in-depth is preserved verbatim for as long as
+/// sidecars ship, and only a release that intentionally omits them relaxes to the
+/// manifest-pin gate.
+fn fetch_optional_sidecar_text(url: &str, kind: &str) -> Result<Option<String>, String> {
+    if url.trim().is_empty() {
+        return Ok(None);
+    }
+    assert_https(url)?;
+    let bytes = download_small(url)?;
+    let text =
+        String::from_utf8(bytes).map_err(|e| format!("{kind} sidecar is not valid UTF-8: {e}"))?;
+    Ok(Some(text))
 }
 
 /// Blocking GET of a large asset, streaming the body to drive `progress`
@@ -1012,43 +1037,50 @@ fn download_verify_extract_inner(
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(staging_dir).map_err(|e| format!("failed to create staging dir: {e}"))?;
 
-    // Defense-in-depth (audit #6): assert every download URL is https BEFORE
-    // any fetch. The GitHub API base is hardcoded https, but these three URLs
-    // are `browser_download_url` values taken verbatim from the JSON response.
+    // Defense-in-depth (audit #6): assert EVERY download URL is https BEFORE any
+    // fetch. A present (non-empty) sidecar url is https-checked upfront too, so a
+    // downgraded sidecar url is refused before any network I/O; an ABSENT sidecar
+    // (empty url — the signed-manifest-only asset set) is simply skipped.
     assert_https(&info.asset_url)?;
-    assert_https(&info.sig_url)?;
-    assert_https(&info.sha_url)?;
+    if !info.sig_url.trim().is_empty() {
+        assert_https(&info.sig_url)?;
+    }
+    if !info.sha_url.trim().is_empty() {
+        assert_https(&info.sha_url)?;
+    }
 
-    // Big asset (streamed for progress) + the two tiny sidecars.
+    // Big asset (streamed for progress) + the two tiny sidecars, fetched
+    // best-effort: a release that ENUMERATES them is fully verified; a release
+    // that OMITS them (empty url — the signed-manifest-only asset set) falls back
+    // to the authoritative signed-manifest pin.
     let asset_bytes = download_asset(&info.asset_url, progress)?;
-    let sig_bytes = download_small(&info.sig_url)?;
-    let sha_text = download_small(&info.sha_url)?;
+    let sig_str = fetch_optional_sidecar_text(&info.sig_url, "minisig")?;
+    let sha_text = fetch_optional_sidecar_text(&info.sha_url, "sha256")?;
 
-    // The .sha256 sidecar is text — either a bare hex digest or the
-    // `<hex>  <filename>` `sha256sum` form. Take the first whitespace token.
-    let sha_str = String::from_utf8(sha_text)
-        .map_err(|e| format!("sha256 sidecar is not valid UTF-8: {e}"))?;
-    let sidecar_sha = sha_str
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| "sha256 sidecar was empty".to_string())?;
+    // The manifest's SIGNED digest is authoritative. When the `.sha256` sidecar
+    // is present it must AGREE (defense-in-depth — a disagreement fails closed);
+    // when absent, the signed pin stands alone. Every `ReleaseInfo` carries a
+    // pin, so the download is always bound to the signed hash.
+    let expected_sha = match sha_text.as_deref() {
+        Some(text) => {
+            // `.sha256` is a bare hex digest or the `<hex>  <file>` `sha256sum`
+            // form — take the first whitespace token.
+            let sidecar_sha = text
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| "sha256 sidecar was empty".to_string())?;
+            resolve_expected_sha(&info.pinned_sha256, sidecar_sha)?
+        }
+        None => info.pinned_sha256.trim(),
+    };
 
-    // The manifest's SIGNED digest is authoritative and the sidecar must AGREE
-    // (defense-in-depth — a disagreement fails closed). Every `ReleaseInfo`
-    // carries a pin, so the download is always bound to the signed hash.
-    let expected_sha = resolve_expected_sha(&info.pinned_sha256, sidecar_sha)?;
-
-    let sig_str =
-        String::from_utf8(sig_bytes).map_err(|e| format!("minisig is not valid UTF-8: {e}"))?;
-
-    // SHA-256 THEN minisign against the embedded public key, with the
-    // signature's trusted-comment `file:` token bound to the resolved asset
-    // name (defense-in-depth against same-key wrong-artifact substitution).
-    // Fails closed.
-    verify_artifact_bound(
+    // SHA-256 (ALWAYS, against the signed pin) THEN minisign WHEN a sidecar is
+    // present, its trusted-comment `file:` token bound to the resolved asset name
+    // (defense-in-depth against same-key wrong-artifact substitution). Fails closed.
+    verify_artifact_bound_optional_sig(
         &asset_bytes,
         expected_sha,
-        &sig_str,
+        sig_str.as_deref(),
         EMBEDDED_PUBLIC_KEY,
         &info.asset_name,
     )?;
@@ -1085,35 +1117,42 @@ fn download_verify_installer_inner(
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(staging_dir).map_err(|e| format!("failed to create staging dir: {e}"))?;
 
-    // Defense-in-depth (audit #6): assert every download URL is https BEFORE any
-    // fetch — the same TLS-downgrade guard the archive path applies.
+    // Defense-in-depth (audit #6): assert EVERY download URL is https BEFORE any
+    // fetch — a present sidecar url upfront (refused before network I/O), an
+    // absent one (empty url) simply skipped.
     assert_https(&installer.url)?;
-    assert_https(&installer.sig_url)?;
-    assert_https(&installer.sha_url)?;
+    if !installer.sig_url.trim().is_empty() {
+        assert_https(&installer.sig_url)?;
+    }
+    if !installer.sha_url.trim().is_empty() {
+        assert_https(&installer.sha_url)?;
+    }
 
     let exe_bytes = download_asset(&installer.url, progress)?;
-    let sig_bytes = download_small(&installer.sig_url)?;
-    let sha_text = download_small(&installer.sha_url)?;
+    let sig_str = fetch_optional_sidecar_text(&installer.sig_url, "minisig")?;
+    let sha_text = fetch_optional_sidecar_text(&installer.sha_url, "sha256")?;
 
-    let sha_str = String::from_utf8(sha_text)
-        .map_err(|e| format!("sha256 sidecar is not valid UTF-8: {e}"))?;
-    let sidecar_sha = sha_str
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| "sha256 sidecar was empty".to_string())?;
-    // The manifest's SIGNED digest is authoritative; the sidecar must AGREE.
-    let expected_sha = resolve_expected_sha(&installer.pinned_sha256, sidecar_sha)?;
-    let sig_str =
-        String::from_utf8(sig_bytes).map_err(|e| format!("minisig is not valid UTF-8: {e}"))?;
+    // The manifest's SIGNED digest is authoritative; a present `.sha256` sidecar
+    // must AGREE (defense-in-depth), an absent one leaves the signed pin alone.
+    let expected_sha = match sha_text.as_deref() {
+        Some(text) => {
+            let sidecar_sha = text
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| "sha256 sidecar was empty".to_string())?;
+            resolve_expected_sha(&installer.pinned_sha256, sidecar_sha)?
+        }
+        None => installer.pinned_sha256.trim(),
+    };
 
-    // SHA-256 THEN minisign against the embedded public key, with the
-    // signature's trusted-comment `file:` token bound to the installer asset
-    // name (defense-in-depth against same-key wrong-artifact substitution).
-    // Fails closed — IDENTICAL gate to the tar.gz/zip archive path.
-    verify_artifact_bound(
+    // SHA-256 (ALWAYS, against the signed pin) THEN minisign WHEN a sidecar is
+    // present, its trusted-comment `file:` token bound to the installer asset
+    // name (defense-in-depth against same-key wrong-artifact substitution). Fails
+    // closed — IDENTICAL gate to the tar.gz/zip archive path.
+    verify_artifact_bound_optional_sig(
         &exe_bytes,
         expected_sha,
-        &sig_str,
+        sig_str.as_deref(),
         EMBEDDED_PUBLIC_KEY,
         &installer.asset_name,
     )?;
@@ -2329,14 +2368,21 @@ mod tests {
     }
 
     #[test]
-    fn tier1_errs_when_manifest_archive_sidecars_absent() {
-        // A manifest-bearing release whose archive lacks its `.minisig`/`.sha256`
-        // sidecars is malformed → fail-closed (we keep the per-asset sidecar
-        // verification as defense-in-depth, so the sidecars MUST exist).
+    fn tier1_tolerates_absent_archive_sidecars_via_signed_manifest_hash() {
+        // The signed-manifest-only migration: a manifest-bearing release whose
+        // archive OMITS its `.minisig`/`.sha256` sidecars resolves SUCCESSFULLY —
+        // the sidecar urls come back EMPTY and verification falls back to the
+        // authoritative signed-manifest SHA-256 (the manifest is itself
+        // minisign-verified, so the pin is trusted). Reverses the old
+        // fail-closed-on-absent-sidecar behavior on purpose.
         let target = "x86_64-unknown-linux-gnu";
         let mut raw = tier1_raw(target, ".tar.gz", "v0.4.9");
-        raw.assets
-            .retain(|a| !a.name.ends_with(".minisig") || a.name == "latest.json.minisig");
+        // Drop the archive's own .minisig AND .sha256 sidecars; keep the archive
+        // itself and the REQUIRED signed manifest pair.
+        raw.assets.retain(|a| {
+            a.name == "latest.json.minisig"
+                || (!a.name.ends_with(".minisig") && !a.name.ends_with(".sha256"))
+        });
         let m = tier1_manifest(
             target,
             ".tar.gz",
@@ -2348,9 +2394,23 @@ mod tests {
             "abc",
         );
         let current = semver::Version::parse("0.4.5").unwrap();
-        let err = resolve_tier1_update(&raw, &m, &current, target, ".tar.gz", 0, 0)
-            .expect_err("a missing archive sidecar must be refused");
-        assert!(err.contains("missing its .minisig"), "got: {err}");
+        let info = resolve_tier1_update(&raw, &m, &current, target, ".tar.gz", 0, 0)
+            .expect("absent archive sidecars must not error")
+            .expect("an in-range update must still be offered");
+        assert!(
+            info.sig_url.is_empty(),
+            "sig_url must be empty when the .minisig sidecar is absent, got {:?}",
+            info.sig_url
+        );
+        assert!(
+            info.sha_url.is_empty(),
+            "sha_url must be empty when the .sha256 sidecar is absent, got {:?}",
+            info.sha_url
+        );
+        assert!(
+            !info.pinned_sha256.is_empty(),
+            "the signed-manifest digest must still be pinned"
+        );
     }
 
     #[test]
@@ -2363,6 +2423,23 @@ mod tests {
         let err = resolve_expected_sha("aaaa", "bbbb")
             .expect_err("a manifest/sidecar disagreement must fail closed");
         assert!(err.contains("disagreement"), "got: {err}");
+    }
+
+    #[test]
+    fn fetch_optional_sidecar_text_absent_is_none_and_http_is_refused() {
+        // An EMPTY url — a release that does not enumerate the sidecar (the
+        // signed-manifest-only asset set) — resolves to None WITHOUT any network
+        // call, so the caller falls back to the authoritative signed-manifest pin.
+        assert!(fetch_optional_sidecar_text("", "minisig")
+            .unwrap()
+            .is_none());
+        assert!(fetch_optional_sidecar_text("   ", "sha256")
+            .unwrap()
+            .is_none());
+        // A NON-empty http:// url is refused BEFORE any fetch (the TLS-downgrade
+        // guard) — an ENUMERATED sidecar is still held to the https bar, so
+        // tolerating absence never tolerates a downgraded fetch.
+        assert!(fetch_optional_sidecar_text("http://evil.example/x.minisig", "minisig").is_err());
     }
 
     #[test]
@@ -2387,11 +2464,14 @@ mod tests {
         let real_sha = sha256_hex(data);
 
         // The genuine (manifest-matching) sha → accepted.
-        assert!(verify_artifact_bound(data, &real_sha, &sig, &pk_box, asset).is_ok());
+        assert!(
+            verify_artifact_bound_optional_sig(data, &real_sha, Some(&sig), &pk_box, asset).is_ok()
+        );
         // A WRONG pinned sha (attacker swapped the asset under the same key) → rejected.
         let wrong = "0".repeat(64);
         assert_eq!(
-            verify_artifact_bound(data, &wrong, &sig, &pk_box, asset).unwrap_err(),
+            verify_artifact_bound_optional_sig(data, &wrong, Some(&sig), &pk_box, asset)
+                .unwrap_err(),
             "checksum mismatch"
         );
     }

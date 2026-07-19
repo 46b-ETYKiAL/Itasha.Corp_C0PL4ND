@@ -8,6 +8,28 @@ Full per-release artifacts (signed binaries, SBOMs, provenance) are on the
 [GitHub Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases)
 page.
 
+## [0.4.23]
+
+### Changed — leaner release assets + auto-update verification
+
+- **Auto-update now verifies against the signed manifest hash, tolerating an
+  absent per-artifact `.minisig`/`.sha256` sidecar.** The `latest.json` manifest
+  is minisign-verified and pins each asset's SHA-256; the updater treats that pin
+  as the authoritative integrity+authenticity gate and verifies the per-artifact
+  `.minisig` only when present (a present-but-invalid signature still fails
+  closed). This loses no security — a substitution is impossible without a SHA-256
+  preimage, and a forged manifest is impossible without the release key — and lets
+  future releases ship a smaller asset set. Deployed clients are unaffected (the
+  sidecars are still published).
+- **Trimmed the release asset list.** Dropped the redundant `*.sha256.minisig`
+  (a signature over a checksum — the signed `SHA256SUMS` already covers it) and
+  the SBOM / build-provenance `.minisig` (covered by the release's SLSA
+  attestation), and consolidated the three per-crate SBOMs into the single
+  top-level `c0pl4nd.cdx.json` (the dependency superset). The per-binary
+  `.minisig` + `.sha256` remain for now so already-deployed clients keep
+  auto-updating; they are removed in a later release once the manifest-hash
+  updater has aged in.
+
 ## [0.4.22]
 
 ### Added

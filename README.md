@@ -93,8 +93,12 @@ installer is x64-only for now, so ARM64 ships as the portable archive.
 
 #### Verify your download
 
-Every release asset ships a `.sha256` checksum and a minisign `.minisig`
-signature so you can confirm the file is exactly what CI built.
+Every downloadable binary, archive, and installer ships a `.sha256` checksum and
+a minisign `.minisig` signature so you can confirm the file is exactly what CI
+built; the aggregate `SHA256SUMS` (with its own `SHA256SUMS.minisig`) covers them
+all in one signed manifest. (The SBOM and build-provenance files are covered by
+the release's SLSA attestation — `gh attestation verify` — and listed in
+`SHA256SUMS`.)
 
 **Checksum (PowerShell):**
 
@@ -130,8 +134,9 @@ cd c0pl4nd-*-unknown-linux-gnu
 ./c0pl4nd
 ```
 
-Each release asset has a `.sha256` and a minisign `.minisig` sibling — verify
-the same way as the [Windows steps above](#verify-your-download). A working GPU
+Each binary/archive has a `.sha256` and a minisign `.minisig` sibling (or verify
+against the signed `SHA256SUMS`) — verify the same way as the
+[Windows steps above](#verify-your-download). A working GPU
 (Vulkan, or OpenGL 3.3+) is required — see
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md) if the window won't open.
 
@@ -153,8 +158,9 @@ cd c0pl4nd-*-apple-darwin
 > Anyway**, or `xattr -d com.apple.quarantine ./c0pl4nd` after extracting. This
 > does not weaken update security — every asset and the update manifest are
 > minisign-signed (Ed25519) and SLSA-attested, and the in-app updater verifies
-> them before installing. Each asset has `.sha256` + `.minisig` siblings; verify
-> the [same way as above](#verify-your-download).
+> them before installing. Each binary/archive has `.sha256` + `.minisig` siblings
+> (or verify against the signed `SHA256SUMS`); verify the
+> [same way as above](#verify-your-download).
 
 ---
 
