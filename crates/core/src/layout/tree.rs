@@ -312,10 +312,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_flex_empty_slice_is_noop() {
-        // The empty-slice guard: normalizing zero children must return before the
-        // `1.0 / total` redistribution. Removing the guard divides by a zero
-        // total (NaN flex). An empty slice in / an empty slice out, no panic.
+    fn normalize_flex_empty_slice_does_not_panic() {
+        // Defensive regression guard: normalize_flex on an empty slice must not
+        // panic and must leave it empty. NB the `if children.is_empty()` early
+        // return is an EQUIVALENT mutant for this input — with it removed, n=0,
+        // sum=0 routes into the degenerate branch, `1.0/0.0` is `inf`, and the
+        // redistribution loop then iterates ZERO children, so empty-in stays
+        // empty-out either way (verified: deleting the guard leaves this test
+        // green). The real value is catching a FUTURE refactor that indexes
+        // `children[0]` unconditionally, which WOULD panic on empty.
         let mut empty: Vec<Child> = Vec::new();
         normalize_flex(&mut empty);
         assert!(empty.is_empty(), "normalizing no children stays a no-op");
