@@ -422,7 +422,7 @@ jobs:
   ci-gate:
     name: CI Gate
     runs-on: ubuntu-latest
-    needs: [test, lint, msrv, security]
+    needs: [test, lint, msrv, security, flaky-gate-live, visual-qa]
     if: always()
     steps:
       - name: Verify all required jobs succeeded
@@ -433,6 +433,8 @@ jobs:
             [lint]="${{ needs.lint.result }}"
             [msrv]="${{ needs.msrv.result }}"
             [security]="${{ needs.security.result }}"
+            [flaky-gate-live]="${{ needs.flaky-gate-live.result }}"
+            [visual-qa]="${{ needs.visual-qa.result }}"
           )
           failed=0
           for job in "${!results[@]}"; do
