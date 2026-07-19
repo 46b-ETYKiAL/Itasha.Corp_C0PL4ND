@@ -8,6 +8,34 @@ Full per-release artifacts (signed binaries, SBOMs, provenance) are on the
 [GitHub Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases)
 page.
 
+## [0.4.22]
+
+### Added
+
+- **Always-on-top window toggle.** A new window option keeps C0PL4ND pinned
+  above other windows (SCR1B3 parity).
+
+### Changed — dependencies
+
+- Batched dependabot updates (codeql-action 4.37.0, pollster 1.0, and the cargo
+  minor-patch group: regex 1.13.1, toml 1.1.3, wgpu 29.0.4, …). The GPU stack
+  (eframe / egui / wgpu / winit / glyphon) is deliberately held as one
+  coordinated set — glyphon `< 0.12` and wgpu `< 30` — so a same-generation
+  patch never splits the single shared `wgpu::Device`.
+
+### Internal — test & CI honesty hardening
+
+- Raised coverage (core ≈97%, app line floor 78 → 80) and made three silently
+  vacuous gates real: cargo-mutants now reads its config (relocated to
+  `.cargo/mutants.toml`), nextest fails rerun-masked flakes (`flaky-result =
+  "fail"`, proven by a live bidirectional canary), and the reporting-coverage
+  job measures the right target (`--lib`, not `--bin`).
+- The `CI Gate` aggregator now transitively requires the flaky canary and the
+  visual-QA render job, so a future silent disarm of either blocks the merge.
+- Reconciled `docs/control-test-ledger.md`: repointed seven ✅ rows that cited
+  non-existent test names to the real tests, and replaced a vacuous
+  equivalent-mutant test with an honestly-documented defensive one.
+
 ## [0.4.21]
 
 ### Added — frosted glass
