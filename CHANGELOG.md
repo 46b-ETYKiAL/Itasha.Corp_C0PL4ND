@@ -8,6 +8,19 @@ Full per-release artifacts (signed binaries, SBOMs, provenance) are on the
 [GitHub Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases)
 page.
 
+## [0.4.25]
+
+### Fixed
+
+- **Clear "too old — reinstall" update message.** When an installed build is
+  below the update manifest's `minimum_version` floor, the updater refuses the
+  in-place hop by design. That refusal was being shown with the generic
+  "Couldn't confirm the update details from GitHub. Try again later…" copy —
+  misleadingly implying a transient error. It now shows a clear, actionable
+  message: *"This installed version is too old to auto-update in place. Download
+  the latest installer from the official GitHub releases page and reinstall once —
+  automatic updates will work normally afterward."*
+
 ## [0.4.24]
 
 ### Changed — release assets trimmed to the signed-manifest set (~13)
