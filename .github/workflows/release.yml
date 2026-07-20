@@ -576,7 +576,15 @@ jobs:
               "product": "c0pl4nd",
               "version": ver,
               "release_index": release_index,
-              "minimum_version": "0.4.0",
+              # Raised to 0.4.23 (the first sidecar-tolerant updater,
+              # verify_artifact_bound_optional_sig) BECAUSE this release stops
+              # shipping the per-binary .minisig/.sha256. A client below this floor
+              # (a pre-0.4.23 updater that still REQUIRES those sidecars) is told
+              # "a fresh install is required" — a graceful message emitted BEFORE
+              # it resolves a now-absent sidecar — instead of a cryptic
+              # missing-sidecar failure. v0.4.23+ clients verify via the signed
+              # manifest SHA-256 and auto-update seamlessly.
+              "minimum_version": "0.4.23",
               "published_utc": now.strftime(fmt),
               "valid_until_utc": (now + datetime.timedelta(days=14)).strftime(fmt),
               "assets": assets,
@@ -720,28 +728,38 @@ jobs:
 
       - name: Prune redundant signature sidecars before publish
         # The fail-closed sign+verify gate above signs and self-verifies EVERY
-        # asset (unchanged — the hardening is fully intact). We then drop the
-        # sidecars that NO consumer reads, to keep the published asset list lean:
-        #   * `*.sha256.minisig` — a signature OVER a checksum. The signed
-        #     SHA256SUMS already authenticates every checksum, and the in-app
-        #     updater never fetches a `.sha256.minisig`. Pure redundancy.
-        #   * `*.cdx.json.minisig` / `BUILD-PROVENANCE.txt.minisig` — the SBOM and
-        #     the human-readable provenance are already covered by the SLSA
-        #     attestation (next step) and listed in SHA256SUMS; their minisig adds
-        #     nothing.
-        # The per-artifact `<archive>.minisig` + `<archive>.sha256` are KEPT — the
-        # in-app updater on already-deployed clients still fetches them (they are
-        # dropped only in a later release, once the signed-manifest-hash updater
-        # has aged in). This step is deterministic and only ever removes signatures
-        # of DERIVED files — never an artifact, never latest.json, never SHA256SUMS.
+        # asset (unchanged — the hardening is fully intact). We then drop, before
+        # upload, every sidecar the published set no longer needs, keeping only the
+        # SIGNED aggregate manifests (latest.json + SHA256SUMS and their .minisig).
+        # A binary's authenticity now rests on the signed-manifest SHA-256 (the
+        # in-app updater, v0.4.23+) and the signed SHA256SUMS (manual verify) — the
+        # per-binary .minisig/.sha256 were redundant with both.
+        #
+        # SAFE for deployed clients because this release also raised the manifest
+        # `minimum_version` to 0.4.23 (the first sidecar-tolerant updater): a
+        # client below that floor is told "a fresh install is required" (graceful)
+        # BEFORE it ever tries to resolve a now-absent sidecar — never a cryptic
+        # missing-sidecar error. v0.4.23+ clients verify via the pinned signed
+        # manifest hash and auto-update seamlessly.
+        #
+        # Deterministic and never touches a binary, latest.json, SHA256SUMS, the
+        # SBOM, BUILD-PROVENANCE.txt, or the two KEPT .minisig — only per-binary
+        # and derived-file signatures/checksums.
         run: |
           set -euo pipefail
           before=$(find release -type f | wc -l | tr -d ' ')
-          find release -type f \
-            \( -name '*.sha256.minisig' -o -name '*.cdx.json.minisig' -o -name 'BUILD-PROVENANCE.txt.minisig' \) \
-            -delete
+          find release -type f \( \
+              -name '*.tar.gz.minisig' -o -name '*.zip.minisig' -o -name '*.exe.minisig' \
+              -o -name '*.tar.gz.sha256' -o -name '*.zip.sha256' -o -name '*.exe.sha256' \
+              -o -name '*.sha256.minisig' -o -name '*.cdx.json.minisig' \
+              -o -name 'BUILD-PROVENANCE.txt.minisig' \
+            \) -delete
           after=$(find release -type f | wc -l | tr -d ' ')
-          echo "pruned $((before - after)) redundant sidecar(s); ${after} asset(s) will be published"
+          echo "pruned $((before - after)) sidecar(s); ${after} asset(s) will be published"
+          # Guard: the SIGNED aggregate manifests MUST survive the prune.
+          for keep in latest.json latest.json.minisig SHA256SUMS SHA256SUMS.minisig; do
+            [ -f "release/$keep" ] || { echo "::error::prune removed required $keep"; exit 1; }
+          done
           ls -la release
 
       - name: Attest published release assets (SLSA provenance, Tier 2)

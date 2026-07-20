@@ -8,6 +8,25 @@ Full per-release artifacts (signed binaries, SBOMs, provenance) are on the
 [GitHub Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_C0PL4ND/releases)
 page.
 
+## [0.4.24]
+
+### Changed — release assets trimmed to the signed-manifest set (~13)
+
+- **Dropped the per-binary `.minisig` and `.sha256` sidecars.** A binary's
+  authenticity now rests on the minisign-signed `latest.json` manifest (which
+  pins each asset's SHA-256 — what the in-app updater checks) and the signed
+  `SHA256SUMS` (for manual verification). The release asset list drops from ~27
+  to ~13.
+- **Raised the manifest `minimum_version` to 0.4.23** (the first sidecar-tolerant
+  updater). A client older than that — whose updater still requires the per-binary
+  sidecars — is now told "a fresh install is required" (a graceful message shown
+  *before* it looks for a now-absent sidecar) instead of a cryptic failure.
+  Clients on v0.4.23+ verify via the signed-manifest hash and auto-update
+  seamlessly. **If you are on an older build, download the latest installer once
+  from the releases page; auto-update works normally from v0.4.23 onward.**
+- `post-release-verify` now verifies each published asset via the signed-manifest
+  SHA-256, tolerating an absent per-asset `.minisig` (mirroring the updater).
+
 ## [0.4.23]
 
 ### Changed — leaner release assets + auto-update verification
