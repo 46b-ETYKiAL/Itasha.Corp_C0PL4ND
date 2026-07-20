@@ -132,6 +132,20 @@ pub fn update_failed_user_copy(raw: &str) -> String {
         // downgrade / rollback-blocked.
         "This update was blocked because it would move C0PL4ND to an older \
          version. No changes were made."
+    } else if r.contains("a fresh install is required")
+        || r.contains("in-place update refused")
+        || r.contains("below the manifest minimum_version")
+    {
+        // too-old-to-update-in-place: this installed build predates the update
+        // system's current minimum supported version, so an in-place auto-update
+        // is refused BY DESIGN — NOT a transient error. Checked BEFORE the
+        // manifest bucket below because the floor-refusal reason string also
+        // contains the word "manifest" and would otherwise be mis-mapped to the
+        // misleading "try again later" copy. A one-time manual reinstall of the
+        // latest release restores automatic updates.
+        "This installed version is too old to auto-update in place. Download the \
+         latest installer from the official GitHub releases page and reinstall \
+         once — automatic updates will work normally afterward."
     } else if r.contains("release json")
         || r.contains("parse release")
         || r.contains("release response")
@@ -309,6 +323,23 @@ mod tests {
         ] {
             let s = update_failed_user_copy(raw);
             assert!(s.contains("verified as authentic"), "raw {raw:?} -> {s:?}");
+            assert_clean(&s);
+        }
+
+        // too-old-to-update-in-place (minimum_version floor). MUST route to the
+        // clear "reinstall" copy, NOT the generic "couldn't confirm" manifest
+        // bucket — even though the floor-refusal reason ALSO contains "manifest".
+        for raw in [
+            "installed version 0.4.22 is below the manifest minimum_version 0.4.23 \
+             — a fresh install is required (in-place update refused)",
+            "in-place update refused: installed build too old",
+        ] {
+            let s = update_failed_user_copy(raw);
+            assert!(s.contains("too old to auto-update"), "raw {raw:?} -> {s:?}");
+            assert!(
+                !s.contains("Try again later"),
+                "a too-old refusal must NOT read as a transient error: {s:?}"
+            );
             assert_clean(&s);
         }
 
