@@ -89,7 +89,14 @@ jobs:
                   print(f"::error::{name} sha256 {got} != signed manifest {a['sha256']} (binding broken)"); fail = True
               sig = name + ".minisig"
               if not os.path.exists(sig):
-                  print(f"::error::{name} is missing its .minisig"); fail = True
+                  # Signed-manifest-only asset set (Stage 2, v0.4.24+): the
+                  # SHA-256 binding checked above IS authoritative — latest.json's
+                  # own signature was verified in step (1), so its pinned digest is
+                  # trusted, and a bit-for-bit substitution is impossible without a
+                  # SHA-256 preimage. An absent per-asset .minisig is therefore
+                  # fine; it mirrors the in-app updater's
+                  # verify_artifact_bound_optional_sig tolerate-absent path.
+                  print(f"note: {name} ships no .minisig; verified via the signed-manifest SHA-256")
                   continue
               r = subprocess.run(["rsign", "verify", "-p", "rsign.pub", "-x", sig, name],
                                  capture_output=True, text=True)

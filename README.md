@@ -93,33 +93,38 @@ installer is x64-only for now, so ARM64 ships as the portable archive.
 
 #### Verify your download
 
-Every downloadable binary, archive, and installer ships a `.sha256` checksum and
-a minisign `.minisig` signature so you can confirm the file is exactly what CI
-built; the aggregate `SHA256SUMS` (with its own `SHA256SUMS.minisig`) covers them
-all in one signed manifest. (The SBOM and build-provenance files are covered by
-the release's SLSA attestation — `gh attestation verify` — and listed in
-`SHA256SUMS`.)
+The release ships a single signed checksum manifest — `SHA256SUMS` plus its
+`SHA256SUMS.minisig` — that covers every binary, archive, and installer. Verify
+the manifest's signature once, then confirm your download's SHA-256 is listed in
+it. (The SBOM and build-provenance files are covered by the release's SLSA
+attestation — `gh attestation verify`.)
 
-**Checksum (PowerShell):**
-
-```powershell
-# Compare the printed hash to the matching line in SHA256SUMS (or the .sha256 file)
-Get-FileHash .\c0pl4nd-<version>-x86_64-setup.exe -Algorithm SHA256
-```
-
-**Signature ([minisign](https://jedisct1.github.io/minisign/) / `rsign`):** the
-release is signed with C0PL4ND's minisign key (the same key the in-app updater
-trusts). Verify the installer against its `.minisig` with the public key below:
+**1. Verify the signed checksum manifest** ([minisign](https://jedisct1.github.io/minisign/)
+/ `rsign`) against C0PL4ND's public key — the same key the in-app updater trusts:
 
 ```bash
 # public key (id A8D869E2B4DD3FD9)
-minisign -Vm c0pl4nd-<version>-x86_64-setup.exe \
+minisign -Vm SHA256SUMS \
   -P RWTZP9204mnYqKT/TK6OfYG70QwFoHF5WuuxODg8tgPU+WdLRJYt6iNN
 ```
 
-A `Signature and comment signature verified` result means the file is genuine
-and untampered. (The in-app updater performs this same SHA-256 + minisign check
-automatically before applying any update — it refuses anything that fails.)
+A `Signature and comment signature verified` result means `SHA256SUMS` is genuine.
+
+**2. Check your download against the trusted manifest:**
+
+```bash
+# Linux / macOS:
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+```powershell
+# Windows — compare the printed hash to the matching line in SHA256SUMS:
+Get-FileHash .\c0pl4nd-<version>-x86_64-setup.exe -Algorithm SHA256
+```
+
+(The in-app updater performs an equivalent check automatically: it verifies the
+signed `latest.json` manifest, then confirms each download's SHA-256 against the
+signed digest it pins — refusing anything that fails.)
 
 ### Linux
 
@@ -134,9 +139,8 @@ cd c0pl4nd-*-unknown-linux-gnu
 ./c0pl4nd
 ```
 
-Each binary/archive has a `.sha256` and a minisign `.minisig` sibling (or verify
-against the signed `SHA256SUMS`) — verify the same way as the
-[Windows steps above](#verify-your-download). A working GPU
+Verify your download against the signed `SHA256SUMS` — the same way as the
+[verify steps above](#verify-your-download). A working GPU
 (Vulkan, or OpenGL 3.3+) is required — see
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md) if the window won't open.
 
@@ -156,10 +160,10 @@ cd c0pl4nd-*-apple-darwin
 > pending), so Gatekeeper will warn the app is from an unidentified developer.
 > To run it the first time: **System Settings → Privacy & Security → Open
 > Anyway**, or `xattr -d com.apple.quarantine ./c0pl4nd` after extracting. This
-> does not weaken update security — every asset and the update manifest are
-> minisign-signed (Ed25519) and SLSA-attested, and the in-app updater verifies
-> them before installing. Each binary/archive has `.sha256` + `.minisig` siblings
-> (or verify against the signed `SHA256SUMS`); verify the
+> does not weaken update security — the signed `SHA256SUMS` and the `latest.json`
+> update manifest are minisign-signed (Ed25519) and SLSA-attested, and the in-app
+> updater verifies every download against the signed manifest digest before
+> installing. Verify your download against `SHA256SUMS` the
 > [same way as above](#verify-your-download).
 
 ---
