@@ -83,7 +83,7 @@ jobs:
 
       - name: Checkout
         # actions/checkout@v4.2.2
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
@@ -239,7 +239,7 @@ jobs:
 
       - name: Checkout
         # actions/checkout@v4.2.2
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
@@ -360,12 +360,12 @@ jobs:
         with:
           egress-policy: audit
       - name: Checkout C0PL4ND (assets + licenses)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           path: app
           persist-credentials: false
       - name: Checkout installer framework (F0RG3-W1R3)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: 46b-ETYKiAL/Itasha.Corp_F0RG3-W1R3
           path: framework
@@ -482,7 +482,7 @@ jobs:
         # the source must be present. Checkout into an isolated `src/` subdir so
         # it never collides with the `artifacts/` + `release/` asset dirs.
         # actions/checkout@v4.2.2
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           path: src
           persist-credentials: false
