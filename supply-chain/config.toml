@@ -113,7 +113,7 @@ version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.anyhow]]
-version = "1.0.103"
+version = "1.0.104"
 criteria = "safe-to-deploy"
 
 [[exemptions.arboard]]
@@ -1727,6 +1727,10 @@ criteria = "safe-to-deploy"
 version = "0.2.7"
 criteria = "safe-to-deploy"
 
+[[exemptions.syn]]
+version = "3.0.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.sync_wrapper]]
 version = "0.1.2"
 criteria = "safe-to-deploy"
@@ -1757,6 +1761,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.termios]]
 version = "0.2.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.thiserror]]
+version = "2.0.19"
+criteria = "safe-to-deploy"
+
+[[exemptions.thiserror-impl]]
+version = "2.0.19"
 criteria = "safe-to-deploy"
 
 [[exemptions.tiff]]
